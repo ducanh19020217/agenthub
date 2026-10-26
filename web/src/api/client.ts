@@ -74,6 +74,7 @@ export const completeSetup = (skip = false) => apiFetch(`/api/setup/${skip ? 'sk
 export const installSetupMcp = () => apiFetch('/api/setup/mcp', { method: 'POST' });
 
 const TOKEN_STORAGE_KEY = 'agenthub_token';
+export const API_REQUEST_TIMEOUT_MS = 15_000;
 
 let unauthorizedListeners: Array<() => void> = [];
 
@@ -153,10 +154,22 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
     headers.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(path, {
-    ...options,
-    headers,
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
+  const onAbort = () => controller.abort();
+  options.signal?.addEventListener('abort', onAbort, { once: true });
+
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...options,
+      headers,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+    options.signal?.removeEventListener('abort', onAbort);
+  }
 
   if (response.status === 401) {
     clearToken();

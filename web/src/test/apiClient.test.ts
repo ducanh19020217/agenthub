@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { apiFetch, AuthError, clearToken, getTasksPage, setToken } from '../api/client';
+import { apiFetch, API_REQUEST_TIMEOUT_MS, AuthError, clearToken, getTasksPage, setToken } from '../api/client';
 
 describe('API Client', () => {
   const originalFetch = window.fetch;
@@ -53,6 +53,24 @@ describe('API Client', () => {
 
     await expect(apiFetch('/api/protected')).rejects.toThrow(AuthError);
     expect(sessionStorage.getItem('agenthub_token')).toBeNull();
+  });
+
+  it('hủy request bị treo sau timeout để query không loading vô hạn', async () => {
+    setToken('slow_token');
+    vi.useFakeTimers();
+    const fetchSpy = vi.fn((_url: URL | RequestInfo, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted', 'AbortError')), { once: true });
+    }));
+    window.fetch = fetchSpy;
+
+    const request = apiFetch('/api/slow').then(
+      () => null,
+      (error) => error,
+    );
+    await vi.advanceTimersByTimeAsync(API_REQUEST_TIMEOUT_MS);
+    await expect(request).resolves.toMatchObject({ name: 'AbortError' });
+    expect(fetchSpy).toHaveBeenCalledWith('/api/slow', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    vi.useRealTimers();
   });
 
   it('bọc phản hồi mảng cũ của /api/tasks thành một trang', async () => {

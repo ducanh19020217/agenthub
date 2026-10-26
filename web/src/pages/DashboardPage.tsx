@@ -94,12 +94,15 @@ export const DashboardPage: React.FC = () => {
   const { data: status, isLoading, error } = useQuery({
     queryKey: ['status'],
     queryFn: getStatus,
-    refetchInterval: 5000,
+    // Status changes arrive over SSE; keep a slower poll as a recovery path.
+    refetchInterval: 15_000,
+    refetchIntervalInBackground: false,
   });
   const { data: eventPage } = useQuery({
     queryKey: ['event-history', 'dashboard', eventPageNumber, eventCursor],
     queryFn: () => getEventHistoryPage({ limit: 20, cursor: eventCursor, offset: eventCursor ? undefined : (eventPageNumber - 1) * 20 }),
-    refetchInterval: 10_000,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
   useEffect(() => {
     if (eventPage?.nextCursor) setEventCursors((current) => ({ ...current, [eventPageNumber]: eventPage.nextCursor || undefined }));
@@ -114,14 +117,15 @@ export const DashboardPage: React.FC = () => {
     queryKey: ['profiles'],
     queryFn: getProfiles,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
-  const { data: claudeQuota } = useQuery({ queryKey: ['claude-quota'], queryFn: getClaudeQuota, refetchInterval: 30_000 });
-  const { data: brainOverview } = useQuery({ queryKey: ['brain'], queryFn: getBrain, refetchInterval: 5000 });
-  const { data: claudeFailover } = useQuery({ queryKey: ['claude-failover'], queryFn: getClaudeFailover, refetchInterval: 5000 });
+  const { data: claudeQuota } = useQuery({ queryKey: ['claude-quota'], queryFn: getClaudeQuota, refetchInterval: 30_000, refetchIntervalInBackground: false });
+  const { data: brainOverview } = useQuery({ queryKey: ['brain'], queryFn: getBrain, refetchInterval: 30_000, refetchIntervalInBackground: false });
+  const { data: claudeFailover } = useQuery({ queryKey: ['claude-failover'], queryFn: getClaudeFailover, refetchInterval: 30_000, refetchIntervalInBackground: false });
   const failoverMutation = useMutation({ mutationFn: clearClaudeFailover });
-  const { data: orphans = [], refetch: refetchOrphans } = useQuery({ queryKey: ['system-orphans'], queryFn: getOrphans, refetchInterval: 30_000 });
-  const { data: projects = [] } = useQuery({ queryKey: ['projects'], queryFn: getProjects, refetchInterval: 30_000 });
-  const { data: perf } = useQuery({ queryKey: ['perf'], queryFn: getPerf, refetchInterval: 30_000 });
+  const { data: orphans = [], refetch: refetchOrphans } = useQuery({ queryKey: ['system-orphans'], queryFn: getOrphans, refetchInterval: 30_000, refetchIntervalInBackground: false });
+  const { data: projects = [] } = useQuery({ queryKey: ['projects'], queryFn: getProjects, refetchInterval: 30_000, refetchIntervalInBackground: false });
+  const { data: perf } = useQuery({ queryKey: ['perf'], queryFn: getPerf, refetchInterval: 30_000, refetchIntervalInBackground: false });
 
   const queryClient = useQueryClient();
   const pauseMutation = useMutation({

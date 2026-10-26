@@ -71,6 +71,8 @@ describe('Brain Codex Engine Integration and Failover', () => {
 
   afterEach(async () => {
     delete process.env.AGENTHUB_CODEX_BIN;
+    delete process.env.FAKE_CODEX_QUOTA;
+    delete process.env.FAKE_CLAUDE_STREAM_JSON;
     if (prevBwrap === undefined) delete process.env.AGENTHUB_BWRAP_BIN;
     else process.env.AGENTHUB_BWRAP_BIN = prevBwrap;
     await server.close();
@@ -183,6 +185,89 @@ describe('Brain Codex Engine Integration and Failover', () => {
   });
 
   describe('Integration with Fake Codex CLI', () => {
+    it('fails over a Claude quota error to the configured Codex profile without waiting', async () => {
+      createCodexProfile('codex-failover');
+      ctx.config.brain.engine = 'claude';
+      ctx.config.brain.codexProfile = 'codex-failover';
+      ctx.chatService.configureFailoverSteps([{ type: 'engine', engine: 'codex' }]);
+
+      const sessionId = 'brain:global-failover';
+      ctx.chatSessionRepo.insert({ id: sessionId, title: 'Brain', mode: 'safe', model: 'sonnet', profileName: 'claude-default', kind: 'brain' });
+      const done = new Promise<void>((resolve) => {
+        ctx.scheduler.getEventBus().on('chat.done', (_id, payload) => {
+          if ((payload as { sessionId?: string }).sessionId === sessionId) resolve();
+        });
+      });
+
+      await ctx.chatService.sendMessage(sessionId, 'quota');
+      await done;
+
+      expect(ctx.chatService.getLastEngine(sessionId)).toBe('codex');
+      expect(ctx.chatSessionRepo.get(sessionId)?.state).toBe('idle');
+      expect(ctx.chatMessageRepo.getBySession(sessionId).some((message) => message.role === 'assistant' && message.meta?.includes('"engine":"codex"'))).toBe(true);
+    });
+
+    it('does not loop when Codex is unavailable after Claude quota exhaustion', async () => {
+      createCodexProfile('codex-unavailable');
+      ctx.config.brain.codexProfile = 'codex-unavailable';
+      ctx.chatService.configureFailoverSteps([{ type: 'engine', engine: 'codex' }]);
+      process.env.FAKE_CODEX_QUOTA = '1';
+      const sessionId = 'brain:codex-unavailable';
+      ctx.chatSessionRepo.insert({ id: sessionId, title: 'Brain', mode: 'safe', model: 'sonnet', profileName: 'claude-default', kind: 'brain' });
+      const error = new Promise<Record<string, unknown>>((resolve) => {
+        ctx.scheduler.getEventBus().on('chat.error', (_id, payload) => {
+          if ((payload as { sessionId?: string }).sessionId === sessionId) resolve(payload as Record<string, unknown>);
+        });
+      });
+
+      await ctx.chatService.sendMessage(sessionId, 'quota');
+      const payload = await error;
+
+      expect(payload.message).toContain('Codex hiện không khả dụng');
+      expect(ctx.chatSessionRepo.get(sessionId)?.state).toBe('waiting_limit');
+      expect(ctx.chatService.getLastEngine(sessionId)).toBe('codex');
+    });
+
+    it('fails over a persistent Claude quota error to Codex without losing the turn', async () => {
+      const streamClaudeBin = path.join(tmpDir, 'fake-claude-stream.mjs');
+      fs.symlinkSync(path.resolve(__dirname, 'fixtures', 'fake-claude.mjs'), streamClaudeBin);
+      process.env.FAKE_CLAUDE_STREAM_JSON = '1';
+      createCodexProfile('codex-persistent-failover');
+      ctx.config.brain.engine = 'claude';
+      ctx.config.brain.codexProfile = 'codex-persistent-failover';
+      ctx.chatService.setClaudeBinOverride(streamClaudeBin);
+      ctx.chatService.configureFailoverSteps([{ type: 'engine', engine: 'codex' }]);
+
+      const sessionId = 'brain:persistent-failover';
+      ctx.chatSessionRepo.insert({ id: sessionId, title: 'Persistent Brain', mode: 'safe', model: 'sonnet', profileName: 'claude-default', kind: 'brain' });
+      const done = new Promise<void>((resolve) => {
+        ctx.scheduler.getEventBus().on('chat.done', (_id, payload) => {
+          if ((payload as { sessionId?: string }).sessionId === sessionId) resolve();
+        });
+      });
+
+      await ctx.chatService.sendMessage(sessionId, 'quota');
+      await done;
+
+      const messages = ctx.chatMessageRepo.getBySession(sessionId);
+      expect(ctx.chatService.getLastEngine(sessionId)).toBe('codex');
+      expect(ctx.chatSessionRepo.get(sessionId)?.state).toBe('idle');
+      expect(messages.some((message) => message.role === 'assistant' && message.meta?.includes('"engine":"codex"'))).toBe(true);
+      expect(messages.filter((message) => message.role === 'error')).toHaveLength(0);
+    });
+
+    it('keeps a department Brain on its pinned Codex profile when global Brain uses Claude', () => {
+      createCodexProfile('codex-department');
+      ctx.config.brain.engine = 'claude';
+      ctx.chatSessionRepo.insert({ id: 'brain:department:eng', title: 'Department Brain', mode: 'safe', model: 'gpt-5.6-luna', profileName: 'codex-department', kind: 'brain' });
+
+      const planned = ctx.chatService['failoverExecution']({
+        sessionId: 'brain:department:eng', messageId: 'msg-dept', text: 'hello', model: 'gpt-5.6-luna', profileName: 'codex-department', mode: 'safe',
+      });
+
+      expect(planned).toMatchObject({ engine: 'codex', profileName: 'codex-department' });
+    });
+
     it('executes a brain turn with Codex, calls hub_review and creates session config.toml with mode 0600', async () => {
       createCodexProfile('codex-worker');
       ctx.config.brain.engine = 'codex';

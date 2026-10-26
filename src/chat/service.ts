@@ -89,6 +89,12 @@ export interface RunningTurn {
   isCompact?: boolean;
   isForkSummary?: boolean;
   accumulatedText?: string;
+  text?: string;
+  projectId?: string | null;
+  mode?: 'safe' | 'full';
+  claudeSessionId?: string | null;
+  model?: string;
+  profileName?: string | null;
   toolExecutions?: Map<string, { messageId: string; startedAt: number; name: string; summary: string; input?: Record<string, unknown> }>;
   onFinish?: (err?: Error, result?: { contextTokens?: number; summary?: string }) => void;
 }
@@ -452,7 +458,13 @@ export class ChatService {
         profileName: resolveClaudeProfile(this.profileRepo || { getAll: () => [] }, this.config.chat.claudeProfile, this.config.chat.claudeProfileExplicit),
       };
     }
-    const requestedEngine = session?.kind === 'brain' ? effectiveBrainEngine(project, this.config.brain) : 'claude';
+    // BrainRunner pins the effective department Codex profile on the session. Keep
+    // that choice when the common runner handles the turn; otherwise a department
+    // Brain would silently fall back to the global Claude engine/profile.
+    const sessionProfile = session?.profileName ? this.profileRepo?.get(session.profileName) : undefined;
+    const requestedEngine = session?.kind === 'brain'
+      ? sessionProfile?.engine === 'codex' ? 'codex' : effectiveBrainEngine(project, this.config.brain)
+      : 'claude';
     const selectCodex = (configured?: string): string | null => {
       return resolveCodexProfile(
         this.profileRepo || { getAll: () => [] },
@@ -462,7 +474,7 @@ export class ChatService {
       );
     };
     const codex = (model?: string, profile?: string): { engine: 'codex'; model: string; profileName: string } | null => {
-      const name = selectCodex(profile || this.config.brain.codexProfile);
+      const name = selectCodex(profile || (sessionProfile?.engine === 'codex' ? sessionProfile.name : undefined) || this.config.brain.codexProfile);
       if (!name) return null;
       return { engine: 'codex', model: model || this.config.brain.codexModel || turn.model || 'gpt-5.6-luna', profileName: name };
     };
@@ -1679,7 +1691,19 @@ export class ChatService {
           if (ev.isError) {
             const errMsg = ev.result || 'Claude error';
             const quota = detectClaudeQuota({ streamText: errMsg });
-            if (quota.exhausted && this.scheduleLimitRetry(turn, quota.resetSeconds, errMsg)) continue;
+            // Let the close handler record the signal once and select the next
+            // engine. Scheduling a Claude retry here used to run before the
+            // failover state was activated, leaving a healthy Codex idle.
+            if (quota.exhausted) {
+              if (this.chatSessionRepo.get(turn.sessionId)?.kind !== 'brain') {
+                if (this.scheduleLimitRetry(turn, quota.resetSeconds, errMsg)) continue;
+                // Without a retry store, retain the normal error handling below.
+                limitResetSeconds = undefined;
+              } else {
+                limitResetSeconds = quota.resetSeconds || 5 * 3600;
+                continue;
+              }
+            }
             if (turn.claudeSessionId && /session|resume|conversation/i.test(errMsg) && /not found|invalid|unknown|exist/i.test(errMsg)) {
               this.chatSessionRepo.clearClaudeSessionId(turn.sessionId);
               this.chatMessageRepo.insert({ id: crypto.randomUUID(), sessionId: turn.sessionId, role: 'error', content: 'Đã mở phiên mới, ngữ cảnh cũ không còn' });
@@ -1772,6 +1796,21 @@ export class ChatService {
       if (running && !running.cancelled) {
         const quota = this.recordClaudeQuota(accumulatedText, stderrOutput, code);
         if (!quota.exhausted && limitResetSeconds) { quota.exhausted = true; quota.resetSeconds = limitResetSeconds; }
+        const fallback = this.failoverState.snapshot();
+        if (this.chatSessionRepo.get(turn.sessionId)?.kind === 'brain' && quota.exhausted && fallback.step && fallback.step.type !== 'wait') {
+          this.runningTurns.delete(turn.sessionId);
+          this.chatSessionRepo.setBusy(turn.sessionId, 0);
+          this.emitEvent('chat.failover', {
+            sessionId: turn.sessionId,
+            messageId: turn.messageId,
+            fromEngine: 'claude',
+            toEngine: fallback.step.type === 'engine' ? 'codex' : 'claude',
+            reason: 'claude_quota_exhausted',
+            step: fallback.step,
+          });
+          this.executeTurn(turn);
+          return;
+        }
         if (!resultHandled) {
           if (quota.exhausted && this.scheduleLimitRetry(turn, quota.resetSeconds, stderrOutput.trim())) {
             // The original user message remains pending until the retry succeeds.
@@ -1978,6 +2017,24 @@ export class ChatService {
           if (execution.profileName && this.quotaMarkRepo) {
             if (quota.exhausted) this.quotaMarkRepo.mark(execution.profileName, 'codex', Math.floor(Date.now() / 1000) + 3600, 'codex_quota');
           }
+          const failover = this.failoverState.snapshot();
+          if (failover.active) {
+            this.failoverState.advance(quota.exhausted ? 'codex_quota' : 'codex_login');
+            this.chatSessionRepo.setBusy(turn.sessionId, 0);
+            this.setSessionState(turn.sessionId, 'waiting_limit');
+            this.emitEvent('chat.failover', {
+              sessionId: turn.sessionId,
+              messageId: turn.messageId,
+              fromEngine: 'codex',
+              toEngine: null,
+              reason: quota.exhausted ? 'codex_quota' : 'codex_login',
+              message: 'Claude và Codex đều không khả dụng; đang chờ quota hoặc đăng nhập lại.',
+            });
+            this.emitChatError(turn.sessionId, turn.messageId, 'Claude đã hết quota và Codex hiện không khả dụng; phiên đang chờ quota hoặc đăng nhập lại.');
+            setBrainActivity('idle').catch(() => {});
+            this.processQueue();
+            return;
+          }
           this.eventBus.emit('claude.fallback_changed', undefined, { reason: quota.exhausted ? 'codex_quota' : 'codex_login', step: null });
           this.forceClaude.add(turn.sessionId);
           this.chatSessionRepo.setBusy(turn.sessionId, 0);
@@ -2013,7 +2070,20 @@ export class ChatService {
       return;
     }
     const timeoutTimer = setTimeout(() => this.timeoutPersistentTurn(proc), 15 * 60 * 1000);
-    const running: RunningTurn = { sessionId: turn.sessionId, messageId: turn.messageId, child: proc.child, timeoutTimer, cancelled: false, persistent: true };
+    const running: RunningTurn = {
+      sessionId: turn.sessionId,
+      messageId: turn.messageId,
+      child: proc.child,
+      timeoutTimer,
+      cancelled: false,
+      persistent: true,
+      text: turn.text,
+      projectId: turn.projectId,
+      mode: turn.mode,
+      claudeSessionId: turn.claudeSessionId,
+      model: turn.model,
+      profileName: turn.profileName,
+    };
     proc.active = running;
     proc.lastUsedAt = Date.now();
     proc.lastAssistantUsage = undefined;
@@ -2132,7 +2202,10 @@ export class ChatService {
     proc.limitResetSeconds = undefined;
     if (ev.isError) {
       const session = this.chatSessionRepo.get(proc.sessionId);
-      const retryTurn: QueuedTurn = { sessionId: proc.sessionId, messageId: running.messageId, text: this.chatMessageRepo.getBySession(proc.sessionId, 100000).find((message) => message.role === 'user' && message.id !== running.messageId)?.content || '', projectId: session?.projectId || null, mode: session?.mode || 'safe', claudeSessionId: session?.claudeSessionId || null, model: proc.model, profileName: proc.profileName };
+      const retryTurn = this.persistentTurn(running, session);
+      if (quota.exhausted && session?.kind === 'brain' && this.failoverPersistentTurn(proc, running, retryTurn, 'claude_quota_exhausted')) {
+        return;
+      }
       if (quota.exhausted && retryTurn.text && this.scheduleLimitRetry(retryTurn, quota.resetSeconds, ev.result)) {
         this.armIdleTimer(proc);
         setBrainActivity('idle').catch(() => {});
@@ -2210,6 +2283,47 @@ export class ChatService {
     this.processQueue();
   }
 
+  private persistentTurn(running: RunningTurn, session: ChatSessionRow | undefined): QueuedTurn {
+    return {
+      sessionId: running.sessionId,
+      messageId: running.messageId,
+      text: running.text || '',
+      projectId: running.projectId ?? session?.projectId ?? null,
+      mode: running.mode || session?.mode || 'safe',
+      claudeSessionId: running.claudeSessionId ?? session?.claudeSessionId ?? null,
+      model: running.model || session?.model || 'sonnet',
+      profileName: running.profileName ?? session?.profileName ?? null,
+    };
+  }
+
+  private failoverPersistentTurn(
+    proc: PersistentProcess,
+    running: RunningTurn,
+    turn: QueuedTurn,
+    reason: string,
+  ): boolean {
+    const snapshot = this.failoverState.snapshot();
+    const step = snapshot.step;
+    if (!step || step.type === 'wait') return false;
+
+    proc.active = undefined;
+    this.runningTurns.delete(proc.sessionId);
+    this.chatSessionRepo.setBusy(proc.sessionId, 0);
+    this.setSessionState(proc.sessionId, 'running');
+    this.emitEvent('chat.failover', {
+      sessionId: proc.sessionId,
+      messageId: running.messageId,
+      fromEngine: 'claude',
+      toEngine: step.type === 'engine' ? step.engine : 'claude',
+      reason,
+      step,
+    });
+    this.closePersistentProcess(proc);
+    this.chatSessionRepo.setBusy(proc.sessionId, 1);
+    this.executeTurn(turn);
+    return true;
+  }
+
   private timeoutPersistentTurn(proc: PersistentProcess): void {
     const running = proc.active;
     if (!running) return;
@@ -2242,9 +2356,12 @@ export class ChatService {
       const quota = this.recordClaudeQuota('', proc.stderrOutput, null);
       if (!quota.exhausted && proc.limitResetSeconds) { quota.exhausted = true; quota.resetSeconds = proc.limitResetSeconds; }
       this.chatSessionRepo.setBusy(proc.sessionId, 0);
-      this.setSessionState(proc.sessionId, 'error');
       const session = this.chatSessionRepo.get(proc.sessionId);
-      const retryTurn: QueuedTurn = { sessionId: proc.sessionId, messageId: active.messageId, text: this.chatMessageRepo.getBySession(proc.sessionId, 100000).find((message) => message.role === 'user')?.content || '', projectId: session?.projectId || null, mode: session?.mode || 'safe', claudeSessionId: session?.claudeSessionId || null, model: proc.model, profileName: proc.profileName };
+      const retryTurn = this.persistentTurn(active, session);
+      if (!active.cancelled && quota.exhausted && session?.kind === 'brain' && this.failoverPersistentTurn(proc, active, retryTurn, 'claude_quota_exhausted')) {
+        return;
+      }
+      this.setSessionState(proc.sessionId, 'error');
       if (!active.cancelled && quota.exhausted && retryTurn.text && this.scheduleLimitRetry(retryTurn, quota.resetSeconds, proc.stderrOutput.trim())) {
         this.closePersistentProcess(proc);
       } else if (!active.cancelled) {

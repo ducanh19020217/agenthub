@@ -196,6 +196,7 @@ function ProjectSettingsForm({
           >
             <option value="auto">{t('projects.worktreeAuto')}</option>
             <option value="skip">{t('projects.worktreeSkip')}</option>
+            <option value="worker">{t('projects.worktreeWorker')}</option>
           </select>
         </label>
 

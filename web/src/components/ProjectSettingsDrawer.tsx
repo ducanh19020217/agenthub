@@ -1326,6 +1326,22 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                     >
                       {t('projects.worktreeSkip')}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDraftSettings((prev) => ({
+                          ...prev,
+                          worktree: { ...prev.worktree, install: 'worker' },
+                        }))
+                      }
+                      className={`px-3 py-1 text-xs font-medium rounded-md cursor-pointer transition-colors ${
+                        draftSettings.worktree.install === 'worker'
+                          ? 'bg-[var(--t-accent)] text-[var(--t-on-accent)] shadow-xs'
+                          : 'text-[var(--t-text-2)] hover:text-[var(--t-text)]'
+                      }`}
+                    >
+                      {t('projects.worktreeWorker')}
+                    </button>
                   </div>
                 </div>
                 <p className="text-[11px] text-[var(--t-text-3)] leading-relaxed">

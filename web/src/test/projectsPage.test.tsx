@@ -712,4 +712,30 @@ describe('ProjectsPage', () => {
 
     expect(await screen.findByText('XFarm')).toBeInTheDocument();
   });
+
+  it('21. Cho phép chọn chế độ cài phụ thuộc "Worker tự cài" và lưu cài đặt', async () => {
+    const updateSpy = vi.spyOn(client, 'updateProject').mockResolvedValue(mockProject);
+    renderPage();
+    await screen.findByText('XFarm');
+    fireEvent.click(screen.getByRole('button', { name: 'Cài đặt' }));
+
+    expect(await screen.findByTestId('project-settings-drawer')).toBeInTheDocument();
+    const workerBtn = screen.getByRole('button', { name: 'Worker tự cài' });
+    expect(workerBtn).toBeInTheDocument();
+    fireEvent.click(workerBtn);
+
+    const saveBtn = screen.getByRole('button', { name: 'Lưu' });
+    fireEvent.click(saveBtn);
+
+    await waitFor(() =>
+      expect(updateSpy).toHaveBeenCalledWith(
+        'proj-1',
+        expect.objectContaining({
+          settings: expect.objectContaining({
+            worktree: expect.objectContaining({ install: 'worker' }),
+          }),
+        }),
+      ),
+    );
+  });
 });

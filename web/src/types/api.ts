@@ -222,7 +222,7 @@ export interface ProjectSettings {
     dailyTokenBudget?: number;
     maxTurnsPerHour?: number;
   };
-  worktree: { root?: string; logsInRoot?: boolean; install: 'auto' | 'skip'; gitHooks: 'run' | 'skip' };
+  worktree: { root?: string; logsInRoot?: boolean; install: 'auto' | 'skip' | 'worker'; gitHooks: 'run' | 'skip' };
   integration: { enabled: boolean; branch?: string; baseRef?: string; autoMerge?: boolean };
   review?: { autoMerge?: boolean; order?: ReviewerOrderItem[]; fallback?: Partial<ReviewerFallback> };
   ci: { enabled?: boolean; branch?: string };

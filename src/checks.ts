@@ -212,7 +212,7 @@ export class CheckRunner {
     return { passed: results.every((r) => r.ok), failed: results.filter((r) => !r.ok).map((r) => r.name), results };
   }
   private async prepare(repo: string, projectPath?: string, project?: ProjectRow): Promise<void> {
-    if (project && projectSettings(project).worktree.install === 'skip') {
+    if (project && projectSettings(project).worktree.install !== 'auto') {
       return;
     }
     try {

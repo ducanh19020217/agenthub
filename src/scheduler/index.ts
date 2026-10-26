@@ -67,7 +67,75 @@ export function isProjectAccessible(projectPath: string | null | undefined): boo
   }
 }
 
-const PROTOCOL_PROMPT = `Đọc \`.agenthub/task.md\` và thực hiện. Đọc thêm AGENTS.md / CLAUDE.md / GEMINI.md của project nếu có. Làm trên nhánh hiện tại, commit nhỏ theo Conventional Commits. KHÔNG dùng subagent / agent con; tự làm tuần tự trong phiên này. Tránh đọc lại file lớn không cần thiết. \`node_modules\` đã được chuẩn bị sẵn, KHÔNG chạy \`npm ci\`/\`npm install\` trừ khi bạn sửa \`package.json\`. KHÔNG chạy test/lệnh ở chế độ nền (background) rồi chờ: luôn chạy trực tiếp (foreground) và bọc \`timeout 300\`; test dùng \`--run\`, không watch. KHÔNG sửa file ngoài phạm vi task. Khi xong tạo \`.agenthub/DONE\` (tóm tắt, kết quả lint/test, việc còn thiếu); nếu bị chặn tạo \`.agenthub/BLOCKED\` (lý do). Chỉ tạo marker ở bước cuối.`;
+export const PROTOCOL_PROMPT_PREFIX = `Đọc \`.agenthub/task.md\` và thực hiện. Đọc thêm AGENTS.md / CLAUDE.md / GEMINI.md của project nếu có. Làm trên nhánh hiện tại, commit nhỏ theo Conventional Commits. KHÔNG dùng subagent / agent con; tự làm tuần tự trong phiên này. Tránh đọc lại file lớn không cần thiết.`;
+
+export const PROTOCOL_PROMPT_SUFFIX = `KHÔNG chạy test/lệnh ở chế độ nền (background) rồi chờ: luôn chạy trực tiếp (foreground) và bọc \`timeout 300\`; test dùng \`--run\`, không watch. KHÔNG sửa file ngoài phạm vi task. Khi xong tạo \`.agenthub/DONE\` (tóm tắt, kết quả lint/test, việc còn thiếu); nếu bị chặn tạo \`.agenthub/BLOCKED\` (lý do). Chỉ tạo marker ở bước cuối.`;
+
+export type NodeModulesPreparationResult =
+  | 'prepared'
+  | 'success'
+  | 'no_lockfile'
+  | 'failed'
+  | 'skipped'
+  | boolean
+  | {
+      status?: 'prepared' | 'success' | 'no_lockfile' | 'failed' | 'skipped';
+      success?: boolean;
+      hasLockfile?: boolean;
+      error?: unknown;
+    };
+
+export function getNodeModulesPromptInstruction(
+  settings?: { worktree?: { install?: 'auto' | 'skip' | 'worker' } } | null,
+  preparation?: NodeModulesPreparationResult,
+): string {
+  const installMode = settings?.worktree?.install ?? 'auto';
+
+  if (installMode === 'skip') {
+    return '';
+  }
+
+  if (installMode === 'worker') {
+    return 'Được phép chạy `npm ci`/`npm install` trong thư mục module (bọc `timeout 900`), dọn node_modules/dist khi xong nếu project yêu cầu.';
+  }
+
+  let isPrepared = true;
+  if (typeof preparation === 'boolean') {
+    isPrepared = preparation;
+  } else if (typeof preparation === 'string') {
+    isPrepared = preparation === 'prepared' || preparation === 'success';
+  } else if (preparation && typeof preparation === 'object') {
+    if (preparation.status !== undefined) {
+      isPrepared = preparation.status === 'prepared' || preparation.status === 'success';
+    } else if (preparation.success !== undefined) {
+      isPrepared = preparation.success;
+    } else if (preparation.hasLockfile === false || preparation.error !== undefined) {
+      isPrepared = false;
+    }
+  }
+
+  if (isPrepared) {
+    return '`node_modules` đã được chuẩn bị sẵn, KHÔNG chạy `npm ci`/`npm install` trừ khi bạn sửa `package.json`.';
+  }
+
+  return '`node_modules` chưa có, được chạy `npm ci` khi cần test/build.';
+}
+
+export function buildProtocolPrompt(
+  settings?: { worktree?: { install?: 'auto' | 'skip' | 'worker' } } | null,
+  preparation?: NodeModulesPreparationResult,
+): string {
+  const nodeModulesClause = getNodeModulesPromptInstruction(settings, preparation);
+  if (nodeModulesClause) {
+    return `${PROTOCOL_PROMPT_PREFIX} ${nodeModulesClause} ${PROTOCOL_PROMPT_SUFFIX}`;
+  }
+  return `${PROTOCOL_PROMPT_PREFIX} ${PROTOCOL_PROMPT_SUFFIX}`;
+}
+
+export const renderProtocolPrompt = buildProtocolPrompt;
+export const renderNodeModulesInstruction = getNodeModulesPromptInstruction;
+
+export const PROTOCOL_PROMPT = buildProtocolPrompt({ worktree: { install: 'auto' } }, 'prepared');
 
 export class EventBus extends EventEmitter {
   constructor(private eventRepo: EventRepo) {
@@ -3100,6 +3168,9 @@ export class Scheduler {
 
     this.starting.set(task.id, { projectId: task.projectId, profileName });
 
+    const settings = projectSettings(project);
+    let installResult: NodeModulesPreparationResult = 'prepared';
+
     // Create worktree if needed
     let worktreePath = task.worktreePath;
     if (!worktreePath) {
@@ -3112,11 +3183,10 @@ export class Scheduler {
         return this.logStartSkipped(task, error instanceof Error ? error.message : String(error));
       }
       const branch = task.branch || renderTaskBranch(project, task);
-      const settings = projectSettings(project);
       if (settings.integration?.enabled) {
         try {
           ensureIntegrationWorktree(project, this.config.hubHome);
-          if (settings.worktree.install !== 'skip') {
+          if (settings.worktree.install === 'auto') {
             void ensureIntegrationNodeModules(project, this.config.hubHome, {
               cacheDir: this.config.cacheDir,
               cacheMaxEntries: this.config.cacheMaxEntries,
@@ -3168,7 +3238,7 @@ export class Scheduler {
       // Dependency installation can take minutes. Keep the task out of the
       // queue while it runs, but never let a cache/native-module failure stop
       // the worker from starting with its own install.
-      if (settings.worktree.install !== 'skip') {
+      if (settings.worktree.install === 'auto') {
         const hasDependencyLock = (dir: string): boolean =>
           fs.existsSync(path.join(dir, 'package-lock.json')) || fs.existsSync(path.join(dir, 'pnpm-lock.yaml'));
         if (hasDependencyLock(worktreePath) || hasDependencyLock(path.join(worktreePath, 'web'))) {
@@ -3177,7 +3247,9 @@ export class Scheduler {
               maxEntries: this.config.cacheMaxEntries,
               maxBytes: this.config.cacheMaxGB * 1024 ** 3,
             });
+            installResult = 'prepared';
           } catch (error) {
+            installResult = 'failed';
             this.eventBus.emit('worktree.install_failed', task.id, {
               error: `Failed to prepare node_modules before worker start: ${String(error)}`,
             });
@@ -3194,6 +3266,8 @@ export class Scheduler {
               }
             }
           }
+        } else {
+          installResult = 'no_lockfile';
         }
       }
 
@@ -3210,6 +3284,17 @@ export class Scheduler {
         }
       }
 
+    } else {
+      if (settings.worktree.install === 'auto') {
+        const hasDependencyLock = (dir: string): boolean =>
+          fs.existsSync(path.join(dir, 'package-lock.json')) || fs.existsSync(path.join(dir, 'pnpm-lock.yaml'));
+        if (hasDependencyLock(worktreePath) || hasDependencyLock(path.join(worktreePath, 'web'))) {
+          const hasNm = fs.existsSync(path.join(worktreePath, 'node_modules')) || fs.existsSync(path.join(worktreePath, 'web', 'node_modules'));
+          installResult = hasNm ? 'prepared' : 'failed';
+        } else {
+          installResult = 'no_lockfile';
+        }
+      }
     }
 
     if (task.slot == null) {
@@ -3223,7 +3308,7 @@ export class Scheduler {
     }
 
     // Write task.md
-    let prompt = PROTOCOL_PROMPT;
+    let prompt = buildProtocolPrompt(settings, installResult);
     const convention = projectSettings(project).commitConvention;
     const branchExample = renderTaskBranch(project, task);
     prompt += `\n\n## Quy ước commit\n- Nhánh task: \`${branchExample}\`\n- Commit message mẫu: \`${renderCommitTemplate(convention.commitTemplate, { type: 'feat', scope: 'scope', ref: task.externalRef || 'REF-123', summary: 'summary' })}\`\n- Merge message mẫu: \`${renderCommitTemplate(convention.mergeMessageTemplate, { branch: branchExample, target: task.baseRef || project.defaultBranch })}\``;

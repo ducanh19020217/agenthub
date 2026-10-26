@@ -228,10 +228,9 @@ exit 1
  * brain may use a shell only for one of the commands that BrainPolicy can
  * autonomously allow, without shell operators or indirection.
  */
-export function brainShellShimScript(interpreter = '/bin/sh'): string {
+export function brainShellShimScript(installMode: 'auto' | 'skip' | 'worker' = 'auto', interpreter = '/bin/sh'): string {
   return `#!${interpreter}
 shim_path="$1"
-shift
 script="$2"
 shell_option="$1"
 shell_script="$2"
@@ -260,7 +259,7 @@ case "$1" in
         ;;
     esac
     case "$script" in
-      git[[:space:]]*|grep[[:space:]]*|cat[[:space:]]*|head[[:space:]]*|tail[[:space:]]*|wc[[:space:]]*|ls[[:space:]]*|npm[[:space:]]*|pnpm[[:space:]]*|npx[[:space:]]*)
+      git[[:space:]]*|grep[[:space:]]*|cat[[:space:]]*|head[[:space:]]*|tail[[:space:]]*|wc[[:space:]]*|ls[[:space:]]*|npm[[:space:]]*|pnpm[[:space:]]*|npx[[:space:]]*${installMode === 'worker' ? '|"timeout 900 npm ci"*|"timeout 900 npm install"*' : ''})
         exec ${interpreter} "$shell_option" "$shell_script"
         ;;
       curl[[:space:]]*)
@@ -309,7 +308,7 @@ esac
  * Codex's approval prompt.  In particular, a direct `npm run arbitrary` must
  * be rejected just like the same command through `sh -c`.
  */
-export function brainAllowlistedShimScript(name: 'npm' | 'pnpm' | 'npx' | 'curl', realBinary: string, interpreter = '/bin/sh'): string {
+export function brainAllowlistedShimScript(name: 'npm' | 'pnpm' | 'npx' | 'curl', realBinary: string, installMode: 'auto' | 'skip' | 'worker' = 'auto', interpreter = '/bin/sh'): string {
   const denied = 'AgentHub: brain policy chặn tham số lệnh';
   if (name === 'npx') {
     return `#!${interpreter}
@@ -324,6 +323,7 @@ exec ${shellQuote(realBinary)} "$@"
     return `#!${interpreter}
 case "$1 $2" in
   "test "|"test "*|"run test"|"run test "*|"lint "|"lint "*|"run lint"|"run lint "*|"typecheck "|"typecheck "*|"run typecheck"|"run typecheck "*|"build "|"build "*|"run build"|"run build "*|"build:web "|"build:web "*|"run build:web"|"run build:web "*) ;;
+  ${installMode === 'worker' && name === 'npm' ? '"ci"|"ci "*|"install"|"install "*) [ "$AGENTHUB_WORKER_INSTALL" = "1" ] || { echo ' + shellQuote(denied) + ' >&2; exit 1; } ;;' : ''}
   *) echo ${shellQuote(denied)} >&2; exit 1 ;;
 esac
 exec ${shellQuote(realBinary)} "$@"
@@ -353,6 +353,20 @@ done
 case "$request" in GET|get) ;; *) echo ${shellQuote(denied)} >&2; exit 1 ;; esac
 [ "$header" -eq 0 ] && [ -n "$url" ] || { echo ${shellQuote(denied)} >&2; exit 1; }
 exec ${shellQuote(realBinary)} "$@"
+`;
+}
+
+function brainTimeoutShimScript(realBinary: string, interpreter = '/bin/sh'): string {
+  return `#!${interpreter}
+if [ "$1" != "900" ] || [ "$2" != "npm" ]; then
+  echo ${shellQuote('AgentHub: brain policy chặn tham số timeout')} >&2
+  exit 1
+fi
+case "$3" in
+  ci|install) ;;
+  *) echo ${shellQuote('AgentHub: brain policy chặn tham số timeout')} >&2; exit 1 ;;
+esac
+AGENTHUB_WORKER_INSTALL=1 exec ${shellQuote(realBinary)} "$@"
 `;
 }
 
@@ -490,6 +504,10 @@ export function workerEnvironment(
   const serviceDir = path.join(hubHome, 'shims', 'service');
   const workerDir = path.join(hubHome, 'shims', 'worker');
   const guards = !options || !('guards' in options) || options.guards !== false;
+  const settings = options && ('settings' in options || ('project' in options && options.project))
+    ? projectSettings(('project' in options ? options.project : options) as { settings?: string | null })
+    : undefined;
+  const installMode = settings?.worktree.install ?? 'auto';
 
   cleanOldShims(hubHome);
   fs.mkdirSync(serviceDir, { recursive: true, mode: 0o700 });
@@ -530,7 +548,7 @@ export function workerEnvironment(
       // `mv`), so they must not reach the real binary from a brain sandbox.
       const brainShells = ['sh', 'bash', 'zsh', 'dash', 'fish'];
       for (const name of brainShells) {
-        writeShimFile(path.join(workerDir, name), brainShellShimScript(brainInterpreter));
+        writeShimFile(path.join(workerDir, name), brainShellShimScript(installMode, brainInterpreter));
       }
 
       const blockedNames = new Set([
@@ -550,7 +568,10 @@ export function workerEnvironment(
       for (const name of blockedNames) {
         const content = name === 'node'
           ? brainInterpreterShimScript(name, findExecutable(name, env, hubHome) || process.execPath, brainInterpreter)
-          : brainShells.includes(name) ? brainShellShimScript(brainInterpreter) : brainBlockedShimScript(name, brainInterpreter);
+          : brainShells.includes(name) ? brainShellShimScript(installMode, brainInterpreter)
+            : name === 'timeout' && installMode === 'worker'
+              ? brainTimeoutShimScript(findExecutable(name, env, hubHome) || '/usr/bin/timeout', brainInterpreter)
+              : brainBlockedShimScript(name, brainInterpreter);
         writeShimFile(path.join(workerDir, name), content);
       }
       // These commands are useful for the small read/build checks BrainPolicy
@@ -558,7 +579,7 @@ export function workerEnvironment(
       // binaries so direct execution cannot bypass the shell shim.
       for (const name of ['npm', 'pnpm', 'npx', 'curl'] as const) {
         const realBinary = findExecutable(name, env, hubHome);
-        if (realBinary) writeShimFile(path.join(workerDir, name), brainAllowlistedShimScript(name, realBinary, brainInterpreter));
+        if (realBinary) writeShimFile(path.join(workerDir, name), brainAllowlistedShimScript(name, realBinary, installMode, brainInterpreter));
       }
       // serviceDir precedes workerDir in PATH, so replace the permissive worker
       // service guard for brain sessions with the same unconditional policy.
@@ -581,17 +602,14 @@ export function workerEnvironment(
 
   // Check project settings for gitHooks and references
   let gitHooks: 'run' | 'skip' | undefined;
-  let settings: ReturnType<typeof projectSettings> | undefined;
 
   if (options) {
     if ('gitHooks' in options && options.gitHooks) {
       gitHooks = options.gitHooks;
     }
     if ('settings' in options || ('project' in options && options.project)) {
-      const proj = 'project' in options ? options.project : options;
-      settings = projectSettings(proj as { settings?: string | null });
       if (!gitHooks) {
-        gitHooks = settings.worktree.gitHooks;
+        gitHooks = settings?.worktree.gitHooks;
       }
     }
   }

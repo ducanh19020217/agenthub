@@ -166,13 +166,19 @@ export function checkWorktreeDependencies(
     if (argv.length === 0) continue;
     const first = argv[0];
 
-    if ((first === 'npm' || first === 'pnpm' || first === 'yarn') && argv[1] === 'run' && argv[2]) {
-      const scriptName = argv[2];
+    // `pnpm lint` / `yarn lint` run the package script, exactly like `pnpm run lint`.
+    const runScript = (first === 'npm' || first === 'pnpm' || first === 'yarn') && argv[1] === 'run' && argv[2]
+      ? argv[2]
+      : (first === 'pnpm' || first === 'yarn') && argv[1] && pkg.scripts?.[argv[1]] !== undefined
+        ? argv[1]
+        : undefined;
+    if (runScript) {
+      const scriptName = runScript;
       const scriptCmd = pkg.scripts?.[scriptName];
       if (scriptCmd) {
         const scriptParts = splitCommand(scriptCmd);
         const scriptBin = scriptParts[0];
-        const builtins = ['node', 'echo', 'sh', 'bash', 'exit', 'true', 'false', 'export', 'set', 'env', 'cd'];
+        const builtins = ['node', 'npm', 'pnpm', 'npx', 'yarn', 'echo', 'sh', 'bash', 'exit', 'true', 'false', 'export', 'set', 'env', 'cd'];
         if (scriptBin && !builtins.includes(scriptBin)) {
           const inBinDir = fs.existsSync(path.join(binDir, scriptBin));
           const inPath = isCommandInPath(scriptBin);

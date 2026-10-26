@@ -186,6 +186,36 @@ describe('worker service guard', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it('allows dependency installation only for brain workers configured with install=worker', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-brain-install-'));
+    const bin = path.join(root, 'bin');
+    const repo = path.join(root, 'repo');
+    const hub = path.join(root, 'hub');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(repo);
+    for (const name of ['npm', 'timeout']) {
+      fs.writeFileSync(path.join(bin, name), name === 'npm'
+        ? '#!/bin/sh\nprintf "npm:%s\\n" "$*"\n'
+        : '#!/bin/sh\nshift\nexec "$@"\n', { mode: 0o700 });
+    }
+
+    const worker = workerEnvironment(hub, { PATH: bin }, {
+      cwd: repo,
+      project: { settings: JSON.stringify({ worktree: { install: 'worker' } }) },
+      brainPolicy: 'standard',
+    });
+    expect(execFileSync('timeout', ['900', 'npm', 'ci'], { cwd: repo, env: worker, encoding: 'utf8' })).toContain('npm:ci');
+    expect(execFileSync('sh', ['-c', 'timeout 900 npm ci'], { cwd: repo, env: worker, encoding: 'utf8' })).toContain('npm:ci');
+    expect(execFileSync('npm', ['install'], { cwd: repo, env: worker, encoding: 'utf8' })).toContain('npm:install');
+    expect(() => execFileSync('timeout', ['901', 'npm', 'ci'], { cwd: repo, env: worker, stdio: 'pipe' })).toThrow('brain policy chặn tham số timeout');
+
+    const autoHub = path.join(root, 'auto-hub');
+    const auto = workerEnvironment(autoHub, { PATH: bin }, { cwd: repo, brainPolicy: 'standard' });
+    expect(() => execFileSync('npm', ['ci'], { cwd: repo, env: auto, stdio: 'pipe' })).toThrow('brain policy chặn tham số lệnh');
+    expect(() => execFileSync('timeout', ['900', 'npm', 'ci'], { cwd: repo, env: auto, stdio: 'pipe' })).toThrow('brain policy chặn lệnh');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   it('resolves read-command symlinks before allowing access', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-brain-read-links-'));
     const hub = path.join(root, 'hub');

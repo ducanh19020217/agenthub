@@ -92,7 +92,7 @@ describe('Dashboard polling and SSE recovery', () => {
     vi.useFakeTimers();
     const responseDelay = 6_000;
     type Profile = 'baseline' | 'optimized';
-    type RequestTrace = { endpoint: string; key: string; start: number; end: number; source: 'initial' | 'poll' | 'sse'; sseEventId?: number };
+    type RequestTrace = { endpoint: string; key: string; start: number; end: number; source: 'initial' | 'poll' | 'sse'; sseEventId?: number; causeToken?: string };
     type Metric = { spy: ReturnType<typeof vi.fn>; getMaxInFlight: () => number };
     type ScenarioResult = {
       totalRequests: number;
@@ -107,22 +107,16 @@ describe('Dashboard polling and SSE recovery', () => {
       eventRenderCommits: number;
       dashboardEvents: number;
       reconnects: number;
-      traceByKey: Record<string, Array<{ source: string; overlap: boolean; sseEventId?: number }>>;
-      traceSummaryByKey: Record<string, { requests: number; overlaps: number; sources: Record<string, number>; sseEventIds: number[] }>;
+      traceByKey: Record<string, Array<{ source: string; overlap: boolean; sseEventId?: number; causeToken?: string }>>;
+      traceSummaryByKey: Record<string, { requests: number; overlaps: number; sources: Record<string, number>; sseEventIds: number[]; causeTokens: string[] }>;
     };
 
     const runScenario = async (profile: Profile): Promise<ScenarioResult> => {
       const requestTrace: RequestTrace[] = [];
       const invalidationCountByKey: Record<string, number> = {};
-      const pendingSseCausesByKey = new Map<string, number[]>();
-      const recordSseInvalidation = (key: string, eventId: number) => {
-        let causes = pendingSseCausesByKey.get(key);
-        if (!causes) {
-          causes = [];
-          pendingSseCausesByKey.set(key, causes);
-        }
-        causes.push(eventId);
-      };
+      let nextCauseSequence = 0;
+      const latestSseCauseByRoot = new Map<string, { token: string; eventId: number }>();
+      const causeByQueryHash = new Map<string, { token: string; eventId: number }>();
       const makeTracked = <T,>(value: T): Metric => {
         let inFlight = 0;
         let maxInFlight = 0;
@@ -132,15 +126,16 @@ describe('Dashboard polling and SSE recovery', () => {
           const params = call?.[0] as { status?: string } | undefined;
           const key = endpoint === 'tasks' ? `${endpoint}:${params?.status || 'all'}` : endpoint;
           const start = Date.now();
-          const sseCauses = pendingSseCausesByKey.get(key);
-          const sseEventId = sseCauses?.shift();
+          const cause = activeSseCauseByKey.get(key);
+          activeSseCauseByKey.delete(key);
           const trace: RequestTrace = {
             endpoint,
             key,
             start,
             end: 0,
-            source: sseEventId === undefined ? (start === 0 ? 'initial' : 'poll') : 'sse',
-            sseEventId,
+            source: cause === undefined ? (start === 0 ? 'initial' : 'poll') : 'sse',
+            sseEventId: cause?.eventId,
+            causeToken: cause?.token,
           };
           requestTrace.push(trace);
           inFlight += 1;
@@ -191,20 +186,47 @@ describe('Dashboard polling and SSE recovery', () => {
       (window as any).EventSource = BenchmarkEventSource;
       setToken('benchmark-token');
       let renderCommits = 0;
+      let eventRenderCommits = 0;
+      let eventRenderPending = false;
+      const activeSseCauseByKey = new Map<string, { token: string; eventId: number }>();
       const dashboardEventIds: number[] = [];
       const originalSubscribe = sse.subscribeToEvents;
       vi.spyOn(sse, 'subscribeToEvents').mockImplementation((callback) => originalSubscribe((event) => {
         dashboardEventIds.push(event.id);
+        eventRenderPending = true;
         callback(event);
       }));
       const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      // Follow the exact Query instance through invalidate -> fetch. This avoids
+      // attributing a later polling request to an old SSE event by queue order.
+      const queryTraceSubscription = queryClient.getQueryCache().subscribe((event: any) => {
+        if (event.type !== 'updated' || !event.query || !event.action) return;
+        const root = String(event.query.queryKey[0]);
+        if (event.action.type === 'invalidate') {
+          const cause = latestSseCauseByRoot.get(root);
+          if (cause) causeByQueryHash.set(event.query.queryHash, cause);
+        } else if (event.action.type === 'fetch') {
+          const cause = causeByQueryHash.get(event.query.queryHash);
+          if (!cause) return;
+          causeByQueryHash.delete(event.query.queryHash);
+          const keyParts = event.query.queryKey as unknown[];
+          const key = root === 'tasks'
+            ? `tasks:${keyParts[1] === 'waiting' ? 'waiting_quota' : String(keyParts[1])}`
+            : root === 'event-history' ? 'eventHistory' : root;
+          activeSseCauseByKey.set(key, cause);
+          if (key === 'tasks:waiting_quota') {
+            // WaitingQueue performs two endpoint calls inside one Query fetch.
+            activeSseCauseByKey.set('tasks:queued', cause);
+          }
+        }
+      });
       const originalInvalidate = queryClient.invalidateQueries.bind(queryClient);
       const onInvalidation = (queryKey: readonly unknown[], eventId: number) => {
         const root = String(queryKey[0]);
+        latestSseCauseByRoot.set(root, { token: `${root}:${eventId}:${++nextCauseSequence}`, eventId });
         const keys = root === 'tasks' ? ['tasks:review', 'tasks:waiting_quota', 'tasks:queued'] : [root];
         for (const key of keys) {
           invalidationCountByKey[key] = (invalidationCountByKey[key] || 0) + 1;
-          recordSseInvalidation(key, eventId);
         }
       };
       vi.spyOn(queryClient, 'invalidateQueries').mockImplementation((filters) => {
@@ -213,7 +235,13 @@ describe('Dashboard polling and SSE recovery', () => {
       const view = render(
         <QueryClientProvider client={queryClient}>
           <BrowserRouter>
-            <Profiler id={`dashboard-${profile}`} onRender={() => { renderCommits += 1; }}>
+            <Profiler id={`dashboard-${profile}`} onRender={() => {
+              renderCommits += 1;
+              if (eventRenderPending) {
+                eventRenderCommits += 1;
+                eventRenderPending = false;
+              }
+            }}>
               <DashboardPage pollingProfile={profile} />
             </Profiler>
           </BrowserRouter>
@@ -228,7 +256,7 @@ describe('Dashboard polling and SSE recovery', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(responseDelay); });
       const firstSource = BenchmarkEventSource.instances[0];
       expect(firstSource).toBeDefined();
-      const rendersBeforeEvents = renderCommits;
+      const eventRenderCommitsBeforeEvents = eventRenderCommits;
       const emitBatch = async (source: BenchmarkEventSource, ids: number[]) => {
         await act(async () => {
           for (const id of ids) {
@@ -243,7 +271,6 @@ describe('Dashboard polling and SSE recovery', () => {
       const secondSource = BenchmarkEventSource.instances[1];
       expect(secondSource).toBeDefined();
       await emitBatch(secondSource, Array.from({ length: 20 }, (_, index) => index + 1));
-      const eventRenderCommits = renderCommits - rendersBeforeEvents;
       await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
       const metricValues = Object.values(metrics);
@@ -262,13 +289,13 @@ describe('Dashboard polling and SSE recovery', () => {
         }
       }
       const sseRequestsByKey: Record<string, number> = {};
-      const traceByKey: Record<string, Array<{ source: string; overlap: boolean; sseEventId?: number }>> = {};
+      const traceByKey: Record<string, Array<{ source: string; overlap: boolean; sseEventId?: number; causeToken?: string }>> = {};
       for (const trace of requestTrace) {
         const overlaps = requestTrace.some((other) => other !== trace
           && other.key === trace.key
           && other.start < trace.end
           && trace.start < other.end);
-        (traceByKey[trace.key] ||= []).push({ source: trace.source, overlap: overlaps, sseEventId: trace.sseEventId });
+        (traceByKey[trace.key] ||= []).push({ source: trace.source, overlap: overlaps, sseEventId: trace.sseEventId, causeToken: trace.causeToken });
         if (trace.source === 'sse') sseRequestsByKey[trace.key] = (sseRequestsByKey[trace.key] || 0) + 1;
       }
       const traceSummaryByKey: ScenarioResult['traceSummaryByKey'] = {};
@@ -281,6 +308,7 @@ describe('Dashboard polling and SSE recovery', () => {
             return counts;
           }, {}),
           sseEventIds: traces.flatMap((trace) => trace.sseEventId === undefined ? [] : [trace.sseEventId]),
+          causeTokens: traces.flatMap((trace) => trace.causeToken === undefined ? [] : [trace.causeToken]),
         };
       }
       const result = {
@@ -293,13 +321,14 @@ describe('Dashboard polling and SSE recovery', () => {
         sseRequestsByKey,
         invalidationCountByKey,
         renderCommits,
-        eventRenderCommits,
+        eventRenderCommits: eventRenderCommits - eventRenderCommitsBeforeEvents,
         dashboardEvents: dashboardEventIds.length,
         reconnects: BenchmarkEventSource.instances.length - 1,
         traceByKey,
         traceSummaryByKey,
       };
       cleanupSse();
+      queryTraceSubscription();
       view.unmount();
       (window as any).EventSource = originalEventSource;
       vi.restoreAllMocks();
@@ -336,28 +365,33 @@ describe('Dashboard polling and SSE recovery', () => {
     expect(baseline.sseRequestsByKey['tasks:waiting_quota'] || 0).toBeGreaterThan(0);
     expect(baseline.sseRequestsByKey['tasks:queued'] || 0).toBeGreaterThan(0);
     expect(optimized.sseRequestsByKey.status || 0).toBeGreaterThan(0);
-    expect(optimized.sseRequestsByKey['tasks:review'] || 0).toBeGreaterThan(0);
-    expect(optimized.sseRequestsByKey['tasks:waiting_quota'] || 0).toBeGreaterThan(0);
-    expect(optimized.sseRequestsByKey['tasks:queued'] || 0).toBeGreaterThan(0);
     const causalKeys = ['status', 'tasks:review', 'tasks:waiting_quota', 'tasks:queued'];
     const allHotPathKeys = [...causalKeys, 'eventHistory'];
     for (const key of causalKeys) {
       const baselineTrace = baseline.traceSummaryByKey[key];
       const optimizedTrace = optimized.traceSummaryByKey[key];
-      expect(baselineTrace.sseEventIds.length).toBe(baseline.sseRequestsByKey[key]);
-      expect(optimizedTrace.sseEventIds.length).toBe(optimized.sseRequestsByKey[key]);
+      expect(baselineTrace.sseEventIds.length).toBe(baseline.sseRequestsByKey[key] || 0);
+      expect(optimizedTrace.sseEventIds.length).toBe(optimized.sseRequestsByKey[key] || 0);
       expect(baselineTrace.sseEventIds.every((id) => baseline.dashboardEvents >= id)).toBe(true);
       expect(optimizedTrace.sseEventIds.every((id) => optimized.dashboardEvents >= id)).toBe(true);
+      expect(new Set(baselineTrace.causeTokens).size).toBe(baselineTrace.causeTokens.length);
+      expect(new Set(optimizedTrace.causeTokens).size).toBe(optimizedTrace.causeTokens.length);
+      expect(baselineTrace.causeTokens.length).toBe(baselineTrace.sseEventIds.length);
+      expect(optimizedTrace.causeTokens.length).toBe(optimizedTrace.sseEventIds.length);
     }
     for (const key of allHotPathKeys) {
+      expect(baseline.overlapByKey[key] || 0).toBe(baseline.traceSummaryByKey[key].overlaps);
+      expect(optimized.overlapByKey[key] || 0).toBe(optimized.traceSummaryByKey[key].overlaps);
       expect(optimized.traceByKey[key]?.every((trace) => !trace.overlap)).toBe(true);
       expect(optimized.invalidationCountByKey[key] || 0).toBeGreaterThanOrEqual(optimized.sseRequestsByKey[key] || 0);
     }
     expect(baseline.overlapByKey.status).toBeGreaterThan(0);
     expect(optimized.traceByKey.status.some((trace) => trace.source === 'sse' && trace.sseEventId !== undefined)).toBe(true);
-    expect(optimized.traceByKey['tasks:review'].some((trace) => trace.source === 'sse' && trace.sseEventId !== undefined)).toBe(true);
+    expect(optimized.traceByKey['tasks:review'].every((trace) => trace.source !== 'sse')).toBe(true);
     expect(optimized.traceSummaryByKey.status.sseEventIds).toEqual([20]);
-    expect(optimized.traceSummaryByKey['tasks:review'].sseEventIds).toEqual([20]);
+    expect(optimized.traceSummaryByKey['tasks:review'].sseEventIds).toEqual([]);
+    expect(optimized.traceSummaryByKey['tasks:waiting_quota'].sseEventIds).toEqual([]);
+    expect(optimized.traceSummaryByKey['tasks:queued'].sseEventIds).toEqual([]);
     expect(optimized.renderCommits).toBeLessThan(baseline.renderCommits);
     expect(optimized.eventRenderCommits).toBeLessThan(baseline.eventRenderCommits);
   });

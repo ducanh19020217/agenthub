@@ -986,6 +986,16 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(reviewerSelect.value).toBe('codex:custom-model-dynamic');
       expect(within(reviewerSelect).queryByRole('option', { name: 'codex:gpt-5.6-turbo' })).not.toBeInTheDocument();
       expect(within(reviewerSelect).queryByRole('option', { name: 'gpt-5.6-turbo' })).not.toBeInTheDocument();
+
+      // Models from another provider must not leak into the Codex selector.
+      expect(within(reviewerSelect).queryByRole('option', { name: 'gemini-3.8-flash-high' })).not.toBeInTheDocument();
+
+      // Switching provider must also replace the list with Claude-only models.
+      const engineSelect = within(orderBlock).getByRole('combobox', { name: /^Thứ tự duyệt 1$/i }) as HTMLSelectElement;
+      fireEvent.change(engineSelect, { target: { value: 'claude' } });
+      expect(within(reviewerSelect).getByRole('option', { name: 'sonnet' })).toBeInTheDocument();
+      expect(within(reviewerSelect).queryByRole('option', { name: 'codex:custom-model-dynamic' })).not.toBeInTheDocument();
+      expect(within(reviewerSelect).queryByRole('option', { name: 'gemini-3.8-flash-high' })).not.toBeInTheDocument();
     });
 
     it('sends review order: null and fallback: null when user resets overrides to system default', async () => {

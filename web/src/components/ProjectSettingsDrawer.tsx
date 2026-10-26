@@ -31,6 +31,7 @@ import {
 import {
   DEFAULT_COMMON_BRANCHES,
   DEFAULT_CLAUDE_MODELS,
+  getModelsForProvider,
   validateBranchSyntax,
   validateReviewerModelSyntax,
   validateReviewChainReviewerSyntax,
@@ -247,25 +248,19 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const [hasReviewChainOverride, setHasReviewChainOverride] = useState<boolean>(false);
 
   const availableCodexReviewerModels = useMemo(() => {
-    const fromApi = (modelOptions?.suggestions || []).filter(
-      (m) => m.startsWith('codex:') || m.startsWith('gpt-'),
-    );
-    const fromConfigured = (modelOptions?.configured || []).filter(
-      (m) => m.startsWith('codex:') || m.startsWith('gpt-'),
-    );
+    const fromApi = modelOptions?.suggestions || [];
+    const fromConfigured = modelOptions?.configured || [];
     const fromConfigOrder = (config?.reviewer?.order || [])
       .filter((r) => r.engine === 'codex')
       .map((r) => r.model);
-    const fromConfigReviewer = config?.reviewer?.model
-      ? (config.reviewer.model.startsWith('codex:') || config.reviewer.model.startsWith('gpt-') ? [config.reviewer.model] : [])
-      : [];
+    const fromConfigReviewer = config?.reviewer?.model ? [config.reviewer.model] : [];
     const fromConfigArbiter = config?.reviewer?.arbiter?.engine === 'codex' && config.reviewer.arbiter.model
       ? [config.reviewer.arbiter.model]
       : [];
     const fromChains = [
       ...(config?.modelChainHard || []),
       ...(config?.modelChainEasy || []),
-    ].filter((m) => m.startsWith('codex:') || m.startsWith('gpt-'));
+    ];
     const fromCurrentOrder = reviewerOrder
       .filter((r) => r.engine === 'codex')
       .map((r) => r.model);
@@ -273,8 +268,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       .filter((r) => r.engine === 'codex')
       .map((r) => r.model);
 
-    return Array.from(
-      new Set([
+    return getModelsForProvider([
         ...fromApi,
         ...fromConfigured,
         ...fromConfigOrder,
@@ -283,8 +277,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
         ...fromChains,
         ...fromCurrentOrder,
         ...fromProjectOrder,
-      ]),
-    ).filter(Boolean);
+      ], 'codex');
   }, [modelOptions, config, reviewerOrder, project]);
 
   const availableClaudeReviewerModels = useMemo(() => {
@@ -297,12 +290,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     const fromConfigArbiter = config?.reviewer?.arbiter?.engine === 'claude' && config.reviewer.arbiter.model
       ? [config.reviewer.arbiter.model]
       : [];
-    const fromApi = (modelOptions?.suggestions || []).filter(
-      (m) => DEFAULT_CLAUDE_MODELS.includes(m) || m.startsWith('claude'),
-    );
-    const fromConfigured = (modelOptions?.configured || []).filter(
-      (m) => DEFAULT_CLAUDE_MODELS.includes(m) || m.startsWith('claude'),
-    );
+    const fromApi = modelOptions?.suggestions || [];
+    const fromConfigured = modelOptions?.configured || [];
     const fromCurrentOrder = reviewerOrder
       .filter((r) => r.engine === 'claude')
       .map((r) => r.model);
@@ -310,8 +299,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       .filter((r) => r.engine === 'claude')
       .map((r) => r.model);
 
-    return Array.from(
-      new Set([
+    return getModelsForProvider([
         ...DEFAULT_CLAUDE_MODELS,
         ...fromChat,
         ...fromChatModel,
@@ -322,8 +310,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
         ...fromConfigured,
         ...fromCurrentOrder,
         ...fromProjectOrder,
-      ]),
-    ).filter(Boolean);
+      ], 'claude');
   }, [modelOptions, config, reviewerOrder, project]);
 
   const availableReviewChainReviewers = useMemo(() => {

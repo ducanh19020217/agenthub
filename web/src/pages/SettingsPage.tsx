@@ -147,29 +147,29 @@ export const SettingsPage: React.FC = () => {
       : DEFAULT_CODEX_MODELS.map((model) => `codex:${model}`);
     const reviewerModels = reviewOrder.filter((r) => r.engine === 'codex').map((r) => r.model);
     const arbiterModel = arbiter.engine === 'codex' && arbiter.model ? [arbiter.model] : [];
-    const chainCodex = [...hardChainModels, ...easyChainModels].filter((m) => m.startsWith('codex:') || m.startsWith('gpt-'));
-    return Array.from(new Set([
+    const chainCodex = [...hardChainModels, ...easyChainModels];
+    return getModelsForProvider([
       ...getModelsForProvider(sourceModels, 'codex'),
       ...reviewerModels,
       ...arbiterModel,
       ...chainCodex,
-    ])).filter(Boolean);
+    ], 'codex');
   }, [modelOptions, reviewOrder, arbiter, hardChainModels, easyChainModels]);
 
   const availableClaudeReviewerModels = useMemo(() => {
-    const fromChat = chatModels;
+    const fromChat = getModelsForProvider(chatModels, 'claude');
     const sourceModels = modelOptions
       ? [...modelOptions.suggestions, ...modelOptions.configured]
       : DEFAULT_CLAUDE_MODELS;
     const reviewerModels = reviewOrder.filter((r) => r.engine === 'claude').map((r) => r.model);
     const arbiterModel = arbiter.engine === 'claude' && arbiter.model ? [arbiter.model] : [];
-    return Array.from(new Set([
+    return getModelsForProvider([
       ...DEFAULT_CLAUDE_MODELS,
       ...fromChat,
       ...getModelsForProvider(sourceModels, 'claude'),
       ...reviewerModels,
       ...arbiterModel,
-    ])).filter(Boolean);
+    ], 'claude');
   }, [modelOptions, reviewOrder, arbiter, chatModels]);
 
   useEffect(() => {

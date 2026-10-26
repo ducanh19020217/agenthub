@@ -507,7 +507,7 @@ export class DeployService {
     const settings = projectSettings(project);
     if (settings.integration.enabled) {
       const worktree = ensureIntegrationWorktree(project, this.config.hubHome);
-      if (settings.worktree.install !== 'skip') {
+      if (settings.worktree.install === 'auto') {
         await ensureIntegrationNodeModules(project, this.config.hubHome, {
           cacheDir: this.config.cacheDir,
           cacheMaxEntries: this.config.cacheMaxEntries,
@@ -525,7 +525,7 @@ export class DeployService {
       const target = merge.worktrees[project.defaultBranch];
       if (!target || !path.isAbsolute(target)) return null;
       const worktree = path.resolve(target);
-      if (settings.worktree.install !== 'skip') {
+      if (settings.worktree.install === 'auto') {
         await ensureWorktreeNodeModules(worktree, project.path || undefined, this.config.cacheDir).catch((err) => {
           console.warn(`[deploy] Failed to prepare legacy worktree node_modules:`, err);
         });

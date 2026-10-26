@@ -1736,7 +1736,7 @@ export class AppService {
     if (effectiveSettings.integration.enabled) {
       const projLike = { id, path: resolvedPath, defaultBranch: parsed.defaultBranch, settings: JSON.stringify(effectiveSettings) };
       ensureIntegrationWorktree(projLike, this.config.hubHome);
-      if (effectiveSettings.worktree.install !== 'skip') {
+      if (effectiveSettings.worktree.install === 'auto') {
         void ensureIntegrationNodeModules(projLike, this.config.hubHome, {
           cacheDir: this.config.cacheDir,
           cacheMaxEntries: this.config.cacheMaxEntries,
@@ -1801,7 +1801,7 @@ export class AppService {
     if (mergedSettings.integration.enabled) {
       const updatedProject = this.projectRepo.get(id)!;
       ensureIntegrationWorktree(updatedProject, this.config.hubHome);
-      if (mergedSettings.worktree.install !== 'skip') {
+      if (mergedSettings.worktree.install === 'auto') {
         void ensureIntegrationNodeModules(updatedProject, this.config.hubHome, {
           cacheDir: this.config.cacheDir,
           cacheMaxEntries: this.config.cacheMaxEntries,

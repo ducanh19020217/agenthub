@@ -293,8 +293,8 @@ export async function mergeTaskIntoBase(
 
   addExcludeRules(repo);
 
-  // Pre-prepare node_modules in repo if worktree.install !== 'skip' and node_modules is missing
-  if (settings.worktree.install !== 'skip') {
+  // Pre-prepare node_modules in repo if worktree.install === 'auto' and node_modules is missing
+  if (settings.worktree.install === 'auto') {
     const hasLock = fs.existsSync(path.join(repo, 'package-lock.json')) || fs.existsSync(path.join(repo, 'pnpm-lock.yaml'));
     const hasNm = fs.existsSync(path.join(repo, 'node_modules', '.bin'));
     if (hasLock && !hasNm) {
@@ -347,7 +347,7 @@ export async function mergeTaskIntoBase(
     'web/pnpm-lock.yaml',
   ];
   const lockChanged = diffFiles.some((f) => lockFiles.includes(f));
-  if (lockChanged && settings.worktree.install !== 'skip') {
+  if (lockChanged && settings.worktree.install === 'auto') {
     try {
       try {
         fs.rmSync(path.join(repo, '.agenthub', 'root-lock.hash'), { force: true });
@@ -374,7 +374,7 @@ export async function mergeTaskIntoBase(
 
   // Pre-check dependencies before running checks
   let depCheck = checkWorktreeDependencies(repo, checks);
-  if (!depCheck.ok && settings.worktree.install !== 'skip') {
+  if (!depCheck.ok && settings.worktree.install === 'auto') {
     try {
       await ensureWorktreeNodeModules(
         repo,

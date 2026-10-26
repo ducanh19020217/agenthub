@@ -155,68 +155,71 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
   const onAbort = () => controller.abort();
-  options.signal?.addEventListener('abort', onAbort, { once: true });
+  if (options.signal?.aborted) {
+    controller.abort();
+  } else {
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+  }
+  const timeout = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
 
-  let response: Response;
   try {
-    response = await fetch(path, {
+    const response = await fetch(path, {
       ...options,
       headers,
       signal: controller.signal,
     });
+
+    if (response.status === 401) {
+      clearToken();
+      throw new AuthError(getActiveLocale() === 'en' ? 'Token is invalid or expired' : 'Token không hợp lệ hoặc đã hết hạn');
+    }
+
+    if (!response.ok) {
+      let errorMsg = getActiveLocale() === 'en' ? `Error ${response.status}: ${response.statusText}` : `Lỗi ${response.status}: ${response.statusText}`;
+      let errorCode: string | undefined;
+      try {
+        const errJson = await response.json();
+        if (errJson) {
+          if (typeof errJson.error === 'string') {
+            errorCode = errJson.error;
+          } else if (typeof errJson.code === 'string') {
+            errorCode = errJson.code;
+          }
+
+          if (errJson.message) {
+            errorMsg = errJson.message;
+          } else if (errJson.error) {
+            errorMsg = errJson.error;
+          }
+        }
+      } catch {
+        try {
+          const errText = await response.text();
+          if (errText) errorMsg = errText;
+        } catch {
+          // fallback
+        }
+      }
+      const rawMsg = errorMsg;
+      errorMsg = translateApiErrorMessage(errorMsg, errorCode, getActiveLocale());
+      const err: any = new Error(errorMsg);
+      err.status = response.status;
+      err.code = errorCode;
+      err.rawMessage = rawMsg;
+      throw err;
+    }
+
+    // Handle empty or text responses
+    const contentType = response.headers.get('content-type');
+    if (contentType && contentType.includes('application/json')) {
+      return (await response.json()) as T;
+    }
+    return (await response.text()) as unknown as T;
   } finally {
     clearTimeout(timeout);
     options.signal?.removeEventListener('abort', onAbort);
   }
-
-  if (response.status === 401) {
-    clearToken();
-    throw new AuthError(getActiveLocale() === 'en' ? 'Token is invalid or expired' : 'Token không hợp lệ hoặc đã hết hạn');
-  }
-
-  if (!response.ok) {
-    let errorMsg = getActiveLocale() === 'en' ? `Error ${response.status}: ${response.statusText}` : `Lỗi ${response.status}: ${response.statusText}`;
-    let errorCode: string | undefined;
-    try {
-      const errJson = await response.json();
-      if (errJson) {
-        if (typeof errJson.error === 'string') {
-          errorCode = errJson.error;
-        } else if (typeof errJson.code === 'string') {
-          errorCode = errJson.code;
-        }
-
-        if (errJson.message) {
-          errorMsg = errJson.message;
-        } else if (errJson.error) {
-          errorMsg = errJson.error;
-        }
-      }
-    } catch {
-      try {
-        const errText = await response.text();
-        if (errText) errorMsg = errText;
-      } catch {
-        // fallback
-      }
-    }
-    const rawMsg = errorMsg;
-    errorMsg = translateApiErrorMessage(errorMsg, errorCode, getActiveLocale());
-    const err: any = new Error(errorMsg);
-    err.status = response.status;
-    err.code = errorCode;
-    err.rawMessage = rawMsg;
-    throw err;
-  }
-
-  // Handle empty or text responses
-  const contentType = response.headers.get('content-type');
-  if (contentType && contentType.includes('application/json')) {
-    return (await response.json()) as T;
-  }
-  return (await response.text()) as unknown as T;
 }
 
 // API methods

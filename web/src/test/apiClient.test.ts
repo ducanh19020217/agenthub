@@ -73,6 +73,49 @@ describe('API Client', () => {
     vi.useRealTimers();
   });
 
+  it('giữ timeout trong lúc đọc body, không chỉ đến khi nhận headers', async () => {
+    setToken('slow_body_token');
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | null | undefined;
+    const response = new Response('{}', {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+    response.json = vi.fn(() => new Promise<never>((_resolve, reject) => {
+      requestSignal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted', 'AbortError')), { once: true });
+    }));
+    window.fetch = vi.fn((_url: URL | RequestInfo, init?: RequestInit) => {
+      requestSignal = init?.signal;
+      return Promise.resolve(response);
+    });
+
+    const request = apiFetch('/api/slow-body').then(
+      () => null,
+      (error) => error,
+    );
+    await vi.advanceTimersByTimeAsync(API_REQUEST_TIMEOUT_MS);
+    expect(requestSignal?.aborted).toBe(true);
+    // The body itself may reject after the timeout; the important regression is
+    // that apiFetch has already aborted instead of waiting indefinitely.
+    await expect(request).resolves.toMatchObject({ name: 'AbortError' });
+    vi.useRealTimers();
+  });
+
+  it('hủy ngay khi AbortSignal đã bị abort trước lúc đăng ký request', async () => {
+    setToken('pre_aborted_token');
+    const externalController = new AbortController();
+    externalController.abort();
+    const fetchSpy = vi.fn((_url: URL | RequestInfo, init?: RequestInit) => {
+      expect(init?.signal?.aborted).toBe(true);
+      return Promise.reject(new DOMException('The operation was aborted', 'AbortError'));
+    });
+    window.fetch = fetchSpy;
+
+    await expect(apiFetch('/api/already-cancelled', { signal: externalController.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('bọc phản hồi mảng cũ của /api/tasks thành một trang', async () => {
     setToken('legacy_token');
     window.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify([{ id: 'p/t', title: 'Legacy' }]), {

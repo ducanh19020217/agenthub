@@ -19,6 +19,7 @@ describe('DepartmentsPage', () => {
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     vi.spyOn(client, 'getDepartments').mockResolvedValue([department]);
     vi.spyOn(client, 'getProfiles').mockResolvedValue([{ name: 'worker-1' }] as any);
+    vi.spyOn(client, 'getModelOptions').mockResolvedValue({ suggestions: ['codex:gpt-5.6-luna'], configured: [] });
   });
 
   afterEach(() => vi.restoreAllMocks());
@@ -52,9 +53,23 @@ describe('DepartmentsPage', () => {
     fireEvent.change(screen.getByLabelText('Engine Brain'), { target: { value: 'codex' } });
     const profile = await screen.findByLabelText('Profile Codex');
     fireEvent.change(profile, { target: { value: '' } });
-    fireEvent.blur(profile);
 
     await waitFor(() => expect(updateSpy).toHaveBeenCalledWith('engineering', { brainCodexProfile: null }));
+  });
+
+  it('chọn model Brain từ danh sách hợp lệ và ẩn các giới hạn theo giờ', async () => {
+    const updateSpy = vi.spyOn(client, 'updateDepartment').mockResolvedValue(department);
+    renderPage();
+    await screen.findByText('Engineering');
+    fireEvent.click(screen.getByText('Cấu hình Brain'));
+
+    const model = screen.getByLabelText('Model Brain');
+    expect(model.tagName).toBe('SELECT');
+    expect(screen.getByRole('option', { name: 'sonnet' })).toBeInTheDocument();
+    expect(screen.queryByText('Ngân sách token/ngày')).toBeNull();
+    expect(screen.queryByText('Lượt tối đa/giờ')).toBeNull();
+    fireEvent.change(model, { target: { value: 'opus' } });
+    await waitFor(() => expect(updateSpy).toHaveBeenCalledWith('engineering', { brainModel: 'opus' }));
   });
 
   it('gán và bỏ gán profile bằng checkbox', async () => {

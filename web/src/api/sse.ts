@@ -149,6 +149,7 @@ export function handleRunOutput(
 export interface SSEConnectionOptions {
   deduplicateEvents?: boolean;
   coalesceInvalidations?: boolean;
+  onInvalidation?: (queryKey: readonly unknown[], eventId: number) => void;
 }
 
 export function connectSSE(queryClient: QueryClient, options: SSEConnectionOptions = {}): () => void {
@@ -160,20 +161,30 @@ export function connectSSE(queryClient: QueryClient, options: SSEConnectionOptio
   let reconnectAttempts = 0;
   let lastEventId: string | null = null;
   const seenEventIds = new Set<string>();
-  const pendingInvalidations = new Map<string, readonly unknown[]>();
+  const pendingInvalidations = new Map<string, { queryKey: readonly unknown[]; eventId: number }>();
   let invalidationFlushScheduled = false;
+  let currentEventId: number | undefined;
 
   function invalidateQueries(queryKey: readonly unknown[]): void {
-    if (!coalesceInvalidations) {
+    const eventId = currentEventId;
+    if (eventId === undefined) {
       queryClient.invalidateQueries({ queryKey });
       return;
     }
-    pendingInvalidations.set(JSON.stringify(queryKey), queryKey);
+    if (!coalesceInvalidations) {
+      options.onInvalidation?.(queryKey, eventId);
+      queryClient.invalidateQueries({ queryKey });
+      return;
+    }
+    pendingInvalidations.set(JSON.stringify(queryKey), { queryKey, eventId });
     if (invalidationFlushScheduled) return;
     invalidationFlushScheduled = true;
     queueMicrotask(() => {
       invalidationFlushScheduled = false;
-      for (const key of pendingInvalidations.values()) queryClient.invalidateQueries({ queryKey: key });
+      for (const { queryKey: key, eventId: cause } of pendingInvalidations.values()) {
+        options.onInvalidation?.(key, cause);
+        queryClient.invalidateQueries({ queryKey: key });
+      }
       pendingInvalidations.clear();
     });
   }
@@ -245,6 +256,7 @@ export function connectSSE(queryClient: QueryClient, options: SSEConnectionOptio
           taskId: parsed.taskId || null,
           payload: parsed.payload !== undefined ? parsed.payload : parsed,
         };
+        currentEventId = eventId;
 
         const appConfig = queryClient.getQueryData<{ brain?: { mode?: BrowserNotificationOptions['brainMode'] }; notifications?: { desktop?: boolean; desktopLevel?: 'all' | 'important' | 'critical' | 'off'; quietHours?: BrowserNotificationOptions['quietHours'] } }>(['config']);
         const notificationConfig = appConfig?.notifications;
@@ -324,7 +336,9 @@ export function connectSSE(queryClient: QueryClient, options: SSEConnectionOptio
         } else if (type.startsWith('batch.')) {
           invalidateQueries(['batches']);
         }
+        currentEventId = undefined;
       } catch (err) {
+        currentEventId = undefined;
         console.error('Failed to parse SSE event:', err);
       }
     };

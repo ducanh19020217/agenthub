@@ -21,7 +21,9 @@ export const ReviewQueue: React.FC<ReviewQueueProps> = ({
     queryKey: ['tasks', 'review'],
     queryFn: async () => (await getTasksPage({ status: 'review', limit: 20, sort: 'createdAt', order: 'desc' })).items,
     enabled: propTasks === undefined,
-    refetchInterval: 5000,
+    refetchInterval: 15_000,
+    refetchIntervalInBackground: false,
+    retry: false,
   });
 
   const allTasks = propTasks !== undefined ? propTasks : fetchedTasks || [];

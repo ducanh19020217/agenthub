@@ -97,12 +97,14 @@ export const DashboardPage: React.FC = () => {
     // Status changes arrive over SSE; keep a slower poll as a recovery path.
     refetchInterval: 15_000,
     refetchIntervalInBackground: false,
+    retry: false,
   });
   const { data: eventPage } = useQuery({
     queryKey: ['event-history', 'dashboard', eventPageNumber, eventCursor],
     queryFn: () => getEventHistoryPage({ limit: 20, cursor: eventCursor, offset: eventCursor ? undefined : (eventPageNumber - 1) * 20 }),
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
+    retry: false,
   });
   useEffect(() => {
     if (eventPage?.nextCursor) setEventCursors((current) => ({ ...current, [eventPageNumber]: eventPage.nextCursor || undefined }));
@@ -182,7 +184,12 @@ export const DashboardPage: React.FC = () => {
 
   useEffect(() => {
     const unsub = subscribeToEvents((event) => {
-      setLiveEvents((prev) => [event, ...prev.filter((e) => e.id !== event.id)].slice(0, 20));
+      setLiveEvents((prev) => {
+        // Replayed events are possible after SSE reconnect via Last-Event-ID.
+        // Keep the same state reference so a duplicate does not rerender the page.
+        if (prev.some((current) => current.id === event.id)) return prev;
+        return [event, ...prev].slice(0, 20);
+      });
     });
     return unsub;
   }, []);

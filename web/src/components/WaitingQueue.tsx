@@ -31,7 +31,9 @@ export const WaitingQueue: React.FC<WaitingQueueProps> = ({
       return [...quota.items, ...queued.items].filter((task, index, items) => items.findIndex((item) => item.id === task.id) === index);
     },
     enabled: propTasks === undefined,
-    refetchInterval: 5000,
+    refetchInterval: 15_000,
+    refetchIntervalInBackground: false,
+    retry: false,
   });
 
   const allTasks = propTasks !== undefined ? propTasks : fetchedTasks || [];

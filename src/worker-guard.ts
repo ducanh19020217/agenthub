@@ -323,7 +323,7 @@ exec ${shellQuote(realBinary)} "$@"
     return `#!${interpreter}
 case "$1 $2" in
   "test "|"test "*|"run test"|"run test "*|"lint "|"lint "*|"run lint"|"run lint "*|"typecheck "|"typecheck "*|"run typecheck"|"run typecheck "*|"build "|"build "*|"run build"|"run build "*|"build:web "|"build:web "*|"run build:web"|"run build:web "*) ;;
-  ${installMode === 'worker' && name === 'npm' ? '"ci"|"ci "*|"install"|"install "*) ;;' : ''}
+  ${installMode === 'worker' && name === 'npm' ? '"ci"|"ci "*|"install"|"install "*) [ "$AGENTHUB_WORKER_INSTALL" = "1" ] || { echo ' + shellQuote(denied) + ' >&2; exit 1; } ;;' : ''}
   *) echo ${shellQuote(denied)} >&2; exit 1 ;;
 esac
 exec ${shellQuote(realBinary)} "$@"
@@ -366,7 +366,7 @@ case "$3" in
   ci|install) ;;
   *) echo ${shellQuote('AgentHub: brain policy chặn tham số timeout')} >&2; exit 1 ;;
 esac
-exec ${shellQuote(realBinary)} "$@"
+AGENTHUB_WORKER_INSTALL=1 exec ${shellQuote(realBinary)} "$@"
 `;
 }
 

@@ -206,7 +206,11 @@ describe('worker service guard', () => {
     });
     expect(execFileSync('timeout', ['900', 'npm', 'ci'], { cwd: repo, env: worker, encoding: 'utf8' })).toContain('npm:ci');
     expect(execFileSync('sh', ['-c', 'timeout 900 npm ci'], { cwd: repo, env: worker, encoding: 'utf8' })).toContain('npm:ci');
-    expect(execFileSync('npm', ['install'], { cwd: repo, env: worker, encoding: 'utf8' })).toContain('npm:install');
+    expect(execFileSync('timeout', ['900', 'npm', 'install'], { cwd: repo, env: worker, encoding: 'utf8' })).toContain('npm:install');
+    for (const command of [['ci'], ['install']]) {
+      expect(() => execFileSync('npm', command, { cwd: repo, env: worker, stdio: 'pipe' }))
+        .toThrow('brain policy chặn tham số lệnh');
+    }
     expect(() => execFileSync('timeout', ['901', 'npm', 'ci'], { cwd: repo, env: worker, stdio: 'pipe' })).toThrow('brain policy chặn tham số timeout');
 
     const autoHub = path.join(root, 'auto-hub');

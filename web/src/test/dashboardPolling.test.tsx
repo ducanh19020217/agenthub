@@ -114,8 +114,15 @@ describe('Dashboard polling and SSE recovery', () => {
     const runScenario = async (profile: Profile): Promise<ScenarioResult> => {
       const requestTrace: RequestTrace[] = [];
       const invalidationCountByKey: Record<string, number> = {};
-      const sseInvalidationByKey = new Map<string, { eventId: number; at: number }>();
-      let activeSseEventId: number | null = null;
+      const pendingSseCausesByKey = new Map<string, number[]>();
+      const recordSseInvalidation = (key: string, eventId: number) => {
+        let causes = pendingSseCausesByKey.get(key);
+        if (!causes) {
+          causes = [];
+          pendingSseCausesByKey.set(key, causes);
+        }
+        causes.push(eventId);
+      };
       const makeTracked = <T,>(value: T): Metric => {
         let inFlight = 0;
         let maxInFlight = 0;
@@ -125,15 +132,15 @@ describe('Dashboard polling and SSE recovery', () => {
           const params = call?.[0] as { status?: string } | undefined;
           const key = endpoint === 'tasks' ? `${endpoint}:${params?.status || 'all'}` : endpoint;
           const start = Date.now();
-          const sseCause = sseInvalidationByKey.get(key)
-            || (endpoint === 'tasks' ? sseInvalidationByKey.get('tasks') : undefined);
+          const sseCauses = pendingSseCausesByKey.get(key);
+          const sseEventId = sseCauses?.shift();
           const trace: RequestTrace = {
             endpoint,
             key,
             start,
             end: 0,
-            source: sseCause?.at === start ? 'sse' : (start === 0 ? 'initial' : 'poll'),
-            sseEventId: sseCause?.at === start ? sseCause.eventId : undefined,
+            source: sseEventId === undefined ? (start === 0 ? 'initial' : 'poll') : 'sse',
+            sseEventId,
           };
           requestTrace.push(trace);
           inFlight += 1;
@@ -192,15 +199,15 @@ describe('Dashboard polling and SSE recovery', () => {
       }));
       const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
       const originalInvalidate = queryClient.invalidateQueries.bind(queryClient);
-      vi.spyOn(queryClient, 'invalidateQueries').mockImplementation((filters) => {
-        const queryKey = filters?.queryKey || [];
-        const key = String(queryKey[0] === 'tasks' && queryKey.length > 1 ? `tasks:${queryKey[1]}` : queryKey[0]);
-        const affectedKeys = key === 'tasks' ? ['tasks:review', 'tasks:waiting_quota', 'tasks:queued'] : [key];
-        for (const affectedKey of affectedKeys) {
-          invalidationCountByKey[affectedKey] = (invalidationCountByKey[affectedKey] || 0) + 1;
-          if (activeSseEventId !== null) sseInvalidationByKey.set(affectedKey, { eventId: activeSseEventId, at: Date.now() });
+      const onInvalidation = (queryKey: readonly unknown[], eventId: number) => {
+        const root = String(queryKey[0]);
+        const keys = root === 'tasks' ? ['tasks:review', 'tasks:waiting_quota', 'tasks:queued'] : [root];
+        for (const key of keys) {
+          invalidationCountByKey[key] = (invalidationCountByKey[key] || 0) + 1;
+          recordSseInvalidation(key, eventId);
         }
-        if (activeSseEventId !== null) sseInvalidationByKey.set(key, { eventId: activeSseEventId, at: Date.now() });
+      };
+      vi.spyOn(queryClient, 'invalidateQueries').mockImplementation((filters) => {
         return originalInvalidate(filters);
       });
       const view = render(
@@ -215,6 +222,7 @@ describe('Dashboard polling and SSE recovery', () => {
       const cleanupSse = sse.connectSSE(queryClient, {
         deduplicateEvents: profile === 'optimized',
         coalesceInvalidations: profile === 'optimized',
+        onInvalidation,
       });
 
       await act(async () => { await vi.advanceTimersByTimeAsync(responseDelay); });
@@ -224,11 +232,9 @@ describe('Dashboard polling and SSE recovery', () => {
       const emitBatch = async (source: BenchmarkEventSource, ids: number[]) => {
         await act(async () => {
           for (const id of ids) {
-            activeSseEventId = id;
             source.listeners.get('task.done')!({ lastEventId: String(id), data: JSON.stringify({ type: 'task.done', taskId: `p/t-${id}`, payload: {} }) } as MessageEvent);
           }
           await vi.runAllTicks();
-          activeSseEventId = null;
         });
       };
       await emitBatch(firstSource, Array.from({ length: 20 }, (_, index) => index + 1));
@@ -333,10 +339,21 @@ describe('Dashboard polling and SSE recovery', () => {
     expect(optimized.sseRequestsByKey['tasks:review'] || 0).toBeGreaterThan(0);
     expect(optimized.sseRequestsByKey['tasks:waiting_quota'] || 0).toBeGreaterThan(0);
     expect(optimized.sseRequestsByKey['tasks:queued'] || 0).toBeGreaterThan(0);
-    for (const key of ['status', 'eventHistory', 'tasks:review', 'tasks:waiting_quota', 'tasks:queued']) {
+    const causalKeys = ['status', 'tasks:review', 'tasks:waiting_quota', 'tasks:queued'];
+    const allHotPathKeys = [...causalKeys, 'eventHistory'];
+    for (const key of causalKeys) {
+      const baselineTrace = baseline.traceSummaryByKey[key];
+      const optimizedTrace = optimized.traceSummaryByKey[key];
+      expect(baselineTrace.sseEventIds.length).toBe(baseline.sseRequestsByKey[key]);
+      expect(optimizedTrace.sseEventIds.length).toBe(optimized.sseRequestsByKey[key]);
+      expect(baselineTrace.sseEventIds.every((id) => baseline.dashboardEvents >= id)).toBe(true);
+      expect(optimizedTrace.sseEventIds.every((id) => optimized.dashboardEvents >= id)).toBe(true);
+    }
+    for (const key of allHotPathKeys) {
       expect(optimized.traceByKey[key]?.every((trace) => !trace.overlap)).toBe(true);
       expect(optimized.invalidationCountByKey[key] || 0).toBeGreaterThanOrEqual(optimized.sseRequestsByKey[key] || 0);
     }
+    expect(baseline.overlapByKey.status).toBeGreaterThan(0);
     expect(optimized.traceByKey.status.some((trace) => trace.source === 'sse' && trace.sseEventId !== undefined)).toBe(true);
     expect(optimized.traceByKey['tasks:review'].some((trace) => trace.source === 'sse' && trace.sseEventId !== undefined)).toBe(true);
     expect(optimized.traceSummaryByKey.status.sseEventIds).toEqual([20]);

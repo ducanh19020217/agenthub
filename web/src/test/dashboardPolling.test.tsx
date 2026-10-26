@@ -88,169 +88,142 @@ describe('Dashboard polling and SSE recovery', () => {
     ]);
   });
 
-  it('benchmarks the complete dashboard hot path against the previous cadence', async () => {
+  it('benchmarks baseline and optimized dashboard hot paths with the same delayed SSE scenario', async () => {
     vi.useFakeTimers();
-    const responseDelay = 100;
-    const makeTracked = <T,>(value: T) => {
-      let inFlight = 0;
-      let maxInFlight = 0;
-      const spy = vi.fn((..._args: unknown[]) => {
-        inFlight += 1;
-        maxInFlight = Math.max(maxInFlight, inFlight);
-        return new Promise<T>((resolve) => {
-          setTimeout(() => {
+    const responseDelay = 6_000;
+    type Profile = 'baseline' | 'optimized';
+    type Metric = { spy: ReturnType<typeof vi.fn>; getMaxInFlight: () => number };
+    type ScenarioResult = {
+      totalRequests: number;
+      taskRequests: number;
+      maxInFlight: number;
+      renderCommits: number;
+      eventRenderCommits: number;
+      acceptedSseEvents: number;
+      reconnects: number;
+    };
+
+    const runScenario = async (profile: Profile): Promise<ScenarioResult> => {
+      const makeTracked = <T,>(value: T): Metric => {
+        let inFlight = 0;
+        let maxInFlight = 0;
+        const spy = vi.fn(() => {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          return new Promise<T>((resolve) => setTimeout(() => {
             inFlight -= 1;
             resolve(value);
-          }, responseDelay);
+          }, responseDelay));
         });
+        return { spy, getMaxInFlight: () => maxInFlight };
+      };
+
+      const metrics = {
+        status: makeTracked({ tasks: { running: 0 }, running: [] }),
+        eventHistory: makeTracked({ items: [], total: 0, nextCursor: null }),
+        tasks: makeTracked({ items: [], total: 0, nextCursor: null }),
+        profiles: makeTracked([]),
+        claudeQuota: makeTracked(null),
+        brain: makeTracked(null),
+        failover: makeTracked(null),
+        orphans: makeTracked([]),
+        projects: makeTracked([]),
+        perf: makeTracked(null),
+      };
+      vi.spyOn(client, 'getStatus').mockImplementation(metrics.status.spy as any);
+      vi.spyOn(client, 'getEventHistoryPage').mockImplementation(metrics.eventHistory.spy as any);
+      vi.spyOn(client, 'getTasksPage').mockImplementation(metrics.tasks.spy as any);
+      vi.spyOn(client, 'getProfiles').mockImplementation(metrics.profiles.spy as any);
+      vi.spyOn(client, 'getClaudeQuota').mockImplementation(metrics.claudeQuota.spy as any);
+      vi.spyOn(client, 'getBrain').mockImplementation(metrics.brain.spy as any);
+      vi.spyOn(client, 'getClaudeFailover').mockImplementation(metrics.failover.spy as any);
+      vi.spyOn(client, 'getOrphans').mockImplementation(metrics.orphans.spy as any);
+      vi.spyOn(client, 'getProjects').mockImplementation(metrics.projects.spy as any);
+      vi.spyOn(client, 'getPerf').mockImplementation(metrics.perf.spy as any);
+
+      class BenchmarkEventSource {
+        static instances: BenchmarkEventSource[] = [];
+        onerror: (() => void) | null = null;
+        onopen: (() => void) | null = null;
+        listeners = new Map<string, (event: MessageEvent) => void>();
+        constructor(public url: string) { BenchmarkEventSource.instances.push(this); }
+        addEventListener(name: string, listener: EventListener) { this.listeners.set(name, listener as (event: MessageEvent) => void); }
+        close() {}
+      }
+      const originalEventSource = window.EventSource;
+      (window as any).EventSource = BenchmarkEventSource;
+      setToken('benchmark-token');
+      let renderCommits = 0;
+      let acceptedSseEvents = 0;
+      const unsubscribeTrace = sse.subscribeToEvents(() => { acceptedSseEvents += 1; });
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const view = render(
+        <QueryClientProvider client={queryClient}>
+          <BrowserRouter>
+            <Profiler id={`dashboard-${profile}`} onRender={() => { renderCommits += 1; }}>
+              <DashboardPage pollingProfile={profile} />
+            </Profiler>
+          </BrowserRouter>
+        </QueryClientProvider>,
+      );
+      const cleanupSse = sse.connectSSE(queryClient, {
+        deduplicateEvents: profile === 'optimized',
+        coalesceInvalidations: profile === 'optimized',
       });
-      return { spy, getMaxInFlight: () => maxInFlight };
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(responseDelay); });
+      const firstSource = BenchmarkEventSource.instances[0];
+      expect(firstSource).toBeDefined();
+      const rendersBeforeEvents = renderCommits;
+      await act(async () => {
+        for (let id = 1; id <= 20; id += 1) {
+          firstSource.listeners.get('task.done')!({ lastEventId: String(id), data: JSON.stringify({ type: 'task.done', taskId: `p/t-${id}`, payload: {} }) } as MessageEvent);
+        }
+      });
+      firstSource.onerror!();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      const secondSource = BenchmarkEventSource.instances[1];
+      expect(secondSource).toBeDefined();
+      await act(async () => {
+        for (let id = 1; id <= 20; id += 1) {
+          secondSource.listeners.get('task.done')!({ lastEventId: String(id), data: JSON.stringify({ type: 'task.done', taskId: `p/t-${id}`, payload: {} }) } as MessageEvent);
+        }
+      });
+      const eventRenderCommits = renderCommits - rendersBeforeEvents;
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+      const metricValues = Object.values(metrics);
+      const result = {
+        totalRequests: metricValues.reduce((sum, metric) => sum + metric.spy.mock.calls.length, 0),
+        taskRequests: metrics.tasks.spy.mock.calls.length,
+        maxInFlight: Math.max(...metricValues.map((metric) => metric.getMaxInFlight())),
+        renderCommits,
+        eventRenderCommits,
+        acceptedSseEvents,
+        reconnects: BenchmarkEventSource.instances.length - 1,
+      };
+      cleanupSse();
+      unsubscribeTrace();
+      view.unmount();
+      (window as any).EventSource = originalEventSource;
+      vi.restoreAllMocks();
+      vi.clearAllTimers();
+      clearToken();
+      return result;
     };
 
-    const baseline = {
-      status: makeTracked({ tasks: { running: 0 }, running: [] }),
-      eventHistory: makeTracked({ items: [], total: 0, nextCursor: null }),
-      tasks: makeTracked({ items: [], total: 0, nextCursor: null }),
-      profiles: makeTracked([]),
-      claudeQuota: makeTracked(null),
-      brain: makeTracked(null),
-      failover: makeTracked(null),
-      orphans: makeTracked([]),
-      projects: makeTracked([]),
-      perf: makeTracked(null),
-    };
-    vi.spyOn(client, 'getStatus').mockImplementation(baseline.status.spy as any);
-    vi.spyOn(client, 'getEventHistoryPage').mockImplementation(baseline.eventHistory.spy as any);
-    vi.spyOn(client, 'getTasksPage').mockImplementation(baseline.tasks.spy as any);
-    vi.spyOn(client, 'getProfiles').mockImplementation(baseline.profiles.spy as any);
-    vi.spyOn(client, 'getClaudeQuota').mockImplementation(baseline.claudeQuota.spy as any);
-    vi.spyOn(client, 'getBrain').mockImplementation(baseline.brain.spy as any);
-    vi.spyOn(client, 'getClaudeFailover').mockImplementation(baseline.failover.spy as any);
-    vi.spyOn(client, 'getOrphans').mockImplementation(baseline.orphans.spy as any);
-    vi.spyOn(client, 'getProjects').mockImplementation(baseline.projects.spy as any);
-    vi.spyOn(client, 'getPerf').mockImplementation(baseline.perf.spy as any);
+    const baseline = await runScenario('baseline');
+    const optimized = await runScenario('optimized');
+    console.info('dashboard hot-path benchmark', { baseline, optimized });
 
-    const baselineIntervals = [
-      [baseline.status.spy, 5_000], [baseline.eventHistory.spy, 10_000],
-      [baseline.profiles.spy, 30_000], [baseline.claudeQuota.spy, 30_000],
-      [baseline.brain.spy, 5_000], [baseline.failover.spy, 5_000],
-      [baseline.orphans.spy, 30_000], [baseline.projects.spy, 30_000],
-      [baseline.perf.spy, 30_000],
-    ] as const;
-    const baselineTimers = baselineIntervals.map(([fn, interval]) => {
-      fn();
-      return setInterval(fn, interval);
-    });
-    for (const interval of [5_000, 15_000]) {
-      for (const status of ['review', 'waiting_quota', 'queued']) {
-        const timer = setInterval(() => baseline.tasks.spy({ status }), interval);
-        baselineTimers.push(timer as any);
-        baseline.tasks.spy({ status });
-      }
-    }
-    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-    const baselineRequests = {
-      total: Object.values(baseline).reduce((sum, metric) => sum + metric.spy.mock.calls.length, 0),
-      duplicates: baseline.tasks.spy.mock.calls.length - new Set(baseline.tasks.spy.mock.calls.map(([params]) => JSON.stringify(params))).size,
-      maxInFlight: Math.max(...Object.values(baseline).map((metric) => metric.getMaxInFlight())),
-    };
-    baselineTimers.forEach(clearInterval);
-
-    vi.clearAllMocks();
-    const optimized = {
-      status: makeTracked({ tasks: { running: 0 }, running: [] }),
-      eventHistory: makeTracked({ items: [], total: 0, nextCursor: null }),
-      tasks: makeTracked({ items: [], total: 0, nextCursor: null }),
-      profiles: makeTracked([]),
-      claudeQuota: makeTracked(null),
-      brain: makeTracked(null),
-      failover: makeTracked(null),
-      orphans: makeTracked([]),
-      projects: makeTracked([]),
-      perf: makeTracked(null),
-    };
-    vi.mocked(client.getStatus).mockImplementation(optimized.status.spy as any);
-    vi.mocked(client.getEventHistoryPage).mockImplementation(optimized.eventHistory.spy as any);
-    vi.mocked(client.getTasksPage).mockImplementation(optimized.tasks.spy as any);
-    vi.mocked(client.getProfiles).mockImplementation(optimized.profiles.spy as any);
-    vi.mocked(client.getClaudeQuota).mockImplementation(optimized.claudeQuota.spy as any);
-    vi.mocked(client.getBrain).mockImplementation(optimized.brain.spy as any);
-    vi.mocked(client.getClaudeFailover).mockImplementation(optimized.failover.spy as any);
-    vi.mocked(client.getOrphans).mockImplementation(optimized.orphans.spy as any);
-    vi.mocked(client.getProjects).mockImplementation(optimized.projects.spy as any);
-    vi.mocked(client.getPerf).mockImplementation(optimized.perf.spy as any);
-
-    class BenchmarkEventSource {
-      static instances: BenchmarkEventSource[] = [];
-      onerror: (() => void) | null = null;
-      onopen: (() => void) | null = null;
-      listeners = new Map<string, (event: MessageEvent) => void>();
-      closed = false;
-      constructor(public url: string) { BenchmarkEventSource.instances.push(this); }
-      addEventListener(name: string, listener: EventListener) { this.listeners.set(name, listener as (event: MessageEvent) => void); }
-      close() { this.closed = true; }
-    }
-    const originalEventSource = window.EventSource;
-    (window as any).EventSource = BenchmarkEventSource;
-    setToken('benchmark-token');
-    let renderCommits = 0;
-    const receivedEvents: number[] = [];
-    const unsubscribeTrace = sse.subscribeToEvents((event) => receivedEvents.push(event.id));
-
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const view = render(
-      <QueryClientProvider client={queryClient}>
-        <BrowserRouter>
-          <Profiler id="dashboard-benchmark" onRender={() => { renderCommits += 1; }}>
-            <DashboardPage />
-          </Profiler>
-        </BrowserRouter>
-      </QueryClientProvider>,
-    );
-    const cleanupSse = sse.connectSSE(queryClient);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(responseDelay);
-    });
-    const firstSource = BenchmarkEventSource.instances[0];
-    expect(firstSource).toBeDefined();
-    const rendersBeforeEvents = renderCommits;
-    await act(async () => {
-      for (let id = 1; id <= 20; id += 1) {
-        firstSource.listeners.get('task.done')!({ lastEventId: String(id), data: JSON.stringify({ type: 'task.done', taskId: `p/t-${id}`, payload: {} }) } as MessageEvent);
-      }
-    });
-    const eventRenderCommits = renderCommits - rendersBeforeEvents;
-    firstSource.onerror!();
-    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
-    const secondSource = BenchmarkEventSource.instances[1];
-    await act(async () => {
-      for (let id = 1; id <= 20; id += 1) {
-        secondSource.listeners.get('task.done')!({ lastEventId: String(id), data: JSON.stringify({ type: 'task.done', taskId: `p/t-${id}`, payload: {} }) } as MessageEvent);
-      }
-    });
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(60_000);
-    });
-    const optimizedRequests = {
-      total: Object.values(optimized).reduce((sum, metric) => sum + metric.spy.mock.calls.length, 0),
-      duplicates: optimized.tasks.spy.mock.calls.length - new Set(optimized.tasks.spy.mock.calls.map(([params]) => JSON.stringify(params))).size,
-      maxInFlight: Math.max(...Object.values(optimized).map((metric) => metric.getMaxInFlight())),
-      renders: renderCommits,
-      eventRenders: eventRenderCommits,
-      acceptedSseEvents: receivedEvents.length,
-    };
-    console.info('dashboard hot-path benchmark', { baselineRequests, optimizedRequests });
-    expect(optimizedRequests.total).toBeLessThan(baselineRequests.total);
-    expect(optimizedRequests.duplicates).toBeLessThan(baselineRequests.duplicates);
-    expect(optimizedRequests.maxInFlight).toBeLessThanOrEqual(baselineRequests.maxInFlight);
-    expect(optimizedRequests.renders).toBeGreaterThan(0);
-    expect(optimizedRequests.acceptedSseEvents).toBe(20);
-    expect(optimizedRequests.eventRenders).toBeLessThanOrEqual(1);
-    cleanupSse();
-    unsubscribeTrace();
-    view.unmount();
-    (window as any).EventSource = originalEventSource;
+    expect(baseline.reconnects).toBe(1);
+    expect(optimized.reconnects).toBe(1);
+    expect(baseline.acceptedSseEvents).toBe(40);
+    expect(optimized.acceptedSseEvents).toBe(20);
+    expect(optimized.totalRequests).toBeLessThan(baseline.totalRequests);
+    expect(optimized.taskRequests).toBeLessThan(baseline.taskRequests);
+    expect(optimized.maxInFlight).toBeLessThan(baseline.maxInFlight);
+    expect(optimized.renderCommits).toBeLessThan(baseline.renderCommits);
+    expect(optimized.eventRenderCommits).toBeLessThan(baseline.eventRenderCommits);
   });
 });

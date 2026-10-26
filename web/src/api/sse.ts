@@ -146,7 +146,14 @@ export function handleRunOutput(
   }
 }
 
-export function connectSSE(queryClient: QueryClient): () => void {
+export interface SSEConnectionOptions {
+  deduplicateEvents?: boolean;
+  coalesceInvalidations?: boolean;
+}
+
+export function connectSSE(queryClient: QueryClient, options: SSEConnectionOptions = {}): () => void {
+  const deduplicateEvents = options.deduplicateEvents !== false;
+  const coalesceInvalidations = options.coalesceInvalidations !== false;
   let eventSource: EventSource | null = null;
   let isClosed = false;
   let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -157,6 +164,10 @@ export function connectSSE(queryClient: QueryClient): () => void {
   let invalidationFlushScheduled = false;
 
   function invalidateQueries(queryKey: readonly unknown[]): void {
+    if (!coalesceInvalidations) {
+      queryClient.invalidateQueries({ queryKey });
+      return;
+    }
     pendingInvalidations.set(JSON.stringify(queryKey), queryKey);
     if (invalidationFlushScheduled) return;
     invalidationFlushScheduled = true;
@@ -217,7 +228,7 @@ export function connectSSE(queryClient: QueryClient): () => void {
         // replay before notifying the UI or invalidating query caches; the
         // Dashboard already de-duplicates its rendered list, but cache
         // invalidation here would still start duplicate requests.
-        if (rawLastEventId || parsed.id) {
+        if (deduplicateEvents && (rawLastEventId || parsed.id)) {
           const eventKey = String(eventId);
           if (seenEventIds.has(eventKey)) return;
           seenEventIds.add(eventKey);

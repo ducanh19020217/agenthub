@@ -92,11 +92,16 @@ describe('Dashboard polling and SSE recovery', () => {
     vi.useFakeTimers();
     const responseDelay = 6_000;
     type Profile = 'baseline' | 'optimized';
+    type RequestTrace = { endpoint: string; key: string; start: number; end: number };
     type Metric = { spy: ReturnType<typeof vi.fn>; getMaxInFlight: () => number };
     type ScenarioResult = {
       totalRequests: number;
       taskRequests: number;
       maxInFlight: number;
+      overlapByEndpoint: Record<string, number>;
+      overlapByKey: Record<string, number>;
+      requestCountByKey: Record<string, number>;
+      sseTriggeredRequests: Record<string, number>;
       renderCommits: number;
       eventRenderCommits: number;
       acceptedSseEvents: number;
@@ -104,14 +109,24 @@ describe('Dashboard polling and SSE recovery', () => {
     };
 
     const runScenario = async (profile: Profile): Promise<ScenarioResult> => {
+      const requestTrace: RequestTrace[] = [];
       const makeTracked = <T,>(value: T): Metric => {
         let inFlight = 0;
         let maxInFlight = 0;
         const spy = vi.fn(() => {
+          const call = spy.mock.calls.at(-1) as unknown[] | undefined;
+          const endpoint = String((spy as any).__endpoint);
+          const params = call?.[0] as { status?: string } | undefined;
+          const key = endpoint === 'tasks'
+            ? `${endpoint}:${params?.status || 'all'}`
+            : `${endpoint}:${JSON.stringify(call?.[0] ?? null)}`;
+          const trace: RequestTrace = { endpoint, key, start: Date.now(), end: 0 };
+          requestTrace.push(trace);
           inFlight += 1;
           maxInFlight = Math.max(maxInFlight, inFlight);
           return new Promise<T>((resolve) => setTimeout(() => {
             inFlight -= 1;
+            trace.end = Date.now();
             resolve(value);
           }, responseDelay));
         });
@@ -130,6 +145,7 @@ describe('Dashboard polling and SSE recovery', () => {
         projects: makeTracked([]),
         perf: makeTracked(null),
       };
+      for (const [endpoint, metric] of Object.entries(metrics)) (metric.spy as any).__endpoint = endpoint;
       vi.spyOn(client, 'getStatus').mockImplementation(metrics.status.spy as any);
       vi.spyOn(client, 'getEventHistoryPage').mockImplementation(metrics.eventHistory.spy as any);
       vi.spyOn(client, 'getTasksPage').mockImplementation(metrics.tasks.spy as any);
@@ -175,6 +191,7 @@ describe('Dashboard polling and SSE recovery', () => {
       const firstSource = BenchmarkEventSource.instances[0];
       expect(firstSource).toBeDefined();
       const rendersBeforeEvents = renderCommits;
+      const firstSseAt = Date.now();
       await act(async () => {
         for (let id = 1; id <= 20; id += 1) {
           firstSource.listeners.get('task.done')!({ lastEventId: String(id), data: JSON.stringify({ type: 'task.done', taskId: `p/t-${id}`, payload: {} }) } as MessageEvent);
@@ -189,14 +206,39 @@ describe('Dashboard polling and SSE recovery', () => {
           secondSource.listeners.get('task.done')!({ lastEventId: String(id), data: JSON.stringify({ type: 'task.done', taskId: `p/t-${id}`, payload: {} }) } as MessageEvent);
         }
       });
+      const sseWindowEnd = Date.now();
       const eventRenderCommits = renderCommits - rendersBeforeEvents;
       await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
       const metricValues = Object.values(metrics);
+      const overlapByEndpoint: Record<string, number> = {};
+      const overlapByKey: Record<string, number> = {};
+      const requestCountByKey: Record<string, number> = {};
+      for (const trace of requestTrace) {
+        requestCountByKey[trace.key] = (requestCountByKey[trace.key] || 0) + 1;
+        const overlaps = requestTrace.filter((other) => other !== trace
+          && other.key === trace.key
+          && other.start < trace.end
+          && trace.start < other.end).length;
+        if (overlaps > 0) {
+          overlapByEndpoint[trace.endpoint] = (overlapByEndpoint[trace.endpoint] || 0) + 1;
+          overlapByKey[trace.key] = (overlapByKey[trace.key] || 0) + 1;
+        }
+      }
+      const sseTriggeredRequests: Record<string, number> = {};
+      for (const trace of requestTrace) {
+        if (trace.start >= firstSseAt && trace.start <= sseWindowEnd) {
+          sseTriggeredRequests[trace.endpoint] = (sseTriggeredRequests[trace.endpoint] || 0) + 1;
+        }
+      }
       const result = {
         totalRequests: metricValues.reduce((sum, metric) => sum + metric.spy.mock.calls.length, 0),
         taskRequests: metrics.tasks.spy.mock.calls.length,
         maxInFlight: Math.max(...metricValues.map((metric) => metric.getMaxInFlight())),
+        overlapByEndpoint,
+        overlapByKey,
+        requestCountByKey,
+        sseTriggeredRequests,
         renderCommits,
         eventRenderCommits,
         acceptedSseEvents,
@@ -223,6 +265,19 @@ describe('Dashboard polling and SSE recovery', () => {
     expect(optimized.totalRequests).toBeLessThan(baseline.totalRequests);
     expect(optimized.taskRequests).toBeLessThan(baseline.taskRequests);
     expect(optimized.maxInFlight).toBeLessThan(baseline.maxInFlight);
+    expect(baseline.overlapByEndpoint.status).toBeGreaterThan(0);
+    expect(optimized.overlapByEndpoint.status || 0).toBe(0);
+    expect(optimized.overlapByEndpoint.tasks || 0).toBe(0);
+    expect(optimized.overlapByEndpoint.eventHistory || 0).toBe(0);
+    for (const status of ['review', 'waiting_quota', 'queued']) {
+      const key = `tasks:${status}`;
+      expect(baseline.requestCountByKey[key]).toBeGreaterThan(optimized.requestCountByKey[key]);
+      expect(baseline.requestCountByKey[key]).toBeGreaterThan(1);
+    }
+    expect(baseline.sseTriggeredRequests.status || 0).toBeGreaterThan(0);
+    expect(baseline.sseTriggeredRequests.tasks || 0).toBeGreaterThan(0);
+    expect(optimized.sseTriggeredRequests.status || 0).toBeGreaterThan(0);
+    expect(optimized.sseTriggeredRequests.tasks || 0).toBeGreaterThan(0);
     expect(optimized.renderCommits).toBeLessThan(baseline.renderCommits);
     expect(optimized.eventRenderCommits).toBeLessThan(baseline.eventRenderCommits);
   });

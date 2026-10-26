@@ -92,7 +92,7 @@ describe('Dashboard polling and SSE recovery', () => {
     vi.useFakeTimers();
     const responseDelay = 6_000;
     type Profile = 'baseline' | 'optimized';
-    type RequestTrace = { endpoint: string; key: string; start: number; end: number };
+    type RequestTrace = { endpoint: string; key: string; start: number; end: number; source: 'initial' | 'poll' | 'sse'; sseEventId?: number };
     type Metric = { spy: ReturnType<typeof vi.fn>; getMaxInFlight: () => number };
     type ScenarioResult = {
       totalRequests: number;
@@ -101,15 +101,21 @@ describe('Dashboard polling and SSE recovery', () => {
       overlapByEndpoint: Record<string, number>;
       overlapByKey: Record<string, number>;
       requestCountByKey: Record<string, number>;
-      sseTriggeredRequests: Record<string, number>;
+      sseRequestsByKey: Record<string, number>;
+      invalidationCountByKey: Record<string, number>;
       renderCommits: number;
       eventRenderCommits: number;
-      acceptedSseEvents: number;
+      dashboardEvents: number;
       reconnects: number;
+      traceByKey: Record<string, Array<{ source: string; overlap: boolean; sseEventId?: number }>>;
+      traceSummaryByKey: Record<string, { requests: number; overlaps: number; sources: Record<string, number>; sseEventIds: number[] }>;
     };
 
     const runScenario = async (profile: Profile): Promise<ScenarioResult> => {
       const requestTrace: RequestTrace[] = [];
+      const invalidationCountByKey: Record<string, number> = {};
+      const sseInvalidationByKey = new Map<string, { eventId: number; at: number }>();
+      let activeSseEventId: number | null = null;
       const makeTracked = <T,>(value: T): Metric => {
         let inFlight = 0;
         let maxInFlight = 0;
@@ -117,10 +123,18 @@ describe('Dashboard polling and SSE recovery', () => {
           const call = spy.mock.calls.at(-1) as unknown[] | undefined;
           const endpoint = String((spy as any).__endpoint);
           const params = call?.[0] as { status?: string } | undefined;
-          const key = endpoint === 'tasks'
-            ? `${endpoint}:${params?.status || 'all'}`
-            : `${endpoint}:${JSON.stringify(call?.[0] ?? null)}`;
-          const trace: RequestTrace = { endpoint, key, start: Date.now(), end: 0 };
+          const key = endpoint === 'tasks' ? `${endpoint}:${params?.status || 'all'}` : endpoint;
+          const start = Date.now();
+          const sseCause = sseInvalidationByKey.get(key)
+            || (endpoint === 'tasks' ? sseInvalidationByKey.get('tasks') : undefined);
+          const trace: RequestTrace = {
+            endpoint,
+            key,
+            start,
+            end: 0,
+            source: sseCause?.at === start ? 'sse' : (start === 0 ? 'initial' : 'poll'),
+            sseEventId: sseCause?.at === start ? sseCause.eventId : undefined,
+          };
           requestTrace.push(trace);
           inFlight += 1;
           maxInFlight = Math.max(maxInFlight, inFlight);
@@ -170,9 +184,25 @@ describe('Dashboard polling and SSE recovery', () => {
       (window as any).EventSource = BenchmarkEventSource;
       setToken('benchmark-token');
       let renderCommits = 0;
-      let acceptedSseEvents = 0;
-      const unsubscribeTrace = sse.subscribeToEvents(() => { acceptedSseEvents += 1; });
+      const dashboardEventIds: number[] = [];
+      const originalSubscribe = sse.subscribeToEvents;
+      vi.spyOn(sse, 'subscribeToEvents').mockImplementation((callback) => originalSubscribe((event) => {
+        dashboardEventIds.push(event.id);
+        callback(event);
+      }));
       const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const originalInvalidate = queryClient.invalidateQueries.bind(queryClient);
+      vi.spyOn(queryClient, 'invalidateQueries').mockImplementation((filters) => {
+        const queryKey = filters?.queryKey || [];
+        const key = String(queryKey[0] === 'tasks' && queryKey.length > 1 ? `tasks:${queryKey[1]}` : queryKey[0]);
+        const affectedKeys = key === 'tasks' ? ['tasks:review', 'tasks:waiting_quota', 'tasks:queued'] : [key];
+        for (const affectedKey of affectedKeys) {
+          invalidationCountByKey[affectedKey] = (invalidationCountByKey[affectedKey] || 0) + 1;
+          if (activeSseEventId !== null) sseInvalidationByKey.set(affectedKey, { eventId: activeSseEventId, at: Date.now() });
+        }
+        if (activeSseEventId !== null) sseInvalidationByKey.set(key, { eventId: activeSseEventId, at: Date.now() });
+        return originalInvalidate(filters);
+      });
       const view = render(
         <QueryClientProvider client={queryClient}>
           <BrowserRouter>
@@ -191,22 +221,22 @@ describe('Dashboard polling and SSE recovery', () => {
       const firstSource = BenchmarkEventSource.instances[0];
       expect(firstSource).toBeDefined();
       const rendersBeforeEvents = renderCommits;
-      const firstSseAt = Date.now();
-      await act(async () => {
-        for (let id = 1; id <= 20; id += 1) {
-          firstSource.listeners.get('task.done')!({ lastEventId: String(id), data: JSON.stringify({ type: 'task.done', taskId: `p/t-${id}`, payload: {} }) } as MessageEvent);
-        }
-      });
+      const emitBatch = async (source: BenchmarkEventSource, ids: number[]) => {
+        await act(async () => {
+          for (const id of ids) {
+            activeSseEventId = id;
+            source.listeners.get('task.done')!({ lastEventId: String(id), data: JSON.stringify({ type: 'task.done', taskId: `p/t-${id}`, payload: {} }) } as MessageEvent);
+          }
+          await vi.runAllTicks();
+          activeSseEventId = null;
+        });
+      };
+      await emitBatch(firstSource, Array.from({ length: 20 }, (_, index) => index + 1));
       firstSource.onerror!();
       await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
       const secondSource = BenchmarkEventSource.instances[1];
       expect(secondSource).toBeDefined();
-      await act(async () => {
-        for (let id = 1; id <= 20; id += 1) {
-          secondSource.listeners.get('task.done')!({ lastEventId: String(id), data: JSON.stringify({ type: 'task.done', taskId: `p/t-${id}`, payload: {} }) } as MessageEvent);
-        }
-      });
-      const sseWindowEnd = Date.now();
+      await emitBatch(secondSource, Array.from({ length: 20 }, (_, index) => index + 1));
       const eventRenderCommits = renderCommits - rendersBeforeEvents;
       await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
@@ -225,11 +255,27 @@ describe('Dashboard polling and SSE recovery', () => {
           overlapByKey[trace.key] = (overlapByKey[trace.key] || 0) + 1;
         }
       }
-      const sseTriggeredRequests: Record<string, number> = {};
+      const sseRequestsByKey: Record<string, number> = {};
+      const traceByKey: Record<string, Array<{ source: string; overlap: boolean; sseEventId?: number }>> = {};
       for (const trace of requestTrace) {
-        if (trace.start >= firstSseAt && trace.start <= sseWindowEnd) {
-          sseTriggeredRequests[trace.endpoint] = (sseTriggeredRequests[trace.endpoint] || 0) + 1;
-        }
+        const overlaps = requestTrace.some((other) => other !== trace
+          && other.key === trace.key
+          && other.start < trace.end
+          && trace.start < other.end);
+        (traceByKey[trace.key] ||= []).push({ source: trace.source, overlap: overlaps, sseEventId: trace.sseEventId });
+        if (trace.source === 'sse') sseRequestsByKey[trace.key] = (sseRequestsByKey[trace.key] || 0) + 1;
+      }
+      const traceSummaryByKey: ScenarioResult['traceSummaryByKey'] = {};
+      for (const [key, traces] of Object.entries(traceByKey)) {
+        traceSummaryByKey[key] = {
+          requests: traces.length,
+          overlaps: traces.filter((trace) => trace.overlap).length,
+          sources: traces.reduce<Record<string, number>>((counts, trace) => {
+            counts[trace.source] = (counts[trace.source] || 0) + 1;
+            return counts;
+          }, {}),
+          sseEventIds: traces.flatMap((trace) => trace.sseEventId === undefined ? [] : [trace.sseEventId]),
+        };
       }
       const result = {
         totalRequests: metricValues.reduce((sum, metric) => sum + metric.spy.mock.calls.length, 0),
@@ -238,14 +284,16 @@ describe('Dashboard polling and SSE recovery', () => {
         overlapByEndpoint,
         overlapByKey,
         requestCountByKey,
-        sseTriggeredRequests,
+        sseRequestsByKey,
+        invalidationCountByKey,
         renderCommits,
         eventRenderCommits,
-        acceptedSseEvents,
+        dashboardEvents: dashboardEventIds.length,
         reconnects: BenchmarkEventSource.instances.length - 1,
+        traceByKey,
+        traceSummaryByKey,
       };
       cleanupSse();
-      unsubscribeTrace();
       view.unmount();
       (window as any).EventSource = originalEventSource;
       vi.restoreAllMocks();
@@ -256,12 +304,15 @@ describe('Dashboard polling and SSE recovery', () => {
 
     const baseline = await runScenario('baseline');
     const optimized = await runScenario('optimized');
-    console.info('dashboard hot-path benchmark', { baseline, optimized });
+    console.info('dashboard hot-path benchmark', JSON.stringify({
+      baseline: { ...baseline, traceByKey: baseline.traceSummaryByKey },
+      optimized: { ...optimized, traceByKey: optimized.traceSummaryByKey },
+    }));
 
     expect(baseline.reconnects).toBe(1);
     expect(optimized.reconnects).toBe(1);
-    expect(baseline.acceptedSseEvents).toBe(40);
-    expect(optimized.acceptedSseEvents).toBe(20);
+    expect(baseline.dashboardEvents).toBe(40);
+    expect(optimized.dashboardEvents).toBe(20);
     expect(optimized.totalRequests).toBeLessThan(baseline.totalRequests);
     expect(optimized.taskRequests).toBeLessThan(baseline.taskRequests);
     expect(optimized.maxInFlight).toBeLessThan(baseline.maxInFlight);
@@ -274,10 +325,22 @@ describe('Dashboard polling and SSE recovery', () => {
       expect(baseline.requestCountByKey[key]).toBeGreaterThan(optimized.requestCountByKey[key]);
       expect(baseline.requestCountByKey[key]).toBeGreaterThan(1);
     }
-    expect(baseline.sseTriggeredRequests.status || 0).toBeGreaterThan(0);
-    expect(baseline.sseTriggeredRequests.tasks || 0).toBeGreaterThan(0);
-    expect(optimized.sseTriggeredRequests.status || 0).toBeGreaterThan(0);
-    expect(optimized.sseTriggeredRequests.tasks || 0).toBeGreaterThan(0);
+    expect(baseline.sseRequestsByKey.status || 0).toBeGreaterThan(0);
+    expect(baseline.sseRequestsByKey['tasks:review'] || 0).toBeGreaterThan(0);
+    expect(baseline.sseRequestsByKey['tasks:waiting_quota'] || 0).toBeGreaterThan(0);
+    expect(baseline.sseRequestsByKey['tasks:queued'] || 0).toBeGreaterThan(0);
+    expect(optimized.sseRequestsByKey.status || 0).toBeGreaterThan(0);
+    expect(optimized.sseRequestsByKey['tasks:review'] || 0).toBeGreaterThan(0);
+    expect(optimized.sseRequestsByKey['tasks:waiting_quota'] || 0).toBeGreaterThan(0);
+    expect(optimized.sseRequestsByKey['tasks:queued'] || 0).toBeGreaterThan(0);
+    for (const key of ['status', 'eventHistory', 'tasks:review', 'tasks:waiting_quota', 'tasks:queued']) {
+      expect(optimized.traceByKey[key]?.every((trace) => !trace.overlap)).toBe(true);
+      expect(optimized.invalidationCountByKey[key] || 0).toBeGreaterThanOrEqual(optimized.sseRequestsByKey[key] || 0);
+    }
+    expect(optimized.traceByKey.status.some((trace) => trace.source === 'sse' && trace.sseEventId !== undefined)).toBe(true);
+    expect(optimized.traceByKey['tasks:review'].some((trace) => trace.source === 'sse' && trace.sseEventId !== undefined)).toBe(true);
+    expect(optimized.traceSummaryByKey.status.sseEventIds).toEqual([20]);
+    expect(optimized.traceSummaryByKey['tasks:review'].sseEventIds).toEqual([20]);
     expect(optimized.renderCommits).toBeLessThan(baseline.renderCommits);
     expect(optimized.eventRenderCommits).toBeLessThan(baseline.eventRenderCommits);
   });

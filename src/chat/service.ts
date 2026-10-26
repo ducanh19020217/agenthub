@@ -89,6 +89,12 @@ export interface RunningTurn {
   isCompact?: boolean;
   isForkSummary?: boolean;
   accumulatedText?: string;
+  text?: string;
+  projectId?: string | null;
+  mode?: 'safe' | 'full';
+  claudeSessionId?: string | null;
+  model?: string;
+  profileName?: string | null;
   toolExecutions?: Map<string, { messageId: string; startedAt: number; name: string; summary: string; input?: Record<string, unknown> }>;
   onFinish?: (err?: Error, result?: { contextTokens?: number; summary?: string }) => void;
 }
@@ -2064,7 +2070,20 @@ export class ChatService {
       return;
     }
     const timeoutTimer = setTimeout(() => this.timeoutPersistentTurn(proc), 15 * 60 * 1000);
-    const running: RunningTurn = { sessionId: turn.sessionId, messageId: turn.messageId, child: proc.child, timeoutTimer, cancelled: false, persistent: true };
+    const running: RunningTurn = {
+      sessionId: turn.sessionId,
+      messageId: turn.messageId,
+      child: proc.child,
+      timeoutTimer,
+      cancelled: false,
+      persistent: true,
+      text: turn.text,
+      projectId: turn.projectId,
+      mode: turn.mode,
+      claudeSessionId: turn.claudeSessionId,
+      model: turn.model,
+      profileName: turn.profileName,
+    };
     proc.active = running;
     proc.lastUsedAt = Date.now();
     proc.lastAssistantUsage = undefined;
@@ -2183,7 +2202,10 @@ export class ChatService {
     proc.limitResetSeconds = undefined;
     if (ev.isError) {
       const session = this.chatSessionRepo.get(proc.sessionId);
-      const retryTurn: QueuedTurn = { sessionId: proc.sessionId, messageId: running.messageId, text: this.chatMessageRepo.getBySession(proc.sessionId, 100000).find((message) => message.role === 'user' && message.id !== running.messageId)?.content || '', projectId: session?.projectId || null, mode: session?.mode || 'safe', claudeSessionId: session?.claudeSessionId || null, model: proc.model, profileName: proc.profileName };
+      const retryTurn = this.persistentTurn(running, session);
+      if (quota.exhausted && session?.kind === 'brain' && this.failoverPersistentTurn(proc, running, retryTurn, 'claude_quota_exhausted')) {
+        return;
+      }
       if (quota.exhausted && retryTurn.text && this.scheduleLimitRetry(retryTurn, quota.resetSeconds, ev.result)) {
         this.armIdleTimer(proc);
         setBrainActivity('idle').catch(() => {});
@@ -2261,6 +2283,47 @@ export class ChatService {
     this.processQueue();
   }
 
+  private persistentTurn(running: RunningTurn, session: ChatSessionRow | undefined): QueuedTurn {
+    return {
+      sessionId: running.sessionId,
+      messageId: running.messageId,
+      text: running.text || '',
+      projectId: running.projectId ?? session?.projectId ?? null,
+      mode: running.mode || session?.mode || 'safe',
+      claudeSessionId: running.claudeSessionId ?? session?.claudeSessionId ?? null,
+      model: running.model || session?.model || 'sonnet',
+      profileName: running.profileName ?? session?.profileName ?? null,
+    };
+  }
+
+  private failoverPersistentTurn(
+    proc: PersistentProcess,
+    running: RunningTurn,
+    turn: QueuedTurn,
+    reason: string,
+  ): boolean {
+    const snapshot = this.failoverState.snapshot();
+    const step = snapshot.step;
+    if (!step || step.type === 'wait') return false;
+
+    proc.active = undefined;
+    this.runningTurns.delete(proc.sessionId);
+    this.chatSessionRepo.setBusy(proc.sessionId, 0);
+    this.setSessionState(proc.sessionId, 'running');
+    this.emitEvent('chat.failover', {
+      sessionId: proc.sessionId,
+      messageId: running.messageId,
+      fromEngine: 'claude',
+      toEngine: step.type === 'engine' ? step.engine : 'claude',
+      reason,
+      step,
+    });
+    this.closePersistentProcess(proc);
+    this.chatSessionRepo.setBusy(proc.sessionId, 1);
+    this.executeTurn(turn);
+    return true;
+  }
+
   private timeoutPersistentTurn(proc: PersistentProcess): void {
     const running = proc.active;
     if (!running) return;
@@ -2293,9 +2356,12 @@ export class ChatService {
       const quota = this.recordClaudeQuota('', proc.stderrOutput, null);
       if (!quota.exhausted && proc.limitResetSeconds) { quota.exhausted = true; quota.resetSeconds = proc.limitResetSeconds; }
       this.chatSessionRepo.setBusy(proc.sessionId, 0);
-      this.setSessionState(proc.sessionId, 'error');
       const session = this.chatSessionRepo.get(proc.sessionId);
-      const retryTurn: QueuedTurn = { sessionId: proc.sessionId, messageId: active.messageId, text: this.chatMessageRepo.getBySession(proc.sessionId, 100000).find((message) => message.role === 'user')?.content || '', projectId: session?.projectId || null, mode: session?.mode || 'safe', claudeSessionId: session?.claudeSessionId || null, model: proc.model, profileName: proc.profileName };
+      const retryTurn = this.persistentTurn(active, session);
+      if (!active.cancelled && quota.exhausted && session?.kind === 'brain' && this.failoverPersistentTurn(proc, active, retryTurn, 'claude_quota_exhausted')) {
+        return;
+      }
+      this.setSessionState(proc.sessionId, 'error');
       if (!active.cancelled && quota.exhausted && retryTurn.text && this.scheduleLimitRetry(retryTurn, quota.resetSeconds, proc.stderrOutput.trim())) {
         this.closePersistentProcess(proc);
       } else if (!active.cancelled) {

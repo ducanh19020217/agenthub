@@ -72,6 +72,7 @@ describe('Brain Codex Engine Integration and Failover', () => {
   afterEach(async () => {
     delete process.env.AGENTHUB_CODEX_BIN;
     delete process.env.FAKE_CODEX_QUOTA;
+    delete process.env.FAKE_CLAUDE_STREAM_JSON;
     if (prevBwrap === undefined) delete process.env.AGENTHUB_BWRAP_BIN;
     else process.env.AGENTHUB_BWRAP_BIN = prevBwrap;
     await server.close();
@@ -225,6 +226,34 @@ describe('Brain Codex Engine Integration and Failover', () => {
       expect(payload.message).toContain('Codex hiện không khả dụng');
       expect(ctx.chatSessionRepo.get(sessionId)?.state).toBe('waiting_limit');
       expect(ctx.chatService.getLastEngine(sessionId)).toBe('codex');
+    });
+
+    it('fails over a persistent Claude quota error to Codex without losing the turn', async () => {
+      const streamClaudeBin = path.join(tmpDir, 'fake-claude-stream.mjs');
+      fs.symlinkSync(path.resolve(__dirname, 'fixtures', 'fake-claude.mjs'), streamClaudeBin);
+      process.env.FAKE_CLAUDE_STREAM_JSON = '1';
+      createCodexProfile('codex-persistent-failover');
+      ctx.config.brain.engine = 'claude';
+      ctx.config.brain.codexProfile = 'codex-persistent-failover';
+      ctx.chatService.setClaudeBinOverride(streamClaudeBin);
+      ctx.chatService.configureFailoverSteps([{ type: 'engine', engine: 'codex' }]);
+
+      const sessionId = 'brain:persistent-failover';
+      ctx.chatSessionRepo.insert({ id: sessionId, title: 'Persistent Brain', mode: 'safe', model: 'sonnet', profileName: 'claude-default', kind: 'brain' });
+      const done = new Promise<void>((resolve) => {
+        ctx.scheduler.getEventBus().on('chat.done', (_id, payload) => {
+          if ((payload as { sessionId?: string }).sessionId === sessionId) resolve();
+        });
+      });
+
+      await ctx.chatService.sendMessage(sessionId, 'quota');
+      await done;
+
+      const messages = ctx.chatMessageRepo.getBySession(sessionId);
+      expect(ctx.chatService.getLastEngine(sessionId)).toBe('codex');
+      expect(ctx.chatSessionRepo.get(sessionId)?.state).toBe('idle');
+      expect(messages.some((message) => message.role === 'assistant' && message.meta?.includes('"engine":"codex"'))).toBe(true);
+      expect(messages.filter((message) => message.role === 'error')).toHaveLength(0);
     });
 
     it('keeps a department Brain on its pinned Codex profile when global Brain uses Claude', () => {

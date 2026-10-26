@@ -14,6 +14,8 @@ import {
   validateReviewChainReviewerSyntax,
   validateReviewerModelSyntax,
   validateBranchSyntax,
+  getModelProvider,
+  getModelsForProvider,
 } from '../utils/models';
 import * as client from '../api/client';
 import * as sse from '../api/sse';
@@ -52,6 +54,31 @@ function TestSortableWrapper({ initialModels = ['sonnet', 'haiku'] }: { initialM
 }
 
 describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)', () => {
+  it('classifies and filters models without mixing providers', () => {
+    expect(getModelProvider('gemini-3.8-flash-high')).toBe('gemini');
+    expect(getModelProvider('claude-opus-4-6-thinking')).toBe('claude');
+    expect(getModelProvider('codex:gpt-5.6-luna')).toBe('codex');
+    expect(getModelProvider('gpt-oss-120b-medium')).toBeNull();
+    expect(getModelsForProvider([
+      'gemini-3.8-flash-high',
+      'claude-opus-4-6-thinking',
+      'codex:gpt-5.6-luna',
+      'sonnet',
+    ], 'gemini')).toEqual(['gemini-3.8-flash-high']);
+    expect(getModelsForProvider([
+      'gemini-3.8-flash-high',
+      'claude-opus-4-6-thinking',
+      'codex:gpt-5.6-luna',
+      'sonnet',
+    ], 'claude')).toEqual(['claude-opus-4-6-thinking', 'sonnet']);
+    expect(getModelsForProvider([
+      'gemini-3.8-flash-high',
+      'claude-opus-4-6-thinking',
+      'codex:gpt-5.6-luna',
+      'gpt-5.6-turbo',
+    ], 'codex')).toEqual(['codex:gpt-5.6-luna', 'gpt-5.6-turbo']);
+  });
+
   describe('1. SelectOrCustomInput Component', () => {
     it('renders preset options and allows selecting a standard model', () => {
       render(

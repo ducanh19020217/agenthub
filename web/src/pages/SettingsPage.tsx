@@ -11,6 +11,9 @@ import { InfoTooltip } from '../components/tour/InfoTooltip';
 import { DataTable, SelectOrCustomInput, SortableModelList } from '../components/ui';
 import {
   DEFAULT_CLAUDE_MODELS,
+  DEFAULT_CODEX_MODELS,
+  DEFAULT_VALID_MODELS,
+  getModelsForProvider,
   validateModelSyntax,
   validateChatModelSyntax,
   validateReviewerModelSyntax,
@@ -103,7 +106,7 @@ export const SettingsPage: React.FC = () => {
   });
 
   const availableWorkerModels = useMemo(() => {
-    const fromApi = modelOptions?.suggestions || [];
+    const fromApi = modelOptions?.suggestions || DEFAULT_VALID_MODELS;
     const fromConfig = modelOptions?.configured || [];
     const set = new Set([...fromApi, ...fromConfig, ...hardChainModels, ...easyChainModels]);
     return Array.from(set).filter(Boolean);
@@ -139,14 +142,14 @@ export const SettingsPage: React.FC = () => {
   }, [availableClaudeProfiles, claudeProfiles, fallback, t]);
 
   const availableCodexReviewerModels = useMemo(() => {
-    const fromApi = (modelOptions?.suggestions || []).filter((m) => m.startsWith('codex:') || m.startsWith('gpt-'));
-    const fromConfigured = (modelOptions?.configured || []).filter((m) => m.startsWith('codex:') || m.startsWith('gpt-'));
+    const sourceModels = modelOptions
+      ? [...modelOptions.suggestions, ...modelOptions.configured]
+      : DEFAULT_CODEX_MODELS.map((model) => `codex:${model}`);
     const reviewerModels = reviewOrder.filter((r) => r.engine === 'codex').map((r) => r.model);
     const arbiterModel = arbiter.engine === 'codex' && arbiter.model ? [arbiter.model] : [];
     const chainCodex = [...hardChainModels, ...easyChainModels].filter((m) => m.startsWith('codex:') || m.startsWith('gpt-'));
     return Array.from(new Set([
-      ...fromApi,
-      ...fromConfigured,
+      ...getModelsForProvider(sourceModels, 'codex'),
       ...reviewerModels,
       ...arbiterModel,
       ...chainCodex,
@@ -155,15 +158,15 @@ export const SettingsPage: React.FC = () => {
 
   const availableClaudeReviewerModels = useMemo(() => {
     const fromChat = chatModels;
-    const fromApi = (modelOptions?.suggestions || []).filter((m) => DEFAULT_CLAUDE_MODELS.includes(m) || m.startsWith('claude'));
-    const fromConfigured = (modelOptions?.configured || []).filter((m) => DEFAULT_CLAUDE_MODELS.includes(m) || m.startsWith('claude'));
+    const sourceModels = modelOptions
+      ? [...modelOptions.suggestions, ...modelOptions.configured]
+      : DEFAULT_CLAUDE_MODELS;
     const reviewerModels = reviewOrder.filter((r) => r.engine === 'claude').map((r) => r.model);
     const arbiterModel = arbiter.engine === 'claude' && arbiter.model ? [arbiter.model] : [];
     return Array.from(new Set([
       ...DEFAULT_CLAUDE_MODELS,
       ...fromChat,
-      ...fromApi,
-      ...fromConfigured,
+      ...getModelsForProvider(sourceModels, 'claude'),
       ...reviewerModels,
       ...arbiterModel,
     ])).filter(Boolean);
@@ -256,18 +259,23 @@ export const SettingsPage: React.FC = () => {
   useEffect(() => setApiKeyConfigured(Boolean(apiKeyStatus?.configured)), [apiKeyStatus]);
 
   const mutation = useMutation({
-    mutationFn: updateConfig,
+    mutationFn: async (data: Partial<import('../types/api').SystemConfig>) => {
+      const updated = await updateConfig(data);
+      if (apiKey.trim()) await setClaudeApiKey(apiKey.trim());
+      return updated;
+    },
     onSuccess: (updated) => {
       queryClient.setQueryData(['config'], updated);
       if (apiKey.trim()) {
-        setClaudeApiKey(apiKey).then(() => { setApiKey(''); setApiKeyConfigured(true); }).catch(() => undefined);
+        setApiKey('');
+        setApiKeyConfigured(true);
       }
       setSaveSuccess(true);
       setSaveError(null);
       setTimeout(() => setSaveSuccess(false), 3000);
     },
     onError: (err: any) => {
-      setSaveError(err.message || t('settings.saveError'));
+      setSaveError(typeof err?.message === 'string' && err.message.trim() ? err.message : t('settings.saveError'));
       setSaveSuccess(false);
     },
   });
@@ -462,14 +470,14 @@ export const SettingsPage: React.FC = () => {
       </section>
 
       {saveSuccess && (
-        <div className="p-4 rounded-xl bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)] border border-[var(--t-ok)] text-[var(--t-ok)] text-sm flex items-center gap-2">
+        <div role="status" aria-live="polite" className="p-4 rounded-xl bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)] border border-[var(--t-ok)] text-[var(--t-ok)] text-sm flex items-center gap-2">
           <CheckCircle2 className="w-5 h-5 text-[var(--t-ok)] shrink-0" />
           <span>{t('settings.saveSuccess')}</span>
         </div>
       )}
 
       {saveError && (
-        <div className="p-4 rounded-xl bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] border border-[var(--t-crit)] text-[var(--t-crit)] text-sm flex items-center gap-2">
+        <div role="alert" aria-live="assertive" className="p-4 rounded-xl bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] border border-[var(--t-crit)] text-[var(--t-crit)] text-sm flex items-center gap-2">
           <AlertCircle className="w-5 h-5 text-[var(--t-crit)] shrink-0" />
           <span>{saveError}</span>
         </div>
@@ -1452,10 +1460,11 @@ export const SettingsPage: React.FC = () => {
             <button
               type="submit"
               disabled={mutation.isPending}
+              aria-busy={mutation.isPending}
               className="px-5 py-2 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-2 shadow-xs cursor-pointer disabled:opacity-50"
             >
               <Save className="w-4 h-4" />
-              <span>{mutation.isPending ? t('common.loading') : t('settings.saveConfigBtn')}</span>
+              <span>{mutation.isPending ? t('settings.savingConfigBtn') : t('settings.saveConfigBtn')}</span>
             </button>
           </div>
         </form>

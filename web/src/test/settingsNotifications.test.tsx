@@ -142,6 +142,7 @@ describe('SettingsPage Notifications & Digest (b-brain-notify)', () => {
 
     await waitFor(() => {
       expect(updateSpy).toHaveBeenCalled();
+      expect(screen.getByRole('status')).toHaveTextContent('Cài đặt hệ thống đã được cập nhật thành công!');
     });
 
     const callPayload = updateSpy.mock.calls[0][0];
@@ -149,6 +150,30 @@ describe('SettingsPage Notifications & Digest (b-brain-notify)', () => {
     expect(callPayload.brain?.digest).toBeDefined();
     expect(callPayload.notifications).toBeDefined();
     expect(callPayload.notifications?.desktop).toBe(true);
+  });
+
+  it('shows a translated error and never reports success when saving fails', async () => {
+    vi.spyOn(client, 'updateConfig').mockRejectedValue(new Error('Không thể lưu cài đặt'));
+
+    render(
+      <LocaleProvider initialLocale="vi">
+        <ThemeProvider>
+          <QueryClientProvider client={queryClient}>
+            <MemoryRouter>
+              <SettingsPage />
+            </MemoryRouter>
+          </QueryClientProvider>
+        </ThemeProvider>
+      </LocaleProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId('notifications-settings')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Lưu cấu hình'));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('Không thể lưu cài đặt');
+    });
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
   it('updates desktop notification level and quiet hours in settings form and saves correctly', async () => {

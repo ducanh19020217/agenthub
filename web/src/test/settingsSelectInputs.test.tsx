@@ -59,6 +59,7 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
     expect(getModelProvider('claude-opus-4-6-thinking')).toBe('claude');
     expect(getModelProvider('codex:gpt-5.6-luna')).toBe('codex');
     expect(getModelProvider('gpt-oss-120b-medium')).toBeNull();
+    expect(getModelProvider('codex:gpt-oss-120b-medium')).toBeNull();
     expect(getModelsForProvider([
       'gemini-3.8-flash-high',
       'claude-opus-4-6-thinking',
@@ -940,7 +941,11 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
           },
         },
         review: {
-          chain: [{ reviewer: 'codex:custom-model-dynamic', mode: 'gate' }],
+          chain: [
+            { reviewer: 'codex:custom-model-dynamic', mode: 'gate' },
+            { reviewer: 'gemini-3.8-flash-high', mode: 'gate' },
+            { reviewer: 'codex:gpt-oss-120b-medium', mode: 'gate' },
+          ],
           maxRounds: 2,
         },
       };
@@ -978,6 +983,8 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       // Ensure hardcoded models like gpt-5.6-turbo/luna are NOT included when not in API or config
       expect(within(stepSelect).queryByRole('option', { name: 'codex:gpt-5.6-turbo' })).not.toBeInTheDocument();
       expect(within(stepSelect).queryByRole('option', { name: 'codex:gpt-5.6-luna' })).not.toBeInTheDocument();
+      expect(within(stepSelect).queryByRole('option', { name: 'gemini-3.8-flash-high' })).not.toBeInTheDocument();
+      expect(within(stepSelect).queryByRole('option', { name: 'codex:gpt-oss-120b-medium' })).not.toBeInTheDocument();
 
       // Reviewer order select should also have codex:custom-model-dynamic as option
       const orderBlock = screen.getByTestId('project-reviewer-order');

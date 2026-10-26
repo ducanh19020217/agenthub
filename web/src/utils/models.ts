@@ -30,7 +30,11 @@ export type ModelProvider = 'gemini' | 'claude' | 'codex';
  */
 export function getModelProvider(model: string): ModelProvider | null {
   const trimmed = model.trim();
-  if (trimmed.startsWith('codex:') || (trimmed.startsWith('gpt-') && !trimmed.startsWith('gpt-oss-'))) return 'codex';
+  if (trimmed.startsWith('codex:')) {
+    const raw = trimmed.slice('codex:'.length);
+    return raw && !raw.startsWith('gpt-oss-') ? 'codex' : null;
+  }
+  if (trimmed.startsWith('gpt-') && !trimmed.startsWith('gpt-oss-')) return 'codex';
   if (trimmed.startsWith('gemini-')) return 'gemini';
   if (trimmed.startsWith('claude-') || DEFAULT_CLAUDE_MODELS.includes(trimmed)) return 'claude';
   return null;

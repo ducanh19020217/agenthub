@@ -333,12 +333,15 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
         }
       }
     }
+    const chainReviewers = getModelsForProvider(
+      [...fromCurrentChain, ...fromProjectChain],
+      'codex',
+    ).map((model) => (model.startsWith('codex:') ? model : `codex:${model}`));
     return Array.from(
       new Set([
         'claude',
         ...codexModels,
-        ...fromCurrentChain,
-        ...fromProjectChain,
+        ...chainReviewers,
       ]),
     ).filter(Boolean);
   }, [availableCodexReviewerModels, reviewChain.chain, project]);

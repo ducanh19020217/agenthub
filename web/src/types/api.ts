@@ -164,8 +164,6 @@ export interface Department {
   brainCodexProfile?: string | null;
   brainMode?: 'inherit' | 'off' | 'suggest' | 'auto';
   brainPermissions?: 'inherit' | 'standard' | 'trusted' | 'full';
-  brainDailyTokenBudget?: number;
-  brainMaxTurnsPerHour?: number;
   createdAt: string;
   projectCount?: number;
   profiles: DepartmentProfile[];

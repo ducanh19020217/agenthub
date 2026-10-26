@@ -35,7 +35,6 @@ export const tourDefinitions: TourDefinition[] = [
     { id: 'connection', route: '/', selector: '[data-tour="connection-status"]', title: 'tour.steps.intro.connection.title', content: 'tour.steps.intro.connection.content', placement: 'bottom' },
     { id: 'resources', route: '/', selector: '[data-tour="resource-status"]', title: 'tour.steps.intro.resources.title', content: 'tour.steps.intro.resources.content', placement: 'bottom' },
     { id: 'brain', route: '/', selector: '[data-tour="brain"]', title: 'tour.steps.intro.brain.title', content: 'tour.steps.intro.brain.content', placement: 'bottom' },
-    { id: 'assistant', route: '/chat', selector: '[data-tour="assistant-chat"]', title: 'tour.steps.intro.assistant.title', content: 'tour.steps.intro.assistant.content', placement: 'right' },
     { id: 'projects', route: '/projects', selector: '[data-tour="projects"]', title: 'tour.steps.intro.projects.title', content: 'tour.steps.intro.projects.content', placement: 'right' },
     { id: 'tasks', route: '/tasks', selector: '[data-tour="tasks"]', title: 'tour.steps.intro.tasks.title', content: 'tour.steps.intro.tasks.content', placement: 'right' },
     { id: 'queue', route: '/tasks', selector: '[data-tour="task-filters"]', title: 'tour.steps.intro.queue.title', content: 'tour.steps.intro.queue.content', placement: 'bottom' },
@@ -109,15 +108,6 @@ export const pageTours: Record<string, TourDefinition> = {
     { id: 'capture', selector: '[data-tour="task-capture"]', title: 'tour.steps.page-task-detail.capture.title', content: 'tour.steps.page-task-detail.capture.content', placement: 'top' },
     { id: 'task-summary', selector: '[data-tour="task-summary"]', title: 'tour.steps.page-task-detail.task-summary.title', content: 'tour.steps.page-task-detail.task-summary.content', placement: 'top' },
     { id: 'help', selector: '[data-tour="help"]', title: 'tour.steps.page-task-detail.help.title', content: 'tour.steps.page-task-detail.help.content', placement: 'bottom' },
-  ] },
-  '/chat': { id: 'page-chat', steps: [
-    { id: 'chat', selector: '[data-tour="chat"]', title: 'tour.steps.page-chat.chat.title', content: 'tour.steps.page-chat.chat.content', placement: 'right' },
-    { id: 'assistant', selector: '[data-tour="assistant-chat"]', title: 'tour.steps.page-chat.assistant.title', content: 'tour.steps.page-chat.assistant.content', placement: 'bottom' },
-    { id: 'composer', selector: '[data-tour="chat-composer"]', title: 'tour.steps.page-chat.composer.title', content: 'tour.steps.page-chat.composer.content', placement: 'top' },
-    { id: 'new-session', selector: '[data-tour="new-session"]', title: 'tour.steps.page-chat.new-session.title', content: 'tour.steps.page-chat.new-session.content', placement: 'bottom' },
-    { id: 'permissions', selector: '[data-tour="chat-permissions"]', title: 'tour.steps.page-chat.permissions.title', content: 'tour.steps.page-chat.permissions.content', placement: 'top' },
-    { id: 'sessions', selector: '[data-tour="chat-sessions"]', title: 'tour.steps.page-chat.sessions.title', content: 'tour.steps.page-chat.sessions.content', placement: 'right' },
-    { id: 'help', selector: '[data-tour="help"]', title: 'tour.steps.page-chat.help.title', content: 'tour.steps.page-chat.help.content', placement: 'bottom' },
   ] },
   '/plans': { id: 'page-plans', steps: [
     { id: 'plans', selector: '[data-tour="plans"]', title: 'tour.steps.page-plans.plans.title', content: 'tour.steps.page-plans.plans.content', placement: 'right' },

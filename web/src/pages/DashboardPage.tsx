@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { getStatus, getProfiles, getClaudeQuota, getClaudeFailover, clearClaudeFailover, getOrphans, reapOrphans, pauseTask, resumeTask, getBrain, getProjects, getPerf, getEventHistoryPage } from '../api/client';
-import { getChatSessions, createChatSession, sendChatMessage, retryChatLimitNow } from '../api/chat';
+import { retryChatLimitNow } from '../api/chat';
 import { subscribeToEvents } from '../api/sse';
 import { EventItem } from '../types/api';
 import { parseApiTime, formatTimeAgo } from '../lib/time';
@@ -15,7 +15,6 @@ import {
   Cpu,
   ArrowRight,
   Radio,
-  Send,
   HardDrive,
   Play,
   Pause,
@@ -81,10 +80,7 @@ function RunningDuration({ startedAt }: { startedAt: string }) {
 
 export const DashboardPage: React.FC = () => {
   const { t, locale } = useLocale();
-  const navigate = useNavigate();
   const [liveEvents, setLiveEvents] = useState<EventItem[]>([]);
-  const [quickChatText, setQuickChatText] = useState('');
-  const [isSubmittingQuickChat, setIsSubmittingQuickChat] = useState(false);
   const [isReaping, setIsReaping] = useState(false);
   const [urlParams, setUrlParams] = useSearchParams();
   const [eventPageNumber, setEventPageNumber] = useState(Math.max(1, Number(urlParams.get('eventsPage') || 1)));
@@ -145,34 +141,6 @@ export const DashboardPage: React.FC = () => {
       await refetchOrphans();
     } finally {
       setIsReaping(false);
-    }
-  };
-
-  const handleQuickChat = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const text = quickChatText.trim();
-    if (!text || isSubmittingQuickChat) return;
-
-    try {
-      setIsSubmittingQuickChat(true);
-      const sessionsPage = await getChatSessions({ limit: 1 });
-      const sessions = sessionsPage.items;
-      let targetSessionId: string;
-      if (sessions.length > 0) {
-        targetSessionId = sessions[0].id;
-      } else {
-        const newSession = await createChatSession({
-          title: text.length > 30 ? text.slice(0, 30) + '...' : text,
-          mode: 'safe',
-        });
-        targetSessionId = newSession.id;
-      }
-
-      await sendChatMessage(targetSessionId, text);
-      navigate(`/chat/${targetSessionId}`);
-    } catch (err: any) {
-      alert(err.message || t('extra.quickChatError'));
-      setIsSubmittingQuickChat(false);
     }
   };
 
@@ -351,11 +319,10 @@ export const DashboardPage: React.FC = () => {
         <h2 className="text-base font-semibold">{t('dashboard.brains')}</h2>
         {brainOverview.brains.map((brain: ProjectBrain) => <div key={brain.projectId || 'system'} className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--t-border)] pt-3 first:border-0 first:pt-0" data-testid={`brain-row-${brain.projectId || 'system'}`}>
           <div><div className="font-medium text-sm">{brain.projectName}</div><div className="text-xs text-[var(--t-text-2)]">{t('dashboard.brainMode')}: {t(`dashboard.brainMode_${brain.mode}`)} · {t('dashboard.brainEngine')}: {brain.engine || 'claude'} · {t('projects.brainPermissions')}: {brain.permissions} · {t('dashboard.brainSessionMode')}: {brain.sessionMode || 'safe'} · {t(`dashboard.brainState${brain.state}`)}{brain.queued ? ` · ${t('dashboard.brainQueued')}` : ''}</div>{brain.directives?.length ? <div className="mt-1 text-xs text-[var(--t-text-2)]">📌 {brain.directives.map((directive) => directive.text).join(' · ')}</div> : null}</div>
-          <div className="flex items-center gap-3 text-xs"><span>{t('dashboard.brainTokens')}: {brain.tokensToday.toLocaleString()}</span><Link to={`/chat/${encodeURIComponent(brain.sessionId)}`} className="text-[var(--t-accent)] hover:underline">{t('dashboard.openBrainChat')}</Link></div>
+          <div className="flex items-center gap-3 text-xs"><span>{t('dashboard.brainTokens')}: {brain.tokensToday.toLocaleString()}</span></div>
         </div>)}
         {brainOverview.assistants?.map((assistant) => <div key={`assistant-${assistant.projectId || 'system'}`} className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--t-border)] pt-3" data-testid={`assistant-row-${assistant.projectId || 'system'}`}>
           <div><div className="font-medium text-sm">{t('dashboard.assistant')} · {assistant.projectName}</div><div className="text-xs text-[var(--t-text-2)]">{assistant.busy ? t('dashboard.assistantWorking') : t('dashboard.assistantReady')}</div></div>
-          <Link to={`/chat/${encodeURIComponent(assistant.sessionId)}`} className="text-xs text-[var(--t-accent)] hover:underline">{t('dashboard.openAssistantChat')}</Link>
         </div>)}
       </div>}
 
@@ -692,38 +659,6 @@ export const DashboardPage: React.FC = () => {
           {claudeFailover.active && <button type="button" onClick={() => failoverMutation.mutate()} disabled={failoverMutation.isPending} className="shrink-0 px-3 py-2 rounded-lg bg-[var(--t-warn)] text-[var(--t-on-accent)] text-xs font-semibold disabled:opacity-50">{failoverMutation.isPending ? t('dashboard.failoverTurningOff') : t('dashboard.failoverTurnOff')}</button>}
         </div>
       </div>}
-
-      {/* Compact quick chat */}
-      <div className="order-5 p-4 rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] shadow-xs transition-colors">
-        <form onSubmit={handleQuickChat} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-          <div className="flex items-center gap-2 text-xs font-semibold text-[var(--t-text)] shrink-0">
-            <div className="w-6 h-6 rounded-full bg-[var(--t-claude)] text-[var(--t-on-accent)] font-bold text-xs flex items-center justify-center shadow-xs">
-              C
-            </div>
-            <span>{t('extra.quickChat')}</span>
-          </div>
-
-          <div className="flex-1 relative">
-            <input
-              type="text"
-              value={quickChatText}
-              onChange={(e) => setQuickChatText(e.target.value)}
-              placeholder={t('extra.quickChatPlaceholder')}
-              disabled={isSubmittingQuickChat}
-              className="w-full text-xs rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-[var(--t-text)] placeholder-[var(--t-text-3)] focus:outline-none focus:ring-2 focus:ring-[var(--t-accent)] disabled:opacity-50"
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={!quickChatText.trim() || isSubmittingQuickChat}
-            className="px-4 py-2 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center justify-center gap-1.5 shadow-xs disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shrink-0 transition-colors"
-          >
-            <Send className="w-3.5 h-3.5" />
-            <span>{isSubmittingQuickChat ? t('extra.sending') : t('extra.send')}</span>
-          </button>
-        </form>
-      </div>
 
       {orphans.length > 0 && <div data-testid="orphan-processes" className="order-1 bg-[var(--t-surface)] rounded-xl border border-[var(--t-border)] overflow-hidden shadow-xs">
         <div className="px-6 py-4 border-b border-[var(--t-border)] flex items-center justify-between gap-3">

@@ -17,7 +17,6 @@ const TasksPage = lazy(() => import('./pages/TasksPage').then((m) => ({ default:
 const CreateTaskPage = lazy(() => import('./pages/CreateTaskPage').then((m) => ({ default: m.CreateTaskPage })));
 const TaskDetailPage = lazy(() => import('./pages/TaskDetailPage').then((m) => ({ default: m.TaskDetailPage })));
 const ProfilesPage = lazy(() => import('./pages/ProfilesPage').then((m) => ({ default: m.ProfilesPage })));
-const ChatPage = lazy(() => import('./pages/ChatPage').then((m) => ({ default: m.ChatPage })));
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((m) => ({ default: m.ProjectsPage })));
 const DepartmentsPage = lazy(() => import('./pages/DepartmentsPage').then((m) => ({ default: m.DepartmentsPage })));
 const PlansPage = lazy(() => import('./pages/PlansPage').then((m) => ({ default: m.PlansPage })));
@@ -81,8 +80,6 @@ const AppShell: React.FC = () => {
                 <Route path="/" element={<Layout />}>
                   <Route index element={<DashboardPage />} />
                   <Route path="setup" element={<SetupPage />} />
-                  <Route path="chat" element={<ChatPage />} />
-                  <Route path="chat/:sessionId" element={<ChatPage />} />
                   <Route path="claude-sessions" element={<ClaudeSessionsPage />} />
                   <Route path="claude-sessions/:sessionId" element={<ClaudeSessionsPage />} />
                   <Route path="plans" element={<PlansPage />} />

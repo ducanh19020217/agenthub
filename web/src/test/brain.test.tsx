@@ -242,7 +242,7 @@ describe('DashboardPage - Claude Integration', () => {
     expect(claudeIcons.length).toBe(2);
   });
 
-  it('renders system and project brain rows with chat links', async () => {
+  it('renders system and project brain rows without chat entry points', async () => {
     vi.spyOn(client, 'getStatus').mockResolvedValue({ tasks: {}, running: [] } as any);
     vi.spyOn(client, 'getBrain').mockResolvedValue({
       activity: 'idle', detail: '', updatedAt: new Date().toISOString(), stale: false,
@@ -254,6 +254,6 @@ describe('DashboardPage - Claude Integration', () => {
     render(<QueryClientProvider client={queryClient}><BrowserRouter><DashboardPage /></BrowserRouter></QueryClientProvider>);
     expect(await screen.findByTestId('brain-row-system')).toHaveTextContent('Hệ thống');
     expect(screen.getByTestId('brain-row-demo')).toHaveTextContent('Demo');
-    expect(screen.getByTestId('brain-row-demo').querySelector('a')).toHaveAttribute('href', '/chat/brain%3Ademo');
+    expect(screen.getByTestId('brain-row-demo').querySelector('a')).toBeNull();
   });
 });

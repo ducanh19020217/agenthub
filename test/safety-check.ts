@@ -42,30 +42,6 @@ export interface QuotaUsageInfo {
   fetchedAt: number;
 }
 
-export interface QuotaMarkInfo {
-  profileName: string;
-  family: string;
-  until: number;
-  reason: string | null;
-}
-
-export interface ClaudeScanStateInfo {
-  inode: number;
-  size: number;
-  offset: number;
-  mtime: number;
-}
-
-export interface ClaudeSessionInfo {
-  cwd: string;
-}
-
-export interface HubDbTableUsageDelta {
-  maxRowid: number;
-  count: number;
-  checksum: string;
-}
-
 export interface HubDbInfo {
   isValid: boolean;
   schemaVersion?: string;
@@ -76,11 +52,6 @@ export interface HubDbInfo {
   claudeQuotaInfo?: ClaudeQuotaRow | null;
   claudeQuotaProfilesMap?: Record<string, ClaudeQuotaProfileRow>;
   quotaUsageMap?: Record<string, QuotaUsageInfo>;
-  quotaMarksMap?: Record<string, QuotaMarkInfo>;
-  claudeScanStateMap?: Record<string, ClaudeScanStateInfo>;
-  claudeSessionsMap?: Record<string, ClaudeSessionInfo>;
-  claudeUsageInfo?: HubDbTableUsageDelta | null;
-  claudeTaskUsageInfo?: HubDbTableUsageDelta | null;
   taskIds?: string[];
   profileNames?: string[];
   projectIds?: string[];
@@ -107,11 +78,6 @@ export const ALLOWED_DAEMON_BACKGROUND_TABLES = new Set([
   'claude_quota',
   'claude_quota_profiles',
   'quota_usage',
-  'quota_marks',
-  'claude_scan_state',
-  'claude_sessions',
-  'claude_usage',
-  'claude_task_usage',
 ]);
 
 export const ALLOWED_DAEMON_EVENT_TYPES = new Set([
@@ -316,69 +282,7 @@ export function getHubDbInfo(dbPath: string): HubDbInfo {
         } catch { /* ignore */ }
       }
 
-      const quotaMarksMap: Record<string, QuotaMarkInfo> = {};
-      if (tables.includes('quota_marks')) {
-        try {
-          const rows = db.prepare('SELECT profileName, family, until, reason FROM quota_marks').all() as QuotaMarkInfo[];
-          for (const r of rows) {
-            quotaMarksMap[`${r.profileName}::${r.family}`] = r;
-            if (r.profileName) profileNamesSet.add(r.profileName);
-          }
-        } catch { /* ignore */ }
-      }
-
       const profileNames = Array.from(profileNamesSet);
-
-      const claudeScanStateMap: Record<string, ClaudeScanStateInfo> = {};
-      if (tables.includes('claude_scan_state')) {
-        try {
-          const rows = db.prepare('SELECT path, inode, size, offset, mtime FROM claude_scan_state').all() as {
-            path: string;
-            inode: number;
-            size: number;
-            offset: number;
-            mtime: number;
-          }[];
-          for (const r of rows) {
-            claudeScanStateMap[r.path] = { inode: r.inode, size: r.size, offset: r.offset, mtime: r.mtime };
-          }
-        } catch { /* ignore */ }
-      }
-
-      const claudeSessionsMap: Record<string, ClaudeSessionInfo> = {};
-      if (tables.includes('claude_sessions')) {
-        try {
-          const rows = db.prepare('SELECT sessionId, cwd FROM claude_sessions').all() as {
-            sessionId: string;
-            cwd: string;
-          }[];
-          for (const r of rows) {
-            claudeSessionsMap[r.sessionId] = { cwd: r.cwd };
-          }
-        } catch { /* ignore */ }
-      }
-
-      let claudeUsageInfo: HubDbTableUsageDelta | null = null;
-      if (tables.includes('claude_usage')) {
-        try {
-          const maxRow = db.prepare('SELECT MAX(rowid) as m, COUNT(*) as c FROM claude_usage').get() as { m: number | null; c: number };
-          const maxRowid = maxRow.m ?? 0;
-          const rows = db.prepare('SELECT rowid, sessionId, messageId FROM claude_usage WHERE rowid <= ? ORDER BY rowid').all(maxRowid);
-          const checksum = crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex');
-          claudeUsageInfo = { maxRowid, count: maxRow.c, checksum };
-        } catch { /* ignore */ }
-      }
-
-      let claudeTaskUsageInfo: HubDbTableUsageDelta | null = null;
-      if (tables.includes('claude_task_usage')) {
-        try {
-          const maxRow = db.prepare('SELECT MAX(rowid) as m, COUNT(*) as c FROM claude_task_usage').get() as { m: number | null; c: number };
-          const maxRowid = maxRow.m ?? 0;
-          const rows = db.prepare('SELECT rowid, taskId, sessionId FROM claude_task_usage WHERE rowid <= ? ORDER BY rowid').all(maxRowid);
-          const checksum = crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex');
-          claudeTaskUsageInfo = { maxRowid, count: maxRow.c, checksum };
-        } catch { /* ignore */ }
-      }
 
       return {
         isValid: true,
@@ -390,11 +294,6 @@ export function getHubDbInfo(dbPath: string): HubDbInfo {
         claudeQuotaInfo,
         claudeQuotaProfilesMap,
         quotaUsageMap,
-        quotaMarksMap,
-        claudeScanStateMap,
-        claudeSessionsMap,
-        claudeUsageInfo,
-        claudeTaskUsageInfo,
         taskIds,
         profileNames,
         projectIds,
@@ -700,8 +599,8 @@ export function verifyHubHomeSafety(
                   if (beforeTables.includes('claude_quota_profiles')) {
                     const currentRows = db.prepare('SELECT profileName, status, resetsAt, rateLimitType, isUsingOverage, observedAt FROM claude_quota_profiles').all() as ClaudeQuotaProfileRow[];
                     const initialMap = snap.dbInfo?.claudeQuotaProfilesMap || {};
-                    if (currentRows.length < Object.keys(initialMap).length) {
-                      throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_quota_profiles records were deleted during test execution!`);
+                    if (currentRows.length !== Object.keys(initialMap).length) {
+                      throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_quota_profiles record count changed during test execution!`);
                     }
                     for (const current of currentRows) {
                       const initial = initialMap[current.profileName];
@@ -743,8 +642,8 @@ export function verifyHubHomeSafety(
                   if (beforeTables.includes('quota_usage')) {
                     const currentRows = db.prepare('SELECT profileName, grp, window, remainingPct, resetAt, fetchedAt FROM quota_usage').all() as QuotaUsageInfo[];
                     const initialMap = snap.dbInfo?.quotaUsageMap || {};
-                    if (currentRows.length < Object.keys(initialMap).length) {
-                      throw new Error(`SAFETY NET VIOLATION: ${dbPath} quota_usage records were deleted during test execution!`);
+                    if (currentRows.length !== Object.keys(initialMap).length) {
+                      throw new Error(`SAFETY NET VIOLATION: ${dbPath} quota_usage record count changed during test execution!`);
                     }
                     for (const current of currentRows) {
                       const key = `${current.profileName}::${current.grp}::${current.window}`;
@@ -769,128 +668,6 @@ export function verifyHubHomeSafety(
                       }
                       if (/agenthub-test-|test-worker-|vitest/i.test(JSON.stringify(current))) {
                         throw new Error(`SAFETY NET VIOLATION: ${dbPath} quota_usage contains test markers!`);
-                      }
-                    }
-                  }
-
-                  // Verify quota_marks delta if present
-                  if (beforeTables.includes('quota_marks')) {
-                    const currentRows = db.prepare('SELECT profileName, family, until, reason FROM quota_marks').all() as QuotaMarkInfo[];
-                    const initialMap = snap.dbInfo?.quotaMarksMap || {};
-                    const allowedProfiles = new Set(snap.dbInfo?.profileNames || []);
-                    for (const current of currentRows) {
-                      if (!allowedProfiles.has(current.profileName) || /agenthub-test-|test-worker-|vitest/i.test(current.profileName)) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} quota_marks has unexpected profile "${current.profileName}"!`);
-                      }
-                      const key = `${current.profileName}::${current.family}`;
-                      const initial = initialMap[key];
-                      if (initial && current.until < initial.until) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} quota_marks until moved backwards for "${key}"!`);
-                      }
-                      if (initial && current.until <= initial.until && current.reason !== initial.reason) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} quota_marks was modified without new timestamp for "${key}"!`);
-                      }
-                      if (current.reason && /agenthub-test-|test-worker-|vitest/i.test(current.reason)) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} quota_marks contains test reason!`);
-                      }
-                    }
-                  }
-
-                  // Verify claude_scan_state delta if present
-                  if (beforeTables.includes('claude_scan_state')) {
-                    const currentRows = db.prepare('SELECT path, inode, size, offset, mtime, turnId, turnTasks FROM claude_scan_state').all() as {
-                      path: string;
-                      inode: number;
-                      size: number;
-                      offset: number;
-                      mtime: number;
-                      turnId?: string;
-                      turnTasks?: string;
-                    }[];
-                    const initialMap = snap.dbInfo?.claudeScanStateMap || {};
-                    if (currentRows.length < Object.keys(initialMap).length) {
-                      throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_scan_state records were deleted during test execution!`);
-                    }
-                    for (const current of currentRows) {
-                      if (/agenthub-test-|test-worker-|vitest|\/tmp\//i.test(current.path)) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_scan_state references test path "${current.path}"!`);
-                      }
-                      if (current.turnTasks && /agenthub-test-|test-worker-|vitest/i.test(current.turnTasks)) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_scan_state references test task in turnTasks!`);
-                      }
-                      if (current.turnId && /agenthub-test-|test-worker-|vitest/i.test(current.turnId)) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_scan_state contains test turnId!`);
-                      }
-                    }
-                  }
-
-                  // Verify claude_sessions delta if present
-                  if (beforeTables.includes('claude_sessions')) {
-                    const currentRows = db.prepare('SELECT sessionId, cwd, title FROM claude_sessions').all() as {
-                      sessionId: string;
-                      cwd: string;
-                      title?: string;
-                    }[];
-                    const initialMap = snap.dbInfo?.claudeSessionsMap || {};
-                    if (currentRows.length < Object.keys(initialMap).length) {
-                      throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_sessions records were deleted during test execution!`);
-                    }
-                    for (const current of currentRows) {
-                      if (/agenthub-test-|test-worker-|vitest/i.test(current.sessionId)) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_sessions has test sessionId "${current.sessionId}"!`);
-                      }
-                      if (current.cwd && /agenthub-test-|test-worker-|\/tmp\//i.test(current.cwd)) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_sessions references test cwd "${current.cwd}"!`);
-                      }
-                      if (current.title && /agenthub-test-|test-worker-/i.test(current.title)) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_sessions contains test title!`);
-                      }
-                    }
-                  }
-
-                  // Verify claude_usage delta if present
-                  if (beforeTables.includes('claude_usage') && snap.dbInfo?.claudeUsageInfo) {
-                    const info = snap.dbInfo.claudeUsageInfo;
-                    const prevCount = (db.prepare('SELECT COUNT(*) as c FROM claude_usage WHERE rowid <= ?').get(info.maxRowid) as { c: number }).c;
-                    if (prevCount !== info.count) {
-                      throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_usage existing records were deleted or tampered!`);
-                    }
-                    const prevRows = db.prepare('SELECT rowid, sessionId, messageId FROM claude_usage WHERE rowid <= ? ORDER BY rowid').all(info.maxRowid);
-                    const prevChecksum = crypto.createHash('sha256').update(JSON.stringify(prevRows)).digest('hex');
-                    if (prevChecksum !== info.checksum) {
-                      throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_usage existing records were modified!`);
-                    }
-                    const newRows = db.prepare('SELECT sessionId, turnId FROM claude_usage WHERE rowid > ?').all(info.maxRowid) as {
-                      sessionId: string;
-                      turnId: string;
-                    }[];
-                    for (const row of newRows) {
-                      if (/agenthub-test-|test-worker-|vitest/i.test(row.sessionId) || /agenthub-test-|test-worker-|vitest/i.test(row.turnId)) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_usage contains test session or turn!`);
-                      }
-                    }
-                  }
-
-                  // Verify claude_task_usage delta if present
-                  if (beforeTables.includes('claude_task_usage') && snap.dbInfo?.claudeTaskUsageInfo) {
-                    const info = snap.dbInfo.claudeTaskUsageInfo;
-                    const prevCount = (db.prepare('SELECT COUNT(*) as c FROM claude_task_usage WHERE rowid <= ?').get(info.maxRowid) as { c: number }).c;
-                    if (prevCount !== info.count) {
-                      throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_task_usage existing records were deleted or tampered!`);
-                    }
-                    const prevRows = db.prepare('SELECT rowid, taskId, sessionId FROM claude_task_usage WHERE rowid <= ? ORDER BY rowid').all(info.maxRowid);
-                    const prevChecksum = crypto.createHash('sha256').update(JSON.stringify(prevRows)).digest('hex');
-                    if (prevChecksum !== info.checksum) {
-                      throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_task_usage existing records were modified!`);
-                    }
-                    const allowedTasks = new Set(snap.dbInfo.taskIds || []);
-                    const newRows = db.prepare('SELECT taskId, sessionId FROM claude_task_usage WHERE rowid > ?').all(info.maxRowid) as {
-                      taskId: string;
-                      sessionId: string;
-                    }[];
-                    for (const row of newRows) {
-                      if (!allowedTasks.has(row.taskId) || /agenthub-test-|test-worker-|vitest/i.test(row.taskId) || /agenthub-test-|test-worker-|vitest/i.test(row.sessionId)) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_task_usage contains test task or session!`);
                       }
                     }
                   }

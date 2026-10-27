@@ -41,6 +41,12 @@ describe('safety-check hub home comparison', () => {
     expect(isIgnoredHubEntry('daemon.log')).toBe(true);
     expect(isIgnoredHubEntry('sessions')).toBe(true);
     expect(isIgnoredHubEntry('empty-hooks')).toBe(true);
+    expect(isIgnoredHubEntry('no-browser-bin')).toBe(true);
+
+    // web-staging-* / web-previous-*
+    expect(isIgnoredHubEntry('web-staging-abc')).toBe(true);
+    expect(isIgnoredHubEntry('web-staging-df7pHi')).toBe(true);
+    expect(isIgnoredHubEntry('web-previous-1234-5678')).toBe(true);
 
     // *.tmp / *.tmp-*
     expect(isIgnoredHubEntry('foo.tmp')).toBe(true);
@@ -67,6 +73,11 @@ describe('safety-check hub home comparison', () => {
     expect(isIgnoredHubEntry('unknown.txt')).toBe(false);
     expect(isIgnoredHubEntry('chat-mcp.txt')).toBe(false);
     expect(isIgnoredHubEntry('unexpected-dir')).toBe(false);
+    expect(isIgnoredHubEntry('web-other')).toBe(false);
+    expect(isIgnoredHubEntry('config.json')).toBe(false);
+    expect(isIgnoredHubEntry('token')).toBe(false);
+    expect(isIgnoredHubEntry('secrets')).toBe(false);
+    expect(isIgnoredHubEntry('profiles')).toBe(false);
   });
 
   it('filters out ignored entries and detects unexpected additions', () => {
@@ -105,8 +116,33 @@ describe('safety-check hub home comparison', () => {
     fs.mkdirSync(path.join(tempDir, 'logs'), { recursive: true });
     fs.mkdirSync(path.join(tempDir, 'sessions'), { recursive: true });
     fs.mkdirSync(path.join(tempDir, 'empty-hooks'), { recursive: true });
+    fs.mkdirSync(path.join(tempDir, 'web-staging-abc'), { recursive: true });
+    fs.mkdirSync(path.join(tempDir, 'web-previous-12345'), { recursive: true });
 
     expect(() => verifyHubHomeSafety(snap)).not.toThrow();
+  });
+
+  it('allows web-staging-abc and web-previous additions without error, but reports unexpected directories', () => {
+    fs.writeFileSync(path.join(tempDir, 'daemon.log'), 'initial');
+    const snap = getHubSnapshot(tempDir);
+
+    fs.mkdirSync(path.join(tempDir, 'web-staging-abc'));
+    fs.mkdirSync(path.join(tempDir, 'web-previous-9999'));
+    expect(() => verifyHubHomeSafety(snap)).not.toThrow();
+
+    fs.mkdirSync(path.join(tempDir, 'unexpected-dir'));
+    expect(() => verifyHubHomeSafety(snap)).toThrow(
+      /SAFETY NET VIOLATION:.*unexpected-dir/,
+    );
+  });
+
+  it('reports violation when sensitive files like config.json, token, secrets, or profiles appear', () => {
+    const snap = getHubSnapshot(tempDir);
+
+    fs.writeFileSync(path.join(tempDir, 'config.json'), '{}');
+    expect(() => verifyHubHomeSafety(snap)).toThrow(
+      /SAFETY NET VIOLATION:.*config\.json/,
+    );
   });
 
   it('does not report violation when only directory mtime changes', () => {

@@ -32,12 +32,15 @@ const ALLOWED_HUB_RUNTIME_ENTRIES = new Set([
   'shims',
   'sessions',
   'empty-hooks',
+  'no-browser-bin',
 ]);
 
 export function isIgnoredHubEntry(name: string): boolean {
   if (name.startsWith('hub.db')) return true;
   if (/^chat-mcp.*\.json$/.test(name)) return true;
   if (name.endsWith('.tmp') || name.includes('.tmp-')) return true;
+  if (name.startsWith('web-staging-')) return true;
+  if (name.startsWith('web-previous-')) return true;
   if (ALLOWED_HUB_RUNTIME_ENTRIES.has(name)) return true;
   return false;
 }

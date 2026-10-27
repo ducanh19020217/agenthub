@@ -12,6 +12,81 @@ export interface HubHomeSnapshot {
   dir: string;
   exists: boolean;
   entries: string[];
+  sensitiveFingerprints?: Record<string, string | null>;
+}
+
+export const SENSITIVE_HUB_ENTRIES = [
+  'config.json',
+  'token',
+  'hub.db',
+  'secrets',
+  'profiles',
+] as const;
+
+export function getSensitiveFingerprint(targetPath: string): string | null {
+  if (!fs.existsSync(targetPath)) return null;
+  try {
+    const stat = fs.statSync(targetPath);
+    if (stat.isDirectory()) {
+      const items: string[] = [];
+      const walk = (current: string) => {
+        const entries = fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+        for (const entry of entries) {
+          const full = path.join(current, entry.name);
+          const rel = path.relative(targetPath, full);
+          if (entry.isDirectory()) {
+            items.push(`dir:${rel}`);
+            walk(full);
+          } else if (entry.isFile()) {
+            const hash = crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex');
+            items.push(`file:${rel}:${hash}`);
+          }
+        }
+      };
+      walk(targetPath);
+      return crypto.createHash('sha256').update(items.join('\n')).digest('hex');
+    }
+    return crypto.createHash('sha256').update(fs.readFileSync(targetPath)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+export function isHeldByExternalDaemon(targetPath: string): boolean {
+  if (process.platform !== 'linux') return false;
+  try {
+    const resolved = fs.realpathSync(targetPath);
+    const myPid = process.pid;
+    const pids = fs.readdirSync('/proc');
+    let daemonHolding = false;
+    let testHolding = false;
+
+    for (const p of pids) {
+      if (!/^\d+$/.test(p)) continue;
+      const pid = Number(p);
+      try {
+        const fdDir = path.join('/proc', p, 'fd');
+        const fds = fs.readdirSync(fdDir);
+        for (const fd of fds) {
+          try {
+            if (fs.readlinkSync(path.join(fdDir, fd)) === resolved) {
+              const cmd = fs.readFileSync(path.join('/proc', p, 'cmdline'), 'utf8');
+              if (pid === myPid || cmd.includes('vitest') || cmd.includes('test')) {
+                testHolding = true;
+              } else if (cmd.includes('daemon') || cmd.includes('agenthub')) {
+                daemonHolding = true;
+              }
+            }
+          } catch { /* fd closed or invalid */ }
+        }
+      } catch { /* process exited */ }
+    }
+
+    if (testHolding) return false;
+    return daemonHolding;
+  } catch {
+    return false;
+  }
 }
 
 // Runtime entries that the daemon or worker setup may create in the real hub
@@ -36,7 +111,6 @@ const ALLOWED_HUB_RUNTIME_ENTRIES = new Set([
 ]);
 
 export function isIgnoredHubEntry(name: string): boolean {
-  if (name.startsWith('hub.db')) return true;
   if (/^chat-mcp.*\.json$/.test(name)) return true;
   if (name.endsWith('.tmp') || name.includes('.tmp-')) return true;
   if (name.startsWith('web-staging-')) return true;
@@ -62,10 +136,17 @@ export function getHubEntries(dir: string): string[] {
 
 export function getHubSnapshot(dir: string): HubHomeSnapshot {
   const exists = fs.existsSync(dir);
+  const sensitiveFingerprints: Record<string, string | null> = {};
+  if (exists) {
+    for (const name of SENSITIVE_HUB_ENTRIES) {
+      sensitiveFingerprints[name] = getSensitiveFingerprint(path.join(dir, name));
+    }
+  }
   return {
     dir,
     exists,
     entries: exists ? getHubEntries(dir) : [],
+    sensitiveFingerprints,
   };
 }
 
@@ -79,6 +160,26 @@ export function verifyHubHomeSafety(snap: HubHomeSnapshot, currentDir: string = 
   }
 
   if (snap.exists && currentExists) {
+    if (snap.sensitiveFingerprints) {
+      for (const name of SENSITIVE_HUB_ENTRIES) {
+        const initialFp = snap.sensitiveFingerprints[name];
+        const currentFp = getSensitiveFingerprint(path.join(currentDir, name));
+        if (initialFp !== null && initialFp !== undefined && currentFp !== initialFp) {
+          if (name === 'hub.db' && isHeldByExternalDaemon(path.join(currentDir, name))) {
+            continue;
+          }
+          throw new Error(
+            `SAFETY NET VIOLATION: ${path.join(currentDir, name)} was modified during test execution! Sensitive user or configuration data must not be touched.`,
+          );
+        }
+        if (initialFp === null && currentFp !== null) {
+          throw new Error(
+            `SAFETY NET VIOLATION: ${path.join(currentDir, name)} was created during test execution! Sensitive user or configuration data must not be touched.`,
+          );
+        }
+      }
+    }
+
     const currentEntries = getHubEntries(currentDir);
     const unexpected = findUnexpectedHubEntries(snap.entries, currentEntries);
     if (unexpected.length > 0) {

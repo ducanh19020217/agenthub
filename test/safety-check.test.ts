@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import Database from 'better-sqlite3';
 import {
   isIgnoredHubEntry,
   findUnexpectedHubEntries,
@@ -175,6 +176,131 @@ describe('safety-check hub home comparison', () => {
     // Modify hub.db
     fs.writeFileSync(path.join(tempDir, 'hub.db'), 'tampered db');
     expect(() => verifyHubHomeSafety(snap)).toThrow(/SAFETY NET VIOLATION:.*hub\.db/);
+  });
+
+  it('reports violation when hub.db is corrupted or tampered even if held by external daemon', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT, path TEXT);
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+    expect(snap.dbInfo?.isValid).toBe(true);
+
+    // Tamper with hub.db content
+    fs.writeFileSync(dbPath, 'corrupted non-sqlite data');
+
+    // Even if external daemon is holding it, tampering must be caught and reported
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*hub\.db/);
+  });
+
+  it('reports violation when hub.db sensitive tables (projects, profiles, meta) are modified', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT, path TEXT);
+      INSERT INTO projects VALUES ('proj1', 'Project 1', '/home/user/p1');
+      CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT, provider TEXT);
+      INSERT INTO profiles VALUES ('prof1', 'Profile 1', 'codex');
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    // Modify sensitive table 'projects'
+    const db2 = new Database(dbPath);
+    db2.prepare("INSERT INTO projects VALUES ('proj2', 'Project 2', '/home/user/p2')").run();
+    db2.close();
+
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*hub\.db sensitive tables/);
+  });
+
+  it('reports violation when a test process has hub.db open', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    // Modify hub.db
+    const db2 = new Database(dbPath);
+    db2.exec(`INSERT INTO meta VALUES ('extra', '1');`);
+    db2.close();
+
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: true }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*accessed by a test process/);
+  });
+
+  it('reports violation when hub.db contains test tasks pointing to temporary directories', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE tasks (id TEXT PRIMARY KEY, projectId TEXT, worktreePath TEXT);
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    // Insert task pointing to agenthub-test temp dir
+    const db2 = new Database(dbPath);
+    db2.prepare("INSERT INTO tasks VALUES ('t1', 'p1', '/tmp/agenthub-test-run-123/wt')").run();
+    db2.close();
+
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*contains test tasks/);
+  });
+
+  it('allows legitimate external daemon background activity on hub.db', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT, path TEXT);
+      INSERT INTO projects VALUES ('p1', 'Project 1', '/home/user/p1');
+      CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, payload TEXT);
+      CREATE TABLE tasks (id TEXT PRIMARY KEY, projectId TEXT, worktreePath TEXT);
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    // Daemon naturally logs a heartbeat or event
+    const db2 = new Database(dbPath);
+    db2.prepare("INSERT INTO events (type, payload) VALUES ('heartbeat', '{}')").run();
+    db2.close();
+
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+      }),
+    ).not.toThrow();
   });
 
   it('reports violation when existing sensitive directories (secrets, profiles) are modified', () => {

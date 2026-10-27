@@ -10,18 +10,22 @@ import { getReviewerEngine } from '../utils/reviewer';
 export interface ReviewQueueProps {
   tasks?: Task[];
   activeTaskId?: string | null;
+  pollingInterval?: number;
 }
 
 export const ReviewQueue: React.FC<ReviewQueueProps> = ({
   tasks: propTasks,
   activeTaskId,
+  pollingInterval = 15_000,
 }) => {
   const { t } = useLocale();
   const { data: fetchedTasks } = useQuery({
     queryKey: ['tasks', 'review'],
     queryFn: async () => (await getTasksPage({ status: 'review', limit: 20, sort: 'createdAt', order: 'desc' })).items,
     enabled: propTasks === undefined,
-    refetchInterval: 5000,
+    refetchInterval: pollingInterval,
+    refetchIntervalInBackground: false,
+    retry: false,
   });
 
   const allTasks = propTasks !== undefined ? propTasks : fetchedTasks || [];

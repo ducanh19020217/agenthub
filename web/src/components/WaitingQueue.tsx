@@ -12,6 +12,7 @@ export interface WaitingQueueProps {
   diskFreeGB?: number;
   diskMinFreeGB?: number;
   diskLabel?: string;
+  pollingInterval?: number;
 }
 
 export const WaitingQueue: React.FC<WaitingQueueProps> = ({
@@ -19,6 +20,7 @@ export const WaitingQueue: React.FC<WaitingQueueProps> = ({
   diskFreeGB,
   diskMinFreeGB,
   diskLabel,
+  pollingInterval = 15_000,
 }) => {
   const { t } = useLocale();
   const { data: fetchedTasks } = useQuery({
@@ -31,7 +33,9 @@ export const WaitingQueue: React.FC<WaitingQueueProps> = ({
       return [...quota.items, ...queued.items].filter((task, index, items) => items.findIndex((item) => item.id === task.id) === index);
     },
     enabled: propTasks === undefined,
-    refetchInterval: 5000,
+    refetchInterval: pollingInterval,
+    refetchIntervalInBackground: false,
+    retry: false,
   });
 
   const allTasks = propTasks !== undefined ? propTasks : fetchedTasks || [];

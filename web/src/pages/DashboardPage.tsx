@@ -36,6 +36,8 @@ import { Profile, QuotaUsageItem, ProjectBrain } from '../types/api';
 import { formatReset, formatTimeTitle } from '../lib/time';
 import { GettingStartedChecklist } from '../components/GettingStartedChecklist';
 
+export type DashboardPollingProfile = 'optimized' | 'baseline';
+
 function providerUsage(profiles: Profile[], engine: Profile['engine']): QuotaUsageItem[] {
   const rows = profiles.filter((profile) => profile.engine === engine).flatMap((profile) => profile.usage || []);
   const best = new Map<string, QuotaUsageItem>();
@@ -78,7 +80,10 @@ function RunningDuration({ startedAt }: { startedAt: string }) {
   return <span className="font-mono text-xs">{elapsed}</span>;
 }
 
-export const DashboardPage: React.FC = () => {
+export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile }> = ({ pollingProfile = 'optimized' }) => {
+  const polling = pollingProfile === 'baseline'
+    ? { status: 5_000, eventHistory: 10_000, fast: 5_000, slow: 30_000, queue: 5_000 }
+    : { status: 15_000, eventHistory: 30_000, fast: 30_000, slow: 30_000, queue: 15_000 };
   const { t, locale } = useLocale();
   const [liveEvents, setLiveEvents] = useState<EventItem[]>([]);
   const [isReaping, setIsReaping] = useState(false);
@@ -90,12 +95,17 @@ export const DashboardPage: React.FC = () => {
   const { data: status, isLoading, error } = useQuery({
     queryKey: ['status'],
     queryFn: getStatus,
-    refetchInterval: 5000,
+    // Status changes arrive over SSE; keep a slower poll as a recovery path.
+    refetchInterval: polling.status,
+    refetchIntervalInBackground: false,
+    retry: false,
   });
   const { data: eventPage } = useQuery({
     queryKey: ['event-history', 'dashboard', eventPageNumber, eventCursor],
     queryFn: () => getEventHistoryPage({ limit: 20, cursor: eventCursor, offset: eventCursor ? undefined : (eventPageNumber - 1) * 20 }),
-    refetchInterval: 10_000,
+    refetchInterval: polling.eventHistory,
+    refetchIntervalInBackground: false,
+    retry: false,
   });
   useEffect(() => {
     if (eventPage?.nextCursor) setEventCursors((current) => ({ ...current, [eventPageNumber]: eventPage.nextCursor || undefined }));
@@ -109,15 +119,16 @@ export const DashboardPage: React.FC = () => {
   const { data: profiles = [], refetch: refetchProfiles } = useQuery({
     queryKey: ['profiles'],
     queryFn: getProfiles,
-    refetchInterval: 30_000,
+    refetchInterval: polling.slow,
+    refetchIntervalInBackground: false,
   });
-  const { data: claudeQuota } = useQuery({ queryKey: ['claude-quota'], queryFn: getClaudeQuota, refetchInterval: 30_000 });
-  const { data: brainOverview } = useQuery({ queryKey: ['brain'], queryFn: getBrain, refetchInterval: 5000 });
-  const { data: claudeFailover } = useQuery({ queryKey: ['claude-failover'], queryFn: getClaudeFailover, refetchInterval: 5000 });
+  const { data: claudeQuota } = useQuery({ queryKey: ['claude-quota'], queryFn: getClaudeQuota, refetchInterval: polling.slow, refetchIntervalInBackground: false });
+  const { data: brainOverview } = useQuery({ queryKey: ['brain'], queryFn: getBrain, refetchInterval: polling.fast, refetchIntervalInBackground: false });
+  const { data: claudeFailover } = useQuery({ queryKey: ['claude-failover'], queryFn: getClaudeFailover, refetchInterval: polling.fast, refetchIntervalInBackground: false });
   const failoverMutation = useMutation({ mutationFn: clearClaudeFailover });
-  const { data: orphans = [], refetch: refetchOrphans } = useQuery({ queryKey: ['system-orphans'], queryFn: getOrphans, refetchInterval: 30_000 });
-  const { data: projects = [] } = useQuery({ queryKey: ['projects'], queryFn: getProjects, refetchInterval: 30_000 });
-  const { data: perf } = useQuery({ queryKey: ['perf'], queryFn: getPerf, refetchInterval: 30_000 });
+  const { data: orphans = [], refetch: refetchOrphans } = useQuery({ queryKey: ['system-orphans'], queryFn: getOrphans, refetchInterval: polling.slow, refetchIntervalInBackground: false });
+  const { data: projects = [] } = useQuery({ queryKey: ['projects'], queryFn: getProjects, refetchInterval: polling.slow, refetchIntervalInBackground: false });
+  const { data: perf } = useQuery({ queryKey: ['perf'], queryFn: getPerf, refetchInterval: polling.slow, refetchIntervalInBackground: false });
 
   const queryClient = useQueryClient();
   const pauseMutation = useMutation({
@@ -146,10 +157,15 @@ export const DashboardPage: React.FC = () => {
 
   useEffect(() => {
     const unsub = subscribeToEvents((event) => {
-      setLiveEvents((prev) => [event, ...prev.filter((e) => e.id !== event.id)].slice(0, 20));
+      setLiveEvents((prev) => {
+        // Replayed events are possible after SSE reconnect via Last-Event-ID.
+        // Keep the same state reference so a duplicate does not rerender the page.
+        if (pollingProfile !== 'baseline' && prev.some((current) => current.id === event.id)) return prev;
+        return [event, ...prev].slice(0, 20);
+      });
     });
     return unsub;
-  }, []);
+  }, [pollingProfile]);
 
   if (isLoading) {
     return (
@@ -584,12 +600,13 @@ export const DashboardPage: React.FC = () => {
 
       {/* Review queue */}
       <div className="order-1">
-        <ReviewQueue activeTaskId={status.brain?.taskId} />
+        <ReviewQueue activeTaskId={status.brain?.taskId} pollingInterval={polling.queue} />
       </div>
 
       {/* Waiting queue */}
       <div className="order-1">
         <WaitingQueue
+          pollingInterval={polling.queue}
           diskFreeGB={(status.disks?.find((disk) => disk.low) ?? status.disks?.[0])?.freeGB ?? status.disk?.freeGB}
           diskMinFreeGB={(status.disks?.find((disk) => disk.low) ?? status.disks?.[0])?.minFreeGB ?? status.disk?.minFreeGB}
           diskLabel={(status.disks?.find((disk) => disk.low) ?? status.disks?.[0])?.label}

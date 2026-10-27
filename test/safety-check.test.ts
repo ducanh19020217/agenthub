@@ -273,7 +273,7 @@ describe('safety-check hub home comparison', () => {
       verifyHubHomeSafety(snap, tempDir, {
         processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
       }),
-    ).toThrow(/SAFETY NET VIOLATION:.*contains test tasks/);
+    ).toThrow(/SAFETY NET VIOLATION:.*(contains test tasks|table "tasks" was modified)/);
   });
 
   it('allows legitimate external daemon background activity on hub.db', () => {
@@ -301,6 +301,105 @@ describe('safety-check hub home comparison', () => {
         processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
       }),
     ).not.toThrow();
+  });
+
+  it('reports violation when a non-sensitive table (e.g. tasks) is modified even if held by external daemon', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT, path TEXT);
+      INSERT INTO projects VALUES ('p1', 'Project 1', '/home/user/p1');
+      CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, payload TEXT);
+      CREATE TABLE tasks (id TEXT PRIMARY KEY, projectId TEXT, worktreePath TEXT);
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    // Modify non-sensitive table 'tasks' with normal (non-test) path
+    const db2 = new Database(dbPath);
+    db2.prepare("INSERT INTO tasks VALUES ('t-normal', 'p1', '/home/user/normal-project')").run();
+    db2.close();
+
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*table "tasks" was modified/);
+  });
+
+  it('reports violation when events table receives unauthorized event type even if held by external daemon', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, payload TEXT);
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    const db2 = new Database(dbPath);
+    db2.prepare("INSERT INTO events (type, payload) VALUES ('unauthorized_test_event', '{}')").run();
+    db2.close();
+
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*events table contains unauthorized event type/);
+  });
+
+  it('reports violation when existing events are tampered or deleted even if held by external daemon', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, payload TEXT);
+      INSERT INTO events (id, type, payload) VALUES (1, 'heartbeat', '{}');
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    const db2 = new Database(dbPath);
+    db2.prepare("UPDATE events SET type = 'brain.updated' WHERE id = 1").run();
+    db2.close();
+
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*existing events were modified/);
+  });
+
+  it('reports violation when event references unexpected or test task even if held by external daemon', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, taskId TEXT, payload TEXT);
+      CREATE TABLE tasks (id TEXT PRIMARY KEY, projectId TEXT, worktreePath TEXT);
+      INSERT INTO tasks VALUES ('task-valid', 'p1', '/home/user/p1');
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    const db2 = new Database(dbPath);
+    db2.prepare("INSERT INTO events (type, taskId, payload) VALUES ('heartbeat', 'agenthub-test-task-1', '{}')").run();
+    db2.close();
+
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*events table contains unexpected task reference/);
   });
 
   it('reports violation when existing sensitive directories (secrets, profiles) are modified', () => {

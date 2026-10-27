@@ -276,7 +276,7 @@ describe('safety-check hub home comparison', () => {
     ).toThrow(/SAFETY NET VIOLATION:.*(contains test tasks|table "tasks" was modified)/);
   });
 
-  it('reports violation when valid event (e.g. heartbeat) is inserted because write source cannot be proven even if held by external daemon', () => {
+  it('reports violation when valid event (e.g. heartbeat) is inserted because write source cannot be proven even if held by external daemon with write activity', () => {
     const dbPath = path.join(tempDir, 'hub.db');
     const db = new Database(dbPath);
     db.exec(`
@@ -291,19 +291,19 @@ describe('safety-check hub home comparison', () => {
 
     const snap = getHubSnapshot(tempDir);
 
-    // Test attempts to insert a valid event like heartbeat while daemon holds DB
+    // Test attempts to insert a valid event like heartbeat while daemon holds DB and has write activity
     const db2 = new Database(dbPath);
     db2.prepare("INSERT INTO events (type, payload) VALUES ('heartbeat', '{}')").run();
     db2.close();
 
     expect(() =>
       verifyHubHomeSafety(snap, tempDir, {
-        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false, daemonWriteActivity: true }),
       }),
     ).toThrow(/SAFETY NET VIOLATION:.*events table was modified.*cannot be proven/);
   });
 
-  it('allows legitimate external daemon background activity on events when genuinely attributed to daemon', () => {
+  it('allows legitimate external daemon background activity on events when delta is attributed to daemon', () => {
     const dbPath = path.join(tempDir, 'hub.db');
     const db = new Database(dbPath);
     db.exec(`
@@ -318,16 +318,34 @@ describe('safety-check hub home comparison', () => {
 
     const snap = getHubSnapshot(tempDir);
 
-    // Genuine external daemon logs heartbeat
+    // External daemon logs heartbeat
     const db2 = new Database(dbPath);
     db2.prepare("INSERT INTO events (type, payload) VALUES ('heartbeat', '{}')").run();
     db2.close();
 
+    // Verify with actual delta attribution link to the SQLite change
     expect(() =>
       verifyHubHomeSafety(snap, tempDir, {
-        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false, daemonAttributed: true }),
+        processHoldingChecker: () => ({
+          daemonHolding: true,
+          testHolding: false,
+          daemonWriteActivity: true,
+          verifyDeltaAttribution: (ctx) => ctx.table === 'events' && ctx.row?.type === 'heartbeat',
+        }),
       }),
     ).not.toThrow();
+
+    // If delta attribution does not verify this specific event, it must throw
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({
+          daemonHolding: true,
+          testHolding: false,
+          daemonWriteActivity: true,
+          verifyDeltaAttribution: (ctx) => ctx.table === 'events' && ctx.row?.type === 'brain.updated',
+        }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*events table was modified.*cannot be proven/);
   });
 
   it('reports violation when a non-sensitive table (e.g. tasks) is modified even if held by external daemon', () => {
@@ -703,7 +721,7 @@ describe('safety-check hub home comparison', () => {
     ).toThrow(/SAFETY NET VIOLATION:.*claude_quota_profiles/);
   });
 
-  it('reports violation when valid-looking quota updates are made because write source cannot be proven even if held by external daemon', () => {
+  it('reports violation when valid-looking quota updates are made because write source cannot be proven even if held by external daemon with write activity', () => {
     const dbPath = path.join(tempDir, 'hub.db');
     const db = new Database(dbPath);
     db.exec(`
@@ -728,12 +746,12 @@ describe('safety-check hub home comparison', () => {
 
     expect(() =>
       verifyHubHomeSafety(snap, tempDir, {
-        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false, daemonWriteActivity: true }),
       }),
     ).toThrow(/SAFETY NET VIOLATION:.*claude_quota was modified.*cannot be proven/);
   });
 
-  it('reports violation when valid-looking claude_quota_profiles update is made because write source cannot be proven even if held by external daemon', () => {
+  it('reports violation when valid-looking claude_quota_profiles update is made because write source cannot be proven even if held by external daemon with write activity', () => {
     const dbPath = path.join(tempDir, 'hub.db');
     const db = new Database(dbPath);
     db.exec(`
@@ -754,12 +772,12 @@ describe('safety-check hub home comparison', () => {
 
     expect(() =>
       verifyHubHomeSafety(snap, tempDir, {
-        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false, daemonWriteActivity: true }),
       }),
     ).toThrow(/SAFETY NET VIOLATION:.*claude_quota_profiles was modified.*cannot be proven/);
   });
 
-  it('reports violation when valid-looking quota_usage update is made because write source cannot be proven even if held by external daemon', () => {
+  it('reports violation when valid-looking quota_usage update is made because write source cannot be proven even if held by external daemon with write activity', () => {
     const dbPath = path.join(tempDir, 'hub.db');
     const db = new Database(dbPath);
     db.exec(`
@@ -780,12 +798,12 @@ describe('safety-check hub home comparison', () => {
 
     expect(() =>
       verifyHubHomeSafety(snap, tempDir, {
-        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false, daemonWriteActivity: true }),
       }),
     ).toThrow(/SAFETY NET VIOLATION:.*quota_usage was modified.*cannot be proven/);
   });
 
-  it('allows legitimate external daemon background updates on claude_quota, claude_quota_profiles, and quota_usage when genuinely attributed to daemon', () => {
+  it('allows legitimate external daemon background updates on claude_quota, claude_quota_profiles, and quota_usage when deltas are attributed to daemon', () => {
     const dbPath = path.join(tempDir, 'hub.db');
     const db = new Database(dbPath);
     db.exec(`
@@ -810,11 +828,29 @@ describe('safety-check hub home comparison', () => {
     db2.prepare("UPDATE quota_usage SET remainingPct = 90, fetchedAt = 2000 WHERE profileName = 'prof1'").run();
     db2.close();
 
+    // Verify with delta attribution linked to SQLite deltas
     expect(() =>
       verifyHubHomeSafety(snap, tempDir, {
-        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false, daemonAttributed: true }),
+        processHoldingChecker: () => ({
+          daemonHolding: true,
+          testHolding: false,
+          daemonWriteActivity: true,
+          verifyDeltaAttribution: (ctx) => ['claude_quota', 'claude_quota_profiles', 'quota_usage'].includes(ctx.table),
+        }),
       }),
     ).not.toThrow();
+
+    // Fails when verifier only attributes claude_quota but not quota_usage / claude_quota_profiles
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({
+          daemonHolding: true,
+          testHolding: false,
+          daemonWriteActivity: true,
+          verifyDeltaAttribution: (ctx) => ctx.table === 'claude_quota',
+        }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*claude_quota_profiles was modified.*cannot be proven/);
   });
 
   it('reports violation when existing sensitive directories (secrets, profiles) are modified', () => {

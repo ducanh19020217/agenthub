@@ -49,6 +49,13 @@ export interface DaemonProcessState {
   wchar: number;
 }
 
+export interface ProfileInfo {
+  name: string;
+  engine: string;
+  kind: string;
+  home: string | null;
+}
+
 export interface HubDbInfo {
   isValid: boolean;
   schemaVersion?: string;
@@ -61,6 +68,7 @@ export interface HubDbInfo {
   quotaUsageMap?: Record<string, QuotaUsageInfo>;
   taskIds?: string[];
   profileNames?: string[];
+  profilesMap?: Record<string, ProfileInfo>;
   projectIds?: string[];
   daemonState?: DaemonProcessState | null;
 }
@@ -255,9 +263,18 @@ export function getHubDbInfo(dbPath: string): HubDbInfo {
       }
 
       const profileNamesSet = new Set<string>();
+      const profilesMap: Record<string, ProfileInfo> = {};
       for (const p of profiles as Record<string, unknown>[]) {
-        if (typeof p.name === 'string') profileNamesSet.add(p.name);
-        else if (typeof p.id === 'string') profileNamesSet.add(p.id);
+        const name = typeof p.name === 'string' ? p.name : (typeof p.id === 'string' ? p.id : '');
+        if (name) {
+          profileNamesSet.add(name);
+          profilesMap[name] = {
+            name,
+            engine: typeof p.engine === 'string' ? p.engine : '',
+            kind: typeof p.kind === 'string' ? p.kind : '',
+            home: typeof p.home === 'string' ? p.home : null,
+          };
+        }
       }
 
       let claudeQuotaInfo: ClaudeQuotaRow | null = null;
@@ -305,6 +322,7 @@ export function getHubDbInfo(dbPath: string): HubDbInfo {
         quotaUsageMap,
         taskIds,
         profileNames,
+        profilesMap,
         projectIds,
         daemonState,
       };
@@ -362,24 +380,37 @@ export function getDaemonProcessState(targetPath: string): DaemonProcessState | 
   return null;
 }
 
+export interface DeltaAttributionContext {
+  table: string;
+  operation: 'insert' | 'update' | 'delete';
+  row?: Record<string, unknown>;
+  initial?: unknown;
+  current?: unknown;
+}
+
+export type DeltaAttributionVerifier = (context: DeltaAttributionContext) => boolean;
+
 export interface ProcessHoldingResult {
   daemonHolding: boolean;
   testHolding: boolean;
-  daemonAttributed: boolean;
+  daemonAttributed?: boolean;
+  daemonWriteActivity?: boolean;
+  verifyDeltaAttribution?: DeltaAttributionVerifier;
 }
 
 export function checkDbProcessHolding(
   targetPath: string,
   initialState?: DaemonProcessState | null,
+  dbInfo?: HubDbInfo | null,
 ): ProcessHoldingResult {
-  if (process.platform !== 'linux') return { daemonHolding: false, testHolding: false, daemonAttributed: false };
+  if (process.platform !== 'linux') return { daemonHolding: false, testHolding: false, daemonAttributed: false, daemonWriteActivity: false };
   try {
     const resolved = fs.existsSync(targetPath) ? fs.realpathSync(targetPath) : path.resolve(targetPath);
     const myPid = process.pid;
     const pids = fs.readdirSync('/proc');
     let daemonHolding = false;
     let testHolding = false;
-    let daemonAttributed = false;
+    let daemonWriteActivity = false;
 
     for (const p of pids) {
       if (!/^\d+$/.test(p)) continue;
@@ -406,7 +437,7 @@ export function checkDbProcessHolding(
                       const syscwMatch = ioStr.match(/syscw:\s*(\d+)/);
                       const currentSyscw = syscwMatch ? Number(syscwMatch[1]) : 0;
                       if (currentSyscw > initialState.syscw) {
-                        daemonAttributed = true;
+                        daemonWriteActivity = true;
                       }
                     }
                   } catch { /* ignore */ }
@@ -418,9 +449,216 @@ export function checkDbProcessHolding(
       } catch { /* process exited */ }
     }
 
-    return { daemonHolding, testHolding, daemonAttributed };
+    let verifyDeltaAttribution: DeltaAttributionVerifier | undefined;
+    if (daemonHolding && !testHolding && daemonWriteActivity) {
+      verifyDeltaAttribution = (ctx: DeltaAttributionContext): boolean => {
+        if (ctx.table === 'events' && ctx.operation === 'insert' && ctx.row) {
+          const type = String(ctx.row.type || '');
+          if (type === 'brain.updated') {
+            try {
+              const payload = typeof ctx.row.payload === 'string' ? JSON.parse(ctx.row.payload) : ctx.row.payload;
+              const sessionId = payload?.sessionId;
+              if (typeof sessionId === 'string' && /^[0-9a-f-]+$/i.test(sessionId)) {
+                const userHome = os.userInfo().homedir;
+                const candidateDirs = new Set<string>([
+                  path.join(os.homedir(), '.claude', 'projects'),
+                  path.join(userHome, '.claude', 'projects'),
+                ]);
+                for (const claudeProjectsDir of candidateDirs) {
+                  if (!fs.existsSync(claudeProjectsDir)) continue;
+                  const checkDir = (dir: string): boolean => {
+                    try {
+                      const entries = fs.readdirSync(dir, { withFileTypes: true });
+                      for (const e of entries) {
+                        if (e.isDirectory()) {
+                          if (checkDir(path.join(dir, e.name))) return true;
+                        } else if (e.name === `${sessionId}.jsonl`) {
+                          return true;
+                        }
+                      }
+                    } catch { /* ignore */ }
+                    return false;
+                  };
+                  if (checkDir(claudeProjectsDir)) return true;
+                }
+              }
+            } catch {
+              return false;
+            }
+          }
+          if (type === 'claude.quota_available' || type === 'claude.quota_depleted') {
+            try {
+              const payload = typeof ctx.row.payload === 'string' ? JSON.parse(ctx.row.payload) : ctx.row.payload;
+              const profileName = payload?.profileName;
+              if (typeof profileName === 'string' && profileName.length > 0) {
+                let profile = dbInfo?.profilesMap?.[profileName];
+                if (!profile) {
+                  try {
+                    const db = new Database(resolved, { readonly: true });
+                    try {
+                      const row = db.prepare('SELECT name, engine, kind, home FROM profiles WHERE name = ?').get(profileName) as ProfileInfo | undefined;
+                      if (row) profile = row;
+                    } finally {
+                      db.close();
+                    }
+                  } catch { /* ignore */ }
+                }
+                if (profile && profile.engine === 'claude') {
+                  const claudeHome = profile.home || os.homedir();
+                  if (fs.existsSync(path.join(claudeHome, '.claude'))) return true;
+                }
+              }
+            } catch {
+              return false;
+            }
+          }
+          return false;
+        }
+
+        if (ctx.table === 'quota_usage' && ctx.operation === 'update') {
+          const current = ctx.current as QuotaUsageInfo | undefined;
+          const initial = ctx.initial as QuotaUsageInfo | undefined;
+          if (!current || !initial) return false;
+          if (current.profileName !== initial.profileName) return false;
+          if (current.grp !== initial.grp || current.window !== initial.window) return false;
+          if (typeof current.remainingPct !== 'number' || current.remainingPct < 0 || current.remainingPct > 100) return false;
+          if (typeof current.resetAt !== 'number' || current.resetAt < 0) return false;
+          if (typeof current.fetchedAt !== 'number' || current.fetchedAt < initial.fetchedAt) return false;
+
+          let profile = dbInfo?.profilesMap?.[current.profileName];
+          if (!profile) {
+            try {
+              const db = new Database(resolved, { readonly: true });
+              try {
+                const row = db.prepare('SELECT name, engine, kind, home FROM profiles WHERE name = ?').get(current.profileName) as ProfileInfo | undefined;
+                if (row) profile = row;
+              } finally {
+                db.close();
+              }
+            } catch { /* ignore */ }
+          }
+          if (!profile) return false;
+
+          try {
+            if (profile.engine === 'agy') {
+              const homeDir = profile.kind === 'isolated' && profile.home ? profile.home : os.homedir();
+              const candidatePaths = [
+                path.join(homeDir, '.gemini', 'antigravity-cli'),
+                path.join(homeDir, '.gemini'),
+                homeDir,
+              ];
+              for (const p of candidatePaths) {
+                if (fs.existsSync(p)) {
+                  const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
+                  if (Math.abs(mtime - current.fetchedAt) <= 300 || mtime >= initial.fetchedAt - 300) return true;
+                }
+              }
+            } else if (profile.engine === 'codex') {
+              const codexDir = profile.kind === 'isolated' && profile.home ? profile.home : path.join(profile.home || os.homedir(), '.codex');
+              const candidatePaths = [
+                path.join(codexDir, 'sessions'),
+                path.join(codexDir, 'state_5.sqlite'),
+                codexDir,
+              ];
+              for (const p of candidatePaths) {
+                if (fs.existsSync(p)) {
+                  const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
+                  if (Math.abs(mtime - current.fetchedAt) <= 300 || mtime >= initial.fetchedAt - 300) return true;
+                }
+              }
+            } else if (profile.engine === 'claude') {
+              const claudeHome = profile.home || os.homedir();
+              const candidatePaths = [
+                path.join(claudeHome, '.claude', 'projects'),
+                path.join(claudeHome, '.claude'),
+                claudeHome,
+              ];
+              for (const p of candidatePaths) {
+                if (fs.existsSync(p)) {
+                  const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
+                  if (Math.abs(mtime - current.fetchedAt) <= 300 || mtime >= initial.fetchedAt - 300) return true;
+                }
+              }
+            }
+          } catch {
+            return false;
+          }
+          return false;
+        }
+
+        if (ctx.table === 'claude_quota_profiles' && ctx.operation === 'update') {
+          const current = ctx.current as ClaudeQuotaProfileRow | undefined;
+          const initial = ctx.initial as ClaudeQuotaProfileRow | undefined;
+          if (!current || !initial) return false;
+          if (current.profileName !== initial.profileName) return false;
+          if (!ALLOWED_CLAUDE_QUOTA_STATUSES.has(current.status || '')) return false;
+          if (current.rateLimitType && !ALLOWED_RATE_LIMIT_TYPES.has(current.rateLimitType)) return false;
+
+          let profile = dbInfo?.profilesMap?.[current.profileName];
+          if (!profile) {
+            try {
+              const db = new Database(resolved, { readonly: true });
+              try {
+                const row = db.prepare('SELECT name, engine, kind, home FROM profiles WHERE name = ?').get(current.profileName) as ProfileInfo | undefined;
+                if (row) profile = row;
+              } finally {
+                db.close();
+              }
+            } catch { /* ignore */ }
+          }
+          if (!profile || profile.engine !== 'claude') return false;
+
+          try {
+            const claudeHome = profile.home || os.homedir();
+            const candidatePaths = [
+              path.join(claudeHome, '.claude', 'projects'),
+              path.join(claudeHome, '.claude'),
+            ];
+            for (const p of candidatePaths) {
+              if (fs.existsSync(p)) {
+                const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
+                const observedTs = Math.floor(Date.parse(current.observedAt || '0') / 1000);
+                if (Math.abs(mtime - observedTs) <= 300 || mtime >= Math.floor(Date.parse(initial.observedAt || '0') / 1000) - 300) return true;
+              }
+            }
+          } catch {
+            return false;
+          }
+          return false;
+        }
+
+        if (ctx.table === 'claude_quota' && ctx.operation === 'update') {
+          const current = ctx.current as ClaudeQuotaRow | undefined;
+          const initial = ctx.initial as ClaudeQuotaRow | undefined;
+          if (!current || !initial) return false;
+          if (!ALLOWED_CLAUDE_QUOTA_STATUSES.has(current.status || '')) return false;
+          if (current.rateLimitType && !ALLOWED_RATE_LIMIT_TYPES.has(current.rateLimitType)) return false;
+
+          try {
+            const candidatePaths = [
+              path.join(os.homedir(), '.claude', 'projects'),
+              path.join(os.homedir(), '.claude'),
+            ];
+            for (const p of candidatePaths) {
+              if (fs.existsSync(p)) {
+                const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
+                const observedTs = Math.floor(Date.parse(current.observedAt || '0') / 1000);
+                if (Math.abs(mtime - observedTs) <= 300 || mtime >= Math.floor(Date.parse(initial.observedAt || '0') / 1000) - 300) return true;
+              }
+            }
+          } catch {
+            return false;
+          }
+          return false;
+        }
+
+        return false;
+      };
+    }
+
+    return { daemonHolding, testHolding, daemonAttributed: false, daemonWriteActivity, verifyDeltaAttribution };
   } catch {
-    return { daemonHolding: false, testHolding: false, daemonAttributed: false };
+    return { daemonHolding: false, testHolding: false, daemonAttributed: false, daemonWriteActivity: false };
   }
 }
 
@@ -501,11 +739,8 @@ export function getHubSnapshot(dir: string): HubHomeSnapshot {
 export type ProcessHoldingChecker = (
   targetPath: string,
   initialState?: DaemonProcessState | null,
-) => {
-  daemonHolding: boolean;
-  testHolding: boolean;
-  daemonAttributed?: boolean;
-};
+  dbInfo?: HubDbInfo | null,
+) => ProcessHoldingResult;
 
 export function verifyHubHomeSafety(
   snap: HubHomeSnapshot,
@@ -529,9 +764,9 @@ export function verifyHubHomeSafety(
         if (initialFp !== null && initialFp !== undefined && currentFp !== initialFp) {
           if (name === 'hub.db') {
             const dbPath = path.join(currentDir, name);
-            const holdingResult = checker(dbPath, snap.dbInfo?.daemonState);
+            const holdingResult = checker(dbPath, snap.dbInfo?.daemonState, snap.dbInfo);
             const { daemonHolding, testHolding } = holdingResult;
-            const daemonAttributed = Boolean(holdingResult.daemonAttributed);
+            const deltaVerifier = holdingResult.verifyDeltaAttribution;
             if (testHolding) {
               throw new Error(
                 `SAFETY NET VIOLATION: ${dbPath} was accessed by a test process during test execution! Tests must use temporary directory.`,
@@ -639,10 +874,19 @@ export function verifyHubHomeSafety(
                       }
                     }
 
-                    if (newRows.length > 0 && !daemonAttributed) {
-                      throw new Error(
-                        `SAFETY NET VIOLATION: ${dbPath} events table was modified during test execution! Event "${newRows[0].type}" cannot be proven to originate from external daemon. Tests must not touch hub.db.`,
+                    for (const row of newRows) {
+                      const isAttributed = Boolean(
+                        deltaVerifier?.({
+                          table: 'events',
+                          operation: 'insert',
+                          row,
+                        }),
                       );
+                      if (!isAttributed) {
+                        throw new Error(
+                          `SAFETY NET VIOLATION: ${dbPath} events table was modified during test execution! Event "${row.type}" cannot be proven to originate from external daemon. Tests must not touch hub.db.`,
+                        );
+                      }
                     }
                   }
 
@@ -688,7 +932,15 @@ export function verifyHubHomeSafety(
                         current.isUsingOverage !== initialQuota.isUsingOverage ||
                         current.observedAt !== initialQuota.observedAt
                       );
-                      if (isQuotaModified && !daemonAttributed) {
+                      const isAttributed = Boolean(
+                        deltaVerifier?.({
+                          table: 'claude_quota',
+                          operation: 'update',
+                          initial: initialQuota,
+                          current,
+                        }),
+                      );
+                      if (isQuotaModified && !isAttributed) {
                         throw new Error(
                           `SAFETY NET VIOLATION: ${dbPath} claude_quota was modified during test execution! Modifications cannot be proven to originate from external daemon. Tests must not touch hub.db.`,
                         );
@@ -737,7 +989,15 @@ export function verifyHubHomeSafety(
                         current.isUsingOverage !== initial.isUsingOverage ||
                         current.observedAt !== initial.observedAt
                       );
-                      if (isProfileModified && !daemonAttributed) {
+                      const isAttributed = Boolean(
+                        deltaVerifier?.({
+                          table: 'claude_quota_profiles',
+                          operation: 'update',
+                          initial,
+                          current,
+                        }),
+                      );
+                      if (isProfileModified && !isAttributed) {
                         throw new Error(
                           `SAFETY NET VIOLATION: ${dbPath} claude_quota_profiles was modified during test execution! Modifications cannot be proven to originate from external daemon. Tests must not touch hub.db.`,
                         );
@@ -775,7 +1035,15 @@ export function verifyHubHomeSafety(
                         current.resetAt !== initial.resetAt ||
                         current.fetchedAt !== initial.fetchedAt
                       );
-                      if (isUsageModified && !daemonAttributed) {
+                      const isAttributed = Boolean(
+                        deltaVerifier?.({
+                          table: 'quota_usage',
+                          operation: 'update',
+                          initial,
+                          current,
+                        }),
+                      );
+                      if (isUsageModified && !isAttributed) {
                         throw new Error(
                           `SAFETY NET VIOLATION: ${dbPath} quota_usage was modified during test execution! Modifications cannot be proven to originate from external daemon. Tests must not touch hub.db.`,
                         );

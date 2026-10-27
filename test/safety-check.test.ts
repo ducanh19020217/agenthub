@@ -276,7 +276,7 @@ describe('safety-check hub home comparison', () => {
     ).toThrow(/SAFETY NET VIOLATION:.*(contains test tasks|table "tasks" was modified)/);
   });
 
-  it('allows legitimate external daemon background activity on hub.db', () => {
+  it('reports violation when valid event (e.g. heartbeat) is inserted because write source cannot be proven even if held by external daemon', () => {
     const dbPath = path.join(tempDir, 'hub.db');
     const db = new Database(dbPath);
     db.exec(`
@@ -291,7 +291,7 @@ describe('safety-check hub home comparison', () => {
 
     const snap = getHubSnapshot(tempDir);
 
-    // Daemon naturally logs a heartbeat or event
+    // Test attempts to insert a valid event like heartbeat while daemon holds DB
     const db2 = new Database(dbPath);
     db2.prepare("INSERT INTO events (type, payload) VALUES ('heartbeat', '{}')").run();
     db2.close();
@@ -299,6 +299,33 @@ describe('safety-check hub home comparison', () => {
     expect(() =>
       verifyHubHomeSafety(snap, tempDir, {
         processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*events table was modified.*cannot be proven/);
+  });
+
+  it('allows legitimate external daemon background activity on events when genuinely attributed to daemon', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT, path TEXT);
+      INSERT INTO projects VALUES ('p1', 'Project 1', '/home/user/p1');
+      CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, payload TEXT);
+      CREATE TABLE tasks (id TEXT PRIMARY KEY, projectId TEXT, worktreePath TEXT);
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    // Genuine external daemon logs heartbeat
+    const db2 = new Database(dbPath);
+    db2.prepare("INSERT INTO events (type, payload) VALUES ('heartbeat', '{}')").run();
+    db2.close();
+
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false, daemonAttributed: true }),
       }),
     ).not.toThrow();
   });
@@ -676,7 +703,89 @@ describe('safety-check hub home comparison', () => {
     ).toThrow(/SAFETY NET VIOLATION:.*claude_quota_profiles/);
   });
 
-  it('allows legitimate external daemon background updates on claude_quota, claude_quota_profiles, and quota_usage', () => {
+  it('reports violation when valid-looking quota updates are made because write source cannot be proven even if held by external daemon', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, payload TEXT);
+      CREATE TABLE claude_quota (id INTEGER PRIMARY KEY, status TEXT, resetsAt INTEGER, rateLimitType TEXT, isUsingOverage INTEGER, observedAt TEXT);
+      INSERT INTO claude_quota VALUES (1, 'allowed', 1000, 'five_hour', 0, '2026-10-27T00:00:00.000Z');
+      CREATE TABLE claude_quota_profiles (profileName TEXT PRIMARY KEY, status TEXT, resetsAt INTEGER, rateLimitType TEXT, isUsingOverage INTEGER, observedAt TEXT);
+      INSERT INTO claude_quota_profiles VALUES ('prof1', 'allowed', 1000, 'five_hour', 0, '2026-10-27T00:00:00.000Z');
+      CREATE TABLE quota_usage (profileName TEXT, grp TEXT, window TEXT, remainingPct INTEGER, resetAt INTEGER, fetchedAt INTEGER);
+      INSERT INTO quota_usage VALUES ('prof1', 'grp1', '5h', 100, 1000, 1000);
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    // Test attempts valid-looking quota update with advanced observedAt
+    const db2 = new Database(dbPath);
+    db2.prepare("UPDATE claude_quota SET observedAt = '2026-10-27T01:00:00.000Z' WHERE id = 1").run();
+    db2.close();
+
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*claude_quota was modified.*cannot be proven/);
+  });
+
+  it('reports violation when valid-looking claude_quota_profiles update is made because write source cannot be proven even if held by external daemon', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, payload TEXT);
+      CREATE TABLE claude_quota_profiles (profileName TEXT PRIMARY KEY, status TEXT, resetsAt INTEGER, rateLimitType TEXT, isUsingOverage INTEGER, observedAt TEXT);
+      INSERT INTO claude_quota_profiles VALUES ('prof1', 'allowed', 1000, 'five_hour', 0, '2026-10-27T00:00:00.000Z');
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    // Test attempts valid-looking profile update with advanced observedAt
+    const db2 = new Database(dbPath);
+    db2.prepare("UPDATE claude_quota_profiles SET observedAt = '2026-10-27T01:00:00.000Z' WHERE profileName = 'prof1'").run();
+    db2.close();
+
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*claude_quota_profiles was modified.*cannot be proven/);
+  });
+
+  it('reports violation when valid-looking quota_usage update is made because write source cannot be proven even if held by external daemon', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, payload TEXT);
+      CREATE TABLE quota_usage (profileName TEXT, grp TEXT, window TEXT, remainingPct INTEGER, resetAt INTEGER, fetchedAt INTEGER);
+      INSERT INTO quota_usage VALUES ('prof1', 'grp1', '5h', 100, 1000, 1000);
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    // Test attempts valid-looking quota_usage update with advanced fetchedAt
+    const db2 = new Database(dbPath);
+    db2.prepare("UPDATE quota_usage SET remainingPct = 90, fetchedAt = 2000 WHERE profileName = 'prof1'").run();
+    db2.close();
+
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*quota_usage was modified.*cannot be proven/);
+  });
+
+  it('allows legitimate external daemon background updates on claude_quota, claude_quota_profiles, and quota_usage when genuinely attributed to daemon', () => {
     const dbPath = path.join(tempDir, 'hub.db');
     const db = new Database(dbPath);
     db.exec(`
@@ -703,7 +812,7 @@ describe('safety-check hub home comparison', () => {
 
     expect(() =>
       verifyHubHomeSafety(snap, tempDir, {
-        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false }),
+        processHoldingChecker: () => ({ daemonHolding: true, testHolding: false, daemonAttributed: true }),
       }),
     ).not.toThrow();
   });

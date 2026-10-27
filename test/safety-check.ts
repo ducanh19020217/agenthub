@@ -42,6 +42,13 @@ export interface QuotaUsageInfo {
   fetchedAt: number;
 }
 
+export interface DaemonProcessState {
+  pid: number;
+  startTime: string;
+  syscw: number;
+  wchar: number;
+}
+
 export interface HubDbInfo {
   isValid: boolean;
   schemaVersion?: string;
@@ -55,6 +62,7 @@ export interface HubDbInfo {
   taskIds?: string[];
   profileNames?: string[];
   projectIds?: string[];
+  daemonState?: DaemonProcessState | null;
 }
 
 export interface HubHomeSnapshot {
@@ -283,6 +291,7 @@ export function getHubDbInfo(dbPath: string): HubDbInfo {
       }
 
       const profileNames = Array.from(profileNamesSet);
+      const daemonState = getDaemonProcessState(dbPath);
 
       return {
         isValid: true,
@@ -297,6 +306,7 @@ export function getHubDbInfo(dbPath: string): HubDbInfo {
         taskIds,
         profileNames,
         projectIds,
+        daemonState,
       };
     } finally {
       db.close();
@@ -306,14 +316,70 @@ export function getHubDbInfo(dbPath: string): HubDbInfo {
   }
 }
 
-export function checkDbProcessHolding(targetPath: string): { daemonHolding: boolean; testHolding: boolean } {
-  if (process.platform !== 'linux') return { daemonHolding: false, testHolding: false };
+export function getDaemonProcessState(targetPath: string): DaemonProcessState | null {
+  if (process.platform !== 'linux') return null;
+  try {
+    const resolved = fs.existsSync(targetPath) ? fs.realpathSync(targetPath) : path.resolve(targetPath);
+    const myPid = process.pid;
+    const pids = fs.readdirSync('/proc');
+
+    for (const p of pids) {
+      if (!/^\d+$/.test(p)) continue;
+      const pid = Number(p);
+      if (pid === myPid) continue;
+      try {
+        const cmd = fs.readFileSync(path.join('/proc', p, 'cmdline'), 'utf8');
+        if (cmd.includes('vitest') || cmd.includes('test')) continue;
+        if (!cmd.includes('daemon') && !cmd.includes('agenthub')) continue;
+
+        const fdDir = path.join('/proc', p, 'fd');
+        const fds = fs.readdirSync(fdDir);
+        for (const fd of fds) {
+          try {
+            if (fs.readlinkSync(path.join(fdDir, fd)) === resolved) {
+              const statStr = fs.readFileSync(path.join('/proc', p, 'stat'), 'utf8');
+              const lastParen = statStr.lastIndexOf(')');
+              const after = statStr.slice(lastParen + 2).split(' ');
+              const startTime = after[19] || '';
+
+              let syscw = 0;
+              let wchar = 0;
+              try {
+                const ioStr = fs.readFileSync(path.join('/proc', p, 'io'), 'utf8');
+                const syscwMatch = ioStr.match(/syscw:\s*(\d+)/);
+                if (syscwMatch) syscw = Number(syscwMatch[1]);
+                const wcharMatch = ioStr.match(/wchar:\s*(\d+)/);
+                if (wcharMatch) wchar = Number(wcharMatch[1]);
+              } catch { /* ignore */ }
+
+              return { pid, startTime, syscw, wchar };
+            }
+          } catch { /* fd closed or invalid */ }
+        }
+      } catch { /* process exited */ }
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+export interface ProcessHoldingResult {
+  daemonHolding: boolean;
+  testHolding: boolean;
+  daemonAttributed: boolean;
+}
+
+export function checkDbProcessHolding(
+  targetPath: string,
+  initialState?: DaemonProcessState | null,
+): ProcessHoldingResult {
+  if (process.platform !== 'linux') return { daemonHolding: false, testHolding: false, daemonAttributed: false };
   try {
     const resolved = fs.existsSync(targetPath) ? fs.realpathSync(targetPath) : path.resolve(targetPath);
     const myPid = process.pid;
     const pids = fs.readdirSync('/proc');
     let daemonHolding = false;
     let testHolding = false;
+    let daemonAttributed = false;
 
     for (const p of pids) {
       if (!/^\d+$/.test(p)) continue;
@@ -329,6 +395,22 @@ export function checkDbProcessHolding(targetPath: string): { daemonHolding: bool
                 testHolding = true;
               } else if (cmd.includes('daemon') || cmd.includes('agenthub')) {
                 daemonHolding = true;
+                if (initialState && initialState.pid === pid) {
+                  try {
+                    const statStr = fs.readFileSync(path.join('/proc', p, 'stat'), 'utf8');
+                    const lastParen = statStr.lastIndexOf(')');
+                    const after = statStr.slice(lastParen + 2).split(' ');
+                    const startTime = after[19] || '';
+                    if (startTime === initialState.startTime) {
+                      const ioStr = fs.readFileSync(path.join('/proc', p, 'io'), 'utf8');
+                      const syscwMatch = ioStr.match(/syscw:\s*(\d+)/);
+                      const currentSyscw = syscwMatch ? Number(syscwMatch[1]) : 0;
+                      if (currentSyscw > initialState.syscw) {
+                        daemonAttributed = true;
+                      }
+                    }
+                  } catch { /* ignore */ }
+                }
               }
             }
           } catch { /* fd closed or invalid */ }
@@ -336,9 +418,9 @@ export function checkDbProcessHolding(targetPath: string): { daemonHolding: bool
       } catch { /* process exited */ }
     }
 
-    return { daemonHolding, testHolding };
+    return { daemonHolding, testHolding, daemonAttributed };
   } catch {
-    return { daemonHolding: false, testHolding: false };
+    return { daemonHolding: false, testHolding: false, daemonAttributed: false };
   }
 }
 
@@ -416,10 +498,19 @@ export function getHubSnapshot(dir: string): HubHomeSnapshot {
   };
 }
 
+export type ProcessHoldingChecker = (
+  targetPath: string,
+  initialState?: DaemonProcessState | null,
+) => {
+  daemonHolding: boolean;
+  testHolding: boolean;
+  daemonAttributed?: boolean;
+};
+
 export function verifyHubHomeSafety(
   snap: HubHomeSnapshot,
   currentDir: string = snap.dir,
-  options?: { processHoldingChecker?: (targetPath: string) => { daemonHolding: boolean; testHolding: boolean } },
+  options?: { processHoldingChecker?: ProcessHoldingChecker },
 ): void {
   const currentExists = fs.existsSync(currentDir);
 
@@ -438,7 +529,9 @@ export function verifyHubHomeSafety(
         if (initialFp !== null && initialFp !== undefined && currentFp !== initialFp) {
           if (name === 'hub.db') {
             const dbPath = path.join(currentDir, name);
-            const { daemonHolding, testHolding } = checker(dbPath);
+            const holdingResult = checker(dbPath, snap.dbInfo?.daemonState);
+            const { daemonHolding, testHolding } = holdingResult;
+            const daemonAttributed = Boolean(holdingResult.daemonAttributed);
             if (testHolding) {
               throw new Error(
                 `SAFETY NET VIOLATION: ${dbPath} was accessed by a test process during test execution! Tests must use temporary directory.`,
@@ -545,6 +638,12 @@ export function verifyHubHomeSafety(
                         );
                       }
                     }
+
+                    if (newRows.length > 0 && !daemonAttributed) {
+                      throw new Error(
+                        `SAFETY NET VIOLATION: ${dbPath} events table was modified during test execution! Event "${newRows[0].type}" cannot be proven to originate from external daemon. Tests must not touch hub.db.`,
+                      );
+                    }
                   }
 
                   // Verify claude_quota delta if present
@@ -567,14 +666,6 @@ export function verifyHubHomeSafety(
                       if (!Number.isFinite(currentObs) || currentObs < initialObs) {
                         throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_quota observedAt is invalid or was moved backwards!`);
                       }
-                      if (currentObs <= initialObs && (
-                        current.status !== initialQuota.status ||
-                        current.resetsAt !== initialQuota.resetsAt ||
-                        current.rateLimitType !== initialQuota.rateLimitType ||
-                        current.isUsingOverage !== initialQuota.isUsingOverage
-                      )) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_quota was modified without new observation timestamp!`);
-                      }
                       if (current.status !== null && !ALLOWED_CLAUDE_QUOTA_STATUSES.has(current.status)) {
                         throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_quota has invalid status "${current.status}"!`);
                       }
@@ -589,6 +680,18 @@ export function verifyHubHomeSafety(
                       }
                       if (/agenthub-test-|test-worker-|vitest/i.test(JSON.stringify(current))) {
                         throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_quota contains test markers!`);
+                      }
+                      const isQuotaModified = (
+                        current.status !== initialQuota.status ||
+                        current.resetsAt !== initialQuota.resetsAt ||
+                        current.rateLimitType !== initialQuota.rateLimitType ||
+                        current.isUsingOverage !== initialQuota.isUsingOverage ||
+                        current.observedAt !== initialQuota.observedAt
+                      );
+                      if (isQuotaModified && !daemonAttributed) {
+                        throw new Error(
+                          `SAFETY NET VIOLATION: ${dbPath} claude_quota was modified during test execution! Modifications cannot be proven to originate from external daemon. Tests must not touch hub.db.`,
+                        );
                       }
                     } else if (currentRows.length > 0) {
                       throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_quota was created during test execution!`);
@@ -612,14 +715,6 @@ export function verifyHubHomeSafety(
                       if (!Number.isFinite(currentObs) || currentObs < initialObs) {
                         throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_quota_profiles observedAt moved backwards for "${current.profileName}"!`);
                       }
-                      if (currentObs <= initialObs && (
-                        current.status !== initial.status ||
-                        current.resetsAt !== initial.resetsAt ||
-                        current.rateLimitType !== initial.rateLimitType ||
-                        current.isUsingOverage !== initial.isUsingOverage
-                      )) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_quota_profiles was modified without new observation timestamp for "${current.profileName}"!`);
-                      }
                       if (current.status !== null && !ALLOWED_CLAUDE_QUOTA_STATUSES.has(current.status)) {
                         throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_quota_profiles has invalid status "${current.status}"!`);
                       }
@@ -634,6 +729,18 @@ export function verifyHubHomeSafety(
                       }
                       if (/agenthub-test-|test-worker-|vitest/i.test(JSON.stringify(current))) {
                         throw new Error(`SAFETY NET VIOLATION: ${dbPath} claude_quota_profiles contains test markers!`);
+                      }
+                      const isProfileModified = (
+                        current.status !== initial.status ||
+                        current.resetsAt !== initial.resetsAt ||
+                        current.rateLimitType !== initial.rateLimitType ||
+                        current.isUsingOverage !== initial.isUsingOverage ||
+                        current.observedAt !== initial.observedAt
+                      );
+                      if (isProfileModified && !daemonAttributed) {
+                        throw new Error(
+                          `SAFETY NET VIOLATION: ${dbPath} claude_quota_profiles was modified during test execution! Modifications cannot be proven to originate from external daemon. Tests must not touch hub.db.`,
+                        );
                       }
                     }
                   }
@@ -654,12 +761,6 @@ export function verifyHubHomeSafety(
                       if (current.fetchedAt < initial.fetchedAt) {
                         throw new Error(`SAFETY NET VIOLATION: ${dbPath} quota_usage fetchedAt moved backwards for "${key}"!`);
                       }
-                      if (current.fetchedAt <= initial.fetchedAt && (
-                        current.remainingPct !== initial.remainingPct ||
-                        current.resetAt !== initial.resetAt
-                      )) {
-                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} quota_usage was modified without new fetch timestamp for "${key}"!`);
-                      }
                       if (typeof current.remainingPct !== 'number' || current.remainingPct < 0 || current.remainingPct > 100) {
                         throw new Error(`SAFETY NET VIOLATION: ${dbPath} quota_usage remainingPct out of bounds for "${key}"!`);
                       }
@@ -668,6 +769,16 @@ export function verifyHubHomeSafety(
                       }
                       if (/agenthub-test-|test-worker-|vitest/i.test(JSON.stringify(current))) {
                         throw new Error(`SAFETY NET VIOLATION: ${dbPath} quota_usage contains test markers!`);
+                      }
+                      const isUsageModified = (
+                        current.remainingPct !== initial.remainingPct ||
+                        current.resetAt !== initial.resetAt ||
+                        current.fetchedAt !== initial.fetchedAt
+                      );
+                      if (isUsageModified && !daemonAttributed) {
+                        throw new Error(
+                          `SAFETY NET VIOLATION: ${dbPath} quota_usage was modified during test execution! Modifications cannot be proven to originate from external daemon. Tests must not touch hub.db.`,
+                        );
                       }
                     }
                   }

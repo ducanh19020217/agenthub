@@ -56,6 +56,29 @@ export interface ProfileInfo {
   home: string | null;
 }
 
+export interface ClaudeSessionInfo {
+  sessionId: string;
+  cwd?: string;
+  title?: string;
+  firstAt?: string;
+  lastAt?: string;
+  messages?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  effectiveTokens?: number;
+}
+
+export interface ClaudeScanStateRow {
+  path: string;
+  inode: number;
+  size: number;
+  offset: number;
+  mtime: number;
+  turnId?: string;
+  turnTasks?: string;
+  eligible?: number;
+}
+
 export interface HubDbInfo {
   isValid: boolean;
   schemaVersion?: string;
@@ -66,11 +89,14 @@ export interface HubDbInfo {
   claudeQuotaInfo?: ClaudeQuotaRow | null;
   claudeQuotaProfilesMap?: Record<string, ClaudeQuotaProfileRow>;
   quotaUsageMap?: Record<string, QuotaUsageInfo>;
+  claudeScanStateMap?: Record<string, ClaudeScanStateRow>;
+  claudeSessionsMap?: Record<string, ClaudeSessionInfo>;
   taskIds?: string[];
   profileNames?: string[];
   profilesMap?: Record<string, ProfileInfo>;
   projectIds?: string[];
   daemonState?: DaemonProcessState | null;
+  snapshotTime?: number;
 }
 
 export interface HubHomeSnapshot {
@@ -94,6 +120,8 @@ export const ALLOWED_DAEMON_BACKGROUND_TABLES = new Set([
   'claude_quota',
   'claude_quota_profiles',
   'quota_usage',
+  'claude_scan_state',
+  'claude_sessions',
 ]);
 
 export const ALLOWED_DAEMON_EVENT_TYPES = new Set([
@@ -307,6 +335,26 @@ export function getHubDbInfo(dbPath: string): HubDbInfo {
         } catch { /* ignore */ }
       }
 
+      const claudeScanStateMap: Record<string, ClaudeScanStateRow> = {};
+      if (tables.includes('claude_scan_state')) {
+        try {
+          const rows = db.prepare('SELECT * FROM claude_scan_state').all() as ClaudeScanStateRow[];
+          for (const r of rows) {
+            claudeScanStateMap[r.path] = r;
+          }
+        } catch { /* ignore */ }
+      }
+
+      const claudeSessionsMap: Record<string, ClaudeSessionInfo> = {};
+      if (tables.includes('claude_sessions')) {
+        try {
+          const rows = db.prepare('SELECT * FROM claude_sessions').all() as ClaudeSessionInfo[];
+          for (const r of rows) {
+            claudeSessionsMap[r.sessionId] = r;
+          }
+        } catch { /* ignore */ }
+      }
+
       const profileNames = Array.from(profileNamesSet);
       const daemonState = getDaemonProcessState(dbPath);
 
@@ -320,11 +368,14 @@ export function getHubDbInfo(dbPath: string): HubDbInfo {
         claudeQuotaInfo,
         claudeQuotaProfilesMap,
         quotaUsageMap,
+        claudeScanStateMap,
+        claudeSessionsMap,
         taskIds,
         profileNames,
         profilesMap,
         projectIds,
         daemonState,
+        snapshotTime: Date.now(),
       };
     } finally {
       db.close();
@@ -398,6 +449,278 @@ export interface ProcessHoldingResult {
   verifyDeltaAttribution?: DeltaAttributionVerifier;
 }
 
+export function createDeltaAttributionVerifier(
+  dbPath?: string,
+  dbInfo?: HubDbInfo | null,
+): DeltaAttributionVerifier {
+  const resolved = dbPath && fs.existsSync(dbPath) ? fs.realpathSync(dbPath) : (dbPath ? path.resolve(dbPath) : '');
+  return (ctx: DeltaAttributionContext): boolean => {
+    const snapTime = dbInfo?.snapshotTime || 0;
+    const snapTs = Math.floor(snapTime / 1000);
+    if (snapTime <= 0) return false;
+
+    if (ctx.table === 'events' && ctx.operation === 'insert' && ctx.row) {
+      const type = String(ctx.row.type || '');
+      if (type === 'brain.updated') {
+        try {
+          const payload = typeof ctx.row.payload === 'string' ? JSON.parse(ctx.row.payload) : ctx.row.payload;
+          const sessionId = payload?.sessionId;
+          if (typeof sessionId === 'string' && /^[0-9a-f-]+$/i.test(sessionId)) {
+            const userHome = os.userInfo().homedir;
+            const candidateDirs = new Set<string>([
+              path.join(os.homedir(), '.claude', 'projects'),
+              path.join(userHome, '.claude', 'projects'),
+            ]);
+            if (process.env.AGENTHUB_CLAUDE_PROJECTS_DIR) {
+              candidateDirs.add(process.env.AGENTHUB_CLAUDE_PROJECTS_DIR);
+            }
+            for (const p of Object.values(dbInfo?.profilesMap || {})) {
+              if (p.home) {
+                candidateDirs.add(path.join(p.home, '.claude', 'projects'));
+              }
+            }
+            for (const claudeProjectsDir of candidateDirs) {
+              if (!fs.existsSync(claudeProjectsDir)) continue;
+              const checkDir = (dir: string): boolean => {
+                try {
+                  const entries = fs.readdirSync(dir, { withFileTypes: true });
+                  for (const e of entries) {
+                    if (e.isDirectory()) {
+                      if (checkDir(path.join(dir, e.name))) return true;
+                    } else if (e.name === `${sessionId}.jsonl`) {
+                      const stat = fs.statSync(path.join(dir, e.name));
+                      // The session file MUST have been actively modified during the test execution window,
+                      // or correspond to an existing idle assistant session scanned by daemon scanner (waitingTooLong).
+                      if (stat.mtimeMs >= snapTime - 1000) {
+                        return true;
+                      }
+                      const existingSession = dbInfo?.claudeSessionsMap?.[sessionId];
+                      if (
+                        existingSession &&
+                        existingSession.lastEventKind === 'assistant_text' &&
+                        existingSession.lastAt &&
+                        snapTime - Date.parse(existingSession.lastAt) > 5 * 60_000
+                      ) {
+                        return true;
+                      }
+                    }
+                  }
+                } catch { /* ignore */ }
+                return false;
+              };
+              if (checkDir(claudeProjectsDir)) return true;
+            }
+          }
+        } catch {
+          return false;
+        }
+      }
+      if (type === 'claude.quota_available' || type === 'claude.quota_depleted') {
+        try {
+          const payload = typeof ctx.row.payload === 'string' ? JSON.parse(ctx.row.payload) : ctx.row.payload;
+          const profileName = payload?.profileName;
+          const observedAt = payload?.observedAt;
+          const observedTs = observedAt ? Date.parse(observedAt) : 0;
+          if (observedTs >= snapTime - 1000 && typeof profileName === 'string' && profileName.length > 0) {
+            let profile = dbInfo?.profilesMap?.[profileName];
+            if (!profile && resolved) {
+              try {
+                const db = new Database(resolved, { readonly: true });
+                try {
+                  const row = db.prepare('SELECT name, engine, kind, home FROM profiles WHERE name = ?').get(profileName) as ProfileInfo | undefined;
+                  if (row) profile = row;
+                } finally {
+                  db.close();
+                }
+              } catch { /* ignore */ }
+            }
+            if (profile && profile.engine === 'claude') {
+              const claudeHome = profile.home || os.homedir();
+              const candidatePaths = [
+                path.join(claudeHome, '.claude', 'projects'),
+                path.join(claudeHome, '.claude'),
+              ];
+              for (const p of candidatePaths) {
+                if (fs.existsSync(p)) {
+                  const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
+                  const obsTs = Math.floor(observedTs / 1000);
+                  if (mtime >= snapTs && Math.abs(mtime - obsTs) <= 60) return true;
+                }
+              }
+            }
+          }
+        } catch {
+          return false;
+        }
+      }
+      return false;
+    }
+
+    if (ctx.table === 'quota_usage' && ctx.operation === 'update') {
+      const current = ctx.current as QuotaUsageInfo | undefined;
+      const initial = ctx.initial as QuotaUsageInfo | undefined;
+      if (!current || !initial) return false;
+      if (current.profileName !== initial.profileName) return false;
+      if (current.grp !== initial.grp || current.window !== initial.window) return false;
+      if (typeof current.remainingPct !== 'number' || current.remainingPct < 0 || current.remainingPct > 100) return false;
+      if (typeof current.resetAt !== 'number' || current.resetAt < 0) return false;
+      if (typeof current.fetchedAt !== 'number' || current.fetchedAt < initial.fetchedAt) return false;
+      // Must have been fetched during test execution window, not from before
+      if (current.fetchedAt < snapTs) return false;
+
+      let profile = dbInfo?.profilesMap?.[current.profileName];
+      if (!profile && resolved) {
+        try {
+          const db = new Database(resolved, { readonly: true });
+          try {
+            const row = db.prepare('SELECT name, engine, kind, home FROM profiles WHERE name = ?').get(current.profileName) as ProfileInfo | undefined;
+            if (row) profile = row;
+          } finally {
+            db.close();
+          }
+        } catch { /* ignore */ }
+      }
+      if (!profile) return false;
+
+      try {
+        if (profile.engine === 'agy') {
+          const homeDir = profile.kind === 'isolated' && profile.home ? profile.home : os.homedir();
+          const candidatePaths = [
+            path.join(homeDir, '.gemini', 'antigravity-cli'),
+            path.join(homeDir, '.gemini'),
+            homeDir,
+          ];
+          for (const p of candidatePaths) {
+            if (fs.existsSync(p)) {
+              const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
+              // Strict: must be modified at or after snapshot and within tight window of fetchedAt
+              if (mtime >= snapTs && Math.abs(mtime - current.fetchedAt) <= 60) return true;
+            }
+          }
+        } else if (profile.engine === 'codex') {
+          const codexDir = profile.kind === 'isolated' && profile.home ? profile.home : path.join(profile.home || os.homedir(), '.codex');
+          const candidatePaths = [
+            path.join(codexDir, 'sessions'),
+            path.join(codexDir, 'state_5.sqlite'),
+            codexDir,
+          ];
+          for (const p of candidatePaths) {
+            if (fs.existsSync(p)) {
+              const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
+              if (mtime >= snapTs && Math.abs(mtime - current.fetchedAt) <= 60) return true;
+            }
+          }
+        } else if (profile.engine === 'claude') {
+          const claudeHome = profile.home || os.homedir();
+          const candidatePaths = [
+            path.join(claudeHome, '.claude', 'projects'),
+            path.join(claudeHome, '.claude'),
+            claudeHome,
+          ];
+          for (const p of candidatePaths) {
+            if (fs.existsSync(p)) {
+              const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
+              if (mtime >= snapTs && Math.abs(mtime - current.fetchedAt) <= 60) return true;
+            }
+          }
+        }
+      } catch {
+        return false;
+      }
+      return false;
+    }
+
+    if (ctx.table === 'claude_quota_profiles' && ctx.operation === 'update') {
+      const current = ctx.current as ClaudeQuotaProfileRow | undefined;
+      const initial = ctx.initial as ClaudeQuotaProfileRow | undefined;
+      if (!current || !initial) return false;
+      if (current.profileName !== initial.profileName) return false;
+      if (!ALLOWED_CLAUDE_QUOTA_STATUSES.has(current.status || '')) return false;
+      if (current.rateLimitType && !ALLOWED_RATE_LIMIT_TYPES.has(current.rateLimitType)) return false;
+
+      const observedTs = Math.floor(Date.parse(current.observedAt || '0') / 1000);
+      if (observedTs < snapTs) return false;
+
+      let profile = dbInfo?.profilesMap?.[current.profileName];
+      if (!profile && resolved) {
+        try {
+          const db = new Database(resolved, { readonly: true });
+          try {
+            const row = db.prepare('SELECT name, engine, kind, home FROM profiles WHERE name = ?').get(current.profileName) as ProfileInfo | undefined;
+            if (row) profile = row;
+          } finally {
+            db.close();
+          }
+        } catch { /* ignore */ }
+      }
+      if (!profile || profile.engine !== 'claude') return false;
+
+      try {
+        const claudeHome = profile.home || os.homedir();
+        const candidatePaths = [
+          path.join(claudeHome, '.claude', 'projects'),
+          path.join(claudeHome, '.claude'),
+          claudeHome,
+        ];
+        if (process.env.AGENTHUB_CLAUDE_PROJECTS_DIR) {
+          candidatePaths.push(process.env.AGENTHUB_CLAUDE_PROJECTS_DIR);
+        }
+        for (const p of candidatePaths) {
+          if (fs.existsSync(p)) {
+            const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
+            if (mtime >= snapTs && Math.abs(mtime - observedTs) <= 60) return true;
+          }
+        }
+      } catch {
+        return false;
+      }
+      return false;
+    }
+
+    if (ctx.table === 'claude_quota' && ctx.operation === 'update') {
+      const current = ctx.current as ClaudeQuotaRow | undefined;
+      const initial = ctx.initial as ClaudeQuotaRow | undefined;
+      if (!current || !initial) return false;
+      if (!ALLOWED_CLAUDE_QUOTA_STATUSES.has(current.status || '')) return false;
+      if (current.rateLimitType && !ALLOWED_RATE_LIMIT_TYPES.has(current.rateLimitType)) return false;
+
+      const observedTs = Math.floor(Date.parse(current.observedAt || '0') / 1000);
+      if (observedTs < snapTs) return false;
+
+      try {
+        const userHome = os.userInfo().homedir;
+        const candidatePaths = [
+          path.join(os.homedir(), '.claude', 'projects'),
+          path.join(os.homedir(), '.claude'),
+          path.join(userHome, '.claude', 'projects'),
+          path.join(userHome, '.claude'),
+        ];
+        if (process.env.AGENTHUB_CLAUDE_PROJECTS_DIR) {
+          candidatePaths.push(process.env.AGENTHUB_CLAUDE_PROJECTS_DIR);
+        }
+        for (const p of Object.values(dbInfo?.profilesMap || {})) {
+          if (p.home) {
+            candidatePaths.push(path.join(p.home, '.claude', 'projects'));
+            candidatePaths.push(path.join(p.home, '.claude'));
+            candidatePaths.push(p.home);
+          }
+        }
+        for (const p of candidatePaths) {
+          if (fs.existsSync(p)) {
+            const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
+            if (mtime >= snapTs && Math.abs(mtime - observedTs) <= 60) return true;
+          }
+        }
+      } catch {
+        return false;
+      }
+      return false;
+    }
+
+    return false;
+  };
+}
+
 export function checkDbProcessHolding(
   targetPath: string,
   initialState?: DaemonProcessState | null,
@@ -451,209 +774,7 @@ export function checkDbProcessHolding(
 
     let verifyDeltaAttribution: DeltaAttributionVerifier | undefined;
     if (daemonHolding && !testHolding && daemonWriteActivity) {
-      verifyDeltaAttribution = (ctx: DeltaAttributionContext): boolean => {
-        if (ctx.table === 'events' && ctx.operation === 'insert' && ctx.row) {
-          const type = String(ctx.row.type || '');
-          if (type === 'brain.updated') {
-            try {
-              const payload = typeof ctx.row.payload === 'string' ? JSON.parse(ctx.row.payload) : ctx.row.payload;
-              const sessionId = payload?.sessionId;
-              if (typeof sessionId === 'string' && /^[0-9a-f-]+$/i.test(sessionId)) {
-                const userHome = os.userInfo().homedir;
-                const candidateDirs = new Set<string>([
-                  path.join(os.homedir(), '.claude', 'projects'),
-                  path.join(userHome, '.claude', 'projects'),
-                ]);
-                for (const claudeProjectsDir of candidateDirs) {
-                  if (!fs.existsSync(claudeProjectsDir)) continue;
-                  const checkDir = (dir: string): boolean => {
-                    try {
-                      const entries = fs.readdirSync(dir, { withFileTypes: true });
-                      for (const e of entries) {
-                        if (e.isDirectory()) {
-                          if (checkDir(path.join(dir, e.name))) return true;
-                        } else if (e.name === `${sessionId}.jsonl`) {
-                          return true;
-                        }
-                      }
-                    } catch { /* ignore */ }
-                    return false;
-                  };
-                  if (checkDir(claudeProjectsDir)) return true;
-                }
-              }
-            } catch {
-              return false;
-            }
-          }
-          if (type === 'claude.quota_available' || type === 'claude.quota_depleted') {
-            try {
-              const payload = typeof ctx.row.payload === 'string' ? JSON.parse(ctx.row.payload) : ctx.row.payload;
-              const profileName = payload?.profileName;
-              if (typeof profileName === 'string' && profileName.length > 0) {
-                let profile = dbInfo?.profilesMap?.[profileName];
-                if (!profile) {
-                  try {
-                    const db = new Database(resolved, { readonly: true });
-                    try {
-                      const row = db.prepare('SELECT name, engine, kind, home FROM profiles WHERE name = ?').get(profileName) as ProfileInfo | undefined;
-                      if (row) profile = row;
-                    } finally {
-                      db.close();
-                    }
-                  } catch { /* ignore */ }
-                }
-                if (profile && profile.engine === 'claude') {
-                  const claudeHome = profile.home || os.homedir();
-                  if (fs.existsSync(path.join(claudeHome, '.claude'))) return true;
-                }
-              }
-            } catch {
-              return false;
-            }
-          }
-          return false;
-        }
-
-        if (ctx.table === 'quota_usage' && ctx.operation === 'update') {
-          const current = ctx.current as QuotaUsageInfo | undefined;
-          const initial = ctx.initial as QuotaUsageInfo | undefined;
-          if (!current || !initial) return false;
-          if (current.profileName !== initial.profileName) return false;
-          if (current.grp !== initial.grp || current.window !== initial.window) return false;
-          if (typeof current.remainingPct !== 'number' || current.remainingPct < 0 || current.remainingPct > 100) return false;
-          if (typeof current.resetAt !== 'number' || current.resetAt < 0) return false;
-          if (typeof current.fetchedAt !== 'number' || current.fetchedAt < initial.fetchedAt) return false;
-
-          let profile = dbInfo?.profilesMap?.[current.profileName];
-          if (!profile) {
-            try {
-              const db = new Database(resolved, { readonly: true });
-              try {
-                const row = db.prepare('SELECT name, engine, kind, home FROM profiles WHERE name = ?').get(current.profileName) as ProfileInfo | undefined;
-                if (row) profile = row;
-              } finally {
-                db.close();
-              }
-            } catch { /* ignore */ }
-          }
-          if (!profile) return false;
-
-          try {
-            if (profile.engine === 'agy') {
-              const homeDir = profile.kind === 'isolated' && profile.home ? profile.home : os.homedir();
-              const candidatePaths = [
-                path.join(homeDir, '.gemini', 'antigravity-cli'),
-                path.join(homeDir, '.gemini'),
-                homeDir,
-              ];
-              for (const p of candidatePaths) {
-                if (fs.existsSync(p)) {
-                  const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
-                  if (Math.abs(mtime - current.fetchedAt) <= 300 || mtime >= initial.fetchedAt - 300) return true;
-                }
-              }
-            } else if (profile.engine === 'codex') {
-              const codexDir = profile.kind === 'isolated' && profile.home ? profile.home : path.join(profile.home || os.homedir(), '.codex');
-              const candidatePaths = [
-                path.join(codexDir, 'sessions'),
-                path.join(codexDir, 'state_5.sqlite'),
-                codexDir,
-              ];
-              for (const p of candidatePaths) {
-                if (fs.existsSync(p)) {
-                  const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
-                  if (Math.abs(mtime - current.fetchedAt) <= 300 || mtime >= initial.fetchedAt - 300) return true;
-                }
-              }
-            } else if (profile.engine === 'claude') {
-              const claudeHome = profile.home || os.homedir();
-              const candidatePaths = [
-                path.join(claudeHome, '.claude', 'projects'),
-                path.join(claudeHome, '.claude'),
-                claudeHome,
-              ];
-              for (const p of candidatePaths) {
-                if (fs.existsSync(p)) {
-                  const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
-                  if (Math.abs(mtime - current.fetchedAt) <= 300 || mtime >= initial.fetchedAt - 300) return true;
-                }
-              }
-            }
-          } catch {
-            return false;
-          }
-          return false;
-        }
-
-        if (ctx.table === 'claude_quota_profiles' && ctx.operation === 'update') {
-          const current = ctx.current as ClaudeQuotaProfileRow | undefined;
-          const initial = ctx.initial as ClaudeQuotaProfileRow | undefined;
-          if (!current || !initial) return false;
-          if (current.profileName !== initial.profileName) return false;
-          if (!ALLOWED_CLAUDE_QUOTA_STATUSES.has(current.status || '')) return false;
-          if (current.rateLimitType && !ALLOWED_RATE_LIMIT_TYPES.has(current.rateLimitType)) return false;
-
-          let profile = dbInfo?.profilesMap?.[current.profileName];
-          if (!profile) {
-            try {
-              const db = new Database(resolved, { readonly: true });
-              try {
-                const row = db.prepare('SELECT name, engine, kind, home FROM profiles WHERE name = ?').get(current.profileName) as ProfileInfo | undefined;
-                if (row) profile = row;
-              } finally {
-                db.close();
-              }
-            } catch { /* ignore */ }
-          }
-          if (!profile || profile.engine !== 'claude') return false;
-
-          try {
-            const claudeHome = profile.home || os.homedir();
-            const candidatePaths = [
-              path.join(claudeHome, '.claude', 'projects'),
-              path.join(claudeHome, '.claude'),
-            ];
-            for (const p of candidatePaths) {
-              if (fs.existsSync(p)) {
-                const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
-                const observedTs = Math.floor(Date.parse(current.observedAt || '0') / 1000);
-                if (Math.abs(mtime - observedTs) <= 300 || mtime >= Math.floor(Date.parse(initial.observedAt || '0') / 1000) - 300) return true;
-              }
-            }
-          } catch {
-            return false;
-          }
-          return false;
-        }
-
-        if (ctx.table === 'claude_quota' && ctx.operation === 'update') {
-          const current = ctx.current as ClaudeQuotaRow | undefined;
-          const initial = ctx.initial as ClaudeQuotaRow | undefined;
-          if (!current || !initial) return false;
-          if (!ALLOWED_CLAUDE_QUOTA_STATUSES.has(current.status || '')) return false;
-          if (current.rateLimitType && !ALLOWED_RATE_LIMIT_TYPES.has(current.rateLimitType)) return false;
-
-          try {
-            const candidatePaths = [
-              path.join(os.homedir(), '.claude', 'projects'),
-              path.join(os.homedir(), '.claude'),
-            ];
-            for (const p of candidatePaths) {
-              if (fs.existsSync(p)) {
-                const mtime = Math.floor(fs.statSync(p).mtimeMs / 1000);
-                const observedTs = Math.floor(Date.parse(current.observedAt || '0') / 1000);
-                if (Math.abs(mtime - observedTs) <= 300 || mtime >= Math.floor(Date.parse(initial.observedAt || '0') / 1000) - 300) return true;
-              }
-            }
-          } catch {
-            return false;
-          }
-          return false;
-        }
-
-        return false;
-      };
+      verifyDeltaAttribution = createDeltaAttributionVerifier(resolved, dbInfo);
     }
 
     return { daemonHolding, testHolding, daemonAttributed: false, daemonWriteActivity, verifyDeltaAttribution };
@@ -766,7 +887,7 @@ export function verifyHubHomeSafety(
             const dbPath = path.join(currentDir, name);
             const holdingResult = checker(dbPath, snap.dbInfo?.daemonState, snap.dbInfo);
             const { daemonHolding, testHolding } = holdingResult;
-            const deltaVerifier = holdingResult.verifyDeltaAttribution;
+            const deltaVerifier = holdingResult.verifyDeltaAttribution || (holdingResult.daemonWriteActivity ? createDeltaAttributionVerifier(dbPath, snap.dbInfo) : undefined);
             if (testHolding) {
               throw new Error(
                 `SAFETY NET VIOLATION: ${dbPath} was accessed by a test process during test execution! Tests must use temporary directory.`,
@@ -1047,6 +1168,197 @@ export function verifyHubHomeSafety(
                         throw new Error(
                           `SAFETY NET VIOLATION: ${dbPath} quota_usage was modified during test execution! Modifications cannot be proven to originate from external daemon. Tests must not touch hub.db.`,
                         );
+                      }
+                    }
+                  }
+
+                  // Verify claude_scan_state delta if present
+                  if (beforeTables.includes('claude_scan_state')) {
+                    const currentRows = db.prepare('SELECT * FROM claude_scan_state').all() as ClaudeScanStateRow[];
+                    const initialMap = snap.dbInfo?.claudeScanStateMap || {};
+                    if (currentRows.length < Object.keys(initialMap).length) {
+                      throw new Error(
+                        `SAFETY NET VIOLATION: ${dbPath} table "claude_scan_state" was modified during test execution! Records were deleted.`,
+                      );
+                    }
+                    const userHome = os.userInfo().homedir;
+                    const validDirs = new Set<string>([
+                      path.join(os.homedir(), '.claude', 'projects'),
+                      path.join(userHome, '.claude', 'projects'),
+                    ]);
+                    if (process.env.AGENTHUB_CLAUDE_PROJECTS_DIR) {
+                      validDirs.add(process.env.AGENTHUB_CLAUDE_PROJECTS_DIR);
+                    }
+                    for (const p of Object.values(snap.dbInfo?.profilesMap || {})) {
+                      if (p.home) {
+                        validDirs.add(path.join(p.home, '.claude', 'projects'));
+                      }
+                    }
+
+                    for (const current of currentRows) {
+                      if (!current.path || typeof current.path !== 'string') {
+                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} table "claude_scan_state" contains invalid entry!`);
+                      }
+                      if (/agenthub-test-|test-worker-|vitest/i.test(current.path) || current.path.includes('/tmp/')) {
+                        throw new Error(
+                          `SAFETY NET VIOLATION: ${dbPath} table "claude_scan_state" was modified during test execution! Entry "${current.path}" contains test path.`,
+                        );
+                      }
+                      if (!fs.existsSync(current.path)) {
+                        throw new Error(
+                          `SAFETY NET VIOLATION: ${dbPath} table "claude_scan_state" was modified during test execution! Entry "${current.path}" cannot be proven to originate from external daemon. Tests must not touch hub.db.`,
+                        );
+                      }
+                      const inValidDir = Array.from(validDirs).some((d) => current.path.startsWith(d));
+                      if (!inValidDir) {
+                        throw new Error(
+                          `SAFETY NET VIOLATION: ${dbPath} table "claude_scan_state" was modified during test execution! Entry "${current.path}" cannot be proven to originate from external daemon. Tests must not touch hub.db.`,
+                        );
+                      }
+                      try {
+                        const stat = fs.statSync(current.path);
+                        if (stat.ino !== current.inode || stat.size !== current.size) {
+                          throw new Error(
+                            `SAFETY NET VIOLATION: ${dbPath} table "claude_scan_state" was modified during test execution! Entry "${current.path}" stats do not match file on disk.`,
+                          );
+                        }
+                      } catch (err) {
+                        if (err instanceof Error && err.message.startsWith('SAFETY NET VIOLATION:')) throw err;
+                        throw new Error(
+                          `SAFETY NET VIOLATION: ${dbPath} table "claude_scan_state" was modified during test execution! Entry "${current.path}" cannot be statted.`,
+                        );
+                      }
+                      const initial = initialMap[current.path];
+                      const snapTime = snap.dbInfo?.snapshotTime || 0;
+                      if (initial) {
+                        if (current.size < initial.size || current.offset < initial.offset || current.mtime < initial.mtime || current.inode !== initial.inode) {
+                          throw new Error(
+                            `SAFETY NET VIOLATION: ${dbPath} table "claude_scan_state" was modified during test execution! Entry "${current.path}" moved backwards or changed inode!`,
+                          );
+                        }
+                        const isModified = (
+                          current.size !== initial.size ||
+                          current.offset !== initial.offset ||
+                          current.mtime !== initial.mtime ||
+                          current.turnId !== initial.turnId
+                        );
+                        if (isModified) {
+                          const stat = fs.statSync(current.path);
+                          if (stat.mtimeMs < snapTime) {
+                            throw new Error(
+                              `SAFETY NET VIOLATION: ${dbPath} table "claude_scan_state" was modified during test execution! Entry "${current.path}" modification cannot be proven to originate from active external daemon.`,
+                            );
+                          }
+                        }
+                      } else {
+                        // New entry: file must have been modified or created during test execution window
+                        const stat = fs.statSync(current.path);
+                        if (stat.mtimeMs < snapTime) {
+                          throw new Error(
+                            `SAFETY NET VIOLATION: ${dbPath} table "claude_scan_state" was modified during test execution! New entry "${current.path}" cannot be proven to originate from external daemon.`,
+                          );
+                        }
+                      }
+                    }
+                  }
+
+                  // Verify claude_sessions delta if present
+                  if (beforeTables.includes('claude_sessions')) {
+                    const currentRows = db.prepare('SELECT * FROM claude_sessions').all() as ClaudeSessionInfo[];
+                    const initialMap = snap.dbInfo?.claudeSessionsMap || {};
+                    if (currentRows.length < Object.keys(initialMap).length) {
+                      throw new Error(
+                        `SAFETY NET VIOLATION: ${dbPath} table "claude_sessions" was modified during test execution! Records were deleted.`,
+                      );
+                    }
+                    const userHome = os.userInfo().homedir;
+                    const candidateDirs = new Set<string>([
+                      path.join(os.homedir(), '.claude', 'projects'),
+                      path.join(userHome, '.claude', 'projects'),
+                    ]);
+                    if (process.env.AGENTHUB_CLAUDE_PROJECTS_DIR) {
+                      candidateDirs.add(process.env.AGENTHUB_CLAUDE_PROJECTS_DIR);
+                    }
+                    for (const p of Object.values(snap.dbInfo?.profilesMap || {})) {
+                      if (p.home) {
+                        candidateDirs.add(path.join(p.home, '.claude', 'projects'));
+                      }
+                    }
+
+                    for (const current of currentRows) {
+                      if (!current.sessionId || typeof current.sessionId !== 'string') {
+                        throw new Error(`SAFETY NET VIOLATION: ${dbPath} table "claude_sessions" contains invalid entry!`);
+                      }
+                      if (/agenthub-test-|test-worker-|vitest/i.test(current.sessionId)) {
+                        throw new Error(
+                          `SAFETY NET VIOLATION: ${dbPath} table "claude_sessions" was modified during test execution! Entry "${current.sessionId}" contains test sessionId.`,
+                        );
+                      }
+                      if (current.cwd && /agenthub-test-|test-worker-|\/tmp\//i.test(current.cwd)) {
+                        throw new Error(
+                          `SAFETY NET VIOLATION: ${dbPath} table "claude_sessions" was modified during test execution! Entry "${current.sessionId}" references test cwd "${current.cwd}".`,
+                        );
+                      }
+                      if (current.title && /agenthub-test-|test-worker-/i.test(current.title)) {
+                        throw new Error(
+                          `SAFETY NET VIOLATION: ${dbPath} table "claude_sessions" was modified during test execution! Entry "${current.sessionId}" contains test title.`,
+                        );
+                      }
+
+                      // Find session file on disk
+                      let foundSessionFile: string | null = null;
+                      for (const claudeProjectsDir of candidateDirs) {
+                        if (!fs.existsSync(claudeProjectsDir)) continue;
+                        const checkDir = (dir: string): string | null => {
+                          try {
+                            const entries = fs.readdirSync(dir, { withFileTypes: true });
+                            for (const e of entries) {
+                              if (e.isDirectory()) {
+                                const found = checkDir(path.join(dir, e.name));
+                                if (found) return found;
+                              } else if (e.name === `${current.sessionId}.jsonl`) {
+                                return path.join(dir, e.name);
+                              }
+                            }
+                          } catch { /* ignore */ }
+                          return null;
+                        };
+                        foundSessionFile = checkDir(claudeProjectsDir);
+                        if (foundSessionFile) break;
+                      }
+
+                      if (!foundSessionFile) {
+                        throw new Error(
+                          `SAFETY NET VIOLATION: ${dbPath} table "claude_sessions" was modified during test execution! Entry "${current.sessionId}" cannot be proven to originate from external daemon. Tests must not touch hub.db.`,
+                        );
+                      }
+
+                      const initial = initialMap[current.sessionId];
+                      const snapTime = snap.dbInfo?.snapshotTime || 0;
+                      if (initial) {
+                        const isModified = (
+                          current.cwd !== initial.cwd ||
+                          current.title !== initial.title ||
+                          current.lastAt !== initial.lastAt ||
+                          current.messages !== initial.messages ||
+                          current.effectiveTokens !== initial.effectiveTokens
+                        );
+                        if (isModified) {
+                          const stat = fs.statSync(foundSessionFile);
+                          if (stat.mtimeMs < snapTime - 1000) {
+                            throw new Error(
+                              `SAFETY NET VIOLATION: ${dbPath} table "claude_sessions" was modified during test execution! Entry "${current.sessionId}" modification cannot be proven to originate from active external daemon.`,
+                            );
+                          }
+                        }
+                      } else {
+                        // New entry: session file MUST have been actively modified during test execution window
+                        const stat = fs.statSync(foundSessionFile);
+                        if (stat.mtimeMs < snapTime - 1000) {
+                          throw new Error(
+                            `SAFETY NET VIOLATION: ${dbPath} table "claude_sessions" was modified during test execution! New entry "${current.sessionId}" cannot be proven to originate from active external daemon.`,
+                          );
+                        }
                       }
                     }
                   }

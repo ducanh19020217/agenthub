@@ -305,12 +305,21 @@ describe('safety-check hub home comparison', () => {
 
   it('allows legitimate external daemon background activity on events when delta is attributed to daemon', () => {
     const dbPath = path.join(tempDir, 'hub.db');
+    const mockClaudeHome = path.join(tempDir, 'claude_home');
+    const projectDir = path.join(mockClaudeHome, '.claude', 'projects', 'test-proj');
+    fs.mkdirSync(projectDir, { recursive: true });
+    const sessionId = '11111111-2222-3333-4444-555555555555';
+    const sessionFile = path.join(projectDir, `${sessionId}.jsonl`);
+    fs.writeFileSync(sessionFile, '{"init":true}\n');
+
     const db = new Database(dbPath);
     db.exec(`
       CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
       INSERT INTO meta VALUES ('schema_version', '1');
       CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT, path TEXT);
       INSERT INTO projects VALUES ('p1', 'Project 1', '/home/user/p1');
+      CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT, engine TEXT, kind TEXT, home TEXT);
+      INSERT INTO profiles VALUES ('prof-claude', 'prof-claude', 'claude', 'isolated', '${mockClaudeHome}');
       CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, payload TEXT);
       CREATE TABLE tasks (id TEXT PRIMARY KEY, projectId TEXT, worktreePath TEXT);
     `);
@@ -318,34 +327,85 @@ describe('safety-check hub home comparison', () => {
 
     const snap = getHubSnapshot(tempDir);
 
-    // External daemon logs heartbeat
+    // External daemon writes to the session file during execution window
+    const nowTs = Math.floor(Date.now() / 1000) + 1;
+    fs.appendFileSync(sessionFile, '{"turn":1}\n');
+    fs.utimesSync(sessionFile, nowTs, nowTs);
+
+    // External daemon logs brain.updated event
     const db2 = new Database(dbPath);
-    db2.prepare("INSERT INTO events (type, payload) VALUES ('heartbeat', '{}')").run();
+    db2.prepare("INSERT INTO events (type, payload) VALUES ('brain.updated', ?)").run(
+      JSON.stringify({ sessionId }),
+    );
     db2.close();
 
-    // Verify with actual delta attribution link to the SQLite change
+    // Verify with actual delta attribution without manual mocking of verifyDeltaAttribution
     expect(() =>
       verifyHubHomeSafety(snap, tempDir, {
         processHoldingChecker: () => ({
           daemonHolding: true,
           testHolding: false,
           daemonWriteActivity: true,
-          verifyDeltaAttribution: (ctx) => ctx.table === 'events' && ctx.row?.type === 'heartbeat',
         }),
       }),
     ).not.toThrow();
 
-    // If delta attribution does not verify this specific event, it must throw
+    // If an unprovable event (e.g. heartbeat) is also inserted, it must throw
+    const db3 = new Database(dbPath);
+    db3.prepare("INSERT INTO events (type, payload) VALUES ('heartbeat', '{}')").run();
+    db3.close();
+
     expect(() =>
       verifyHubHomeSafety(snap, tempDir, {
         processHoldingChecker: () => ({
           daemonHolding: true,
           testHolding: false,
           daemonWriteActivity: true,
-          verifyDeltaAttribution: (ctx) => ctx.table === 'events' && ctx.row?.type === 'brain.updated',
         }),
       }),
-    ).toThrow(/SAFETY NET VIOLATION:.*events table was modified.*cannot be proven/);
+    ).toThrow(/SAFETY NET VIOLATION:.*Event "heartbeat" cannot be proven to originate from external daemon/);
+  });
+
+  it('reports violation when brain.updated event with pre-existing session is inserted because write source cannot be proven even if held by external daemon with write activity', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const mockClaudeHome = path.join(tempDir, 'claude_home_pre');
+    const projectDir = path.join(mockClaudeHome, '.claude', 'projects', 'test-proj');
+    fs.mkdirSync(projectDir, { recursive: true });
+    const sessionId = '22222222-3333-4444-5555-666666666666';
+    const sessionFile = path.join(projectDir, `${sessionId}.jsonl`);
+    fs.writeFileSync(sessionFile, '{"init":true}\n');
+    // Set mtime to the past (before snapshot)
+    const pastTs = Math.floor(Date.now() / 1000) - 120;
+    fs.utimesSync(sessionFile, pastTs, pastTs);
+
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT, engine TEXT, kind TEXT, home TEXT);
+      INSERT INTO profiles VALUES ('prof-claude', 'prof-claude', 'claude', 'isolated', '${mockClaudeHome}');
+      CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, payload TEXT);
+    `);
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    // Test inserts brain.updated referencing the pre-existing session file without touching the file
+    const db2 = new Database(dbPath);
+    db2.prepare("INSERT INTO events (type, payload) VALUES ('brain.updated', ?)").run(
+      JSON.stringify({ sessionId }),
+    );
+    db2.close();
+
+    expect(() =>
+      verifyHubHomeSafety(snap, tempDir, {
+        processHoldingChecker: () => ({
+          daemonHolding: true,
+          testHolding: false,
+          daemonWriteActivity: true,
+        }),
+      }),
+    ).toThrow(/SAFETY NET VIOLATION:.*Event "brain.updated" cannot be proven to originate from external daemon/);
   });
 
   it('reports violation when a non-sensitive table (e.g. tasks) is modified even if held by external daemon', () => {
@@ -777,12 +837,22 @@ describe('safety-check hub home comparison', () => {
     ).toThrow(/SAFETY NET VIOLATION:.*claude_quota_profiles was modified.*cannot be proven/);
   });
 
-  it('reports violation when valid-looking quota_usage update is made because write source cannot be proven even if held by external daemon with write activity', () => {
+  it('reports violation when valid-looking quota_usage update with matching mtime is made because write source cannot be proven even if held by external daemon with write activity', () => {
     const dbPath = path.join(tempDir, 'hub.db');
+    const mockClaudeHome = path.join(tempDir, 'claude_home_past');
+    const mockClaudeDir = path.join(mockClaudeHome, '.claude');
+    fs.mkdirSync(mockClaudeDir, { recursive: true });
+
+    // File mtime is from the past (before snapshot)
+    const pastTs = Math.floor(Date.now() / 1000) - 300;
+    fs.utimesSync(mockClaudeDir, pastTs, pastTs);
+
     const db = new Database(dbPath);
     db.exec(`
       CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
       INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT, engine TEXT, kind TEXT, home TEXT);
+      INSERT INTO profiles VALUES ('prof1', 'prof1', 'claude', 'isolated', '${mockClaudeHome}');
       CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, payload TEXT);
       CREATE TABLE quota_usage (profileName TEXT, grp TEXT, window TEXT, remainingPct INTEGER, resetAt INTEGER, fetchedAt INTEGER);
       INSERT INTO quota_usage VALUES ('prof1', 'grp1', '5h', 100, 1000, 1000);
@@ -791,9 +861,9 @@ describe('safety-check hub home comparison', () => {
 
     const snap = getHubSnapshot(tempDir);
 
-    // Test attempts valid-looking quota_usage update with advanced fetchedAt
+    // Test attempts valid-looking quota_usage update with pastTs matching disk mtime
     const db2 = new Database(dbPath);
-    db2.prepare("UPDATE quota_usage SET remainingPct = 90, fetchedAt = 2000 WHERE profileName = 'prof1'").run();
+    db2.prepare("UPDATE quota_usage SET remainingPct = 90, fetchedAt = ? WHERE profileName = 'prof1'").run(pastTs);
     db2.close();
 
     expect(() =>
@@ -805,10 +875,16 @@ describe('safety-check hub home comparison', () => {
 
   it('allows legitimate external daemon background updates on claude_quota, claude_quota_profiles, and quota_usage when deltas are attributed to daemon', () => {
     const dbPath = path.join(tempDir, 'hub.db');
+    const mockClaudeHome = path.join(tempDir, 'claude_home_quota');
+    const mockClaudeDir = path.join(mockClaudeHome, '.claude');
+    fs.mkdirSync(mockClaudeDir, { recursive: true });
+
     const db = new Database(dbPath);
     db.exec(`
       CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
       INSERT INTO meta VALUES ('schema_version', '1');
+      CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT, engine TEXT, kind TEXT, home TEXT);
+      INSERT INTO profiles VALUES ('prof1', 'prof1', 'claude', 'isolated', '${mockClaudeHome}');
       CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, payload TEXT);
       CREATE TABLE claude_quota (id INTEGER PRIMARY KEY, status TEXT, resetsAt INTEGER, rateLimitType TEXT, isUsingOverage INTEGER, observedAt TEXT);
       INSERT INTO claude_quota VALUES (1, 'allowed', 1000, 'five_hour', 0, '2026-10-27T00:00:00.000Z');
@@ -820,37 +896,30 @@ describe('safety-check hub home comparison', () => {
     db.close();
 
     const snap = getHubSnapshot(tempDir);
+    const snapTs = Math.floor((snap.dbInfo?.snapshotTime || Date.now()) / 1000);
+    const nowTs = snapTs + 2;
+
+    // External daemon touches candidate path during execution window
+    fs.utimesSync(mockClaudeDir, nowTs, nowTs);
 
     // Daemon legitimately advances observedAt and fetchedAt
     const db2 = new Database(dbPath);
-    db2.prepare("UPDATE claude_quota SET observedAt = '2026-10-27T01:00:00.000Z' WHERE id = 1").run();
-    db2.prepare("UPDATE claude_quota_profiles SET observedAt = '2026-10-27T01:00:00.000Z' WHERE profileName = 'prof1'").run();
-    db2.prepare("UPDATE quota_usage SET remainingPct = 90, fetchedAt = 2000 WHERE profileName = 'prof1'").run();
+    const nowIso = new Date(nowTs * 1000).toISOString();
+    db2.prepare("UPDATE claude_quota SET observedAt = ? WHERE id = 1").run(nowIso);
+    db2.prepare("UPDATE claude_quota_profiles SET observedAt = ? WHERE profileName = 'prof1'").run(nowIso);
+    db2.prepare("UPDATE quota_usage SET remainingPct = 90, fetchedAt = ? WHERE profileName = 'prof1'").run(nowTs);
     db2.close();
 
-    // Verify with delta attribution linked to SQLite deltas
+    // Verify with actual delta attribution without manual mocking of verifyDeltaAttribution
     expect(() =>
       verifyHubHomeSafety(snap, tempDir, {
         processHoldingChecker: () => ({
           daemonHolding: true,
           testHolding: false,
           daemonWriteActivity: true,
-          verifyDeltaAttribution: (ctx) => ['claude_quota', 'claude_quota_profiles', 'quota_usage'].includes(ctx.table),
         }),
       }),
     ).not.toThrow();
-
-    // Fails when verifier only attributes claude_quota but not quota_usage / claude_quota_profiles
-    expect(() =>
-      verifyHubHomeSafety(snap, tempDir, {
-        processHoldingChecker: () => ({
-          daemonHolding: true,
-          testHolding: false,
-          daemonWriteActivity: true,
-          verifyDeltaAttribution: (ctx) => ctx.table === 'claude_quota',
-        }),
-      }),
-    ).toThrow(/SAFETY NET VIOLATION:.*claude_quota_profiles was modified.*cannot be proven/);
   });
 
   it('reports violation when existing sensitive directories (secrets, profiles) are modified', () => {

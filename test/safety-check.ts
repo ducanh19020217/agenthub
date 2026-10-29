@@ -16,6 +16,8 @@ export interface HubHomeSnapshot {
   /** Checksums of sensitive files that must not be created or modified by tests. */
   sensitiveChecksums: Map<string, string | null>;
   hubDbExists: boolean;
+  hubDbWalExists: boolean;
+  hubDbShmExists: boolean;
   hubDbSensitiveHash: string | null;
 }
 
@@ -138,6 +140,8 @@ export function getHubSnapshot(dir: string): HubHomeSnapshot {
     entries: exists ? getHubEntries(dir) : [],
     sensitiveChecksums: exists ? getSensitiveChecksums(dir) : new Map(),
     hubDbExists,
+    hubDbWalExists: exists && fs.existsSync(path.join(dir, 'hub.db-wal')),
+    hubDbShmExists: exists && fs.existsSync(path.join(dir, 'hub.db-shm')),
     hubDbSensitiveHash: hubDbExists ? getHubDbSensitiveHash(dbPath) : null,
   };
 }
@@ -177,6 +181,17 @@ export function verifyHubHomeSafety(snap: HubHomeSnapshot, currentDir: string = 
       if (!fs.existsSync(dbPath) || snap.hubDbSensitiveHash !== getHubDbSensitiveHash(dbPath)) {
         throw new Error(
           `SAFETY NET VIOLATION: ${currentDir} was modified during test execution! Sensitive entry changed: hub.db`,
+        );
+      }
+    }
+
+    for (const [sidecar, exists] of [
+      ['hub.db-wal', snap.hubDbWalExists],
+      ['hub.db-shm', snap.hubDbShmExists],
+    ] as const) {
+      if (exists && !fs.existsSync(path.join(currentDir, sidecar))) {
+        throw new Error(
+          `SAFETY NET VIOLATION: ${currentDir} was modified during test execution! Sensitive entry changed: ${sidecar}`,
         );
       }
     }

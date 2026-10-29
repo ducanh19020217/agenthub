@@ -96,7 +96,7 @@ describe('safety-check hub home comparison', () => {
   });
 
   it('reports violation when sensitive files are created during test', () => {
-    for (const name of ['config.json', 'token', 'hub.db', 'secrets', 'profiles']) {
+    for (const name of ['config.json', 'token', 'hub.db', 'hub.db-wal', 'hub.db-shm', 'secrets', 'profiles']) {
       const snap = getHubSnapshot(tempDir);
       if (name === 'secrets' || name === 'profiles') {
         fs.mkdirSync(path.join(tempDir, name));
@@ -182,6 +182,30 @@ describe('safety-check hub home comparison', () => {
 
     expect(() => verifyHubHomeSafety(snap)).toThrow(
       /SAFETY NET VIOLATION:.*Sensitive entry changed: hub\.db/,
+    );
+  });
+
+  it('reports violation when existing hub.db-wal is deleted during test', () => {
+    const walPath = path.join(tempDir, 'hub.db-wal');
+    fs.writeFileSync(walPath, 'wal-content');
+
+    const snap = getHubSnapshot(tempDir);
+    fs.rmSync(walPath);
+
+    expect(() => verifyHubHomeSafety(snap)).toThrow(
+      /SAFETY NET VIOLATION:.*Sensitive entry changed: hub\.db-wal/,
+    );
+  });
+
+  it('reports violation when existing hub.db-shm is deleted during test', () => {
+    const shmPath = path.join(tempDir, 'hub.db-shm');
+    fs.writeFileSync(shmPath, 'shm-content');
+
+    const snap = getHubSnapshot(tempDir);
+    fs.rmSync(shmPath);
+
+    expect(() => verifyHubHomeSafety(snap)).toThrow(
+      /SAFETY NET VIOLATION:.*Sensitive entry changed: hub\.db-shm/,
     );
   });
 

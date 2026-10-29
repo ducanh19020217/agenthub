@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import Database from 'better-sqlite3';
 
 interface AgyHomesSnapshot {
   dir: string;
@@ -14,11 +15,14 @@ export interface HubHomeSnapshot {
   entries: string[];
   /** Checksums of sensitive files that must not be created or modified by tests. */
   sensitiveChecksums: Map<string, string | null>;
+  hubDbExists: boolean;
+  hubDbSensitiveHash: string | null;
 }
 
 // Sensitive entries: tests must never create or modify these.
-const SENSITIVE_FILES = ['config.json', 'token', 'hub.db', 'hub.db-wal', 'hub.db-shm'];
+const SENSITIVE_FILES = ['config.json', 'token'];
 const SENSITIVE_DIRS = ['secrets', 'profiles'];
+const SENSITIVE_TABLES = ['projects', 'profiles', 'departments', 'permission_rules', 'chat_permissions'];
 
 // Runtime entries that the daemon or deploy process may create in the real hub
 // home while tests are running. Only specific deploy/web entries are allowed.
@@ -47,6 +51,50 @@ export function getHubEntries(dir: string): string[] {
     return fs.readdirSync(dir).sort();
   } catch {
     return [];
+  }
+}
+
+export function getHubDbSensitiveHash(dbPath: string): string | null {
+  if (!fs.existsSync(dbPath)) return null;
+  let db: Database.Database | undefined;
+  try {
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    let schemaVersion = '';
+    try {
+      const row = db.prepare('SELECT user_version FROM pragma_user_version').get() as { user_version: number } | undefined;
+      schemaVersion = String(row?.user_version ?? '');
+    } catch { /* ignore */ }
+
+    let tables: string[] = [];
+    try {
+      const rows = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string }[];
+      tables = rows.map((r) => r.name);
+    } catch { /* ignore */ }
+
+    const hash = crypto.createHash('sha256');
+    hash.update(schemaVersion);
+    hash.update(tables.join(','));
+
+    for (const tableName of SENSITIVE_TABLES) {
+      if (tables.includes(tableName)) {
+        try {
+          const rows = db.prepare(`SELECT * FROM "${tableName}" ORDER BY rowid`).all();
+          hash.update(JSON.stringify(rows));
+        } catch {
+          try {
+            const rows = db.prepare(`SELECT * FROM "${tableName}"`).all();
+            hash.update(JSON.stringify(rows));
+          } catch { /* ignore */ }
+        }
+      }
+    }
+    return hash.digest('hex');
+  } catch {
+    return null;
+  } finally {
+    if (db) {
+      try { db.close(); } catch { /* ignore */ }
+    }
   }
 }
 
@@ -82,11 +130,15 @@ function getSensitiveChecksums(dir: string): Map<string, string | null> {
 
 export function getHubSnapshot(dir: string): HubHomeSnapshot {
   const exists = fs.existsSync(dir);
+  const dbPath = path.join(dir, 'hub.db');
+  const hubDbExists = exists && fs.existsSync(dbPath);
   return {
     dir,
     exists,
     entries: exists ? getHubEntries(dir) : [],
     sensitiveChecksums: exists ? getSensitiveChecksums(dir) : new Map(),
+    hubDbExists,
+    hubDbSensitiveHash: hubDbExists ? getHubDbSensitiveHash(dbPath) : null,
   };
 }
 
@@ -116,6 +168,15 @@ export function verifyHubHomeSafety(snap: HubHomeSnapshot, currentDir: string = 
         throw new Error(
           `SAFETY NET VIOLATION: ${currentDir} was modified during test execution! ` +
           `Sensitive entry changed: ${name}`,
+        );
+      }
+    }
+
+    if (snap.hubDbExists) {
+      const dbPath = path.join(currentDir, 'hub.db');
+      if (!fs.existsSync(dbPath) || snap.hubDbSensitiveHash !== getHubDbSensitiveHash(dbPath)) {
+        throw new Error(
+          `SAFETY NET VIOLATION: ${currentDir} was modified during test execution! Sensitive entry changed: hub.db`,
         );
       }
     }

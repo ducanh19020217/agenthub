@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import Database from 'better-sqlite3';
 import {
   isIgnoredHubEntry,
   findUnexpectedHubEntries,
@@ -110,7 +111,7 @@ describe('safety-check hub home comparison', () => {
   it('reports violation when existing sensitive files are modified during test', () => {
     // Set up all sensitive files and dirs with original content
     const originals: [string, string][] = [
-      ['config.json', '{"original":true}'], ['token', 'original-token'], ['hub.db', 'original-db'],
+      ['config.json', '{"original":true}'], ['token', 'original-token'],
     ];
     for (const [name, content] of originals) fs.writeFileSync(path.join(tempDir, name), content);
     fs.mkdirSync(path.join(tempDir, 'secrets'));
@@ -131,6 +132,57 @@ describe('safety-check hub home comparison', () => {
     fs.writeFileSync(path.join(tempDir, 'secrets', 'key.pem'), 'original');
     fs.writeFileSync(path.join(tempDir, 'profiles', 'default.json'), '{"changed":true}');
     expect(() => verifyHubHomeSafety(snap)).toThrow(/Sensitive entry changed: profiles/);
+  });
+
+  it('does not report violation when non-sensitive table in hub.db is modified', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec('CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT)');
+    db.exec('CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT)');
+    db.prepare('INSERT INTO projects (id, name) VALUES (?, ?)').run('proj1', 'Project 1');
+    db.prepare('INSERT INTO events (type) VALUES (?)').run('heartbeat');
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    const db2 = new Database(dbPath);
+    db2.prepare('INSERT INTO events (type) VALUES (?)').run('heartbeat2');
+    db2.close();
+
+    expect(() => verifyHubHomeSafety(snap)).not.toThrow();
+  });
+
+  it('reports violation when sensitive table in hub.db is modified', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec('CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT)');
+    db.exec('CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT)');
+    db.prepare('INSERT INTO projects (id, name) VALUES (?, ?)').run('proj1', 'Project 1');
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+
+    const db2 = new Database(dbPath);
+    db2.prepare('INSERT INTO projects (id, name) VALUES (?, ?)').run('proj2', 'Project 2');
+    db2.close();
+
+    expect(() => verifyHubHomeSafety(snap)).toThrow(
+      /SAFETY NET VIOLATION:.*Sensitive entry changed: hub\.db/,
+    );
+  });
+
+  it('reports violation when existing hub.db is deleted during test', () => {
+    const dbPath = path.join(tempDir, 'hub.db');
+    const db = new Database(dbPath);
+    db.exec('CREATE TABLE projects (id TEXT PRIMARY KEY)');
+    db.close();
+
+    const snap = getHubSnapshot(tempDir);
+    fs.rmSync(dbPath);
+
+    expect(() => verifyHubHomeSafety(snap)).toThrow(
+      /SAFETY NET VIOLATION:.*Sensitive entry changed: hub\.db/,
+    );
   });
 
   it('does not report violation when only directory mtime changes', () => {

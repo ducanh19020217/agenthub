@@ -23,71 +23,49 @@ describe('safety-check hub home comparison', () => {
   });
 
   it('correctly classifies ignored hub entries', () => {
-    // hub.db*
-    expect(isIgnoredHubEntry('hub.db')).toBe(true);
-    expect(isIgnoredHubEntry('hub.db-wal')).toBe(true);
-    expect(isIgnoredHubEntry('hub.db-shm')).toBe(true);
-
-    // chat-mcp*.json
-    expect(isIgnoredHubEntry('chat-mcp.json')).toBe(true);
-    expect(isIgnoredHubEntry('chat-mcp-x.json')).toBe(true);
-    expect(isIgnoredHubEntry('chat-mcp-123.json')).toBe(true);
-
-    // Runtime state and directories written by the daemon/worker
-    expect(isIgnoredHubEntry('claude-failover.json')).toBe(true);
-    expect(isIgnoredHubEntry('deploy-push-state.json')).toBe(true);
-    expect(isIgnoredHubEntry('deploy-pending-state.json')).toBe(true);
-    expect(isIgnoredHubEntry('deploy-restart.json')).toBe(true);
-    expect(isIgnoredHubEntry('daemon.log')).toBe(true);
-    expect(isIgnoredHubEntry('sessions')).toBe(true);
-    expect(isIgnoredHubEntry('empty-hooks')).toBe(true);
-    expect(isIgnoredHubEntry('no-browser-bin')).toBe(true);
-
     // web-staging-* / web-previous-*
     expect(isIgnoredHubEntry('web-staging-abc')).toBe(true);
     expect(isIgnoredHubEntry('web-staging-df7pHi')).toBe(true);
     expect(isIgnoredHubEntry('web-previous-1234-5678')).toBe(true);
 
-    // *.tmp / *.tmp-*
-    expect(isIgnoredHubEntry('foo.tmp')).toBe(true);
-    expect(isIgnoredHubEntry('foo.tmp-123')).toBe(true);
-    expect(isIgnoredHubEntry('.tmp')).toBe(true);
-    expect(isIgnoredHubEntry('.tmp-something')).toBe(true);
+    // Deploy runtime files and web directory
+    expect(isIgnoredHubEntry('web')).toBe(true);
+    expect(isIgnoredHubEntry('deploy-restart.json')).toBe(true);
+    expect(isIgnoredHubEntry('deploy-push-state.json')).toBe(true);
+    expect(isIgnoredHubEntry('deploy-pending-state.json')).toBe(true);
 
-    // allowed directories
-    const ignoredDirs = [
-      'logs',
-      'worktrees',
-      'cache',
-      'web',
-      'claude-homes',
-      'codex-homes',
-      'claude-usage-cwd',
-      'shims',
-    ];
-    for (const dir of ignoredDirs) {
-      expect(isIgnoredHubEntry(dir)).toBe(true);
-    }
+    // Sensitive entries must NEVER be ignored
+    expect(isIgnoredHubEntry('config.json')).toBe(false);
+    expect(isIgnoredHubEntry('token')).toBe(false);
+    expect(isIgnoredHubEntry('hub.db')).toBe(false);
+    expect(isIgnoredHubEntry('hub.db-wal')).toBe(false);
+    expect(isIgnoredHubEntry('hub.db-shm')).toBe(false);
+    expect(isIgnoredHubEntry('secrets')).toBe(false);
+    expect(isIgnoredHubEntry('profiles')).toBe(false);
 
-    // unexpected entries
+    // unexpected entries and entries outside minimal allowlist
     expect(isIgnoredHubEntry('unknown.txt')).toBe(false);
+    expect(isIgnoredHubEntry('chat-mcp.json')).toBe(false);
     expect(isIgnoredHubEntry('chat-mcp.txt')).toBe(false);
     expect(isIgnoredHubEntry('unexpected-dir')).toBe(false);
     expect(isIgnoredHubEntry('web-other')).toBe(false);
-    expect(isIgnoredHubEntry('config.json')).toBe(false);
-    expect(isIgnoredHubEntry('token')).toBe(false);
-    expect(isIgnoredHubEntry('secrets')).toBe(false);
-    expect(isIgnoredHubEntry('profiles')).toBe(false);
+    expect(isIgnoredHubEntry('daemon.log')).toBe(false);
+    expect(isIgnoredHubEntry('claude-failover.json')).toBe(false);
+    expect(isIgnoredHubEntry('logs')).toBe(false);
+    expect(isIgnoredHubEntry('worktrees')).toBe(false);
+    expect(isIgnoredHubEntry('cache')).toBe(false);
+    expect(isIgnoredHubEntry('foo.tmp')).toBe(false);
   });
 
   it('filters out ignored entries and detects unexpected additions', () => {
-    const before = ['daemon.log'];
-    const after = ['daemon.log', 'chat-mcp-1.json', 'hub.db-wal', 'unrecognized-file.txt'];
-    expect(findUnexpectedHubEntries(before, after)).toEqual(['unrecognized-file.txt']);
+    const before = ['web'];
+    const after = ['web', 'web-staging-test', 'deploy-restart.json', 'hub.db-wal', 'unrecognized-file.txt'];
+    // hub.db-wal is NOT ignored (sensitive), so it shows as unexpected
+    expect(findUnexpectedHubEntries(before, after)).toEqual(['hub.db-wal', 'unrecognized-file.txt']);
   });
 
   it('reports violation when a new entry has an unexpected name', () => {
-    fs.writeFileSync(path.join(tempDir, 'daemon.log'), 'initial');
+    fs.mkdirSync(path.join(tempDir, 'web'));
     const snap = getHubSnapshot(tempDir);
 
     fs.writeFileSync(path.join(tempDir, 'suspicious-file.txt'), 'content');
@@ -98,24 +76,18 @@ describe('safety-check hub home comparison', () => {
   });
 
   it('does not report violation when allowlisted runtime entries are added or modified', () => {
-    fs.writeFileSync(path.join(tempDir, 'chat-mcp-x.json'), '{"initial":true}');
-    fs.writeFileSync(path.join(tempDir, 'hub.db'), 'initial');
+    fs.writeFileSync(path.join(tempDir, 'deploy-restart.json'), '{"initial":true}');
+    fs.mkdirSync(path.join(tempDir, 'web'), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, 'web', 'index.html'), 'initial');
     const snap = getHubSnapshot(tempDir);
 
-    // Modify existing file
-    fs.writeFileSync(path.join(tempDir, 'chat-mcp-x.json'), '{"modified":true}');
+    // Modify existing allowlisted files
+    fs.writeFileSync(path.join(tempDir, 'deploy-restart.json'), '{"modified":true}');
+    fs.writeFileSync(path.join(tempDir, 'web', 'index.html'), 'modified');
 
-    // Add new ignored files
-    fs.writeFileSync(path.join(tempDir, 'hub.db-wal'), 'wal data');
-    fs.writeFileSync(path.join(tempDir, 'chat-mcp-another.json'), '{}');
-    fs.writeFileSync(path.join(tempDir, 'claude-failover.json'), '{}');
+    // Add new allowlisted runtime entries
     fs.writeFileSync(path.join(tempDir, 'deploy-push-state.json'), '{}');
     fs.writeFileSync(path.join(tempDir, 'deploy-pending-state.json'), '{}');
-    fs.writeFileSync(path.join(tempDir, 'deploy-restart.json'), '{}');
-    fs.writeFileSync(path.join(tempDir, 'atomic.tmp-123'), 'temp');
-    fs.mkdirSync(path.join(tempDir, 'logs'), { recursive: true });
-    fs.mkdirSync(path.join(tempDir, 'sessions'), { recursive: true });
-    fs.mkdirSync(path.join(tempDir, 'empty-hooks'), { recursive: true });
     fs.mkdirSync(path.join(tempDir, 'web-staging-abc'), { recursive: true });
     fs.mkdirSync(path.join(tempDir, 'web-previous-12345'), { recursive: true });
 
@@ -123,7 +95,7 @@ describe('safety-check hub home comparison', () => {
   });
 
   it('allows web-staging-abc and web-previous additions without error, but reports unexpected directories', () => {
-    fs.writeFileSync(path.join(tempDir, 'daemon.log'), 'initial');
+    fs.writeFileSync(path.join(tempDir, 'deploy-restart.json'), 'initial');
     const snap = getHubSnapshot(tempDir);
 
     fs.mkdirSync(path.join(tempDir, 'web-staging-abc'));
@@ -136,8 +108,8 @@ describe('safety-check hub home comparison', () => {
     );
   });
 
-  it('reports violation when sensitive files like config.json, token, secrets, or profiles appear', () => {
-    for (const name of ['config.json', 'token', 'secrets', 'profiles']) {
+  it('reports violation when sensitive files are created during test', () => {
+    for (const name of ['config.json', 'token', 'hub.db', 'secrets', 'profiles']) {
       const snap = getHubSnapshot(tempDir);
       if (name === 'secrets' || name === 'profiles') {
         fs.mkdirSync(path.join(tempDir, name));
@@ -145,14 +117,61 @@ describe('safety-check hub home comparison', () => {
         fs.writeFileSync(path.join(tempDir, name), '{}');
       }
       expect(() => verifyHubHomeSafety(snap)).toThrow(
-        new RegExp(`SAFETY NET VIOLATION:.*${name}`),
+        /SAFETY NET VIOLATION/,
       );
       fs.rmSync(path.join(tempDir, name), { recursive: true, force: true });
     }
   });
 
+  it('reports violation when existing sensitive files are modified during test', () => {
+    // Pre-populate sensitive files
+    fs.writeFileSync(path.join(tempDir, 'config.json'), '{"original":true}');
+    fs.writeFileSync(path.join(tempDir, 'token'), 'original-token');
+    fs.writeFileSync(path.join(tempDir, 'hub.db'), 'original-db');
+    fs.mkdirSync(path.join(tempDir, 'secrets'));
+    fs.writeFileSync(path.join(tempDir, 'secrets', 'key.pem'), 'original');
+    fs.mkdirSync(path.join(tempDir, 'profiles'));
+    fs.writeFileSync(path.join(tempDir, 'profiles', 'default.json'), '{}');
+    const snap = getHubSnapshot(tempDir);
+
+    // Modify config.json
+    fs.writeFileSync(path.join(tempDir, 'config.json'), '{"modified":true}');
+    expect(() => verifyHubHomeSafety(snap)).toThrow(
+      /SAFETY NET VIOLATION:.*Sensitive entry changed: config\.json/,
+    );
+    // Restore
+    fs.writeFileSync(path.join(tempDir, 'config.json'), '{"original":true}');
+
+    // Modify token
+    fs.writeFileSync(path.join(tempDir, 'token'), 'modified-token');
+    expect(() => verifyHubHomeSafety(snap)).toThrow(
+      /SAFETY NET VIOLATION:.*Sensitive entry changed: token/,
+    );
+    fs.writeFileSync(path.join(tempDir, 'token'), 'original-token');
+
+    // Modify hub.db
+    fs.writeFileSync(path.join(tempDir, 'hub.db'), 'modified-db');
+    expect(() => verifyHubHomeSafety(snap)).toThrow(
+      /SAFETY NET VIOLATION:.*Sensitive entry changed: hub\.db/,
+    );
+    fs.writeFileSync(path.join(tempDir, 'hub.db'), 'original-db');
+
+    // Modify secrets/ contents
+    fs.writeFileSync(path.join(tempDir, 'secrets', 'key.pem'), 'modified');
+    expect(() => verifyHubHomeSafety(snap)).toThrow(
+      /SAFETY NET VIOLATION:.*Sensitive entry changed: secrets/,
+    );
+    fs.writeFileSync(path.join(tempDir, 'secrets', 'key.pem'), 'original');
+
+    // Modify profiles/ contents
+    fs.writeFileSync(path.join(tempDir, 'profiles', 'default.json'), '{"changed":true}');
+    expect(() => verifyHubHomeSafety(snap)).toThrow(
+      /SAFETY NET VIOLATION:.*Sensitive entry changed: profiles/,
+    );
+  });
+
   it('does not report violation when only directory mtime changes', () => {
-    fs.writeFileSync(path.join(tempDir, 'daemon.log'), 'initial');
+    fs.writeFileSync(path.join(tempDir, 'deploy-restart.json'), 'initial');
     const snap = getHubSnapshot(tempDir);
 
     // Explicitly modify the directory mtime

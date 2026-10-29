@@ -12,33 +12,24 @@ export interface HubHomeSnapshot {
   dir: string;
   exists: boolean;
   entries: string[];
+  /** Checksums of sensitive files that must not be created or modified by tests. */
+  sensitiveChecksums: Map<string, string | null>;
 }
+
+// Sensitive entries: tests must never create or modify these.
+const SENSITIVE_FILES = ['config.json', 'token', 'hub.db', 'hub.db-wal', 'hub.db-shm'];
+const SENSITIVE_DIRS = ['secrets', 'profiles'];
 
 // Runtime entries that the daemon or worker setup may create in the real hub
 // home while tests are running. User/configuration data must not be added here.
 const ALLOWED_HUB_RUNTIME_ENTRIES = new Set([
-  'claude-failover.json',
-  'deploy-push-state.json',
   'deploy-pending-state.json',
+  'deploy-push-state.json',
   'deploy-restart.json',
-  'daemon.log',
-  'logs',
-  'worktrees',
-  'cache',
   'web',
-  'claude-homes',
-  'codex-homes',
-  'claude-usage-cwd',
-  'shims',
-  'sessions',
-  'empty-hooks',
-  'no-browser-bin',
 ]);
 
 export function isIgnoredHubEntry(name: string): boolean {
-  if (name.startsWith('hub.db')) return true;
-  if (/^chat-mcp.*\.json$/.test(name)) return true;
-  if (name.endsWith('.tmp') || name.includes('.tmp-')) return true;
   if (name.startsWith('web-staging-')) return true;
   if (name.startsWith('web-previous-')) return true;
   if (ALLOWED_HUB_RUNTIME_ENTRIES.has(name)) return true;
@@ -60,12 +51,48 @@ export function getHubEntries(dir: string): string[] {
   }
 }
 
+function getSensitiveChecksums(dir: string): Map<string, string | null> {
+  const checksums = new Map<string, string | null>();
+  for (const name of SENSITIVE_FILES) {
+    checksums.set(name, getChecksum(path.join(dir, name)));
+  }
+  for (const name of SENSITIVE_DIRS) {
+    // For directories, record whether they exist (null = absent, hash of listing = present)
+    const dirPath = path.join(dir, name);
+    if (fs.existsSync(dirPath)) {
+      try {
+        // Hash the recursive listing + file contents for full integrity
+        const hash = crypto.createHash('sha256');
+        const entries = fs.readdirSync(dirPath, { recursive: true })
+          .map(String).sort();
+        hash.update(entries.join('\n'));
+        for (const entry of entries) {
+          const entryPath = path.join(dirPath, entry);
+          try {
+            const stat = fs.statSync(entryPath);
+            if (stat.isFile()) {
+              hash.update(fs.readFileSync(entryPath));
+            }
+          } catch { /* skip unreadable */ }
+        }
+        checksums.set(name, hash.digest('hex'));
+      } catch {
+        checksums.set(name, null);
+      }
+    } else {
+      checksums.set(name, null);
+    }
+  }
+  return checksums;
+}
+
 export function getHubSnapshot(dir: string): HubHomeSnapshot {
   const exists = fs.existsSync(dir);
   return {
     dir,
     exists,
     entries: exists ? getHubEntries(dir) : [],
+    sensitiveChecksums: exists ? getSensitiveChecksums(dir) : new Map(),
   };
 }
 
@@ -85,6 +112,18 @@ export function verifyHubHomeSafety(snap: HubHomeSnapshot, currentDir: string = 
       throw new Error(
         `SAFETY NET VIOLATION: ${currentDir} was modified during test execution! Unexpected new entries: [${unexpected.join(', ')}]`,
       );
+    }
+
+    // Check sensitive files and dirs for content modification
+    const currentChecksums = getSensitiveChecksums(currentDir);
+    for (const [name, originalChecksum] of snap.sensitiveChecksums) {
+      const currentChecksum = currentChecksums.get(name) ?? null;
+      if (originalChecksum !== currentChecksum) {
+        throw new Error(
+          `SAFETY NET VIOLATION: ${currentDir} was modified during test execution! ` +
+          `Sensitive entry changed: ${name}`,
+        );
+      }
     }
   }
 }

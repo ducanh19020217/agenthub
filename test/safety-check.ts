@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import Database from 'better-sqlite3';
 
 interface AgyHomesSnapshot {
   dir: string;
@@ -12,32 +13,30 @@ export interface HubHomeSnapshot {
   dir: string;
   exists: boolean;
   entries: string[];
+  /** Checksums of sensitive files that must not be created or modified by tests. */
+  sensitiveChecksums: Map<string, string | null>;
+  hubDbExists: boolean;
+  hubDbWalExists: boolean;
+  hubDbShmExists: boolean;
+  hubDbSensitiveHash: string | null;
 }
 
-// Runtime entries that the daemon or worker setup may create in the real hub
-// home while tests are running. User/configuration data must not be added here.
+// Sensitive entries: tests must never create or modify these.
+const SENSITIVE_FILES = ['config.json', 'token'];
+const SENSITIVE_DIRS = ['secrets', 'profiles'];
+const SENSITIVE_TABLES = ['projects', 'profiles', 'departments', 'permission_rules', 'chat_permissions'];
+
+// Runtime entries that the daemon or deploy process may create in the real hub
+// home while tests are running. Only specific deploy/web entries are allowed.
 const ALLOWED_HUB_RUNTIME_ENTRIES = new Set([
-  'claude-failover.json',
   'deploy-push-state.json',
-  'deploy-pending-state.json',
   'deploy-restart.json',
-  'daemon.log',
-  'logs',
-  'worktrees',
-  'cache',
   'web',
-  'claude-homes',
-  'codex-homes',
-  'claude-usage-cwd',
-  'shims',
-  'sessions',
-  'empty-hooks',
 ]);
 
 export function isIgnoredHubEntry(name: string): boolean {
-  if (name.startsWith('hub.db')) return true;
-  if (/^chat-mcp.*\.json$/.test(name)) return true;
-  if (name.endsWith('.tmp') || name.includes('.tmp-')) return true;
+  if (name.startsWith('web-staging-')) return true;
+  if (name.startsWith('web-previous-')) return true;
   if (ALLOWED_HUB_RUNTIME_ENTRIES.has(name)) return true;
   return false;
 }
@@ -57,12 +56,93 @@ export function getHubEntries(dir: string): string[] {
   }
 }
 
+export function getHubDbSensitiveHash(dbPath: string): string | null {
+  if (!fs.existsSync(dbPath)) return null;
+  let db: Database.Database | undefined;
+  try {
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    let schemaVersion = '';
+    try {
+      const row = db.prepare('SELECT user_version FROM pragma_user_version').get() as { user_version: number } | undefined;
+      schemaVersion = String(row?.user_version ?? '');
+    } catch { /* ignore */ }
+
+    let tables: string[] = [];
+    try {
+      const rows = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string }[];
+      tables = rows.map((r) => r.name);
+    } catch { /* ignore */ }
+
+    const hash = crypto.createHash('sha256');
+    hash.update(schemaVersion);
+    hash.update(tables.join(','));
+
+    for (const tableName of SENSITIVE_TABLES) {
+      if (tables.includes(tableName)) {
+        try {
+          const rows = db.prepare(`SELECT * FROM "${tableName}" ORDER BY rowid`).all();
+          hash.update(JSON.stringify(rows));
+        } catch {
+          try {
+            const rows = db.prepare(`SELECT * FROM "${tableName}"`).all();
+            hash.update(JSON.stringify(rows));
+          } catch { /* ignore */ }
+        }
+      }
+    }
+    return hash.digest('hex');
+  } catch {
+    return null;
+  } finally {
+    if (db) {
+      try { db.close(); } catch { /* ignore */ }
+    }
+  }
+}
+
+function getSensitiveChecksums(dir: string): Map<string, string | null> {
+  const checksums = new Map<string, string | null>();
+  for (const name of SENSITIVE_FILES) {
+    checksums.set(name, getChecksum(path.join(dir, name)));
+  }
+  for (const name of SENSITIVE_DIRS) {
+    const dirPath = path.join(dir, name);
+    if (fs.existsSync(dirPath)) {
+      try {
+        const hash = crypto.createHash('sha256');
+        const entries = fs.readdirSync(dirPath, { recursive: true }).map(String).sort();
+        hash.update(entries.join('\n'));
+        for (const entry of entries) {
+          const entryPath = path.join(dirPath, entry);
+          try {
+            const stat = fs.statSync(entryPath);
+            if (stat.isFile()) hash.update(fs.readFileSync(entryPath));
+          } catch { /* skip unreadable */ }
+        }
+        checksums.set(name, hash.digest('hex'));
+      } catch {
+        checksums.set(name, null);
+      }
+    } else {
+      checksums.set(name, null);
+    }
+  }
+  return checksums;
+}
+
 export function getHubSnapshot(dir: string): HubHomeSnapshot {
   const exists = fs.existsSync(dir);
+  const dbPath = path.join(dir, 'hub.db');
+  const hubDbExists = exists && fs.existsSync(dbPath);
   return {
     dir,
     exists,
     entries: exists ? getHubEntries(dir) : [],
+    sensitiveChecksums: exists ? getSensitiveChecksums(dir) : new Map(),
+    hubDbExists,
+    hubDbWalExists: exists && fs.existsSync(path.join(dir, 'hub.db-wal')),
+    hubDbShmExists: exists && fs.existsSync(path.join(dir, 'hub.db-shm')),
+    hubDbSensitiveHash: hubDbExists ? getHubDbSensitiveHash(dbPath) : null,
   };
 }
 
@@ -82,6 +162,38 @@ export function verifyHubHomeSafety(snap: HubHomeSnapshot, currentDir: string = 
       throw new Error(
         `SAFETY NET VIOLATION: ${currentDir} was modified during test execution! Unexpected new entries: [${unexpected.join(', ')}]`,
       );
+    }
+
+    // Check sensitive files and dirs for content modification
+    const currentChecksums = getSensitiveChecksums(currentDir);
+    for (const [name, originalChecksum] of snap.sensitiveChecksums) {
+      const currentChecksum = currentChecksums.get(name) ?? null;
+      if (originalChecksum !== currentChecksum) {
+        throw new Error(
+          `SAFETY NET VIOLATION: ${currentDir} was modified during test execution! ` +
+          `Sensitive entry changed: ${name}`,
+        );
+      }
+    }
+
+    if (snap.hubDbExists) {
+      const dbPath = path.join(currentDir, 'hub.db');
+      if (!fs.existsSync(dbPath) || snap.hubDbSensitiveHash !== getHubDbSensitiveHash(dbPath)) {
+        throw new Error(
+          `SAFETY NET VIOLATION: ${currentDir} was modified during test execution! Sensitive entry changed: hub.db`,
+        );
+      }
+    }
+
+    for (const [sidecar, exists] of [
+      ['hub.db-wal', snap.hubDbWalExists],
+      ['hub.db-shm', snap.hubDbShmExists],
+    ] as const) {
+      if (exists && !fs.existsSync(path.join(currentDir, sidecar))) {
+        throw new Error(
+          `SAFETY NET VIOLATION: ${currentDir} was modified during test execution! Sensitive entry changed: ${sidecar}`,
+        );
+      }
     }
   }
 }

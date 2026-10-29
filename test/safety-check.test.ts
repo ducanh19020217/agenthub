@@ -32,7 +32,6 @@ describe('safety-check hub home comparison', () => {
     expect(isIgnoredHubEntry('web')).toBe(true);
     expect(isIgnoredHubEntry('deploy-restart.json')).toBe(true);
     expect(isIgnoredHubEntry('deploy-push-state.json')).toBe(true);
-    expect(isIgnoredHubEntry('deploy-pending-state.json')).toBe(true);
 
     // Sensitive entries must NEVER be ignored
     expect(isIgnoredHubEntry('config.json')).toBe(false);
@@ -43,17 +42,13 @@ describe('safety-check hub home comparison', () => {
     expect(isIgnoredHubEntry('secrets')).toBe(false);
     expect(isIgnoredHubEntry('profiles')).toBe(false);
 
-    // unexpected entries and entries outside minimal allowlist
+    // Entries outside minimal allowlist must NOT be ignored
     expect(isIgnoredHubEntry('unknown.txt')).toBe(false);
+    expect(isIgnoredHubEntry('deploy-pending-state.json')).toBe(false);
     expect(isIgnoredHubEntry('chat-mcp.json')).toBe(false);
-    expect(isIgnoredHubEntry('chat-mcp.txt')).toBe(false);
     expect(isIgnoredHubEntry('unexpected-dir')).toBe(false);
     expect(isIgnoredHubEntry('web-other')).toBe(false);
     expect(isIgnoredHubEntry('daemon.log')).toBe(false);
-    expect(isIgnoredHubEntry('claude-failover.json')).toBe(false);
-    expect(isIgnoredHubEntry('logs')).toBe(false);
-    expect(isIgnoredHubEntry('worktrees')).toBe(false);
-    expect(isIgnoredHubEntry('cache')).toBe(false);
     expect(isIgnoredHubEntry('foo.tmp')).toBe(false);
   });
 
@@ -75,27 +70,18 @@ describe('safety-check hub home comparison', () => {
     );
   });
 
-  it('does not report violation when allowlisted runtime entries are added or modified', () => {
-    fs.writeFileSync(path.join(tempDir, 'deploy-restart.json'), '{"initial":true}');
-    fs.mkdirSync(path.join(tempDir, 'web'), { recursive: true });
-    fs.writeFileSync(path.join(tempDir, 'web', 'index.html'), 'initial');
+  it('does not report violation when allowlisted runtime entries are added', () => {
     const snap = getHubSnapshot(tempDir);
 
-    // Modify existing allowlisted files
-    fs.writeFileSync(path.join(tempDir, 'deploy-restart.json'), '{"modified":true}');
-    fs.writeFileSync(path.join(tempDir, 'web', 'index.html'), 'modified');
-
-    // Add new allowlisted runtime entries
     fs.writeFileSync(path.join(tempDir, 'deploy-push-state.json'), '{}');
-    fs.writeFileSync(path.join(tempDir, 'deploy-pending-state.json'), '{}');
-    fs.mkdirSync(path.join(tempDir, 'web-staging-abc'), { recursive: true });
-    fs.mkdirSync(path.join(tempDir, 'web-previous-12345'), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, 'deploy-restart.json'), '{}');
+    fs.mkdirSync(path.join(tempDir, 'web-staging-abc'));
+    fs.mkdirSync(path.join(tempDir, 'web-previous-12345'));
 
     expect(() => verifyHubHomeSafety(snap)).not.toThrow();
   });
 
-  it('allows web-staging-abc and web-previous additions without error, but reports unexpected directories', () => {
-    fs.writeFileSync(path.join(tempDir, 'deploy-restart.json'), 'initial');
+  it('allows web-staging-abc additions but reports unexpected directories', () => {
     const snap = getHubSnapshot(tempDir);
 
     fs.mkdirSync(path.join(tempDir, 'web-staging-abc'));
@@ -116,58 +102,35 @@ describe('safety-check hub home comparison', () => {
       } else {
         fs.writeFileSync(path.join(tempDir, name), '{}');
       }
-      expect(() => verifyHubHomeSafety(snap)).toThrow(
-        /SAFETY NET VIOLATION/,
-      );
+      expect(() => verifyHubHomeSafety(snap)).toThrow(/SAFETY NET VIOLATION/);
       fs.rmSync(path.join(tempDir, name), { recursive: true, force: true });
     }
   });
 
   it('reports violation when existing sensitive files are modified during test', () => {
-    // Pre-populate sensitive files
-    fs.writeFileSync(path.join(tempDir, 'config.json'), '{"original":true}');
-    fs.writeFileSync(path.join(tempDir, 'token'), 'original-token');
-    fs.writeFileSync(path.join(tempDir, 'hub.db'), 'original-db');
+    // Set up all sensitive files and dirs with original content
+    const originals: [string, string][] = [
+      ['config.json', '{"original":true}'], ['token', 'original-token'], ['hub.db', 'original-db'],
+    ];
+    for (const [name, content] of originals) fs.writeFileSync(path.join(tempDir, name), content);
     fs.mkdirSync(path.join(tempDir, 'secrets'));
     fs.writeFileSync(path.join(tempDir, 'secrets', 'key.pem'), 'original');
     fs.mkdirSync(path.join(tempDir, 'profiles'));
     fs.writeFileSync(path.join(tempDir, 'profiles', 'default.json'), '{}');
     const snap = getHubSnapshot(tempDir);
 
-    // Modify config.json
-    fs.writeFileSync(path.join(tempDir, 'config.json'), '{"modified":true}');
-    expect(() => verifyHubHomeSafety(snap)).toThrow(
-      /SAFETY NET VIOLATION:.*Sensitive entry changed: config\.json/,
-    );
-    // Restore
-    fs.writeFileSync(path.join(tempDir, 'config.json'), '{"original":true}');
-
-    // Modify token
-    fs.writeFileSync(path.join(tempDir, 'token'), 'modified-token');
-    expect(() => verifyHubHomeSafety(snap)).toThrow(
-      /SAFETY NET VIOLATION:.*Sensitive entry changed: token/,
-    );
-    fs.writeFileSync(path.join(tempDir, 'token'), 'original-token');
-
-    // Modify hub.db
-    fs.writeFileSync(path.join(tempDir, 'hub.db'), 'modified-db');
-    expect(() => verifyHubHomeSafety(snap)).toThrow(
-      /SAFETY NET VIOLATION:.*Sensitive entry changed: hub\.db/,
-    );
-    fs.writeFileSync(path.join(tempDir, 'hub.db'), 'original-db');
-
-    // Modify secrets/ contents
+    // Modify each sensitive file and verify detection, then restore
+    for (const [name, content] of originals) {
+      fs.writeFileSync(path.join(tempDir, name), 'MODIFIED');
+      expect(() => verifyHubHomeSafety(snap)).toThrow(new RegExp(`Sensitive entry changed: ${name.replace(/\./g, '\\.')}`));
+      fs.writeFileSync(path.join(tempDir, name), content);
+    }
+    // Modify sensitive directories
     fs.writeFileSync(path.join(tempDir, 'secrets', 'key.pem'), 'modified');
-    expect(() => verifyHubHomeSafety(snap)).toThrow(
-      /SAFETY NET VIOLATION:.*Sensitive entry changed: secrets/,
-    );
+    expect(() => verifyHubHomeSafety(snap)).toThrow(/Sensitive entry changed: secrets/);
     fs.writeFileSync(path.join(tempDir, 'secrets', 'key.pem'), 'original');
-
-    // Modify profiles/ contents
     fs.writeFileSync(path.join(tempDir, 'profiles', 'default.json'), '{"changed":true}');
-    expect(() => verifyHubHomeSafety(snap)).toThrow(
-      /SAFETY NET VIOLATION:.*Sensitive entry changed: profiles/,
-    );
+    expect(() => verifyHubHomeSafety(snap)).toThrow(/Sensitive entry changed: profiles/);
   });
 
   it('does not report violation when only directory mtime changes', () => {

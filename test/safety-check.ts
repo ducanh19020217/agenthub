@@ -20,10 +20,9 @@ export interface HubHomeSnapshot {
 const SENSITIVE_FILES = ['config.json', 'token', 'hub.db', 'hub.db-wal', 'hub.db-shm'];
 const SENSITIVE_DIRS = ['secrets', 'profiles'];
 
-// Runtime entries that the daemon or worker setup may create in the real hub
-// home while tests are running. User/configuration data must not be added here.
+// Runtime entries that the daemon or deploy process may create in the real hub
+// home while tests are running. Only specific deploy/web entries are allowed.
 const ALLOWED_HUB_RUNTIME_ENTRIES = new Set([
-  'deploy-pending-state.json',
   'deploy-push-state.json',
   'deploy-restart.json',
   'web',
@@ -57,22 +56,17 @@ function getSensitiveChecksums(dir: string): Map<string, string | null> {
     checksums.set(name, getChecksum(path.join(dir, name)));
   }
   for (const name of SENSITIVE_DIRS) {
-    // For directories, record whether they exist (null = absent, hash of listing = present)
     const dirPath = path.join(dir, name);
     if (fs.existsSync(dirPath)) {
       try {
-        // Hash the recursive listing + file contents for full integrity
         const hash = crypto.createHash('sha256');
-        const entries = fs.readdirSync(dirPath, { recursive: true })
-          .map(String).sort();
+        const entries = fs.readdirSync(dirPath, { recursive: true }).map(String).sort();
         hash.update(entries.join('\n'));
         for (const entry of entries) {
           const entryPath = path.join(dirPath, entry);
           try {
             const stat = fs.statSync(entryPath);
-            if (stat.isFile()) {
-              hash.update(fs.readFileSync(entryPath));
-            }
+            if (stat.isFile()) hash.update(fs.readFileSync(entryPath));
           } catch { /* skip unreadable */ }
         }
         checksums.set(name, hash.digest('hex'));

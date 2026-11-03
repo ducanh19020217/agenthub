@@ -167,7 +167,7 @@ describe('database migrations', () => {
     expect(migrated.prepare('SELECT id, externalRef, body, level, waitReason FROM tasks').get()).toEqual({
       id: 'p/task', externalRef: 'ref-1', body: 'body', level: 'hard', waitReason: 'focus',
     });
-    expect(migrated.prepare("SELECT value FROM meta WHERE key = 'schema_version'").pluck().get()).toBe('57');
+    expect(migrated.prepare("SELECT value FROM meta WHERE key = 'schema_version'").pluck().get()).toBe(String(MIGRATIONS.length - 1));
     migrated.close();
     fresh.close();
   });

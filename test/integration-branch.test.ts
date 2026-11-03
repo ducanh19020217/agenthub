@@ -324,7 +324,8 @@ describe('Integration branch and cross-project dependencies', () => {
       name: 'Auto merge',
       path: repo,
       defaultBranch: 'main',
-      settings: { integration: { enabled: true, branch: 'agenthub/integration', autoMerge: true } },
+      settings: { integration: { enabled: true, branch: 'agenthub/integration', autoMerge: true }, review: { autoMerge: true } },
+      reviewChain: [{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }],
       merge: { enabled: true, worktrees: {}, checks: ['node -e "process.exit(0)"'], timeoutSec: 30 },
     });
     const intPath = path.join(tmpDir, 'integration', 'auto-proj');
@@ -356,6 +357,7 @@ describe('Integration branch and cross-project dependencies', () => {
       path: repo,
       defaultBranch: 'main',
       settings: { integration: { enabled: true, branch: 'agenthub/integration' }, review: { autoMerge: false } },
+      reviewChain: [{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }],
       merge: { enabled: true, worktrees: {}, checks: [], timeoutSec: 30 },
     });
     ctx.service.createTask({ project: 'rev-proj', slug: 'feat1', title: 'Feature 1', body: 'Do it', level: 'easy', start: true });
@@ -422,7 +424,7 @@ describe('Integration branch and cross-project dependencies', () => {
     expect(ctx.taskRepo.get(task3.id)!.status).toBe('review');
   });
 
-  it('auto-merges a Codex approval without a review chain on the project default branch', async () => {
+  it('does not auto-merge a Codex approval without a review chain on the project default branch', async () => {
     const repo = path.join(tmpDir, 'review-no-chain-repo');
     initGitRepo(repo, 'main');
     ctx.service.createProject({
@@ -447,8 +449,9 @@ describe('Integration branch and cross-project dependencies', () => {
       by: 'codex-reviewer',
       feedback: 'ok',
     });
-    await vi.waitFor(() => expect(ctx.taskRepo.get(task.id)!.status).toBe('done'), { timeout: 5000 });
-    expect(fs.existsSync(path.join(repo, 'feature.txt'))).toBe(true);
+    await ctx.service.autoMergeReviewedTask(task.id);
+    expect(ctx.taskRepo.get(task.id)!.status).toBe('review');
+    expect(fs.existsSync(path.join(repo, 'feature.txt'))).toBe(false);
   });
 
   it('retries an escalated review even when the brain runs in auto mode', async () => {

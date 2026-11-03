@@ -325,7 +325,7 @@ export function createContext(
     if (taskId && data.reviewChainComplete === true) {
       // ReviewTask emits this event before it releases its reviewingTasks guard.
       // Defer the merge so the normal service path can finish first.
-      setImmediate(() => void service.autoMergeReviewedTask(taskId));
+      setImmediate(() => void service.autoMergeReviewedTask(taskId).catch(() => undefined));
     }
   });
   scheduler.getEventBus().on('task.queued', (taskId) => {

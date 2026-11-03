@@ -68,6 +68,8 @@ import { SetupManager } from '../tools/setup.js';
 import { createNewGitProject, inspectProject, readClaudeSessionExcerpt } from '../projects/inspect.js';
 import type { DeployService } from '../deploy.js';
 import type { PerfCollector } from '../perf.js';
+import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../presets.js';
+import { computeEffectiveConfig } from '../effective-config.js';
 
 const execFileAsync = promisify(execFile);
 const CODEX_EMAIL_RECHECK_MS = 10 * 60 * 1000;
@@ -288,13 +290,13 @@ export const DepartmentInputSchema = z.object({
   maxParallel: z.number().int().nonnegative().default(0),
   claudeDailyTokenBudget: z.number().int().nonnegative().default(0),
   telegramTopicId: z.number().int().positive().nullable().default(null),
-  brainEngine: z.enum(['claude', 'codex']).default('claude'),
-  brainModel: z.string().min(1).default('sonnet'),
+  brainEngine: z.enum(['inherit', 'claude', 'codex']).nullable().transform((v) => v ?? 'inherit').default('inherit'),
+  brainModel: z.string().min(1).nullable().transform((v) => v ?? 'inherit').default('inherit'),
   brainCodexProfile: z.string().min(1).nullable().default(null),
-  brainMode: z.enum(['inherit', 'off', 'suggest', 'auto']).default('inherit'),
-  brainPermissions: z.enum(['inherit', 'standard', 'trusted', 'full']).default('full'),
-  brainDailyTokenBudget: z.number().int().nonnegative().default(0),
-  brainMaxTurnsPerHour: z.number().int().positive().default(20),
+  brainMode: z.enum(['inherit', 'off', 'suggest', 'auto']).nullable().transform((v) => v ?? 'inherit').default('inherit'),
+  brainPermissions: z.enum(['inherit', 'standard', 'trusted', 'full']).nullable().transform((v) => v ?? 'inherit').default('inherit'),
+  brainDailyTokenBudget: z.number().int().nonnegative().nullable().transform((v) => v ?? 0).default(0),
+  brainMaxTurnsPerHour: z.number().int().nonnegative().nullable().transform((v) => v ?? 0).default(0),
 });
 
 export const CreateProjectSchema = z.object({
@@ -501,14 +503,10 @@ export const UpdateConfigSchema = z.object({
     .optional(),
   reviewer: z.object({
     enabled: z.boolean().optional(),
-    model: reviewerModelValidator.or(z.literal('')).optional(),
     timeoutSec: z.number().int().positive().optional(),
     failoverSec: z.number().int().positive().optional(),
     maxChangesRequested: z.number().int().positive().optional(),
-    claudeFallback: z.boolean().optional(),
     claudeProfiles: z.array(z.string().min(1)).max(20).optional(),
-    claudeModel: z.enum(['opus', 'sonnet', 'haiku']).optional(),
-    claudeFallbackAfterMin: z.number().int().min(1).max(1440).optional(),
     order: ReviewerOrderSchema.optional(),
     fallback: ReviewerFallbackSchema.partial().optional(),
     arbiter: ReviewerArbiterSchema.optional(),
@@ -986,6 +984,23 @@ export class AppService {
     }
     this.departmentRepo.setProfiles(id, parsed.profiles);
     this.scheduler.getEventBus().emit('department.changed', undefined, { departmentId: id, action: 'profiles' });
+    return this.getDepartment(id);
+  }
+
+  updateDepartmentProjects(id: string, raw: unknown) {
+    if (!this.departmentRepo?.get(id)) throw new HttpError(404, 'not_found', `Department "${id}" không tồn tại`);
+    const schema = z.object({
+      projectIds: z.array(z.string().min(1)).optional(),
+      projectId: z.string().min(1).optional(),
+    }).refine((data) => data.projectIds !== undefined || data.projectId !== undefined, {
+      message: 'projectIds hoặc projectId là bắt buộc',
+    });
+    const parsed = schema.parse(raw);
+    const projectIds = parsed.projectIds ?? (parsed.projectId ? [parsed.projectId] : []);
+    for (const projectId of projectIds) {
+      if (!this.projectRepo.get(projectId)) throw new HttpError(404, 'not_found', `Project "${projectId}" không tồn tại`);
+      this.updateProject(projectId, { departmentId: id });
+    }
     return this.getDepartment(id);
   }
 
@@ -3635,8 +3650,13 @@ export class AppService {
     if (!project) return;
     const settings = projectSettings(project);
     if (!(settings.review.autoMerge || settings.integration.autoMerge)) return;
+    const chain = project.review
+      ? (() => { try { return (JSON.parse(project.review) as { chain?: Array<{ reviewer?: string }> }).chain || []; } catch { return []; } })()
+      : project.reviewChain
+        ? (() => { try { return JSON.parse(project.reviewChain) as Array<{ reviewer?: string }>; } catch { return []; } })()
+        : [];
     const last = this.reviewRepo.getByTask(taskId).at(-1);
-    if (!last || (last.actor !== 'codex-reviewer' && last.actor !== 'claude-reviewer') || last.verdict !== 'approved') return;
+    if (!chain.length || !chain.at(-1)?.reviewer?.startsWith('codex:') || !last || last.actor !== 'codex-reviewer' || last.verdict !== 'approved') return;
     const checks = this.scheduler.getCheckResults(taskId);
     if (checks.length === 0 || checks.some((c) => !c.ok)) return;
     if (this.failedAutoMerges.has(taskId)) return;
@@ -4235,6 +4255,9 @@ export class AppService {
       brain: {
         engine: this.config.brain.engine || 'claude',
         mode: this.config.brain.mode,
+        permissions: this.config.brain.permissions,
+        maxTurnsPerHour: this.config.brain.maxTurnsPerHour,
+        dailyTokenBudget: this.config.brain.dailyTokenBudget,
         maxConcurrent: this.config.brain.maxConcurrent,
         digest: this.config.brain.digest,
         fallback: this.config.brain.fallback,
@@ -4302,7 +4325,11 @@ export class AppService {
         suggestions.add('codex:gpt-5.6-luna');
       }
     }
-    const configured = [...this.config.defaultModelChains.hard, ...this.config.defaultModelChains.easy, this.config.reviewer.model];
+    const configured = [
+      ...this.config.defaultModelChains.hard,
+      ...this.config.defaultModelChains.easy,
+      ...this.config.reviewer.order.map((item) => `${item.engine}:${item.model}`),
+    ];
     const configuredModels = [...new Set(configured.filter(Boolean))];
     return { suggestions: [...suggestions].sort(), configured: configuredModels };
   }
@@ -4344,5 +4371,18 @@ export class AppService {
     this.chatService.setClaudeApiKey(value);
     this.scheduler.getEventBus().emit('config.updated', undefined, { brain: { apiKey: 'configured' } });
     return this.getClaudeApiKeyStatus();
+  }
+
+  getPresets() {
+    return Object.values(PRESET_DEFINITIONS);
+  }
+
+  applyPreset(raw: unknown) {
+    const parsed = ApplyPresetInputSchema.parse(raw);
+    return applyPreset(this, parsed);
+  }
+
+  getEffectiveConfig(projectId: string) {
+    return computeEffectiveConfig(this, projectId);
   }
 }

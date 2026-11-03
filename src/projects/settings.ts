@@ -38,6 +38,7 @@ export const ProjectSettingsSchema = z.object({
   }).default({}),
   brain: z.object({
     engine: z.enum(['inherit', 'claude', 'codex']).default('inherit'),
+    model: z.string().trim().min(1).optional(),
     codexProfile: z.string().min(1).optional(),
     /**
      * Who coordinates this project:
@@ -52,6 +53,12 @@ export const ProjectSettingsSchema = z.object({
     dailyTokenBudget: z.number().int().min(0).optional(),
     maxTurnsPerHour: z.number().int().positive().optional(),
   }).default({}),
+  preset: z.enum(['safe', 'balanced', 'auto', 'custom']).optional(),
+  autoFixOnFail: z.boolean().optional(),
+  planning: z.object({
+    requireApproval: z.boolean().optional(),
+    approvalMinTasks: z.number().int().min(0).max(100).optional(),
+  }).optional(),
   worktree: z.object({
     /** Absolute parent directory for task worktrees. Each task is created as <root>/<slug>. */
     root: z.string().min(1).refine((value) => path.isAbsolute(value), 'phải là đường dẫn tuyệt đối').optional(),
@@ -107,6 +114,12 @@ export const ProjectSettingsInputSchema = z.object({
   references: z.array(ReferenceSchema).max(20).optional(),
   reviewChecklist: z.array(z.string().min(1).max(500).refine(isSafeProjectRelativePath, 'phải là đường dẫn tương đối trong project, không được chứa ..')).max(5).optional(),
   notifications: ProjectSettingsSchema.shape.notifications.removeDefault().partial().optional(),
+  preset: z.enum(['safe', 'balanced', 'auto', 'custom']).optional(),
+  autoFixOnFail: z.boolean().optional(),
+  planning: z.object({
+    requireApproval: z.boolean().optional(),
+    approvalMinTasks: z.number().int().min(0).max(100).optional(),
+  }).partial().optional(),
 });
 
 export type ProjectSettingsInput = z.infer<typeof ProjectSettingsInputSchema>;
@@ -118,7 +131,14 @@ export function parseProjectSettings(raw: string | null | undefined): ProjectSet
   if (!raw) return ProjectSettingsSchema.parse({});
   try {
     const result = ProjectSettingsSchema.safeParse(JSON.parse(raw));
-    return result.success ? result.data : ProjectSettingsSchema.parse({});
+    if (result.success) {
+      const data = result.data;
+      const effectiveAutoMerge = Boolean(data.review?.autoMerge || data.integration?.autoMerge);
+      data.review.autoMerge = effectiveAutoMerge;
+      data.integration.autoMerge = effectiveAutoMerge;
+      return data;
+    }
+    return ProjectSettingsSchema.parse({});
   } catch {
     return ProjectSettingsSchema.parse({});
   }
@@ -145,13 +165,26 @@ export function mergeProjectSettings(current: ProjectSettings, input: ProjectSet
     );
   }
 
+  const nextAutoMerge = input.review?.autoMerge !== undefined
+    ? input.review.autoMerge
+    : (input.integration?.autoMerge !== undefined
+      ? input.integration.autoMerge
+      : (current.review?.autoMerge || current.integration?.autoMerge || false));
+
   return ProjectSettingsSchema.parse({
+    preset: input.preset !== undefined ? input.preset : current.preset,
+    autoFixOnFail: input.autoFixOnFail !== undefined ? input.autoFixOnFail : current.autoFixOnFail,
+    planning: input.planning !== undefined ? (input.planning ? { ...current.planning, ...input.planning } : undefined) : current.planning,
     brain: { ...current.brain, ...input.brain },
     commitConvention: { ...current.commitConvention, ...input.commitConvention },
     worktree: { ...current.worktree, ...input.worktree },
-    integration: { ...current.integration, ...input.integration },
+    integration: {
+      ...current.integration,
+      ...input.integration,
+      autoMerge: nextAutoMerge,
+    },
     review: {
-      autoMerge: input.review?.autoMerge ?? current.review?.autoMerge ?? false,
+      autoMerge: nextAutoMerge,
       ...(nextReviewOrder ? { order: nextReviewOrder } : {}),
       ...(nextReviewFallback ? { fallback: nextReviewFallback } : {}),
     },

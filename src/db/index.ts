@@ -1090,6 +1090,13 @@ export interface QuotaUsageRow {
 
 export type WaitReason = 'disk' | 'quota' | 'no_department_profile' | 'no_matching_profile' | 'parallel' | 'department_parallel' | 'profile_busy' | 'project_unavailable' | 'focus' | 'slot' | 'load' | 'dependency' | null;
 
+export interface BlockingDiskInfo {
+  path: string;
+  label: string;
+  freeGB: number;
+  minFreeGB: number;
+}
+
 export interface TaskRow {
   id: string;
   projectId: string;
@@ -1105,6 +1112,7 @@ export interface TaskRow {
   sourceRef?: string | null;
   status: string;
   waitReason?: WaitReason;
+  blockingDisk?: BlockingDiskInfo | null;
   dependsOn: string;
   attempt: number;
   resume: number;

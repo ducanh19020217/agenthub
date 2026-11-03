@@ -401,4 +401,90 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     expect(waitingEvent?.payload?.path).toBe(path.join(config.worktreesDir, 'proj'));
     expect(waitingEvent?.payload?.label).toBe('Worktrees');
   });
+
+  it('exposes distinct blockingDisk metadata per task when multiple projects have low space on different drives', async () => {
+    const drive1 = path.join(tmpDir, 'drive1');
+    const drive2 = path.join(tmpDir, 'drive2');
+    fs.mkdirSync(drive1, { recursive: true });
+    fs.mkdirSync(drive2, { recursive: true });
+
+    ctx.projectRepo.insert({
+      id: 'proj1',
+      name: 'Project 1',
+      path: path.join(tmpDir, 'repo'),
+      defaultBranch: 'main',
+      maxParallel: 2,
+      settings: JSON.stringify({ worktree: { root: drive1 } }),
+    });
+
+    ctx.projectRepo.insert({
+      id: 'proj2',
+      name: 'Project 2',
+      path: path.join(tmpDir, 'repo'),
+      defaultBranch: 'main',
+      maxParallel: 2,
+      settings: JSON.stringify({ worktree: { root: drive2 } }),
+    });
+
+    fakeDiskReader = (p: string) => {
+      const normalized = path.resolve(p);
+      if (normalized.startsWith(path.resolve(drive1))) {
+        return { freeGB: 0.4, totalGB: 100 };
+      }
+      if (normalized.startsWith(path.resolve(drive2))) {
+        return { freeGB: 1.2, totalGB: 100 };
+      }
+      return { freeGB: 20, totalGB: 100 };
+    };
+
+    ctx.taskRepo.insert({
+      id: 'proj1/t1',
+      projectId: 'proj1',
+      slug: 't1',
+      title: 'Task 1 on drive1',
+      status: 'queued',
+      level: 'easy',
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj2/t2',
+      projectId: 'proj2',
+      slug: 't2',
+      title: 'Task 2 on drive2',
+      status: 'queued',
+      level: 'easy',
+    });
+
+    ctx.scheduler.tick();
+
+    expect(ctx.taskRepo.get('proj1/t1')?.status).toBe('waiting_quota');
+    expect(ctx.taskRepo.get('proj1/t1')?.waitReason).toBe('disk');
+    expect(ctx.taskRepo.get('proj2/t2')?.status).toBe('waiting_quota');
+    expect(ctx.taskRepo.get('proj2/t2')?.waitReason).toBe('disk');
+
+    // Verify listTasks exposes accurate blockingDisk per task
+    const tasks = ctx.service.listTasks();
+    const task1 = tasks.find((t) => t.id === 'proj1/t1');
+    const task2 = tasks.find((t) => t.id === 'proj2/t2');
+
+    expect(task1?.blockingDisk).toBeDefined();
+    expect(task1?.blockingDisk?.freeGB).toBe(0.4);
+    expect(task1?.blockingDisk?.minFreeGB).toBe(3);
+    expect(task1?.blockingDisk?.path).toBe(drive1);
+    expect(task1?.blockingDisk?.label).toBe(`Worktrees (${drive1})`);
+
+    expect(task2?.blockingDisk).toBeDefined();
+    expect(task2?.blockingDisk?.freeGB).toBe(1.2);
+    expect(task2?.blockingDisk?.minFreeGB).toBe(3);
+    expect(task2?.blockingDisk?.path).toBe(drive2);
+    expect(task2?.blockingDisk?.label).toBe(`Worktrees (${drive2})`);
+
+    // Verify getTask exposes accurate blockingDisk per task
+    const detail1 = await ctx.service.getTask('proj1/t1');
+    const detail2 = await ctx.service.getTask('proj2/t2');
+    expect(detail1.blockingDisk?.freeGB).toBe(0.4);
+    expect(detail1.blockingDisk?.path).toBe(drive1);
+    expect(detail2.blockingDisk?.freeGB).toBe(1.2);
+    expect(detail2.blockingDisk?.path).toBe(drive2);
+  });
 });

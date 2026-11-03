@@ -3810,7 +3810,7 @@ export class Scheduler {
     return this.getMonitoredDisks().find((disk) => disk.low);
   }
 
-  private getBlockingDiskForTask(task: TaskRow): MonitoredDisk | undefined {
+  getBlockingDiskForTask(task: TaskRow): MonitoredDisk | undefined {
     // 1. Hub home check: blocks all tasks if low
     const hubHome = this.getHubHomeDisk();
     if (hubHome.low) return hubHome;

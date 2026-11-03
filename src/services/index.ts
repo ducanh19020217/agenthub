@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { HttpError } from '../errors.js';
 import { DEFAULT_PROJECT_SETTINGS, mergeProjectSettings, ProjectSettingsInputSchema, projectSettings } from '../projects/settings.js';
-import { projectWorktreeRoots, validateProjectWorktreeRoot } from '../projects/paths.js';
+import { projectWorktreeRoot, projectWorktreeRoots, validateProjectWorktreeRoot } from '../projects/paths.js';
 import { ensureIntegrationNodeModules, ensureIntegrationWorktree, getIntegrationStatus, removeIntegrationWorktree, validateIntegrationBranch } from '../projects/integration.js';
 import { resolveProjectFile } from '../projects/paths.js';
 import path from 'node:path';
@@ -32,6 +32,7 @@ import {
   BrainDirectiveRepo,
   TaskBatchRow,
   CiRepo,
+  BlockingDiskInfo,
 } from '../db/index.js';
 import type { CiWatchService } from '../ci.js';
 import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
@@ -152,10 +153,11 @@ function apiProfile(profile: ProfileRow): ProfileRow {
   };
 }
 
-function apiTask(task: TaskRow): TaskRow {
+function apiTask(task: TaskRow, blockingDisk?: BlockingDiskInfo | null): TaskRow {
   return {
     ...task,
     waitReason: task.waitReason ?? null,
+    blockingDisk: blockingDisk !== undefined ? blockingDisk : (task.blockingDisk ?? null),
     createdAt: toApiTime(task.createdAt)!,
     updatedAt: toApiTime(task.updatedAt)!,
   };
@@ -2797,12 +2799,60 @@ export class AppService {
   }
 
   // --- Tasks ---
+  getBlockingDiskForTask(task: TaskRow): BlockingDiskInfo | null {
+    if (task.waitReason !== 'disk') return null;
+    let disk: MonitoredDisk | undefined;
+    if (this.scheduler?.getBlockingDiskForTask) {
+      disk = this.scheduler.getBlockingDiskForTask(task);
+    } else {
+      const diskReader = this.scheduler ? this.scheduler.getDiskReader() : getDiskSpaceSync;
+      const hubHomeSpace = diskReader(this.config.hubHome);
+      const hubHomeMinFreeGB = this.config.disk.hubHomeMinFreeGB ?? 1;
+      if (hubHomeSpace.freeGB < hubHomeMinFreeGB) {
+        disk = {
+          path: this.config.hubHome,
+          label: 'Ổ chứa dữ liệu hub (~/.agenthub)',
+          minFreeGB: hubHomeMinFreeGB,
+          source: 'hub_home',
+          ...hubHomeSpace,
+          low: true,
+        };
+      } else {
+        const project = this.projectRepo.get(task.projectId);
+        const projectRoot = project ? projectWorktreeRoot(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir;
+        const projectSpace = diskReader(projectRoot);
+        const projectMinFreeGB = this.config.disk.minFreeGB;
+        if (projectSpace.freeGB < projectMinFreeGB) {
+          disk = {
+            path: projectRoot,
+            label: 'Worktrees',
+            minFreeGB: projectMinFreeGB,
+            source: 'worktrees',
+            ...projectSpace,
+            low: true,
+          };
+        } else {
+          const extraDisks = getMonitoredDisks([], projectMinFreeGB, this.config.disk.extraPaths, process.env.NODE_ENV !== 'test', diskReader);
+          disk = extraDisks.find((d) => d.source === 'extra' && d.low);
+        }
+      }
+    }
+    if (!disk) return null;
+    return {
+      path: disk.path,
+      label: disk.source === 'worktrees' ? `${disk.label} (${disk.path})` : disk.label,
+      freeGB: disk.freeGB,
+      minFreeGB: disk.minFreeGB,
+    };
+  }
+
   private decorateTasks(tasks: TaskRow[]): TaskRow[] {
     const projects = new Map(this.projectRepo.getAll().map((project) => [project.id, project]));
     const running = this.scheduler.getRunning();
     return tasks.map((task) => {
       const run = running.get(task.id);
       const project = projects.get(task.projectId);
+      const blockingDisk = this.getBlockingDiskForTask(task);
       let reviewChain = parseReviewChain(project?.reviewChain);
       if (project?.review) {
         try { reviewChain = parseReviewChain(JSON.stringify((JSON.parse(project.review) as { chain?: unknown }).chain || [])); } catch { /* invalid settings are ignored */ }
@@ -2822,7 +2872,8 @@ export class AppService {
         ? (reviewerRun.engine.id === 'claude' ? 'claude' : 'codex')
         : (isFallback ? fallbackReviewer : (reviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex'));
       return {
-        ...apiTask(task),
+        ...apiTask(task, blockingDisk),
+        blockingDisk,
         reviewChain,
         reviewer,
         checks: this.scheduler.getCheckResults(task.id),
@@ -2959,8 +3010,10 @@ export class AppService {
       ? (reviewerRun.engine.id === 'claude' ? 'claude' : 'codex')
       : (isFallback ? fallbackReviewer : (reviews.at(-1)?.actor === 'claude-reviewer' ? 'claude' : (activeReviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex')));
 
+    const blockingDisk = this.getBlockingDiskForTask(task);
     return {
-      ...apiTask(task),
+      ...apiTask(task, blockingDisk),
+      blockingDisk,
       reviewer,
       events,
       paused: Boolean(activeRun?.paused),
@@ -2992,7 +3045,7 @@ export class AppService {
       worktreePath: task.worktreePath,
       checks: this.scheduler.getCheckResults(taskId),
       sourceRef: task.sourceRef ? JSON.parse(task.sourceRef) : null,
-      derivedTasks: this.taskRepo.getDerivedFrom(taskId).map(apiTask),
+      derivedTasks: this.taskRepo.getDerivedFrom(taskId).map((t) => apiTask(t, this.getBlockingDiskForTask(t))),
       claudeCost: (() => { const measured = this.claudeSessionRepo?.taskCost(taskId); return measured ? { measured: measured.effectiveTokens > 0, ...measured } : { measured: false, effectiveTokens: 0, sessions: 0 }; })(),
     };
   }
@@ -3352,7 +3405,7 @@ export class AppService {
         skipDeps: true,
       });
       taskDepsToPopulate.push({ taskId, deps: normalizedDeps });
-      createdTasks.push(apiTask(this.taskRepo.get(taskId)!));
+      createdTasks.push(apiTask(this.taskRepo.get(taskId)!, this.getBlockingDiskForTask(this.taskRepo.get(taskId)!)));
     }
 
     // Phase 2: populate task_deps now that all tasks exist in DB
@@ -3374,7 +3427,7 @@ export class AppService {
     if (parsed.dispatch) this.dispatchBatch(batchId);
 
     const batchRow = apiBatch(this.taskBatchRepo.get(batchId)!);
-    const tasks = this.taskRepo.getByBatch(batchId).map(apiTask);
+    const tasks = this.taskRepo.getByBatch(batchId).map((t) => apiTask(t, this.getBlockingDiskForTask(t)));
     return { ...batchRow, tasks, progress: batchProgress(tasks) };
   }
 
@@ -3386,7 +3439,7 @@ export class AppService {
     if (!batch) {
       throw new HttpError(404, 'not_found', `Đợt "${id}" không tồn tại`);
     }
-    const tasks = this.taskRepo.getByBatch(id).map(apiTask);
+    const tasks = this.taskRepo.getByBatch(id).map((t) => apiTask(t, this.getBlockingDiskForTask(t)));
     return { ...apiBatch(batch), tasks, progress: batchProgress(tasks) };
   }
 
@@ -3511,7 +3564,8 @@ export class AppService {
       batchId,
     });
 
-    return apiTask(this.taskRepo.get(taskId)!);
+    const created = this.taskRepo.get(taskId)!;
+    return apiTask(created, this.getBlockingDiskForTask(created));
   }
 
   removeTaskFromBatch(batchId: string, idParam: string): { ok: boolean } {

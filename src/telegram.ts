@@ -3506,7 +3506,7 @@ export class TelegramBotService {
       const snapshot = this.quotaCapacity();
       if (this.quotaIncidentActive) {
         this.quotaIncidentActive = false;
-        if (!snapshot || snapshot.runnable.length > 0) this.broadcastMessage('✅ <b>Có quota trở lại</b>');
+        if (snapshot && snapshot.runnable.length > 0) this.broadcastMessage('✅ <b>Có quota trở lại</b>');
       }
     }
     if (type === 'task.waiting_quota' && p.reason === 'quota' && this.taskRepo) {
@@ -3529,7 +3529,7 @@ export class TelegramBotService {
         this.allQuotaNotified.delete(quotaKey);
         if (this.quotaIncidentActive) {
           this.quotaIncidentActive = false;
-          if (!snapshot || snapshot.runnable.length > 0) this.broadcastMessage('✅ <b>Có quota trở lại</b>');
+          if (snapshot && snapshot.runnable.length > 0) this.broadcastMessage('✅ <b>Có quota trở lại</b>');
         }
         return;
       }

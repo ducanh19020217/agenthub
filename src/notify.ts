@@ -184,8 +184,8 @@ export class NotificationService {
       const snapshot = this.quotaCapacity();
       if (this.quotaIncidentActive) {
         this.quotaIncidentActive = false;
-        if (!snapshot || snapshot.runnable.length > 0) {
-          this.notify(snapshot ? this.quotaRecoveryMessage(snapshot) : '✅ Có quota trở lại', 'normal');
+        if (snapshot && snapshot.runnable.length > 0) {
+          this.notify(this.quotaRecoveryMessage(snapshot), 'normal');
         }
       }
     }
@@ -209,8 +209,8 @@ export class NotificationService {
         this.allQuotaNotified.delete(quotaKey);
         if (this.quotaIncidentActive) {
           this.quotaIncidentActive = false;
-          if (!snapshot || snapshot.runnable.length > 0) {
-            this.notify(snapshot ? this.quotaRecoveryMessage(snapshot) : '✅ Có quota trở lại', 'normal');
+          if (snapshot && snapshot.runnable.length > 0) {
+            this.notify(this.quotaRecoveryMessage(snapshot), 'normal');
           }
         }
         return;

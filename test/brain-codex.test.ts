@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -344,6 +344,102 @@ describe('Brain Codex Engine Integration and Failover', () => {
       const updatedSession = ctx.chatSessionRepo.get(sessionId)!;
       expect(updatedSession.inputTokens).toBeGreaterThan(0);
       expect(updatedSession.outputTokens).toBeGreaterThan(0);
+    });
+
+    it('fails over to claude and emits brain.notify once on codex config error in brain turn', async () => {
+      ctx.profileRepo.upsert({ name: 'claude-default', engine: 'claude', kind: 'system', home: os.homedir(), email: null, enabled: 1 });
+      createCodexProfile('codex-cfg-err');
+      ctx.config.brain.engine = 'codex';
+      ctx.config.brain.codexProfile = 'codex-cfg-err';
+
+      const sessionId = 'brain:config-failover';
+      ctx.chatSessionRepo.insert({
+        id: sessionId,
+        title: 'Brain Config Failover',
+        mode: 'safe',
+        model: 'gpt-5.6-luna',
+        profileName: 'codex-cfg-err',
+        kind: 'brain',
+      });
+
+      const notifications: Array<{ level?: string; text?: string }> = [];
+      ctx.scheduler.getEventBus().on('brain.notify', (_id, payload) => {
+        notifications.push(payload as { level?: string; text?: string });
+      });
+
+      const donePromise = new Promise<void>((resolve) => {
+        ctx.scheduler.getEventBus().on('chat.done', (_id, payload) => {
+          if ((payload as { sessionId?: string })?.sessionId === sessionId) resolve();
+        });
+      });
+
+      // Submit turn with sim-codex-config-fail trigger
+      await ctx.chatService.sendMessage(sessionId, 'hello sim-codex-config-fail');
+      await donePromise;
+
+      // 1. Verify brain.notify was emitted exactly once with level warn
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0].level).toBe('warn');
+      expect(notifications[0].text).toContain('lỗi cấu hình hoặc khởi động với Codex');
+
+      // 2. Verify turn executed on Claude
+      expect(ctx.chatService.getLastEngine(sessionId)).toBe('claude');
+      const messages = ctx.chatMessageRepo.getBySession(sessionId);
+      const assistantMsg = messages.find((m) => m.role === 'assistant');
+      expect(assistantMsg).toBeDefined();
+      expect(assistantMsg?.meta).not.toContain('"engine":"codex"');
+
+      // 3. Verify next turn without error attempts Codex again (not permanently stuck on Claude)
+      await vi.waitFor(() => {
+        expect(ctx.chatSessionRepo.get(sessionId)?.busy).toBe(0);
+        expect(ctx.chatService.getRunningPids()).toHaveLength(0);
+      }, { timeout: 10_000 });
+      const nextDone = new Promise<void>((resolve) => {
+        ctx.scheduler.getEventBus().on('chat.done', (_id, payload) => {
+          if ((payload as { sessionId?: string })?.sessionId === sessionId) resolve();
+        });
+      });
+      await ctx.chatService.sendMessage(sessionId, 'second turn');
+      await nextDone;
+      expect(ctx.chatService.getLastEngine(sessionId)).toBe('codex');
+    });
+
+    it('fails over to claude and emits brain.notify once when codex spawn fails', async () => {
+      ctx.profileRepo.upsert({ name: 'claude-default', engine: 'claude', kind: 'system', home: os.homedir(), email: null, enabled: 1 });
+      createCodexProfile('codex-spawn-err');
+      ctx.config.brain.engine = 'codex';
+      ctx.config.brain.codexProfile = 'codex-spawn-err';
+      // Set override to a non-existent binary to trigger spawn error
+      ctx.chatService.setCodexBinOverride('/nonexistent/path/to/codex-bin');
+
+      const sessionId = 'brain:spawn-failover';
+      ctx.chatSessionRepo.insert({
+        id: sessionId,
+        title: 'Brain Spawn Failover',
+        mode: 'safe',
+        model: 'gpt-5.6-luna',
+        profileName: 'codex-spawn-err',
+        kind: 'brain',
+      });
+
+      const notifications: Array<{ level?: string; text?: string }> = [];
+      ctx.scheduler.getEventBus().on('brain.notify', (_id, payload) => {
+        notifications.push(payload as { level?: string; text?: string });
+      });
+
+      const donePromise = new Promise<void>((resolve) => {
+        ctx.scheduler.getEventBus().on('chat.done', (_id, payload) => {
+          if ((payload as { sessionId?: string })?.sessionId === sessionId) resolve();
+        });
+      });
+
+      await ctx.chatService.sendMessage(sessionId, 'test spawn failover');
+      await donePromise;
+
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0].level).toBe('warn');
+      expect(notifications[0].text).toContain('lỗi cấu hình hoặc khởi động với Codex');
+      expect(ctx.chatService.getLastEngine(sessionId)).toBe('claude');
     });
   });
 });

@@ -21,14 +21,16 @@ for (let i = args.length - 1; i >= 0; i--) {
   }
 }
 
+const currentRequest = prompt.includes('[Yêu cầu]') ? prompt.slice(prompt.lastIndexOf('[Yêu cầu]')) : prompt;
+
 // Check for quota simulation
-if (process.env.FAKE_CODEX_QUOTA === '1' || prompt.includes('sim-codex-quota')) {
+if (process.env.FAKE_CODEX_QUOTA === '1' || currentRequest.includes('sim-codex-quota')) {
   console.error('usage limit exceeded; try again in 1h');
   process.exit(1);
 }
 
 // Check for config/startup error simulation
-if (process.env.FAKE_CODEX_CONFIG_ERROR === '1' || prompt.includes('sim-codex-config-error')) {
+if (process.env.FAKE_CODEX_CONFIG_ERROR === '1' || currentRequest.includes('sim-codex-config-fail') || currentRequest.includes('sim-codex-config-error')) {
   console.error('Error loading config.toml: invalid type: string "{\\"AGENTHUB_CHAT_SESSION_ID\\":\\"brain:department:chung\\"}", expected a map in `mcp_servers.agenthub.env`');
   process.exit(1);
 }

@@ -1153,7 +1153,7 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(calls[0].body?.text).toContain('Ổ đĩa thấp');
     });
 
-    it('reproduces 2026-11-03 incident: claude/gpt exhausted on all 4 agy profiles, gemini and codex remain -> only 1 info, no critical', async () => {
+    it('reproduces 2026-11-03 incident: claude/gpt exhausted on all 4 agy profiles, gemini and codex remain -> no notification', async () => {
       // Setup 4 agy profiles and 1 codex profile
       for (const name of ['g3', 'g4', 'pa-gemini', 'g2']) {
         ctx.profileRepo.upsert({ name, engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
@@ -1172,16 +1172,10 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       await bot.flushQueue(CHAT_ID);
 
       const calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
-      expect(calls).toHaveLength(1);
-      const text = calls[0].body?.text || '';
-      expect(text).toContain('Hết quota <b>Claude/GPT</b> trên mọi tài khoản Antigravity');
-      expect(text).toContain('Vẫn chạy bằng: Gemini (4 tài khoản), Codex (codeX1)');
-      expect(text).not.toContain('Hết sạch quota');
-      expect(text).not.toContain('mọi tài khoản đều hết');
-      expect(text).not.toContain('Hệ thống tạm dừng');
+      expect(calls).toHaveLength(0);
     });
 
-    it('uses info for partial exhaustion and deduplicates critical outage until recovery', async () => {
+    it('silences partial family exhaustion and only broadcasts critical outage when capacity is 0', async () => {
       await bot.stop();
       for (const name of ['p1', 'p2']) {
         ctx.profileRepo.upsert({ name, engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
@@ -1199,10 +1193,7 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       await bot.flushQueue(CHAT_ID);
 
       let calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
-      expect(calls).toHaveLength(1);
-      expect(calls[0].body?.text).toContain('Vẫn chạy bằng: Gemini (2 tài khoản), Codex (codeX1)');
-      expect(calls[0].body?.text).not.toContain('Hệ thống tạm dừng');
-      expect(calls[0].body?.text).not.toContain('mọi tài khoản đều hết');
+      expect(calls).toHaveLength(0);
 
       recordedCalls = [];
       for (const profile of ['p1', 'p2']) {

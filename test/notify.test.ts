@@ -344,7 +344,7 @@ describe('NotificationService (Desktop Notifications)', () => {
     notifier.stop();
   });
 
-  it('uses runnable capacity for the shared info notification and batches families', async () => {
+  it('silences notifications when claude/gpt are exhausted on agy but gemini and codex remain (incident 2026-11-03)', async () => {
     profileRepo.update('g1', { enabled: 0 });
     profileRepo.update('chinh', { enabled: 0 });
     for (const name of ['g3', 'g4', 'pa-gemini', 'g2']) {
@@ -363,13 +363,7 @@ describe('NotificationService (Desktop Notifications)', () => {
     eventBus.emit('quota.exhausted', undefined, { profile: 'g2', family: 'gpt', engine: 'agy' });
     eventBus.emit('quota.exhausted', undefined, { profile: 'g2', family: 'claude', engine: 'agy' });
     await new Promise((resolve) => setTimeout(resolve, 120));
-    expect(execCalls).toHaveLength(1);
-    expect(execCalls[0].args).not.toContain('critical');
-    expect(execCalls.some((c) => c.args.includes('critical'))).toBe(false);
-    expect(execCalls[0].args.at(-1)).toContain('Hết quota Claude/GPT trên mọi tài khoản Antigravity');
-    expect(execCalls[0].args.at(-1)).toContain('Vẫn chạy bằng: Gemini (4 tài khoản), Codex (codeX1)');
-    expect(execCalls[0].args.at(-1)).not.toContain('mọi tài khoản đều hết');
-    expect(execCalls[0].args.at(-1)).not.toContain('tạm dừng');
+    expect(execCalls).toHaveLength(0);
     notifier.stop();
   });
 

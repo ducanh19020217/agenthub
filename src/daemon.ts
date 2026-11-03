@@ -32,6 +32,7 @@ import { Engine, AgyEngine, CodexEngine, FakeEngine } from './engines/index.js';
 import { AppService } from './services/index.js';
 import { createServer } from './api/server.js';
 import { QuotaUsageService } from './quota/usage.js';
+import { QuotaService } from './quota/index.js';
 import { ProfileLockService } from './profiles/locks.js';
 import { BrainRepo, BrainService } from './brain.js';
 import { ChatService } from './chat/service.js';
@@ -181,6 +182,7 @@ export function createContext(
   const profileService = new ProfileService(config, profileRepo, quotaMarkRepo);
   const locks = new ProfileLockService(path.join(config.agyHomesDir, '.state'), config.slotsPerAgyProfile, config.slotsPerCodexProfile);
   const usageService = new QuotaUsageService(profileRepo, usageRepo, quotaMarkRepo);
+  const quotaService = new QuotaService(quotaMarkRepo, profileRepo);
   const savingsService = new SavingsService(
     config,
     taskRepo,
@@ -358,6 +360,7 @@ export function createContext(
     taskRepo,
     profileRepo,
     quotaMarkRepo,
+    quotaService,
     projectRepo,
     ciRepo,
   });
@@ -371,6 +374,7 @@ export function createContext(
     departmentRepo,
     profileRepo,
     quotaMarkRepo,
+    quotaService,
     chatService,
     brainSession: true,
     directiveRepo,

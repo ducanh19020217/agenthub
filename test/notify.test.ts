@@ -325,9 +325,13 @@ describe('NotificationService (Desktop Notifications)', () => {
     expect(execCalls).toHaveLength(0);
 
     quotaMarkRepo.mark('chinh', 'gemini', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('g1', 'claude', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('chinh', 'claude', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('g1', 'gpt', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('chinh', 'gpt', Math.floor(Date.now() / 1000) + 3600);
     eventBus.emit('quota.exhausted', undefined, { profile: 'chinh', family: 'gemini', engine: 'agy' });
     expect(execCalls).toHaveLength(1);
-    expect(execCalls[0].args.at(-1)).toBe('AgentHub: Mọi tài khoản đều đã hết quota');
+    expect(execCalls[0].args.at(-1)).toContain('🚨 Hết sạch quota ở mọi tài khoản và model');
     notifier.stop();
   });
 
@@ -477,9 +481,12 @@ describe('NotificationService (Desktop Notifications)', () => {
     // 4. All profiles quota exhausted is a system incident and should be notified
     quotaMarkRepo.mark('g1', 'claude', Math.floor(Date.now() / 1000) + 3600);
     quotaMarkRepo.mark('chinh', 'claude', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('chinh', 'gemini', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('g1', 'gpt', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('chinh', 'gpt', Math.floor(Date.now() / 1000) + 3600);
     eventBus.emit('quota.exhausted', undefined, { profile: 'chinh', family: 'claude' });
     expect(execCalls).toHaveLength(3);
-    expect(execCalls[2].args.at(-1)).toBe('AgentHub: Mọi tài khoản đều đã hết quota');
+    expect(execCalls[2].args.at(-1)).toContain('🚨 Hết sạch quota ở mọi tài khoản và model');
 
     notifier.stop();
   });

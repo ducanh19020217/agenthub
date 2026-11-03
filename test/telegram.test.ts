@@ -1121,7 +1121,7 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       await bot.flushQueue(CHAT_ID);
 
       let calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
-      expect(calls[0].body?.text).toContain('Mọi tài khoản đều đã hết quota');
+      expect(calls[0].body?.text).toContain('Hết sạch quota ở mọi tài khoản và model');
 
       recordedCalls = [];
       currentTime += 15_000;
@@ -2337,11 +2337,15 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
 
     // Allowed: moi tai khoan het quota
     ctx.quotaMarkRepo.mark('p2', 'gemini', Math.floor(currentTime / 1000) + 3600);
+    ctx.quotaMarkRepo.mark('p1', 'claude', Math.floor(currentTime / 1000) + 3600);
+    ctx.quotaMarkRepo.mark('p2', 'claude', Math.floor(currentTime / 1000) + 3600);
+    ctx.quotaMarkRepo.mark('p1', 'gpt', Math.floor(currentTime / 1000) + 3600);
+    ctx.quotaMarkRepo.mark('p2', 'gpt', Math.floor(currentTime / 1000) + 3600);
     bot.handleEvent('quota.exhausted', undefined, { profile: 'p2', family: 'gemini' });
     await bot.flushQueue(CHAT_ID);
     sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
     expect(sendCalls).toHaveLength(3);
-    expect(sendCalls[2].body?.text).toContain('Mọi tài khoản đều đã hết quota');
+    expect(sendCalls[2].body?.text).toContain('Hết sạch quota ở mọi tài khoản và model');
   });
 
   it('lọc thông báo thô theo brain mode hiệu lực của từng project', async () => {

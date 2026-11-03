@@ -171,6 +171,17 @@ export class OpenProjectClient {
     );
   }
 
+  async createWorkPackage(input: { project: string; subject: string; description: string }): Promise<OpenProjectWorkPackage> {
+    return this.request<OpenProjectWorkPackage>('/api/v3/work_packages', {
+      method: 'POST',
+      body: JSON.stringify({
+        subject: input.subject,
+        description: { raw: input.description },
+        _links: { project: { href: `/api/v3/projects/${encodeURIComponent(input.project)}` } },
+      }),
+    });
+  }
+
   async setStatus(id: number | string, statusId: number | string): Promise<OpenProjectWorkPackage> {
     for (let attempt = 0; attempt < 3; attempt++) {
       const wp = await this.getWorkPackage(id);

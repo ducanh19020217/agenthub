@@ -863,7 +863,9 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_tracker_items_source_updated ON tracker_items(source_id, updated_at);
   `,
-  // Migration 60: pending secret entry requests never store secret values in SQLite.
+  // Migration 60: persist BLOCKED reports after the worktree is cleaned up.
+  `ALTER TABLE tasks ADD COLUMN blockedReport TEXT;`,
+  // Migration 61: pending secret entry requests never store secret values in SQLite.
   `
   CREATE TABLE IF NOT EXISTS secret_requests (
     id TEXT PRIMARY KEY,
@@ -1095,6 +1097,7 @@ export interface TaskRow {
   reviewerEscalationReason?: string | null;
   reviewStep?: number;
   doneReport?: string | null;
+  blockedReport?: string | null;
   diffStat?: string | null;
   slot: number | null;
   batchId?: string | null;
@@ -1712,6 +1715,7 @@ export class TaskRepo {
     waitReason?: WaitReason;
     worktreePath?: string | null;
     doneReport?: string | null;
+    blockedReport?: string | null;
     diffStat?: string | null;
     sourceRef?: string | null;
     batchId?: string | null;
@@ -1722,8 +1726,8 @@ export class TaskRepo {
     const deps = JSON.stringify(row.dependsOn || []);
     this.db
       .prepare(
-        `INSERT INTO tasks (id, projectId, slug, title, externalRef, body, level, modelChain, baseRef, branch, dependsOn, status, waitReason, worktreePath, doneReport, diffStat, sourceRef, batchId, creationSessionId, creationGoal)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, projectId, slug, title, externalRef, body, level, modelChain, baseRef, branch, dependsOn, status, waitReason, worktreePath, doneReport, blockedReport, diffStat, sourceRef, batchId, creationSessionId, creationGoal)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -1741,6 +1745,7 @@ export class TaskRepo {
         row.waitReason || null,
         row.worktreePath || null,
         row.doneReport || null,
+        row.blockedReport || null,
         row.diffStat || null,
         row.sourceRef || null,
         row.batchId || null,
@@ -1788,7 +1793,7 @@ export class TaskRepo {
 
   update(
     id: string,
-    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'diffStat' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
+    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'blockedReport' | 'diffStat' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
   ): void {
     const sets: string[] = ["updatedAt = datetime('now')"];
     const values: unknown[] = [];

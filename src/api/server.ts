@@ -342,6 +342,25 @@ export async function createServer(
     return reply.status(202).send(service.rerunDeploy(id));
   });
 
+  fastify.put('/api/projects/:id/gitea/token', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as { token?: string };
+    if (!body.token || typeof body.token !== 'string' || !body.token.trim()) {
+      throw new HttpError(400, 'bad_request', 'Token không được để trống');
+    }
+    return service.saveGiteaToken(id, body.token);
+  });
+
+  fastify.get('/api/projects/:id/gitea/status', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getGiteaStatus(id);
+  });
+
+  fastify.post('/api/projects/:id/gitea/sync', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.triggerGiteaSync(id);
+  });
+
   fastify.put('/api/projects/:id/remote-deploy/env', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
     return service.saveRemoteDeployEnv(id, req.body);
@@ -559,7 +578,8 @@ export async function createServer(
 
   fastify.post('/api/tasks/:id/pause', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
-    return service.pauseTask(id);
+    const body = (req.body || {}) as { reason?: 'manual' | 'load' | 'brain_load' };
+    return service.pauseTask(id, body.reason);
   });
 
   fastify.post('/api/tasks/:id/resume', async (req: FastifyRequest) => {

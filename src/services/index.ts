@@ -35,6 +35,8 @@ import {
 } from '../db/index.js';
 import type { CiWatchService } from '../ci.js';
 import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
+import type { GiteaSyncService } from '../integrations/gitea/service.js';
+import { isGiteaTokenConfigured, saveGiteaToken } from '../integrations/gitea/secrets.js';
 import { BulletinService } from '../bulletin.js';
 import { ProfileService as CoreProfileService, accountKey, isProfileLoggedIn, exchangeAgyRefreshToken, writeAgyIsolatedToken, fetchAgyGoogleUserInfo, fetchAgyGoogleUserInfoDetailed, inspectAgyAccessToken } from '../profiles/index.js';
 import { Scheduler } from '../scheduler/index.js';
@@ -756,6 +758,9 @@ export function formatEventSummary(
         ? `${taskLabel} tạm dừng do quá tải`
         : `${taskLabel} đã tạm dừng`;
 
+    case 'task.pause_reminder':
+      return `${taskLabel} đã tạm dừng hơn ${(p && p.pausedMinutes) || 30} phút`;
+
     case 'task.resumed':
       return `${taskLabel} tiếp tục chạy`;
 
@@ -906,6 +911,7 @@ export class AppService {
   public ciRepo?: CiRepo;
   public ciService?: CiWatchService;
   public intakeService?: OpenProjectIntakeService;
+  public giteaSyncService?: GiteaSyncService;
   private perfCollector?: PerfCollector;
   private profileChecks = new Set<string>();
   private reviewingTasks = new Set<string>();
@@ -1650,6 +1656,33 @@ export class AppService {
     this.getProject(id);
     if (!this.deployService) throw new HttpError(503, 'unavailable', 'Deploy service chưa sẵn sàng');
     return this.deployService.pushNow(id);
+  }
+
+  getGiteaStatus(id: string) {
+    this.getProject(id);
+    return this.giteaSyncService?.getStatus(id) || {
+      tokenConfigured: isGiteaTokenConfigured(this.config.hubHome, id),
+    };
+  }
+
+  saveGiteaToken(id: string, token: string) {
+    this.getProject(id);
+    if (!token || typeof token !== 'string' || !token.trim()) {
+      throw new HttpError(400, 'bad_request', 'Token không được để trống');
+    }
+    if (this.giteaSyncService) {
+      return this.giteaSyncService.saveToken(id, token);
+    }
+    saveGiteaToken(this.config.hubHome, id, token.trim());
+    return { configured: true };
+  }
+
+  async triggerGiteaSync(id: string) {
+    this.getProject(id);
+    if (!this.giteaSyncService) {
+      throw new HttpError(503, 'unavailable', 'Gitea sync service chưa sẵn sàng');
+    }
+    return this.giteaSyncService.syncProject(id);
   }
 
   getRemoteDeployStatus(id: string): RemoteDeployStatus | null {
@@ -2855,6 +2888,9 @@ export class AppService {
 
     if (task.doneReport !== null && task.doneReport !== undefined) {
       doneContent = task.doneReport;
+    }
+    if (task.blockedReport !== null && task.blockedReport !== undefined) {
+      blockedContent = task.blockedReport;
     } else if (task.worktreePath && fs.existsSync(task.worktreePath)) {
       const donePath = path.join(task.worktreePath, '.agenthub', 'DONE');
       const blockedPath = path.join(task.worktreePath, '.agenthub', 'BLOCKED');
@@ -3570,7 +3606,7 @@ export class AppService {
     return this.taskRepo.get(taskId)!;
   }
 
-  pauseTask(idParam: string): { ok: boolean; paused: boolean } {
+  pauseTask(idParam: string, reason: 'manual' | 'load' | 'brain_load' = 'manual'): { ok: boolean; paused: boolean } {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) {
@@ -3580,7 +3616,7 @@ export class AppService {
     if (!rt) {
       throw new HttpError(400, 'bad_request', `Task "${taskId}" không ở trạng thái running`);
     }
-    this.scheduler.pauseTask(taskId, 'manual');
+    this.scheduler.pauseTask(taskId, reason);
     return { ok: true, paused: true };
   }
 

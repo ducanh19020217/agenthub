@@ -29,6 +29,8 @@ import {
 import { CiWatchService } from './ci.js';
 import { OpenProjectIntakeService } from './integrations/openproject/intake.js';
 import { SetupTools } from './setup-tools.js';
+import { OpenProjectWritebackService } from './integrations/openproject/writeback.js';
+import { GiteaSyncService } from './integrations/gitea/service.js';
 import { ProfileService } from './profiles/index.js';
 import { Scheduler } from './scheduler/index.js';
 import { Engine, AgyEngine, CodexEngine, FakeEngine } from './engines/index.js';
@@ -105,6 +107,8 @@ export interface DaemonContext {
   ciService: CiWatchService;
   trackerRepo: TrackerItemRepo;
   intakeService: OpenProjectIntakeService;
+  writebackService: OpenProjectWritebackService;
+  giteaSyncService: GiteaSyncService;
   perfCollector: PerfCollector;
 }
 
@@ -375,6 +379,22 @@ export function createContext(
     eventBus: scheduler.getEventBus(),
   });
   service.intakeService = intakeService;
+  const writebackService = new OpenProjectWritebackService({
+    config,
+    projectRepo,
+    taskRepo,
+    trackerRepo,
+    taskService: service,
+    eventBus: scheduler.getEventBus(),
+  });
+
+  const giteaSyncService = new GiteaSyncService({
+    config,
+    projectRepo,
+    eventBus: scheduler.getEventBus(),
+    service,
+  });
+  service.giteaSyncService = giteaSyncService;
 
   const notifier = new NotificationService({
     eventBus: scheduler.getEventBus(),
@@ -445,6 +465,8 @@ export function createContext(
     ciService,
     trackerRepo,
     intakeService,
+    writebackService,
+    giteaSyncService,
     perfCollector,
   };
 }
@@ -476,7 +498,17 @@ export function closeContext(ctx: DaemonContext): void {
     // ignore
   }
   try {
+    ctx.giteaSyncService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
     ctx.intakeService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.writebackService?.stop();
   } catch {
     // ignore
   }
@@ -555,6 +587,8 @@ export async function startDaemon(
   ctx.brainRunner.start();
   ctx.ciService.start();
   ctx.intakeService.start();
+  ctx.writebackService.start();
+  ctx.giteaSyncService.start();
   ctx.perfCollector.start();
 
   // Start Telegram bot if enabled

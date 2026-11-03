@@ -627,7 +627,7 @@ describe('TaskDetailPage', () => {
     });
   });
 
-  it('16. Nút Tiếp tục khi task paused, nhãn Tạm dừng do quá tải, gọi resumeTask', async () => {
+  it('16. Nút Tiếp tục khi task paused, nhãn Tạm dừng (quá tải), gọi resumeTask', async () => {
     const resumeSpy = vi.spyOn(client, 'resumeTask').mockResolvedValue({ ok: true, paused: false });
 
     vi.spyOn(client, 'getTask').mockResolvedValue({
@@ -646,7 +646,7 @@ describe('TaskDetailPage', () => {
     });
 
     renderPage();
-    expect(await screen.findByText('Tạm dừng do quá tải')).toBeInTheDocument();
+    expect(await screen.findByText('Tạm dừng (quá tải)')).toBeInTheDocument();
     const resumeBtn = screen.getByRole('button', { name: /^Tiếp tục$/i });
     fireEvent.click(resumeBtn);
     await vi.waitFor(() => {

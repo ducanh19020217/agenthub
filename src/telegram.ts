@@ -25,7 +25,7 @@ import { canAlwaysAllowCommand, commandPermissionLabel } from './chat/permission
 import { formatReset } from './time-format.js';
 import { NotificationDeduper } from './notification-dedupe.js';
 import { reviewerSettingsFromLegacy } from './reviewer-config.js';
-import { QuotaService, QuotaCapacitySnapshot } from './quota/index.js';
+import { QuotaService, QuotaCapacitySnapshot, formatRunnableCapacity } from './quota/index.js';
 
 const WAITING_QUOTA_BATCH_DELAY_MS = 100;
 
@@ -302,6 +302,8 @@ export class TelegramBotService {
   private allQuotaNotified = new Set<string>();
   private quotaInfoNotified = new Set<string>();
   private quotaIncidentActive = false;
+  private pendingQuotaInfo = new Map<string, string>();
+  private quotaInfoTimer: ReturnType<typeof setTimeout> | undefined;
   private waitingQuotaNotified = false;
   private waitingQuotaCheckTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly eventDeduper: NotificationDeduper;
@@ -687,6 +689,10 @@ export class TelegramBotService {
     if (this.waitingQuotaCheckTimer) {
       clearTimeout(this.waitingQuotaCheckTimer);
       this.waitingQuotaCheckTimer = undefined;
+    }
+    if (this.quotaInfoTimer) {
+      clearTimeout(this.quotaInfoTimer);
+      this.quotaInfoTimer = undefined;
     }
 
     if (this.pollAbortController) {
@@ -3864,7 +3870,7 @@ export class TelegramBotService {
         }
         if (engineWide && !this.quotaInfoNotified.has(`${p.engine || 'agy'}:${family}`)) {
           this.quotaInfoNotified.add(`${p.engine || 'agy'}:${family}`);
-          this.broadcastMessage(`ℹ️ Hết quota <b>${this.escapeHtml(family)}</b> trên mọi tài khoản Antigravity. Vẫn còn model khác chạy được.`);
+          this.queueQuotaInfo(p.engine === 'agy' ? 'Antigravity' : String(p.engine || ''), family);
           break;
         }
         if (!notifyPerModel) return;
@@ -4063,6 +4069,25 @@ export class TelegramBotService {
       const until = active.length > 0 ? Math.min(...active.map((mark) => mark.until)) : 0;
       const time = until ? new Date(until * 1000).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : 'sớm';
       this.broadcastMessage(`⏳ <b>${waiting.length} task đang chờ quota</b>\nSớm nhất mở lại lúc <b>${time}</b>.`);
+    }, WAITING_QUOTA_BATCH_DELAY_MS);
+  }
+
+  private queueQuotaInfo(engine: string, family: string): void {
+    this.pendingQuotaInfo.set(`${engine}:${family}`, family);
+    if (this.quotaInfoTimer) return;
+    this.quotaInfoTimer = setTimeout(() => {
+      this.quotaInfoTimer = undefined;
+      const snapshot = this.quotaCapacity();
+      const families = [...this.pendingQuotaInfo.values()]
+        .map((value) => value === 'gpt' ? 'GPT' : value.charAt(0).toUpperCase() + value.slice(1))
+        .sort()
+        .join('/');
+      this.pendingQuotaInfo.clear();
+      const reset = snapshot?.nextReset
+        ? ` (reset sớm nhất ${this.escapeHtml(formatReset(snapshot.nextReset.at, this.now()))})`
+        : '';
+      const runnable = snapshot ? formatRunnableCapacity(snapshot) : 'model khác';
+      this.broadcastMessage(`ℹ️ Hết quota <b>${this.escapeHtml(families)}</b> trên mọi tài khoản Antigravity${reset}. Vẫn chạy bằng: ${this.escapeHtml(runnable)}`);
     }, WAITING_QUOTA_BATCH_DELAY_MS);
   }
 

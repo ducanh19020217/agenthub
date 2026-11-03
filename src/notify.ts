@@ -7,7 +7,7 @@ import { isQuietHours, isQuotaEventEngineWide, isSystemIncident, getMinutesSince
 import { effectiveBrainMode } from './brain/mode.js';
 import { formatReset } from './time-format.js';
 import { NotificationDeduper } from './notification-dedupe.js';
-import { QuotaService, QuotaCapacitySnapshot } from './quota/index.js';
+import { QuotaService, QuotaCapacitySnapshot, formatRunnableCapacity } from './quota/index.js';
 
 const WAITING_QUOTA_BATCH_DELAY_MS = 100;
 
@@ -45,6 +45,8 @@ export class NotificationService {
   private allQuotaNotified = new Set<string>();
   private quotaInfoNotified = new Set<string>();
   private quotaIncidentActive = false;
+  private pendingQuotaInfo = new Map<string, string>();
+  private quotaInfoTimer: ReturnType<typeof setTimeout> | undefined;
   private waitingQuotaNotified = false;
   private waitingQuotaCheckTimer: ReturnType<typeof setTimeout> | undefined;
   private lastSentSummary = new Map<string, number>();
@@ -139,6 +141,10 @@ export class NotificationService {
     if (this.checkTimer) {
       clearInterval(this.checkTimer);
       this.checkTimer = undefined;
+    }
+    if (this.quotaInfoTimer) {
+      clearTimeout(this.quotaInfoTimer);
+      this.quotaInfoTimer = undefined;
     }
     if (this.waitingQuotaCheckTimer) {
       clearTimeout(this.waitingQuotaCheckTimer);
@@ -367,7 +373,7 @@ export class NotificationService {
         }
         if (engineWide && !this.quotaInfoNotified.has(`${p.engine || 'agy'}:${family}`)) {
           this.quotaInfoNotified.add(`${p.engine || 'agy'}:${family}`);
-          this.notify(`ℹ️ Hết quota ${family} trên mọi tài khoản ${p.engine === 'agy' ? 'Antigravity' : p.engine || ''}. Vẫn còn capacity cho model khác.`, 'normal');
+          this.queueQuotaInfo(p.engine === 'agy' ? 'Antigravity' : String(p.engine || ''), family);
           break;
         }
         if (!notifyPerModel) break;
@@ -477,6 +483,25 @@ export class NotificationService {
       const until = active.length > 0 ? Math.min(...active.map((mark) => mark.until)) : 0;
       const time = until ? new Date(until * 1000).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : 'sớm';
       this.notify(`${waiting.length} task đang chờ quota, sớm nhất mở lại lúc ${time}`, 'warning');
+    }, WAITING_QUOTA_BATCH_DELAY_MS);
+  }
+
+  private queueQuotaInfo(engine: string, family: string): void {
+    this.pendingQuotaInfo.set(`${engine}:${family}`, family);
+    if (this.quotaInfoTimer) return;
+    this.quotaInfoTimer = setTimeout(() => {
+      this.quotaInfoTimer = undefined;
+      const snapshot = this.quotaCapacity();
+      const families = [...this.pendingQuotaInfo.values()]
+        .map((value) => value === 'gpt' ? 'GPT' : value.charAt(0).toUpperCase() + value.slice(1))
+        .sort()
+        .join('/');
+      this.pendingQuotaInfo.clear();
+      const reset = snapshot?.nextReset
+        ? ` (reset sớm nhất ${formatReset(snapshot.nextReset.at, this.now())})`
+        : '';
+      const runnable = snapshot ? formatRunnableCapacity(snapshot) : 'model khác';
+      this.notify(`ℹ️ Hết quota ${families} trên mọi tài khoản Antigravity${reset}. Vẫn chạy bằng: ${runnable}`, 'normal');
     }, WAITING_QUOTA_BATCH_DELAY_MS);
   }
 

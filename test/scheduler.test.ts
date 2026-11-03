@@ -1125,6 +1125,49 @@ describe('Quota → profile marked → task runs on another profile', () => {
     scheduler.stop();
   });
 
+  it('continues a running task after quota on the same worktree without increasing attempt', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: 'a@test.com', enabled: 1 });
+    profileRepo.upsert({ name: 'p2', engine: 'agy', kind: 'isolated', home: '/tmp/p2', email: 'b@test.com', enabled: 1 });
+    const worktreePath = path.join(tmpDir, 'worktree');
+    fs.mkdirSync(path.join(worktreePath, '.agenthub'), { recursive: true });
+    const logPath = path.join(tmpDir, 'run.log');
+    fs.writeFileSync(logPath, 'worker output');
+    taskRepo.insert({
+      id: 'test-project/live-quota', projectId: 'test-project', slug: 'live-quota', title: 'Live quota',
+      status: 'running', worktreePath,
+    });
+    taskRepo.update('test-project/live-quota', { attempt: 2 });
+    runRepo.insert({ id: 'quota-run', taskId: 'test-project/live-quota', engine: 'agy', model: 'gemini-3.8-flash-medium', profileName: 'p1', logPath });
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>());
+    const schedulerInternal = scheduler as unknown as {
+      handleRunCompletion: (taskId: string, rt: unknown) => Promise<void>;
+      running: Map<string, unknown>;
+    };
+    const rt = {
+      runId: 'quota-run', taskId: 'test-project/live-quota', pid: 999991, pidStart: null,
+      engine: { id: 'agy', detectQuota: () => ({ exhausted: true, resetSeconds: 3600 }), detectAuthError: () => ({ expired: false }), detectTransientError: () => false },
+      model: 'gemini-3.8-flash-medium', profileName: 'p1', projectId: 'test-project',
+      startTime: Date.now() - 10_000, timeoutMs: 60_000, timeoutAt: Date.now() + 60_000,
+      retryCount: 0, lastOutputAt: Date.now(), lastActivityAt: Date.now(), activitySource: 'terminal',
+      activityCheckedAt: Date.now(), cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+    };
+    schedulerInternal.running.set('test-project/live-quota', rt);
+
+    await schedulerInternal.handleRunCompletion('test-project/live-quota', rt);
+
+    const task = taskRepo.get('test-project/live-quota')!;
+    expect(task.status).toBe('queued');
+    expect(task.attempt).toBe(2);
+    expect(task.worktreePath).toBe(worktreePath);
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('Failover: p1/gemini-3.8-flash-medium → p2/gemini-3.8-flash-medium; reason');
+    const failover = eventRepo.getRecent(20).find((event) => event.type === 'task.failover');
+    expect(failover?.payload).toContain('p2');
+    scheduler.stop();
+  });
+
   it('moves to waiting_quota when all profiles exhausted', () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
@@ -2514,6 +2557,7 @@ describe('Env file generation', () => {
     createTestProject(projectPath);
 
     profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: null, enabled: 1 });
+    quotaMarkRepo.mark('p1', 'gemini', Math.floor(Date.now() / 1000) + 3600);
 
     taskRepo.insert({
       id: 'test-project/waiting-t1',
@@ -2531,7 +2575,10 @@ describe('Env file generation', () => {
 
     expect(taskRepo.get('test-project/waiting-t1')?.status).toBe('waiting_quota');
 
-    scheduler.getEventBus().emit('quota.cleared');
+    scheduler.getEventBus().emit('claude.quota_available');
+    expect(taskRepo.get('test-project/waiting-t1')?.status).toBe('waiting_quota');
+    quotaMarkRepo.clear('p1', 'gemini');
+    scheduler.getEventBus().emit('claude.quota_available');
     // Task woke up and was immediately scheduled to run because p1 is available
     expect(['queued', 'running']).toContain(taskRepo.get('test-project/waiting-t1')?.status);
 

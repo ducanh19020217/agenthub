@@ -174,6 +174,7 @@ export class NotificationService {
     if (level === 'important' && !new Set([
       'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
       'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.waiting_quota',
+      'quota.cleared',
     ]).has(type)) return;
 
     const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;

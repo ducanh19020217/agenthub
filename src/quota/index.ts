@@ -104,11 +104,12 @@ export class QuotaService {
    */
   runnableCapacity(models: string[] = [...KNOWN_AGY_MODELS, 'codex:gpt-5.6-luna'], now = Math.floor(Date.now() / 1000)): RunnableCapacityEntry[] {
     const profiles = this.profileRepo.getEnabled().filter((profile) => !profile.authState || profile.authState === 'ok');
+    const activeMarks = this.quotaMarkRepo.getActive(now);
     return models.flatMap((model) => {
       const family = getModelFamily(model);
       const engine = getModelEngine(model);
       return profiles
-        .filter((profile) => profile.engine === engine && !this.quotaMarkRepo.getActive(now).some((mark) => mark.profileName === profile.name && mark.family === family))
+        .filter((profile) => profile.engine === engine && !activeMarks.some((mark) => mark.profileName === profile.name && mark.family === family))
         .map((profile) => ({ profileName: profile.name, engine, family, model }));
     });
   }
@@ -118,13 +119,21 @@ export class QuotaService {
     const candidates = models || [...KNOWN_AGY_MODELS, 'codex:gpt-5.6-luna'];
     const runnable = this.runnableCapacity(candidates, now);
     const marks = this.quotaMarkRepo.getActive(now);
-    const nextResetAt = marks.length > 0 ? Math.min(...marks.map((mark) => mark.until)) : null;
-    const next = marks
+    // A reset is actionable only when that engine/family has no runnable profile.
+    // Marks on a family that still has another available account must not hide the
+    // earliest reset for the exhausted family being reported.
+    const runnableFamilies = new Set(runnable.map((entry) => `${entry.engine}:${entry.family}`));
+    const resetCandidates = marks
       .flatMap((mark) => candidates
-        .filter((model) => getModelFamily(model) === mark.family && this.profileRepo.get(mark.profileName)?.engine === getModelEngine(model))
+        .filter((model) => {
+          const profile = this.profileRepo.get(mark.profileName);
+          const engine = getModelEngine(model);
+          return getModelFamily(model) === mark.family && profile?.engine === engine && !runnableFamilies.has(`${engine}:${mark.family}`);
+        })
         .map((model) => ({ profileName: mark.profileName, model, at: mark.until })))
       .sort((a, b) => a.at - b.at)[0];
-    return { runnable, nextResetAt, nextReset: next };
+    const nextResetAt = resetCandidates?.at ?? null;
+    return { runnable, nextResetAt, nextReset: resetCandidates };
   }
 
   /**

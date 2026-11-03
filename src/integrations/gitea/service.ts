@@ -182,8 +182,14 @@ export class GiteaSyncService {
     const targetBranch = gitea.targetBranch!;
     const giteaUrl = gitea.url!;
 
+    const cleanPath = (process.env.PATH || '')
+      .split(path.delimiter)
+      .filter((entry) => !entry.includes(`${path.sep}shims${path.sep}worker`))
+      .join(path.delimiter);
+
     const gitEnv = {
       ...process.env,
+      PATH: cleanPath,
       GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME || 'AgentHub',
       GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL || 'agenthub@localhost',
       GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME || 'AgentHub',
@@ -201,6 +207,7 @@ export class GiteaSyncService {
     try {
       remoteUrl = execFileSync('git', ['-C', repoPath, 'remote', 'get-url', 'origin'], {
         encoding: 'utf8',
+        env: gitEnv,
       }).trim();
     } catch (err: unknown) {
       const errorMsg = `Không thể lấy git remote origin: ${err instanceof Error ? err.message : String(err)}`;
@@ -231,6 +238,7 @@ export class GiteaSyncService {
       execFileSync('git', ['-C', repoPath, 'fetch', 'origin', sourceBranch, targetBranch], {
         stdio: ['pipe', 'pipe', 'pipe'],
         encoding: 'utf8',
+        env: gitEnv,
       });
     } catch {
       // Fallback to fetch origin without explicit refspecs
@@ -238,6 +246,7 @@ export class GiteaSyncService {
         execFileSync('git', ['-C', repoPath, 'fetch', 'origin'], {
           stdio: ['pipe', 'pipe', 'pipe'],
           encoding: 'utf8',
+          env: gitEnv,
         });
       } catch (err: unknown) {
         const errorMsg = `Lỗi git fetch origin: ${err instanceof Error ? err.message : String(err)}`;
@@ -257,7 +266,7 @@ export class GiteaSyncService {
       logOut = execFileSync(
         'git',
         ['-C', repoPath, 'log', '--no-merges', `origin/${targetBranch}..origin/${sourceBranch}`, '--oneline'],
-        { encoding: 'utf8' },
+        { encoding: 'utf8', env: gitEnv },
       ).trim();
     } catch (err: unknown) {
       const errorMsg = `Lỗi kiểm tra git log: ${err instanceof Error ? err.message : String(err)}`;
@@ -292,7 +301,7 @@ export class GiteaSyncService {
       execFileSync(
         'git',
         ['-C', repoPath, 'worktree', 'add', '--detach', worktreePath, `origin/${sourceBranch}`],
-        { stdio: ['pipe', 'pipe', 'pipe'] },
+        { stdio: ['pipe', 'pipe', 'pipe'], env: gitEnv },
       );
     } catch (err: unknown) {
       const errorMsg = `Lỗi tạo worktree tạm: ${err instanceof Error ? err.message : String(err)}`;
@@ -324,7 +333,7 @@ export class GiteaSyncService {
           const unmergedOut = execFileSync(
             'git',
             ['-C', worktreePath, 'diff', '--name-only', '--diff-filter=U'],
-            { encoding: 'utf8' },
+            { encoding: 'utf8', env: gitEnv },
           ).trim();
           unmergedFiles = unmergedOut ? unmergedOut.split('\n').map((s) => s.trim()).filter(Boolean) : [];
         } catch {
@@ -344,6 +353,7 @@ export class GiteaSyncService {
             try {
               ours = execFileSync('git', ['-C', worktreePath, 'show', `:2:${file}`], {
                 encoding: 'utf8',
+                env: gitEnv,
               });
             } catch {
               // empty
@@ -351,13 +361,14 @@ export class GiteaSyncService {
             try {
               theirs = execFileSync('git', ['-C', worktreePath, 'show', `:3:${file}`], {
                 encoding: 'utf8',
+                env: gitEnv,
               });
             } catch {
               // empty
             }
             const combined = ours + (ours.endsWith('\n') ? '' : '\n') + theirs;
             fs.writeFileSync(path.join(worktreePath, file), combined, 'utf8');
-            execFileSync('git', ['-C', worktreePath, 'add', file], { stdio: ['pipe', 'pipe', 'pipe'] });
+            execFileSync('git', ['-C', worktreePath, 'add', file], { stdio: ['pipe', 'pipe', 'pipe'], env: gitEnv });
           }
 
           execFileSync('git', ['-C', worktreePath, 'commit', '--no-edit'], {
@@ -367,7 +378,7 @@ export class GiteaSyncService {
         } else {
           // Abort merge and create draft task
           try {
-            execFileSync('git', ['-C', worktreePath, 'merge', '--abort'], { stdio: 'ignore' });
+            execFileSync('git', ['-C', worktreePath, 'merge', '--abort'], { stdio: 'ignore', env: gitEnv });
           } catch {
             // ignore
           }
@@ -430,18 +441,20 @@ export class GiteaSyncService {
       // Step 5: Push source branch if updated (never force push)
       const headSha = execFileSync('git', ['-C', worktreePath, 'rev-parse', 'HEAD'], {
         encoding: 'utf8',
+        env: gitEnv,
       }).trim();
       const originSourceSha = execFileSync(
         'git',
         ['-C', repoPath, 'rev-parse', `origin/${sourceBranch}`],
-        { encoding: 'utf8' },
+        { encoding: 'utf8', env: gitEnv },
       ).trim();
 
       const pushedCommit = headSha;
       if (headSha !== originSourceSha) {
         try {
-          execFileSync('git', ['-C', worktreePath, 'push', 'origin', `HEAD:refs/heads/${sourceBranch}`], {
+          execFileSync('git', ['-C', worktreePath, 'push', 'origin', `HEAD:refs/heads/${sourceBranch}`], { // policy: gitea sync push
             stdio: ['pipe', 'pipe', 'pipe'],
+            env: gitEnv,
           });
         } catch (err: unknown) {
           const errorMsg = `Lỗi git push origin ${sourceBranch}: ${err instanceof Error ? err.message : String(err)}`;
@@ -523,15 +536,21 @@ export class GiteaSyncService {
   }
 
   private cleanupWorktree(worktreePath: string, repoPath: string): void {
+    const cleanPath = (process.env.PATH || '')
+      .split(path.delimiter)
+      .filter((entry) => !entry.includes(`${path.sep}shims${path.sep}worker`))
+      .join(path.delimiter);
+    const env = { ...process.env, PATH: cleanPath };
     try {
       execFileSync('git', ['-C', repoPath, 'worktree', 'remove', '--force', worktreePath], {
         stdio: 'ignore',
+        env,
       });
     } catch {
       // ignore
     }
     try {
-      execFileSync('git', ['-C', repoPath, 'worktree', 'prune'], { stdio: 'ignore' });
+      execFileSync('git', ['-C', repoPath, 'worktree', 'prune'], { stdio: 'ignore', env });
     } catch {
       // ignore
     }

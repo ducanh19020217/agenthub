@@ -49,6 +49,18 @@ export function parseRemote(url: string | null | undefined): ParsedRemote | null
     // not a valid URL
   }
 
+  // 4. file:// URL or absolute local path (/path/to/owner/repo[.git])
+  if (trimmed.startsWith('/') || trimmed.startsWith('file://')) {
+    const clean = trimmed.startsWith('file://') ? trimmed.slice(7) : trimmed;
+    const parts = clean.replace(/^\/+|\/+$/g, '').split('/');
+    if (parts.length >= 2) {
+      const owner = parts[parts.length - 2];
+      let repo = parts[parts.length - 1];
+      if (repo.endsWith('.git')) repo = repo.slice(0, -4);
+      return { owner, repo };
+    }
+  }
+
   return null;
 }
 

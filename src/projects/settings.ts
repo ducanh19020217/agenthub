@@ -29,29 +29,32 @@ export function isValidBranchName(val: string): boolean {
   return true;
 }
 
+export const GiteaSettingsSchema = z.object({
+  enabled: z.boolean().default(false),
+  url: z.string().trim().refine((val) => {
+    try {
+      const parsed = new URL(val);
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }, 'URL phải là http(s)').optional(),
+  sourceBranch: z.string().trim().min(1, 'Tên nhánh source không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
+  targetBranch: z.string().trim().min(1, 'Tên nhánh target không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
+  schedule: z.array(z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Định dạng giờ phải là HH:MM')).default(['12:00', '18:00']),
+  weekdaysOnly: z.boolean().default(false),
+  checks: z.array(z.array(z.string().min(1))).default([]),
+  unionMergeGlobs: z.array(z.string().min(1)).default([]),
+});
+export type GiteaSettings = z.infer<typeof GiteaSettingsSchema>;
+
 export const ProjectSettingsSchema = z.object({
   openproject: z.object({
     enabled: z.boolean().default(false),
     sourceId: z.string().min(1).nullable().default(null),
     role: z.enum(['primary', 'secondary']).default('primary'),
   }).default({}),
-  gitea: z.object({
-    enabled: z.boolean().default(false),
-    url: z.string().trim().refine((val) => {
-      try {
-        const parsed = new URL(val);
-        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-      } catch {
-        return false;
-      }
-    }, 'URL phải là http(s)').optional(),
-    sourceBranch: z.string().trim().min(1, 'Tên nhánh source không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
-    targetBranch: z.string().trim().min(1, 'Tên nhánh target không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
-    schedule: z.array(z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Định dạng giờ phải là HH:MM')).default(['12:00', '18:00']),
-    weekdaysOnly: z.boolean().default(false),
-    checks: z.array(z.array(z.string().min(1))).default([]),
-    unionMergeGlobs: z.array(z.string().min(1)).default([]),
-  }).default({}),
+  gitea: GiteaSettingsSchema.default({}),
   commitConvention: z.object({
     branchTemplate: z.string().min(1).max(200).default('agenthub/{slug}'),
     commitTemplate: z.string().min(1).max(200).default('{type}: {summary}'),

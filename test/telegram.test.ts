@@ -1121,7 +1121,28 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       await bot.flushQueue(CHAT_ID);
 
       let calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
-      expect(calls[0].body?.text).toContain('Mọi tài khoản đều đã hết quota');
+      expect(calls[0].body?.text).toContain('Hết sạch quota ở mọi tài khoản và model');
+      expect(calls[0].body?.text).toContain('Hệ thống tạm dừng thực thi task.');
+
+      // Repeated critical event does not send a duplicate broadcast
+      recordedCalls = [];
+      ctx.scheduler.getEventBus().emit('quota.exhausted', undefined, {
+        profile: 'g1',
+        family: 'gemini-pro',
+        allExhausted: true,
+      });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
+
+      // Recovery notification when quota is cleared and capacity restored
+      ctx.profileRepo.upsert({ name: 'g1', engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
+      ctx.quotaMarkRepo.clear('g1', 'gemini');
+      ctx.quotaMarkRepo.clear('g1', 'claude');
+      ctx.quotaMarkRepo.clear('g1', 'gpt');
+      ctx.scheduler.getEventBus().emit('quota.cleared', undefined, { family: 'gemini' });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls.some((c) => c.body?.text?.includes('Có quota trở lại'))).toBe(true);
 
       recordedCalls = [];
       currentTime += 15_000;
@@ -1130,6 +1151,81 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
 
       calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
       expect(calls[0].body?.text).toContain('Ổ đĩa thấp');
+    });
+
+    it('reproduces 2026-11-03 incident: claude/gpt exhausted on all 4 agy profiles, gemini and codex remain -> only 1 info, no critical', async () => {
+      // Setup 4 agy profiles and 1 codex profile
+      for (const name of ['g3', 'g4', 'pa-gemini', 'g2']) {
+        ctx.profileRepo.upsert({ name, engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
+      }
+      ctx.profileRepo.upsert({ name: 'codeX1', engine: 'codex', kind: 'codex', home: tmpDir, email: null, enabled: 1 });
+      const future = Math.floor(currentTime / 1000) + 3600;
+      for (const profile of ['g3', 'g4', 'pa-gemini', 'g2']) {
+        ctx.quotaMarkRepo.mark(profile, 'claude', future);
+        ctx.quotaMarkRepo.mark(profile, 'gpt', future);
+      }
+      recordedCalls = [];
+      await bot.stop();
+      bot.handleEvent('quota.exhausted', undefined, { profile: 'pa-gemini', family: 'claude', engine: 'agy', allExhausted: true });
+      bot.handleEvent('quota.exhausted', undefined, { profile: 'pa-gemini', family: 'gpt', engine: 'agy', allExhausted: true });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await bot.flushQueue(CHAT_ID);
+
+      const calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      const text = calls[0].body?.text || '';
+      expect(text).toContain('Hết quota <b>Claude/GPT</b> trên mọi tài khoản Antigravity');
+      expect(text).toContain('Vẫn chạy bằng: Gemini (4 tài khoản), Codex (codeX1)');
+      expect(text).not.toContain('Hết sạch quota');
+      expect(text).not.toContain('mọi tài khoản đều hết');
+      expect(text).not.toContain('Hệ thống tạm dừng');
+    });
+
+    it('uses info for partial exhaustion and deduplicates critical outage until recovery', async () => {
+      await bot.stop();
+      for (const name of ['p1', 'p2']) {
+        ctx.profileRepo.upsert({ name, engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
+      }
+      ctx.profileRepo.upsert({ name: 'codeX1', engine: 'codex', kind: 'codex', home: tmpDir, email: null, enabled: 1 });
+      const future = Math.floor(currentTime / 1000) + 3600;
+
+      for (const profile of ['p1', 'p2']) {
+        ctx.quotaMarkRepo.mark(profile, 'claude', future);
+        ctx.quotaMarkRepo.mark(profile, 'gpt', future);
+      }
+      bot.handleEvent('quota.exhausted', undefined, { profile: 'p1', family: 'claude', engine: 'agy' });
+      bot.handleEvent('quota.exhausted', undefined, { profile: 'p1', family: 'gpt', engine: 'agy' });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await bot.flushQueue(CHAT_ID);
+
+      let calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Vẫn chạy bằng: Gemini (2 tài khoản), Codex (codeX1)');
+      expect(calls[0].body?.text).not.toContain('Hệ thống tạm dừng');
+      expect(calls[0].body?.text).not.toContain('mọi tài khoản đều hết');
+
+      recordedCalls = [];
+      for (const profile of ['p1', 'p2']) {
+        for (const family of ['gemini', 'claude', 'gpt']) ctx.quotaMarkRepo.mark(profile, family, future);
+      }
+      ctx.quotaMarkRepo.mark('codeX1', 'codex', future);
+      const outage = { profile: 'p2', family: 'gemini', engine: 'agy' };
+      bot.handleEvent('quota.exhausted', undefined, outage);
+      bot.handleEvent('quota.exhausted', undefined, outage);
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Hệ thống tạm dừng thực thi task');
+
+      recordedCalls = [];
+      for (const profile of ['p1', 'p2']) {
+        for (const family of ['gemini', 'claude', 'gpt']) ctx.quotaMarkRepo.clear(profile, family);
+      }
+      ctx.quotaMarkRepo.clear('codeX1', 'codex');
+      bot.handleEvent('quota.cleared', undefined, { family: 'gemini' });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls.some((c) => c.body?.text?.includes('Có quota trở lại'))).toBe(true);
     });
 
     it('broadcasts task.waiting_quota only for no_department_profile with 30-minute dedupe', async () => {
@@ -2337,11 +2433,15 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
 
     // Allowed: moi tai khoan het quota
     ctx.quotaMarkRepo.mark('p2', 'gemini', Math.floor(currentTime / 1000) + 3600);
+    ctx.quotaMarkRepo.mark('p1', 'claude', Math.floor(currentTime / 1000) + 3600);
+    ctx.quotaMarkRepo.mark('p2', 'claude', Math.floor(currentTime / 1000) + 3600);
+    ctx.quotaMarkRepo.mark('p1', 'gpt', Math.floor(currentTime / 1000) + 3600);
+    ctx.quotaMarkRepo.mark('p2', 'gpt', Math.floor(currentTime / 1000) + 3600);
     bot.handleEvent('quota.exhausted', undefined, { profile: 'p2', family: 'gemini' });
     await bot.flushQueue(CHAT_ID);
     sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
     expect(sendCalls).toHaveLength(3);
-    expect(sendCalls[2].body?.text).toContain('Mọi tài khoản đều đã hết quota');
+    expect(sendCalls[2].body?.text).toContain('Hết sạch quota ở mọi tài khoản và model');
   });
 
   it('lọc thông báo thô theo brain mode hiệu lực của từng project', async () => {

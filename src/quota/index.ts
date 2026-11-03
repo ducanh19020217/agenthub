@@ -1,6 +1,39 @@
 import { QuotaMarkRepo, ProfileRepo } from '../db/index.js';
 import { sameAccount } from '../profiles/account.js';
 
+export interface RunnableCapacityEntry {
+  profileName: string;
+  engine: 'agy' | 'codex';
+  family: string;
+  model: string;
+}
+
+export interface QuotaCapacitySnapshot {
+  runnable: RunnableCapacityEntry[];
+  nextResetAt: number | null;
+  nextReset?: { profileName: string; model: string; at: number };
+}
+
+/** Human-readable summary for quota notifications. The source of truth stays
+ * in the runnable entries, so callers cannot accidentally describe a family
+ * as a system-wide outage while another engine/model is available. */
+export function formatRunnableCapacity(snapshot: QuotaCapacitySnapshot): string {
+  const groups = new Map<string, Set<string>>();
+  for (const entry of snapshot.runnable) {
+    const label = entry.family === 'codex' ? 'Codex'
+      : entry.family === 'gpt' ? 'GPT'
+      : entry.family.charAt(0).toUpperCase() + entry.family.slice(1);
+    const profiles = groups.get(label) || new Set<string>();
+    profiles.add(entry.profileName);
+    groups.set(label, profiles);
+  }
+  return [...groups.entries()].map(([label, profiles]) => {
+    const names = [...profiles].sort();
+    if (names.length === 1) return `${label} (${names[0]})`;
+    return `${label} (${names.length} tài khoản)`;
+  }).join(', ');
+}
+
 export class QuotaService {
   constructor(
     private quotaMarkRepo: QuotaMarkRepo,
@@ -62,6 +95,50 @@ export class QuotaService {
     const profiles = this.profileRepo.getEnabled().filter((profile) => profile.engine === engine);
     if (profiles.length === 0) return false;
     return profiles.every((profile) => this.quotaMarkRepo.isExhausted(profile.name, family));
+  }
+
+  /**
+   * Return the quota-bearing profile/model combinations the scheduler can use.
+   * This is deliberately independent of a particular quota event: consumers
+   * must answer “can anything run?” rather than “is this family exhausted?”.
+   */
+  runnableCapacity(models: string[] = [...KNOWN_AGY_MODELS, 'codex:gpt-5.6-luna'], now = Math.floor(Date.now() / 1000)): RunnableCapacityEntry[] {
+    const profiles = this.profileRepo.getEnabled().filter((profile) => !profile.authState || profile.authState === 'ok');
+    const activeMarks = this.quotaMarkRepo.getActive(now);
+    return models.flatMap((model) => {
+      const family = getModelFamily(model);
+      const engine = getModelEngine(model);
+      return profiles
+        .filter((profile) => profile.engine === engine && !activeMarks.some((mark) => mark.profileName === profile.name && mark.family === family))
+        .map((profile) => ({ profileName: profile.name, engine, family, model }));
+    });
+  }
+
+  /** Central quota state used by notification, digest and status consumers. */
+  capacitySnapshot(models?: string[], now = Math.floor(Date.now() / 1000)): QuotaCapacitySnapshot {
+    const candidates = models || [...KNOWN_AGY_MODELS, 'codex:gpt-5.6-luna'];
+    const runnable = this.runnableCapacity(candidates, now);
+    const marks = this.quotaMarkRepo.getActive(now);
+    const eligibleProfiles = new Map(
+      this.profileRepo.getEnabled()
+        .filter((profile) => !profile.authState || profile.authState === 'ok')
+        .map((profile) => [profile.name, profile]),
+    );
+    // A reset is actionable only when that engine/family has no runnable profile.
+    // Marks on a family that still has another available account must not hide the
+    // earliest reset for the exhausted family being reported.
+    const runnableFamilies = new Set(runnable.map((entry) => `${entry.engine}:${entry.family}`));
+    const resetCandidates = marks
+      .flatMap((mark) => candidates
+        .filter((model) => {
+          const profile = eligibleProfiles.get(mark.profileName);
+          const engine = getModelEngine(model);
+          return getModelFamily(model) === mark.family && profile?.engine === engine && !runnableFamilies.has(`${engine}:${mark.family}`);
+        })
+        .map((model) => ({ profileName: mark.profileName, model, at: mark.until })))
+      .sort((a, b) => a.at - b.at)[0];
+    const nextResetAt = resetCandidates?.at ?? null;
+    return { runnable, nextResetAt, nextReset: resetCandidates };
   }
 
   /**

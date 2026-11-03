@@ -363,6 +363,7 @@ export class Scheduler {
     this.eventBus.on('profile.updated', () => this.wakeWaitingQuotaTasks('profile_updated'));
     this.eventBus.on('department.changed', () => this.wakeWaitingQuotaTasks('department_changed'));
     this.eventBus.on('quota.cleared', () => this.wakeWaitingQuotaTasks('quota_cleared'));
+    this.eventBus.on('claude.quota_available', () => this.wakeWaitingQuotaTasks('quota_available'));
     this.eventBus.on('task.done', (taskId) => this.onTaskDoneOrCancelled(taskId));
     this.eventBus.on('task.cancelled', (taskId) => this.onTaskDoneOrCancelled(taskId));
     this.eventBus.on('task.queued', (taskId) => this.invalidateChecks(taskId));
@@ -1993,10 +1994,26 @@ export class Scheduler {
             });
           }
 
-          // Try to find another profile/model
-          const attempt = (task.attempt || 0) + 1;
-          this.taskRepo.update(taskId, { status: 'queued', attempt, resume: 1, transientRetries: 0, notBefore: null });
-          this.eventBus.emit('task.queued', taskId, { reason: 'quota_retry' });
+          // Quota failover is a continuation, not a crash/retry attempt. Keep
+          // the task's run-limit counter unchanged and reuse its worktree.
+          const next = this.findModelProfilePair(task);
+          const reason = next
+            ? `quota exhausted on ${rt.engine.id}/${rt.model} (${rt.profileName})`
+            : `quota exhausted on ${rt.engine.id}/${rt.model} (${rt.profileName}); all models/profiles unavailable`;
+          try {
+            fs.appendFileSync(run?.logPath || '', `\n[agenthub] Failover: ${rt.profileName}/${rt.model} → ${next ? `${next.profileName}/${next.model}` : 'waiting_quota'}; reason: ${reason}\n`);
+          } catch {
+            // The run log may have been removed by cleanup; the event remains authoritative.
+          }
+          this.eventBus.emit('task.failover', taskId, {
+            from: { profile: rt.profileName, model: rt.model, engine: rt.engine.id },
+            to: next ? { profile: next.profileName, model: next.model, engine: getModelEngine(next.model) } : null,
+            reason,
+            runId: rt.runId,
+            worktreePath: task.worktreePath,
+          });
+          this.taskRepo.update(taskId, { status: 'queued', resume: 1, transientRetries: 0, notBefore: null });
+          this.eventBus.emit('task.queued', taskId, { reason: 'quota_retry', failover: next ? 'available' : 'waiting_quota' });
         } else if (rt.engine.detectAuthError(logTail).expired) {
           this.runRepo.finish(rt.runId, 'crashed', undefined, 'auth');
           this.markProfileAuthExpired(rt.profileName);

@@ -1240,6 +1240,7 @@ export class AppService {
     const tasks = this.taskRepo.getAll();
     const profiles = this.profileRepo.getAll();
     const quotaMarks = this.quotaMarkRepo.getActive();
+    const quotaCapacity = new QuotaService(this.quotaMarkRepo, this.profileRepo).capacitySnapshot(undefined, Math.floor(Date.now() / 1000));
     const dupes = this.coreProfileService.getDuplicateEmails();
     const runningMap = this.scheduler.getRunning();
     const projects = this.projectRepo.getAll();
@@ -1401,6 +1402,7 @@ export class AppService {
       tasks: byStatus,
       tasksByProject,
       profiles: profilesStatus,
+      quotaCapacity,
       running: runningTasks,
       overlaps,
       claudeFailover: this.chatService?.getClaudeFailover(),

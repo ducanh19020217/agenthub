@@ -3630,6 +3630,7 @@ export class TelegramBotService {
         type === 'claude.quota_exhausted' ||
         type === 'hub.restart_failed' ||
         type.startsWith('deploy.') ||
+        type.startsWith('gitea.sync.') ||
         type.startsWith('remote_deploy.') ||
         type.startsWith('daily_report.') ||
         type === 'system.error' ||
@@ -4177,6 +4178,56 @@ export class TelegramBotService {
         this.broadcastMessage(text, keyboard.length > 0 ? { inline_keyboard: keyboard } : undefined);
         break;
       }
+
+      case 'gitea.sync.started': {
+        const source = typeof p.sourceBranch === 'string' ? p.sourceBranch : '';
+        const target = typeof p.targetBranch === 'string' ? p.targetBranch : '';
+        this.broadcastMessage(`${prefix}🔄 <b>Bắt đầu đồng bộ Gitea</b>: <code>${this.escapeHtml(source)}</code> → <code>${this.escapeHtml(target)}</code>`);
+        break;
+      }
+
+      case 'gitea.sync.skipped': {
+        const reason = typeof p.reason === 'string' ? p.reason : 'Không có commit mới';
+        this.broadcastMessage(`${prefix}⏭️ <b>Bỏ qua đồng bộ Gitea</b>: ${this.escapeHtml(reason)}`);
+        break;
+      }
+
+      case 'gitea.sync.succeeded': {
+        const prNum = typeof p.prNumber === 'number' ? `PR #${p.prNumber}` : 'PR';
+        const commit = typeof p.commit === 'string' ? ` (<code>${this.escapeHtml(p.commit.slice(0, 7))}</code>)` : '';
+        const keyboard: InlineKeyboardButton[][] = [];
+        if (typeof p.url === 'string' && p.url) {
+          keyboard.push([{ text: '🔗 Xem trên Gitea', url: p.url }]);
+        }
+        this.broadcastMessage(
+          `${prefix}✅ <b>Đồng bộ Gitea thành công</b>: ${prNum}${commit}`,
+          keyboard.length ? { inline_keyboard: keyboard } : undefined,
+        );
+        break;
+      }
+
+      case 'gitea.sync.failed': {
+        const err = typeof p.error === 'string' ? p.error : 'Lỗi không xác định';
+        const prNum = typeof p.prNumber === 'number' ? ` (PR #${p.prNumber})` : '';
+        const keyboard: InlineKeyboardButton[][] = [];
+        if (typeof p.url === 'string' && p.url) {
+          keyboard.push([{ text: '🔗 Xem trên Gitea', url: p.url }]);
+        }
+        this.broadcastMessage(
+          `${prefix}❌ <b>Đồng bộ Gitea thất bại</b>${prNum}: ${this.escapeHtml(err)}`,
+          keyboard.length ? { inline_keyboard: keyboard } : undefined,
+        );
+        break;
+      }
+
+      case 'gitea.sync.conflict': {
+        const files = Array.isArray(p.conflictingFiles) ? (p.conflictingFiles as string[]) : [];
+        const fileList = files.length > 0
+          ? `\n\n<b>File xung đột:</b>\n${files.slice(0, 5).map((f) => `• <code>${this.escapeHtml(f)}</code>`).join('\n')}`
+          : '';
+        this.broadcastMessage(`${prefix}⚠️ <b>Xung đột khi đồng bộ Gitea</b>: đã tạo task gỡ xung đột${fileList}`);
+        break;
+      }
       }
     } finally {
       this.notificationProjectId = null;
@@ -4542,6 +4593,12 @@ export class TelegramBotService {
         return `${prefix}Đã tạo báo cáo ngày cho ${p?.sourceId || 'OpenProject'}`;
       case 'daily_report.failed':
         return `${prefix}Tạo báo cáo ngày thất bại: ${p?.sourceId || ''}`;
+      case 'gitea.sync.succeeded':
+        return `${prefix}Đồng bộ Gitea thành công`;
+      case 'gitea.sync.failed':
+        return `${prefix}Đồng bộ Gitea thất bại: ${p?.error || ''}`;
+      case 'gitea.sync.conflict':
+        return `${prefix}Xung đột khi đồng bộ Gitea`;
       case 'merge.conflict':
         return `${prefix}Xung đột khi merge tự động (${taskId || 'task'})`;
       case 'merge.failed':

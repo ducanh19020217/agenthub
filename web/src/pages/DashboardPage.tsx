@@ -508,16 +508,16 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
                             <span
                               data-testid={`worker-paused-${worker.taskId}`}
                               className={`inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium border ${
-                                worker.pauseReason === 'load'
+                                worker.pauseReason === 'load' || worker.pauseReason === 'brain_load'
                                   ? 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)] border-[color-mix(in_srgb,var(--t-warn)_30%,transparent)]'
                                   : 'bg-[var(--t-surface-2)] text-[var(--t-text-2)] border-[var(--t-border)]'
                               }`}
                             >
-                              {worker.pauseReason === 'load'
+                              {worker.pauseReason === 'load' || worker.pauseReason === 'brain_load'
                                 ? t('status.pausedOverload')
                                 : worker.pauseReason === 'focus'
                                   ? t('status.pausedFocus')
-                                  : t('status.paused')}
+                                  : t('status.pausedManual')}
                             </span>
                           </div>
                         )}

@@ -25,6 +25,7 @@ import { canAlwaysAllowCommand, commandPermissionLabel } from './chat/permission
 import { formatReset } from './time-format.js';
 import { NotificationDeduper } from './notification-dedupe.js';
 import { reviewerSettingsFromLegacy } from './reviewer-config.js';
+import { QuotaService, QuotaCapacitySnapshot, formatRunnableCapacity } from './quota/index.js';
 
 const WAITING_QUOTA_BATCH_DELAY_MS = 100;
 
@@ -129,6 +130,7 @@ export interface TelegramServiceOptions {
   departmentRepo?: DepartmentRepo;
   profileRepo?: ProfileRepo;
   quotaMarkRepo?: QuotaMarkRepo;
+  quotaService?: QuotaService;
   fetch?: typeof fetch;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -256,6 +258,7 @@ export class TelegramBotService {
   private projectRepo: ProjectRepo;
   private profileRepo?: ProfileRepo;
   private quotaMarkRepo?: QuotaMarkRepo;
+  private quotaService?: QuotaService;
   private ciRepo?: CiRepo;
   private lastSentCi = new Map<string, number>();
   private lastSentDisk = new Map<'low' | 'ok', number>();
@@ -297,6 +300,10 @@ export class TelegramBotService {
   // Deduplication for event notifications
   private lastNotificationTime = new Map<string, number>();
   private allQuotaNotified = new Set<string>();
+  private quotaInfoNotified = new Set<string>();
+  private quotaIncidentActive = false;
+  private pendingQuotaInfo = new Map<string, string>();
+  private quotaInfoTimer: ReturnType<typeof setTimeout> | undefined;
   private waitingQuotaNotified = false;
   private waitingQuotaCheckTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly eventDeduper: NotificationDeduper;
@@ -334,6 +341,7 @@ export class TelegramBotService {
     this.departmentRepo = opts.departmentRepo || (opts.service as unknown as { departmentRepo?: DepartmentRepo })?.departmentRepo;
     this.profileRepo = opts.profileRepo || (opts.service as unknown as { profileRepo?: ProfileRepo })?.profileRepo;
     this.quotaMarkRepo = opts.quotaMarkRepo;
+    this.quotaService = opts.quotaService || (this.profileRepo && opts.quotaMarkRepo ? new QuotaService(opts.quotaMarkRepo, this.profileRepo) : undefined);
     this.ciRepo = opts.ciRepo;
     this.fetchFn = opts.fetch || globalThis.fetch;
     this.now = opts.now || (() => Date.now());
@@ -363,6 +371,17 @@ export class TelegramBotService {
       this.config.telegram?.botTokenFile ||
       path.join(this.config.hubHome, 'secrets', 'telegram.token');
     this.token = readTelegramToken(tokenFile);
+  }
+
+  private quotaCapacity(): QuotaCapacitySnapshot | null {
+    if (!this.quotaService || !this.profileRepo || this.profileRepo.getAll().length === 0) return null;
+    return this.quotaService.capacitySnapshot(undefined, Math.floor(this.now() / 1000));
+  }
+
+  private quotaIncidentMessage(snapshot: QuotaCapacitySnapshot | null): string {
+    const next = snapshot?.nextReset;
+    const reset = next ? ` Sớm nhất có lại: ${this.escapeHtml(next.profileName)}/${this.escapeHtml(next.model)} lúc ${this.escapeHtml(formatReset(next.at, this.now()))}.` : '';
+    return `🚨 <b>Hết sạch quota ở mọi tài khoản và model</b> — các task đang chờ quota.${reset}\nHệ thống tạm dừng thực thi task.`;
   }
 
   setToken(token: string | null): void {
@@ -670,6 +689,10 @@ export class TelegramBotService {
     if (this.waitingQuotaCheckTimer) {
       clearTimeout(this.waitingQuotaCheckTimer);
       this.waitingQuotaCheckTimer = undefined;
+    }
+    if (this.quotaInfoTimer) {
+      clearTimeout(this.quotaInfoTimer);
+      this.quotaInfoTimer = undefined;
     }
 
     if (this.pollAbortController) {
@@ -1379,15 +1402,49 @@ export class TelegramBotService {
         await this.handleRejectCommand(chatId, args);
         break;
 
-      case '/pause':
+      case '/pause': {
+        const trimmed = argStr.trim();
+        if (trimmed) {
+          const resolved = this.resolveTask(trimmed);
+          if ('error' in resolved) {
+            await this.sendMessage(chatId, `❌ ${resolved.error}`);
+            break;
+          }
+          try {
+            this.service.pauseTask(resolved.id, 'manual');
+            await this.sendMessage(chatId, `⏸ Đã tạm dừng task <b>${this.escapeHtml(resolved.id)}</b>.`);
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await this.sendMessage(chatId, `❌ Lỗi khi tạm dừng task: ${errMsg}`);
+          }
+          break;
+        }
         this.service.pauseScheduler();
         await this.sendMessage(chatId, '⏸ Đã tạm dừng giao task mới. Các task đang chạy vẫn tiếp tục.');
         break;
+      }
 
-      case '/resume':
+      case '/resume': {
+        const trimmed = argStr.trim();
+        if (trimmed) {
+          const resolved = this.resolveTask(trimmed);
+          if ('error' in resolved) {
+            await this.sendMessage(chatId, `❌ ${resolved.error}`);
+            break;
+          }
+          try {
+            this.service.resumeTask(resolved.id);
+            await this.sendMessage(chatId, `▶️ Đã tiếp tục task <b>${this.escapeHtml(resolved.id)}</b>.`);
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await this.sendMessage(chatId, `❌ Lỗi khi tiếp tục task: ${errMsg}`);
+          }
+          break;
+        }
         this.service.resumeScheduler();
         await this.sendMessage(chatId, '▶️ Đã tiếp tục giao task mới.');
         break;
+      }
 
       default:
         await this.sendMessage(chatId, `Lệnh không hợp lệ: ${cmd}. Gõ /help để xem hướng dẫn.`);
@@ -2375,6 +2432,16 @@ export class TelegramBotService {
             await this.answerCallbackQuery(query.id, 'Lỗi retry.');
             await this.sendMessage(chatId, `❌ Lỗi khi retry task: ${errMsg}`);
           }
+        } else if (action === 'resume') {
+          try {
+            this.service.resumeTask(resolved.id);
+            await this.answerCallbackQuery(query.id, 'Đã tiếp tục task.');
+            await this.sendMessage(chatId, `▶️ Đã tiếp tục task <b>${this.escapeHtml(resolved.id)}</b>.`);
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await this.answerCallbackQuery(query.id, 'Lỗi tiếp tục task.');
+            await this.sendMessage(chatId, `❌ Lỗi khi tiếp tục task: ${errMsg}`);
+          }
         } else if (action === 'log') {
           if (this.isMinimalProject(resolved.projectId)) {
             await this.answerCallbackQuery(query.id, 'Dự án này ẩn nội dung trên Telegram, xem trên dashboard');
@@ -2649,7 +2716,10 @@ export class TelegramBotService {
       for (const r of running) {
         const taskObj = this.taskRepo.get(r.taskId);
         const titleStr = taskObj?.title || r.taskId;
-        text = text + `• <code>${r.taskId}</code> (${r.profileName}/${r.model})\n  <i>${this.escapeHtml(titleStr)}</i>\n`;
+        const pauseBadge = r.paused
+          ? (r.pauseReason === 'load' || r.pauseReason === 'brain_load' ? ' ⏸ [Tạm dừng (quá tải)]' : ' ⏸ [Tạm dừng (thủ công)]')
+          : '';
+        text = text + `• <code>${r.taskId}</code> (${r.profileName}/${r.model})${pauseBadge}\n  <i>${this.escapeHtml(titleStr)}</i>\n`;
       }
     }
 
@@ -2838,7 +2908,12 @@ export class TelegramBotService {
       const title = this.isMinimalProject(t.projectId)
         ? '(nội dung ẩn trên Telegram, xem trên dashboard)'
         : this.escapeHtml(t.title);
-      text = text + `• [${t.status}] <code>${t.id}</code>: ${title}\n`;
+      const taskWithPaused = t as TaskRow & { paused?: boolean; pauseReason?: string | null };
+      const isPaused = Boolean(taskWithPaused.paused);
+      const pauseBadge = isPaused
+        ? (taskWithPaused.pauseReason === 'load' || taskWithPaused.pauseReason === 'brain_load' ? ' [Tạm dừng (quá tải)]' : ' [Tạm dừng (thủ công)]')
+        : '';
+      text = text + `• [${t.status}]${pauseBadge} <code>${t.id}</code>: ${title}\n`;
     }
 
     if (tasks.length > 15) {
@@ -2874,10 +2949,14 @@ export class TelegramBotService {
     }
 
     const dashboardUrl = `http://127.0.0.1:${this.config.port}/#/tasks/${toRouteId(resolved.id)}`;
+    const isPaused = Boolean(detail.paused);
+    const pauseBadge = isPaused
+      ? (detail.pauseReason === 'load' || detail.pauseReason === 'brain_load' ? ' [Tạm dừng (quá tải)]' : ' [Tạm dừng (thủ công)]')
+      : '';
 
     let text = `📌 <b>Task: ${resolved.id}</b>\n\n`;
     text = text + `• Tiêu đề: <b>${this.escapeHtml(detail.title)}</b>\n`;
-    text = text + `• Trạng thái: <code>${detail.status}</code> (${detail.level})\n`;
+    text = text + `• Trạng thái: <code>${detail.status}</code>${pauseBadge} (${detail.level})\n`;
     text = text + `• Nhánh: <code>${detail.branch || 'mặc định'}</code> (gốc: ${detail.baseRef || 'main'})\n`;
     text = text + `• Kiểm tra: ${checksText}\n`;
     text = text + `• Lượt chạy: ${detail.runs?.length || 0}\n`;
@@ -2897,7 +2976,12 @@ export class TelegramBotService {
         { text: '📄 Xem log', callback_data: `task:log:${resolved.id}` },
       ]);
     } else if (detail.status === 'running' || detail.status === 'queued') {
-      buttons.push([{ text: '🛑 Hủy task', callback_data: `cancel:confirm:${resolved.id}` }]);
+      const row: InlineKeyboardButton[] = [];
+      if (isPaused) {
+        row.push({ text: '▶️ Tiếp tục', callback_data: `task:resume:${resolved.id}` });
+      }
+      row.push({ text: '🛑 Hủy task', callback_data: `cancel:confirm:${resolved.id}` });
+      buttons.push(row);
     }
 
     await this.sendMessage(chatId, text, buttons.length > 0 ? { inline_keyboard: buttons } : undefined);
@@ -3484,11 +3568,17 @@ export class TelegramBotService {
     if (type === 'quota.cleared') {
       this.allQuotaNotified.delete('all');
       if (typeof p.family === 'string') this.allQuotaNotified.delete(p.family);
+      this.quotaInfoNotified.clear();
       for (const key of this.lastNotificationTime.keys()) {
         if (key.startsWith('quota.exhausted:')) this.lastNotificationTime.delete(key);
       }
       for (const key of this.lastBroadcast.keys()) {
-        if (key.includes('Mọi tài khoản đều đã hết quota')) this.lastBroadcast.delete(key);
+        if (key.includes('Mọi tài khoản đều đã hết quota') || key.includes('Hết sạch quota')) this.lastBroadcast.delete(key);
+      }
+      const snapshot = this.quotaCapacity();
+      if (this.quotaIncidentActive) {
+        this.quotaIncidentActive = false;
+        if (snapshot && snapshot.runnable.length > 0) this.broadcastMessage('✅ <b>Có quota trở lại</b>');
       }
     }
     if (type === 'task.waiting_quota' && p.reason === 'quota' && this.taskRepo) {
@@ -3517,7 +3607,7 @@ export class TelegramBotService {
 
     // 1. Brain auto mode: suppress raw task notifications
     try {
-      const isSystemEvent = type === 'quota.exhausted' || type === 'claude.quota_exhausted' || type.startsWith('disk.') || type.startsWith('system.') || type.startsWith('hub.') || type.startsWith('deploy.') || type === 'profile.auth_expired' || type === 'chat.limit_waiting' || type.startsWith('daily_report.');
+      const isSystemEvent = type === 'quota.exhausted' || type === 'claude.quota_exhausted' || type.startsWith('disk.') || type.startsWith('system.') || type.startsWith('hub.') || type.startsWith('deploy.') || type.startsWith('remote_deploy.') || type === 'profile.auth_expired' || type === 'chat.limit_waiting' || type.startsWith('daily_report.');
     this.notificationProjectId = isSystemEvent ? null : projectId;
     this.notificationDedupProjectId = projectId;
     const focusProjectId = this.config.focus?.projectId;
@@ -3540,6 +3630,7 @@ export class TelegramBotService {
         type === 'claude.quota_exhausted' ||
         type === 'hub.restart_failed' ||
         type.startsWith('deploy.') ||
+        type.startsWith('remote_deploy.') ||
         type.startsWith('daily_report.') ||
         type === 'system.error' ||
         type === 'ci.failed' ||
@@ -3845,19 +3936,32 @@ export class TelegramBotService {
       case 'quota.exhausted': {
         const family = typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '';
         const quotaKey = family || 'all';
-        const isAllExhausted = isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, now);
+        const snapshot = this.quotaCapacity();
+        const isAllExhausted = snapshot ? snapshot.runnable.length === 0 : isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, now);
+        const engineWide = isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, now);
         if (!isAllExhausted) this.allQuotaNotified.delete(quotaKey);
+        if (!isAllExhausted && this.quotaIncidentActive) {
+          this.quotaIncidentActive = false;
+          if (snapshot && snapshot.runnable.length > 0) this.broadcastMessage('✅ <b>Có quota trở lại</b>');
+        }
         if (effectiveMode === 'auto') {
-          if (isAllExhausted && notifyAllExhausted && !this.allQuotaNotified.has(quotaKey)) {
+          if (isAllExhausted && notifyAllExhausted && !this.quotaIncidentActive) {
             this.allQuotaNotified.add(quotaKey);
-            this.broadcastMessage('🚨 <b>Mọi tài khoản đều đã hết quota</b>\nHệ thống tạm dừng thực thi task.');
+            this.quotaIncidentActive = true;
+            this.broadcastMessage(this.quotaIncidentMessage(snapshot));
           }
           break;
         }
         if (isAllExhausted) {
-          if (!notifyAllExhausted || this.allQuotaNotified.has(quotaKey)) return;
+          if (!notifyAllExhausted || this.quotaIncidentActive) return;
           this.allQuotaNotified.add(quotaKey);
-          this.broadcastMessage('🚨 <b>Mọi tài khoản đều đã hết quota</b>\nHệ thống tạm dừng thực thi task.');
+          this.quotaIncidentActive = true;
+          this.broadcastMessage(this.quotaIncidentMessage(snapshot));
+          break;
+        }
+        if (engineWide && !this.quotaInfoNotified.has(`${p.engine || 'agy'}:${family}`)) {
+          this.quotaInfoNotified.add(`${p.engine || 'agy'}:${family}`);
+          this.queueQuotaInfo(p.engine === 'agy' ? 'Antigravity' : String(p.engine || ''), family);
           break;
         }
         if (!notifyPerModel) return;
@@ -3876,6 +3980,24 @@ export class TelegramBotService {
         if (now - this.lastSentLoadSummary < 15 * 60_000) break;
         this.lastSentLoadSummary = now;
         this.broadcastMessage(`⚠️ <b>AgentHub tạm dừng/gặp tải cao</b> — xem dashboard để biết chi tiết.`);
+        break;
+      }
+
+      case 'task.pause_reminder': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const minutes = typeof p.pausedMinutes === 'number' ? p.pausedMinutes : 30;
+        const taskLabel = taskId || 'Task';
+        const pauseBadge = (p.reason === 'load' || p.reason === 'brain_load') ? 'Tạm dừng (quá tải)' : 'Tạm dừng (thủ công)';
+        const keyboard: InlineKeyboardButton[][] = [];
+        if (taskId) {
+          keyboard.push([
+            { text: '▶️ Tiếp tục', callback_data: `task:resume:${taskId}` },
+          ]);
+        }
+        this.broadcastMessage(
+          `${prefix}⏸ <b>Nhắc nhở: ${pauseBadge}</b>\nID: <code>${taskLabel}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>\nTask đã bị dừng hơn ${minutes} phút trong khi máy không quá tải.`,
+          keyboard.length > 0 ? { inline_keyboard: keyboard } : undefined,
+        );
         break;
       }
 
@@ -3934,6 +4056,27 @@ export class TelegramBotService {
         const icon = isFailure ? '🚨' : isSuccess ? '✅' : '🚀';
         const details = typeof p.error === 'string' ? `\n${this.escapeHtml(p.error)}` : typeof p.message === 'string' ? `\n${this.escapeHtml(p.message)}` : '';
         this.broadcastMessage(`${icon} <b>${title}</b>${details}`);
+        break;
+      }
+
+      case 'remote_deploy.started':
+      case 'remote_deploy.succeeded':
+      case 'remote_deploy.failed':
+      case 'remote_deploy.health_timeout': {
+        if (!notify.fallback) return;
+        const isFailure = type === 'remote_deploy.failed' || type === 'remote_deploy.health_timeout';
+        const isSuccess = type === 'remote_deploy.succeeded';
+        const title = isSuccess
+          ? 'Remote deploy thành công'
+          : type === 'remote_deploy.health_timeout'
+            ? 'Remote deploy hết thời gian chờ health check'
+            : isFailure
+              ? 'Remote deploy thất bại'
+              : 'Bắt đầu remote deploy';
+        const icon = isSuccess ? '✅' : isFailure ? '🚨' : '🚀';
+        const proj = typeof p.projectId === 'string' ? ` [${this.escapeHtml(p.projectId)}]` : '';
+        const details = typeof p.error === 'string' ? `\n${this.escapeHtml(p.error)}` : typeof p.message === 'string' ? `\n${this.escapeHtml(p.message)}` : '';
+        this.broadcastMessage(`${icon} <b>${title}</b>${proj}${details}`);
         break;
       }
 
@@ -4056,6 +4199,25 @@ export class TelegramBotService {
       const until = active.length > 0 ? Math.min(...active.map((mark) => mark.until)) : 0;
       const time = until ? new Date(until * 1000).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : 'sớm';
       this.broadcastMessage(`⏳ <b>${waiting.length} task đang chờ quota</b>\nSớm nhất mở lại lúc <b>${time}</b>.`);
+    }, WAITING_QUOTA_BATCH_DELAY_MS);
+  }
+
+  private queueQuotaInfo(engine: string, family: string): void {
+    this.pendingQuotaInfo.set(`${engine}:${family}`, family);
+    if (this.quotaInfoTimer) return;
+    this.quotaInfoTimer = setTimeout(() => {
+      this.quotaInfoTimer = undefined;
+      const snapshot = this.quotaCapacity();
+      const families = [...this.pendingQuotaInfo.values()]
+        .map((value) => value === 'gpt' ? 'GPT' : value.charAt(0).toUpperCase() + value.slice(1))
+        .sort()
+        .join('/');
+      this.pendingQuotaInfo.clear();
+      const reset = snapshot?.nextReset
+        ? ` (reset sớm nhất ${this.escapeHtml(formatReset(snapshot.nextReset.at, this.now()))})`
+        : '';
+      const runnable = snapshot ? formatRunnableCapacity(snapshot) : 'model khác';
+      this.broadcastMessage(`ℹ️ Hết quota <b>${this.escapeHtml(families)}</b> trên mọi tài khoản Antigravity${reset}. Vẫn chạy bằng: ${this.escapeHtml(runnable)}`);
     }, WAITING_QUOTA_BATCH_DELAY_MS);
   }
 

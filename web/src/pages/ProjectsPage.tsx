@@ -68,7 +68,7 @@ function ProjectSettingsForm({
   const codexProfileOptions = profiles.filter((p) => p.engine === 'codex').map((p) => p.name);
 
   const update = (section: keyof NonNullable<Project['settings']>, patch: object) =>
-    onChange({ ...value, [section]: { ...value[section], ...patch } });
+    onChange({ ...value, [section]: { ...((value[section] as object) || {}), ...patch } });
   const addReference = () =>
     onChange({
       ...value,

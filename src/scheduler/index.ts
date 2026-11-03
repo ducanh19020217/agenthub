@@ -28,7 +28,7 @@ import { Engine, AgyEngine, CodexEngine } from '../engines/index.js';
 import { getModelFamily, getModelEngine, isKnownModel, QuotaService } from '../quota/index.js';
 import { DependencyContext, isDeletableWorktreePath, WorktreeService } from '../worktrees/index.js';
 import { ensureWorktreeNodeModules, nodeModulesCacheSummary, pruneNodeModulesCache } from '../cache.js';
-import { AgentHubConfig } from '../config.js';
+import { AgentHubConfig, DEFAULT_SCHEDULER_LIMITS } from '../config.js';
 import { ProfileLockService } from '../profiles/locks.js';
 import { sameAccount } from '../profiles/account.js';
 import { QuotaUsageService } from '../quota/usage.js';
@@ -194,8 +194,9 @@ interface RunningTask {
   lastTicks?: number;
   lastTicksAt?: number;
   paused?: boolean;
-  pauseReason?: 'manual' | 'load' | 'focus' | null;
+  pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
   pausedAt?: number | null;
+  pauseReminded?: boolean;
   referenceSnapshots?: ReferenceSnapshot[];
 }
 
@@ -257,6 +258,7 @@ export class Scheduler {
   private starting: Map<string, StartingTask> = new Map();
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
+  private inTick = false;
   private skipSchedulingOnce = false;
   private diskLow = false;
   private dockerDiskLow = false;
@@ -366,6 +368,24 @@ export class Scheduler {
     this.eventBus.on('profile.updated', () => this.wakeWaitingQuotaTasks('profile_updated'));
     this.eventBus.on('department.changed', () => this.wakeWaitingQuotaTasks('department_changed'));
     this.eventBus.on('quota.cleared', () => this.wakeWaitingQuotaTasks('quota_cleared'));
+    this.eventBus.on('claude.quota_available', () => this.wakeWaitingQuotaTasks('quota_available'));
+    this.eventBus.on('load.ok', () => {
+      if (!this.inTick) {
+        if (!this.loadGuard.isOverloaded()) {
+          const autoPaused = Array.from(this.running.values())
+            .filter((rt) => rt.paused && (rt.pauseReason === 'load' || rt.pauseReason === 'brain_load'))
+            .sort((a, b) => (a.pausedAt || 0) - (b.pausedAt || 0));
+          if (autoPaused.length > 0) {
+            const nextToResume = autoPaused[0];
+            this.resumeTask(nextToResume.taskId);
+            this.eventBus.emit('load.task_resumed', nextToResume.taskId, { reason: 'recovered' });
+          }
+        }
+        if (!this.stopped) {
+          this.triggerTick();
+        }
+      }
+    });
     this.eventBus.on('task.done', (taskId) => this.onTaskDoneOrCancelled(taskId));
     this.eventBus.on('task.cancelled', (taskId) => this.onTaskDoneOrCancelled(taskId));
     this.eventBus.on('task.queued', (taskId) => this.invalidateChecks(taskId));
@@ -570,7 +590,7 @@ export class Scheduler {
     return this.paused;
   }
 
-  pauseTask(taskId: string, reason: 'manual' | 'load' | 'focus' = 'manual'): boolean {
+  pauseTask(taskId: string, reason: 'manual' | 'load' | 'brain_load' | 'focus' = 'manual'): boolean {
     const rt = this.running.get(taskId);
     if (!rt) return false;
     if (rt.paused) return true;
@@ -588,6 +608,7 @@ export class Scheduler {
     rt.paused = true;
     rt.pauseReason = reason;
     rt.pausedAt = Date.now();
+    rt.pauseReminded = false;
 
     this.eventBus.emit('task.paused', taskId, { reason, runId: rt.runId });
     return true;
@@ -616,6 +637,7 @@ export class Scheduler {
     rt.paused = false;
     rt.pauseReason = null;
     rt.pausedAt = null;
+    rt.pauseReminded = false;
     rt.lastActivityAt = Date.now();
     rt.lastOutputAt = Date.now();
     if (rt.lastCommitCheckAt) {
@@ -1154,34 +1176,36 @@ export class Scheduler {
    * Main scheduler tick
    */
   tick(): void {
-    this.loadGuard.setConfig(this.config.load);
-    const load = this.loadGuard.update();
-    const now = Date.now();
-    if (load.overloaded !== this.lastLoadOverloaded) {
-      this.lastLoadOverloaded = load.overloaded;
-      this.eventBus.emit(load.overloaded ? 'load.high' : 'load.ok', undefined, load);
-      if (load.overloaded) {
+    if (this.inTick) return;
+    this.inTick = true;
+    try {
+      this.loadGuard.setConfig(this.config.load);
+      const load = this.loadGuard.update();
+      const now = Date.now();
+      if (load.overloaded !== this.lastLoadOverloaded) {
+        this.lastLoadOverloaded = load.overloaded;
+        this.eventBus.emit(load.overloaded ? 'load.high' : 'load.ok', undefined, load);
+        if (load.overloaded) {
+          this.lastLoadHighEventAt = now;
+          this.lastLoadHighEventSnapshot = load;
+        } else {
+          this.lastLoadHighEventAt = null;
+          this.lastLoadHighEventSnapshot = null;
+        }
+      } else if (load.overloaded && this.lastLoadHighEventAt !== null && this.lastLoadHighEventSnapshot !== null
+        && now - this.lastLoadHighEventAt >= 30 * 60 * 1000
+        && ((load.load1 > this.lastLoadHighEventSnapshot.load1
+          && load.load1 >= this.lastLoadHighEventSnapshot.load1 * 1.3)
+          || this.lastLoadHighEventSnapshot.freeMemGB - load.freeMemGB > 1)) {
+        this.eventBus.emit('load.high', undefined, load);
         this.lastLoadHighEventAt = now;
         this.lastLoadHighEventSnapshot = load;
-      } else {
-        this.lastLoadHighEventAt = null;
-        this.lastLoadHighEventSnapshot = null;
       }
-    } else if (load.overloaded && this.lastLoadHighEventAt !== null && this.lastLoadHighEventSnapshot !== null
-      && now - this.lastLoadHighEventAt >= 30 * 60 * 1000
-      && ((load.load1 > this.lastLoadHighEventSnapshot.load1
-        && load.load1 >= this.lastLoadHighEventSnapshot.load1 * 1.3)
-        || this.lastLoadHighEventSnapshot.freeMemGB - load.freeMemGB > 1)) {
-      this.eventBus.emit('load.high', undefined, load);
-      this.lastLoadHighEventAt = now;
-      this.lastLoadHighEventSnapshot = load;
-    }
 
-    // Auto-pause / resume by load guard
-    if (this.config.load.enabled) {
-      if (this.loadGuard.isAutoPauseTriggered()) {
+      // Auto-pause / resume by load guard
+      if (this.config.load.enabled && this.loadGuard.isAutoPauseTriggered()) {
         const maxAutoPaused = this.config.load.maxAutoPaused ?? 2;
-        const autoPausedCount = Array.from(this.running.values()).filter((rt) => rt.paused && rt.pauseReason === 'load').length;
+        const autoPausedCount = Array.from(this.running.values()).filter((rt) => rt.paused && (rt.pauseReason === 'load' || rt.pauseReason === 'brain_load')).length;
         if (autoPausedCount < maxAutoPaused) {
           const candidates = Array.from(this.running.values()).filter((rt) => !rt.paused);
           if (candidates.length > 0) {
@@ -1203,7 +1227,7 @@ export class Scheduler {
         }
       } else if (!this.loadGuard.isOverloaded()) {
         const autoPaused = Array.from(this.running.values())
-          .filter((rt) => rt.paused && rt.pauseReason === 'load')
+          .filter((rt) => rt.paused && (rt.pauseReason === 'load' || rt.pauseReason === 'brain_load'))
           .sort((a, b) => (a.pausedAt || 0) - (b.pausedAt || 0));
 
         if (autoPaused.length > 0) {
@@ -1212,7 +1236,30 @@ export class Scheduler {
           this.eventBus.emit('load.task_resumed', nextToResume.taskId, { reason: 'recovered' });
         }
       }
-    }
+
+      // Safety net: check tasks that have been paused longer than scheduler.maxPausedMin
+      if (!this.loadGuard.isOverloaded()) {
+        const maxPausedMin = this.config.scheduler?.maxPausedMin ?? DEFAULT_SCHEDULER_LIMITS.maxPausedMin ?? 30;
+        const maxPausedMs = maxPausedMin * 60 * 1000;
+        for (const rt of this.running.values()) {
+          if (!rt.paused || !rt.pausedAt) continue;
+          const pausedMs = now - rt.pausedAt;
+          if (pausedMs >= maxPausedMs) {
+            if (rt.pauseReason === 'load' || rt.pauseReason === 'brain_load') {
+              this.resumeTask(rt.taskId);
+              this.eventBus.emit('load.task_resumed', rt.taskId, { reason: 'recovered' });
+            } else if (!rt.pauseReminded) {
+              rt.pauseReminded = true;
+              const pausedMinutes = Math.floor(pausedMs / 60000);
+              this.eventBus.emit('task.pause_reminder', rt.taskId, {
+                pausedMinutes,
+                pausedMin: pausedMinutes,
+                reason: rt.pauseReason,
+              });
+            }
+          }
+        }
+      }
     // 0. Check disk space: if sufficient, resume any tasks waiting for disk
     const disks = this.getMonitoredDisks();
     const blockedDisk = disks.find((disk) => disk.low);
@@ -1332,6 +1379,9 @@ export class Scheduler {
       this.lastOrphanScan = Date.now();
       this.scanOrphanWorktrees();
       this.reapOrphans();
+    }
+    } finally {
+      this.inTick = false;
     }
   }
 
@@ -1996,10 +2046,26 @@ export class Scheduler {
             });
           }
 
-          // Try to find another profile/model
-          const attempt = (task.attempt || 0) + 1;
-          this.taskRepo.update(taskId, { status: 'queued', attempt, resume: 1, transientRetries: 0, notBefore: null });
-          this.eventBus.emit('task.queued', taskId, { reason: 'quota_retry' });
+          // Quota failover is a continuation, not a crash/retry attempt. Keep
+          // the task's run-limit counter unchanged and reuse its worktree.
+          const next = this.findModelProfilePair(task);
+          const reason = next
+            ? `quota exhausted on ${rt.engine.id}/${rt.model} (${rt.profileName})`
+            : `quota exhausted on ${rt.engine.id}/${rt.model} (${rt.profileName}); all models/profiles unavailable`;
+          try {
+            fs.appendFileSync(run?.logPath || '', `\n[agenthub] Failover: ${rt.profileName}/${rt.model} → ${next ? `${next.profileName}/${next.model}` : 'waiting_quota'}; reason: ${reason}\n`);
+          } catch {
+            // The run log may have been removed by cleanup; the event remains authoritative.
+          }
+          this.eventBus.emit('task.failover', taskId, {
+            from: { profile: rt.profileName, model: rt.model, engine: rt.engine.id },
+            to: next ? { profile: next.profileName, model: next.model, engine: getModelEngine(next.model) } : null,
+            reason,
+            runId: rt.runId,
+            worktreePath: task.worktreePath,
+          });
+          this.taskRepo.update(taskId, { status: 'queued', resume: 1, transientRetries: 0, notBefore: null });
+          this.eventBus.emit('task.queued', taskId, { reason: 'quota_retry', failover: next ? 'available' : 'waiting_quota' });
         } else if (rt.engine.detectAuthError(logTail).expired) {
           this.runRepo.finish(rt.runId, 'crashed', undefined, 'auth');
           this.markProfileAuthExpired(rt.profileName);

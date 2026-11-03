@@ -37,15 +37,18 @@ function restoredDraft(): WizardDraft {
 
 function projectSettings(draft: WizardDraft): ProjectSettings {
   const projectRoot = draft.path.replace(/\/[^/]+\/?$/, '') || draft.path;
+  const effectivePreset = draft.sensitive ? 'safe' : (draft.preset || 'balanced');
+  const isSafe = draft.sensitive || effectivePreset === 'safe';
   return {
     ...draft.settings,
-    brain: draft.sensitive
+    preset: effectivePreset,
+    brain: isSafe
       ? { ...draft.settings.brain, permissions: 'standard' }
       : draft.settings.brain,
     worktree: {
       ...draft.settings.worktree,
-      ...(draft.sensitive ? { logsInRoot: true } : {}),
-      ...(draft.sensitive ? { root: `${projectRoot}/.agenthub-worktrees` } : {}),
+      ...(isSafe ? { logsInRoot: true } : {}),
+      ...(isSafe ? { root: `${projectRoot}/.agenthub-worktrees` } : {}),
       install: draft.skipInstall ? 'skip' : 'auto',
       gitHooks: draft.skipHooks ? 'skip' : 'run',
     },
@@ -58,7 +61,7 @@ function projectSettings(draft: WizardDraft): ProjectSettings {
       baseRef: draft.branch,
     },
     references: draft.references.filter((reference) => reference.name && reference.path),
-    notifications: draft.sensitive
+    notifications: isSafe
       ? { ...draft.settings.notifications, telegramContent: 'minimal' }
       : draft.settings.notifications,
   };
@@ -110,6 +113,7 @@ export function ProjectWizard({
     mutationFn: () => inspectProject(draft.path),
     onSuccess: (value) => {
       setInspection(value);
+      const isSensitive = value.suggestedSettings.sensitiveProject;
       setDraft((current) => ({
         ...current,
         branch: value.currentBranch || value.branches[0] || current.branch,
@@ -117,7 +121,8 @@ export function ProjectWizard({
         skipInstall: value.suggestedSettings.skipInstall,
         skipHooks: value.suggestedSettings.skipGitHooks,
         integration: value.isGitRepo,
-        sensitive: value.suggestedSettings.sensitiveProject,
+        sensitive: isSensitive,
+        preset: isSensitive ? 'safe' : (current.preset || 'balanced'),
       }));
       setStep(2);
     },
@@ -201,6 +206,7 @@ export function ProjectWizard({
         name: draft.name,
         path: draft.path,
         defaultBranch: draft.branch,
+        departmentId: draft.departmentId || 'chung',
         checks: draft.checks,
         settings: projectSettings(draft),
       };

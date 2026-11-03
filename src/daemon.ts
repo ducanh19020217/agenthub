@@ -35,6 +35,7 @@ import { Engine, AgyEngine, CodexEngine, FakeEngine } from './engines/index.js';
 import { AppService } from './services/index.js';
 import { createServer } from './api/server.js';
 import { QuotaUsageService } from './quota/usage.js';
+import { QuotaService } from './quota/index.js';
 import { ProfileLockService } from './profiles/locks.js';
 import { BrainRepo, BrainService } from './brain.js';
 import { ChatService } from './chat/service.js';
@@ -57,6 +58,7 @@ import { BrainPolicy, projectBrainPolicy, assistantPolicy, globalAssistantPolicy
 import { BrainRunner } from './brain/runner.js';
 import { type DiskSpace } from './disk.js';
 import { DeployService } from './deploy.js';
+import { RemoteDeployService } from './remote-deploy.js';
 import { PerfCollector } from './perf.js';
 import { pruneNodeModulesCache } from './cache.js';
 import { cleanupStaleAgentHubTempDirs } from './temp-cleanup.js';
@@ -98,6 +100,7 @@ export interface DaemonContext {
   brainRunner: BrainRunner;
   directiveRepo: BrainDirectiveRepo;
   deployService: DeployService;
+  remoteDeployService: RemoteDeployService;
   ciRepo: CiRepo;
   ciService: CiWatchService;
   trackerRepo: TrackerItemRepo;
@@ -188,6 +191,7 @@ export function createContext(
   const profileService = new ProfileService(config, profileRepo, quotaMarkRepo);
   const locks = new ProfileLockService(path.join(config.agyHomesDir, '.state'), config.slotsPerAgyProfile, config.slotsPerCodexProfile);
   const usageService = new QuotaUsageService(profileRepo, usageRepo, quotaMarkRepo);
+  const quotaService = new QuotaService(quotaMarkRepo, profileRepo);
   const savingsService = new SavingsService(
     config,
     taskRepo,
@@ -289,6 +293,9 @@ export function createContext(
   });
   deployService.start();
 
+  const remoteDeployService = new RemoteDeployService(config, projectRepo, scheduler.getEventBus());
+  remoteDeployService.start();
+
   const bulletinService = new BulletinService({
     config,
     taskRepo,
@@ -327,6 +334,7 @@ export function createContext(
     departmentRepo,
   );
   service.deployService = deployService;
+  service.remoteDeployService = remoteDeployService;
   scheduler.getEventBus().on('task.review_ready', (taskId, payload) => {
     const data = payload && typeof payload === 'object' ? payload as { reviewChainComplete?: unknown } : {};
     if (taskId && data.reviewChainComplete === true) {
@@ -380,6 +388,7 @@ export function createContext(
     taskRepo,
     profileRepo,
     quotaMarkRepo,
+    quotaService,
     projectRepo,
     ciRepo,
   });
@@ -393,6 +402,7 @@ export function createContext(
     departmentRepo,
     profileRepo,
     quotaMarkRepo,
+    quotaService,
     chatService,
     brainSession: true,
     directiveRepo,
@@ -436,6 +446,7 @@ export function createContext(
     brainRunner,
     directiveRepo,
     deployService,
+    remoteDeployService,
     ciRepo,
     ciService,
     trackerRepo,
@@ -478,6 +489,11 @@ export function closeContext(ctx: DaemonContext): void {
   }
   try {
     ctx.dailyReportService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.remoteDeployService?.stop();
   } catch {
     // ignore
   }

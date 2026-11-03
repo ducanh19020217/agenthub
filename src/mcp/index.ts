@@ -6,6 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { getTokenPath, readExistingToken } from '../auth.js';
 import { toRouteId, toTaskId } from '../services/index.js';
+import { formatRunnableCapacity, QuotaCapacitySnapshot } from '../quota/index.js';
 
 export class DaemonDownError extends Error {
   constructor(message = 'AgentHub daemon chưa chạy: `agenthub install-service` hoặc `agenthub daemon`') {
@@ -270,6 +271,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             slotsUsed?: number;
             slotsTotal?: number;
           }>;
+          quotaCapacity?: QuotaCapacitySnapshot;
         }>('GET', '/api/status');
 
         const lines: string[] = [];
@@ -277,6 +279,19 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         lines.push(
           `Đang chạy ${tasks.running || 0}${tasks.checking ? ` · đang kiểm tra ${tasks.checking}` : ''} · chờ review ${tasks.review || 0} · chờ quota ${tasks.waiting_quota || 0} · lỗi ${tasks.failed || 0}`,
         );
+
+        if (data.quotaCapacity) {
+          if (data.quotaCapacity.runnable.length === 0) {
+            const next = data.quotaCapacity.nextReset;
+            const resetStr = next ? ` (sớm nhất: ${next.profileName}/${next.model})` : '';
+            lines.push(`🚨 Hết sạch quota ở mọi tài khoản và model — Hệ thống tạm dừng thực thi task${resetStr}`);
+          } else {
+            const hasMarks = (data.profiles || []).some((p) => (p.quotaMarks || []).length > 0);
+            if (hasMarks) {
+              lines.push(`Quota: Vẫn chạy bằng ${formatRunnableCapacity(data.quotaCapacity)}`);
+            }
+          }
+        }
 
         lines.unshift(formatBestQuotaLine(data.profiles || [], 'claude'));
         lines.unshift(formatBestQuotaLine(data.profiles || [], 'gemini'));
@@ -1467,9 +1482,16 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   server.tool(
     'hub_pause',
     'Tạm dừng một task',
-    { id: z.string() },
-    async ({ id }) => {
-      try { assertTaskId(id, 'Tạm dừng task'); await callApi('POST', `/api/tasks/${toRouteId(id)}/pause`); return { content: [{ type: 'text', text: `✓ Đã tạm dừng ${id}` }] }; }
+    {
+      id: z.string().describe('ID của task cần tạm dừng'),
+      reason: z.enum(['manual', 'load', 'brain_load']).optional().describe('Lý do tạm dừng: load (khi máy quá tải để tự tiếp tục khi hạ tải) hoặc manual (tạm dừng thủ công)'),
+    },
+    async ({ id, reason }) => {
+      try {
+        assertTaskId(id, 'Tạm dừng task');
+        await callApi('POST', `/api/tasks/${toRouteId(id)}/pause`, { reason });
+        return { content: [{ type: 'text', text: `✓ Đã tạm dừng ${id}` }] };
+      }
       catch (err: unknown) { return handleError(err); }
     },
   );
@@ -1481,6 +1503,22 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     async ({ id }) => {
       try { assertTaskId(id, 'Tiếp tục task'); await callApi('POST', `/api/tasks/${toRouteId(id)}/resume`); return { content: [{ type: 'text', text: `✓ Đã tiếp tục ${id}` }] }; }
       catch (err: unknown) { return handleError(err); }
+    },
+  );
+
+  server.tool(
+    'hub_remote_deploy',
+    'Kích hoạt remote deploy cho một project',
+    { projectId: z.string().describe('ID của project') },
+    async ({ projectId }) => {
+      try {
+        const targetProject = projectId || scopedProject();
+        if (!targetProject) throw new Error('Cần cung cấp projectId');
+        const result = await callApi('POST', `/api/projects/${encodeURIComponent(targetProject)}/remote-deploy`);
+        return { content: [{ type: 'text', text: `✓ Đã kích hoạt remote deploy cho project "${targetProject}": ${JSON.stringify(result)}` }] };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
     },
   );
 

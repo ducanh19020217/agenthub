@@ -212,7 +212,7 @@ const ProjectTaskGroup: React.FC<{ project: { id: string; name: string }; tasks:
         {visible.visibleItems.length > 0 ? <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">{visible.visibleItems.map((task) => (
           <Link key={task.id} to={`/tasks/${encodeURIComponent(task.id.replace('/', '~'))}`} className="block rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] p-3 hover:border-[var(--t-accent)] transition-colors">
             <div className="text-xs font-mono text-[var(--t-text-2)] truncate">{task.slug}</div>
-            <div className="mt-1 text-sm font-semibold text-[var(--t-text)] line-clamp-2">{task.title}</div>
+            <div className="mt-1 text-sm font-semibold text-[var(--t-text)] line-clamp-2">{task.title}</div>{task.externalRef && <a href={task.externalRef} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="mt-1 inline-block text-xs text-[var(--t-accent)] hover:underline">{task.externalRef}</a>}
             <StatusBadge status={task.status} size="sm" />
           </Link>
         ))}</div> : <div className="rounded-lg border border-dashed border-[var(--t-border)] p-5 text-center text-xs italic text-[var(--t-text-3)]">{t('common.empty')}</div>}

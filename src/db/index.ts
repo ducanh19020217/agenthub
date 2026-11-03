@@ -885,6 +885,7 @@ export function openDatabase(dbPath: string): Database.Database {
     );
   }
   ensureProfileAvatarColumn(db);
+  ensureSchedulerLimitColumns(db);
 
   return db;
 }
@@ -910,6 +911,21 @@ function repairForkAvatarMigration(db: Database.Database, currentVersion: number
 /** Cột avatarUrl nằm ngoài danh sách MIGRATIONS để không giành số migration với upstream. */
 function ensureProfileAvatarColumn(db: Database.Database): void {
   if (!hasColumn(db, 'profiles', 'avatarUrl')) db.exec('ALTER TABLE profiles ADD COLUMN avatarUrl TEXT');
+}
+
+/** Scheduler safety state is appended outside numbered migrations to preserve the public schema sequence. */
+function ensureSchedulerLimitColumns(db: Database.Database): void {
+  const add = (table: string, column: string, definition: string) => {
+    if (hasColumn(db, table, column)) return;
+    try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`); } catch (error) {
+      if (!String(error).includes('duplicate column name')) throw error;
+    }
+  };
+  add('tasks', 'runCount', 'INTEGER NOT NULL DEFAULT 0');
+  add('tasks', 'consecutiveCrashes', 'INTEGER NOT NULL DEFAULT 0');
+  add('profiles', 'consecutiveCrashes', 'INTEGER NOT NULL DEFAULT 0');
+  add('profiles', 'lastCrashAt', 'INTEGER');
+  add('profiles', 'coolingUntil', 'INTEGER');
 }
 
 // Repository helpers
@@ -1006,6 +1022,9 @@ export interface ProfileRow {
   accountType?: 'personal' | 'team' | 'api';
   avatarUrl?: string | null;
   deletedAt?: string | null;
+  consecutiveCrashes?: number;
+  lastCrashAt?: number | null;
+  coolingUntil?: number | null;
 }
 
 export interface QuotaMarkRow {
@@ -1046,6 +1065,8 @@ export interface TaskRow {
   resume: number;
   notBefore: number | null;
   transientRetries: number;
+  runCount: number;
+  consecutiveCrashes: number;
   checkFixAttempts: number;
   reviewerChangesRequested?: number;
   reviewerEscalated?: number;
@@ -1470,6 +1491,15 @@ export class ProfileRepo {
     this.db.prepare('UPDATE profiles SET enabled = ? WHERE name = ?').run(enabled, name);
   }
 
+  recordCrash(name: string, now: number, coolingUntil: number | null): number {
+    this.db.prepare('UPDATE profiles SET consecutiveCrashes = consecutiveCrashes + 1, lastCrashAt = ?, coolingUntil = ? WHERE name = ?').run(now, coolingUntil, name);
+    return (this.db.prepare('SELECT consecutiveCrashes FROM profiles WHERE name = ?').get(name) as { consecutiveCrashes: number } | undefined)?.consecutiveCrashes || 0;
+  }
+
+  resetCrashes(name: string): void {
+    this.db.prepare('UPDATE profiles SET consecutiveCrashes = 0, lastCrashAt = NULL, coolingUntil = NULL WHERE name = ?').run(name);
+  }
+
   getEnabled(): ProfileRow[] {
     return this.db
       .prepare('SELECT * FROM profiles WHERE enabled = 1 AND deletedAt IS NULL ORDER BY name')
@@ -1637,6 +1667,10 @@ export class TaskRepo {
     return this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRow | undefined;
   }
 
+  resetRunLimits(id: string): void {
+    this.db.prepare('UPDATE tasks SET runCount = 0, consecutiveCrashes = 0 WHERE id = ?').run(id);
+  }
+
   getDerivedFrom(sourceTaskId: string): TaskRow[] {
     return this.db.prepare("SELECT * FROM tasks WHERE json_extract(sourceRef, '$.taskId') = ? ORDER BY createdAt").all(sourceTaskId) as TaskRow[];
   }
@@ -1733,7 +1767,7 @@ export class TaskRepo {
 
   update(
     id: string,
-    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'diffStat' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
+    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'diffStat' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
   ): void {
     const sets: string[] = ["updatedAt = datetime('now')"];
     const values: unknown[] = [];

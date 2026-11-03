@@ -371,6 +371,65 @@ export class Scheduler {
   getCheckResults(taskId: string) { return this.db ? getCheckResults(this.db, taskId) : []; }
   getDatabase(): Database.Database | undefined { return this.db; }
 
+  private schedulerLimits() {
+    return this.config.scheduler || this.config.schedulerLimits;
+  }
+
+  private isProfileCooling(profile: ProfileRow, now = Date.now()): boolean {
+    if (!profile.coolingUntil) return false;
+    if (profile.coolingUntil > now / 1000) return true;
+    this.profileRepo.resetCrashes(profile.name);
+    return false;
+  }
+
+  private blockForRunLimit(task: TaskRow): boolean {
+    const limits = this.schedulerLimits();
+    const runCount = task.runCount || 0;
+    const crashes = task.consecutiveCrashes || 0;
+    if (runCount < limits.maxRunsPerTask && crashes < limits.maxConsecutiveCrashesPerTask) return false;
+    const message = runCount >= limits.maxRunsPerTask
+      ? `vượt giới hạn ${limits.maxRunsPerTask} lượt chạy cho mỗi task`
+      : `vượt giới hạn ${limits.maxConsecutiveCrashesPerTask} crash liên tiếp cho mỗi task`;
+    this.taskRepo.update(task.id, { status: 'blocked', waitReason: null, notBefore: null });
+    this.eventBus.emit('task.blocked', task.id, { reason: 'run_limit', message, runCount, consecutiveCrashes: crashes });
+    return true;
+  }
+
+  private recordWorkerCrash(taskId: string, rt: RunningTask, reason?: string): boolean {
+    this.runRepo.finish(rt.runId, 'crashed', undefined, reason);
+    const task = this.taskRepo.get(taskId);
+    if (!task) return false;
+    const crashes = (task.consecutiveCrashes || 0) + 1;
+    this.taskRepo.update(taskId, { consecutiveCrashes: crashes });
+    const profile = this.profileRepo.get(rt.profileName);
+    if (profile) {
+      const now = Date.now();
+      if (profile.lastCrashAt && now - profile.lastCrashAt > this.config.profileCooling.windowMin * 60_000) this.profileRepo.resetCrashes(profile.name);
+      const inWindow = profile.lastCrashAt != null && now - profile.lastCrashAt <= this.config.profileCooling.windowMin * 60_000;
+      const nextCount = inWindow ? (profile.consecutiveCrashes || 0) + 1 : 1;
+      const coolingUntil = nextCount >= this.config.profileCooling.threshold
+        ? Math.floor((now + this.config.profileCooling.coolingMin * 60_000) / 1000)
+        : null;
+      this.profileRepo.recordCrash(profile.name, now, coolingUntil);
+      if (coolingUntil) this.eventBus.emit('profile.cooling', taskId, { profile: profile.name, until: coolingUntil, reason: 'consecutive_crashes' });
+    }
+    const limits = this.schedulerLimits();
+    if (crashes >= limits.maxConsecutiveCrashesPerTask || (task.runCount || 0) >= limits.maxRunsPerTask) {
+      const message = crashes >= limits.maxConsecutiveCrashesPerTask
+        ? `vượt giới hạn ${limits.maxConsecutiveCrashesPerTask} crash liên tiếp cho mỗi task`
+        : `vượt giới hạn ${limits.maxRunsPerTask} lượt chạy cho mỗi task`;
+      this.taskRepo.update(taskId, { status: 'blocked', waitReason: null, notBefore: null });
+      this.eventBus.emit('task.blocked', taskId, { reason: 'run_limit', message, runCount: task.runCount || 0, consecutiveCrashes: crashes });
+      return true;
+    }
+    return false;
+  }
+
+  private recordWorkerSuccess(profileName: string, taskId: string): void {
+    this.profileRepo.resetCrashes(profileName);
+    this.taskRepo.update(taskId, { consecutiveCrashes: 0 });
+  }
+
   configureReviewer(reviewRepo: ReviewRepo, failoverState: ClaudeFailoverState): void {
     this.reviewRepo = reviewRepo;
     this.failoverState = failoverState;
@@ -1893,6 +1952,7 @@ export class Scheduler {
         doneReport: markers.doneContent || currentTask.doneReport,
         diffStat: diffStat ?? currentTask.diffStat,
       });
+      this.recordWorkerSuccess(rt.profileName, taskId);
       this.eventBus.emit('task.checking', taskId);
       await this.runChecksForTask(taskId, rt.runId);
     } else if (marker === 'blocked') {
@@ -1900,7 +1960,7 @@ export class Scheduler {
       this.taskRepo.update(taskId, { status: 'blocked', transientRetries: 0, notBefore: null });
       this.eventBus.emit('task.blocked', taskId);
     } else if (this.hasCommitAfter(currentTask, rt.startTime)) {
-      this.runRepo.finish(rt.runId, 'crashed', undefined, 'resume_after_progress');
+      if (this.recordWorkerCrash(taskId, rt, 'resume_after_progress')) return;
       this.taskRepo.update(taskId, { status: 'queued', resume: 1 });
       this.eventBus.emit('task.queued', taskId, { reason: 'resume_after_progress' });
     } else {
@@ -1908,7 +1968,7 @@ export class Scheduler {
       const isLockBusy = durationMs < 3000 && fullLog.trim() === '' && Boolean(rt.lockFile) && exitCode === 1;
 
       if (isLockBusy) {
-        this.runRepo.finish(rt.runId, 'crashed', undefined, 'lock_busy');
+        if (this.recordWorkerCrash(taskId, rt, 'lock_busy')) return;
         this.taskRepo.update(taskId, {
           status: 'queued',
           notBefore: Math.floor(Date.now() / 1000) + 5,
@@ -1948,7 +2008,7 @@ export class Scheduler {
           if (rt.engine.detectTransientError(logTail) && task.transientRetries < 3) {
             const delays = [60000, 120000, 180000];
             const delay = delays[task.transientRetries] || 180000;
-            this.runRepo.finish(rt.runId, 'crashed');
+            if (this.recordWorkerCrash(taskId, rt)) return;
             this.taskRepo.update(taskId, {
               status: 'queued',
               notBefore: Math.floor(Date.now() / 1000) + Math.ceil(delay / 1000),
@@ -1957,7 +2017,7 @@ export class Scheduler {
             this.eventBus.emit('task.queued', taskId, { reason: 'transient_retry', delay });
           } else {
             // Failed
-            this.runRepo.finish(rt.runId, 'crashed');
+            if (this.recordWorkerCrash(taskId, rt)) return;
             this.taskRepo.updateStatus(taskId, 'failed');
             this.eventBus.emit('task.failed', taskId);
           }
@@ -2096,6 +2156,7 @@ export class Scheduler {
           || parseDbTime(a.createdAt) - parseDbTime(b.createdAt);
       });
       const task = remainingTasks.shift()!;
+      if (this.blockForRunLimit(task)) continue;
       if (task.notBefore != null && task.notBefore > Math.floor(Date.now() / 1000)) continue;
       // Check dependencies
       if (!this.areDependenciesMet(task)) continue;
@@ -2929,6 +2990,7 @@ export class Scheduler {
         if (profile.engine !== engineId) return false;
         if (this.quotaService.isExhausted(profile.name, family)) return false;
         if (this.isProfileBusy(profile.name)) return false;
+        if (this.isProfileCooling(profile)) return false;
         if (this.locks.getSlotsSync(profile).busy) return false;
         return true;
       });
@@ -3354,6 +3416,7 @@ export class Scheduler {
       profileName,
       logPath,
     });
+    this.taskRepo.update(task.id, { runCount: (task.runCount || 0) + 1, status: 'running' });
 
     // Spawn the engine
     const referenceSnapshots = takeReferenceSnapshots(projectSettings(project).references);

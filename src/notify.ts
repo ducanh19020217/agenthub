@@ -224,6 +224,8 @@ export class NotificationService {
         type === 'disk.docker_low' ||
         type === 'claude.quota_exhausted' ||
         type === 'hub.restart_failed' ||
+        type.startsWith('deploy.') ||
+        type.startsWith('gitea.sync.') ||
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||
@@ -318,6 +320,38 @@ export class NotificationService {
       case 'tracker.poll_failed': {
         const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
         this.notify(`${this.appName}: đồng bộ ${source} thất bại`, 'critical');
+        break;
+      }
+
+      case 'gitea.sync.started': {
+        const source = typeof p.sourceBranch === 'string' ? p.sourceBranch : '';
+        const target = typeof p.targetBranch === 'string' ? p.targetBranch : '';
+        this.notify(`${this.appName}: bắt đầu đồng bộ Gitea ${source} → ${target}`, 'normal');
+        break;
+      }
+
+      case 'gitea.sync.skipped': {
+        const reason = typeof p.reason === 'string' ? p.reason : 'Không có commit mới';
+        this.notify(`${this.appName}: bỏ qua đồng bộ Gitea: ${reason}`, 'normal');
+        break;
+      }
+
+      case 'gitea.sync.succeeded': {
+        const prNum = typeof p.prNumber === 'number' ? `PR #${p.prNumber}` : 'PR';
+        const commit = typeof p.commit === 'string' ? ` (${p.commit.slice(0, 7)})` : '';
+        this.notify(`${this.appName}: đồng bộ Gitea thành công: ${prNum}${commit}`, 'normal');
+        break;
+      }
+
+      case 'gitea.sync.failed': {
+        const err = typeof p.error === 'string' ? `: ${p.error}` : '';
+        this.notify(`${this.appName}: đồng bộ Gitea thất bại${err}`, 'critical');
+        break;
+      }
+
+      case 'gitea.sync.conflict': {
+        const count = Array.isArray(p.conflictingFiles) ? ` (${p.conflictingFiles.length} file)` : '';
+        this.notify(`${this.appName}: xung đột đồng bộ Gitea${count}: đã tạo task gỡ xung đột`, 'critical');
         break;
       }
 

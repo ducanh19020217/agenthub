@@ -3546,7 +3546,7 @@ export class TelegramBotService {
 
     // 1. Brain auto mode: suppress raw task notifications
     try {
-      const isSystemEvent = type === 'quota.exhausted' || type === 'claude.quota_exhausted' || type.startsWith('disk.') || type.startsWith('system.') || type.startsWith('hub.') || type.startsWith('deploy.') || type === 'profile.auth_expired' || type === 'chat.limit_waiting';
+      const isSystemEvent = type === 'quota.exhausted' || type === 'claude.quota_exhausted' || type.startsWith('disk.') || type.startsWith('system.') || type.startsWith('hub.') || type.startsWith('deploy.') || type.startsWith('remote_deploy.') || type === 'profile.auth_expired' || type === 'chat.limit_waiting';
     this.notificationProjectId = isSystemEvent ? null : projectId;
     this.notificationDedupProjectId = projectId;
     const focusProjectId = this.config.focus?.projectId;
@@ -3569,6 +3569,7 @@ export class TelegramBotService {
         type === 'claude.quota_exhausted' ||
         type === 'hub.restart_failed' ||
         type.startsWith('deploy.') ||
+        type.startsWith('remote_deploy.') ||
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||
@@ -3961,6 +3962,27 @@ export class TelegramBotService {
         const icon = isFailure ? '🚨' : isSuccess ? '✅' : '🚀';
         const details = typeof p.error === 'string' ? `\n${this.escapeHtml(p.error)}` : typeof p.message === 'string' ? `\n${this.escapeHtml(p.message)}` : '';
         this.broadcastMessage(`${icon} <b>${title}</b>${details}`);
+        break;
+      }
+
+      case 'remote_deploy.started':
+      case 'remote_deploy.succeeded':
+      case 'remote_deploy.failed':
+      case 'remote_deploy.health_timeout': {
+        if (!notify.fallback) return;
+        const isFailure = type === 'remote_deploy.failed' || type === 'remote_deploy.health_timeout';
+        const isSuccess = type === 'remote_deploy.succeeded';
+        const title = isSuccess
+          ? 'Remote deploy thành công'
+          : type === 'remote_deploy.health_timeout'
+            ? 'Remote deploy hết thời gian chờ health check'
+            : isFailure
+              ? 'Remote deploy thất bại'
+              : 'Bắt đầu remote deploy';
+        const icon = isSuccess ? '✅' : isFailure ? '🚨' : '🚀';
+        const proj = typeof p.projectId === 'string' ? ` [${this.escapeHtml(p.projectId)}]` : '';
+        const details = typeof p.error === 'string' ? `\n${this.escapeHtml(p.error)}` : typeof p.message === 'string' ? `\n${this.escapeHtml(p.message)}` : '';
+        this.broadcastMessage(`${icon} <b>${title}</b>${proj}${details}`);
         break;
       }
 

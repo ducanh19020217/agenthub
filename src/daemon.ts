@@ -57,6 +57,7 @@ import { BrainPolicy, projectBrainPolicy, assistantPolicy, globalAssistantPolicy
 import { BrainRunner } from './brain/runner.js';
 import { type DiskSpace } from './disk.js';
 import { DeployService } from './deploy.js';
+import { RemoteDeployService } from './remote-deploy.js';
 import { PerfCollector } from './perf.js';
 import { pruneNodeModulesCache } from './cache.js';
 import { cleanupStaleAgentHubTempDirs } from './temp-cleanup.js';
@@ -98,6 +99,7 @@ export interface DaemonContext {
   brainRunner: BrainRunner;
   directiveRepo: BrainDirectiveRepo;
   deployService: DeployService;
+  remoteDeployService: RemoteDeployService;
   ciRepo: CiRepo;
   ciService: CiWatchService;
   trackerRepo: TrackerItemRepo;
@@ -289,6 +291,9 @@ export function createContext(
   });
   deployService.start();
 
+  const remoteDeployService = new RemoteDeployService(config, projectRepo, scheduler.getEventBus());
+  remoteDeployService.start();
+
   const bulletinService = new BulletinService({
     config,
     taskRepo,
@@ -327,6 +332,7 @@ export function createContext(
     departmentRepo,
   );
   service.deployService = deployService;
+  service.remoteDeployService = remoteDeployService;
   scheduler.getEventBus().on('task.review_ready', (taskId, payload) => {
     const data = payload && typeof payload === 'object' ? payload as { reviewChainComplete?: unknown } : {};
     if (taskId && data.reviewChainComplete === true) {
@@ -432,6 +438,7 @@ export function createContext(
     brainRunner,
     directiveRepo,
     deployService,
+    remoteDeployService,
     ciRepo,
     ciService,
     trackerRepo,
@@ -468,6 +475,11 @@ export function closeContext(ctx: DaemonContext): void {
   }
   try {
     ctx.intakeService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.remoteDeployService?.stop();
   } catch {
     // ignore
   }

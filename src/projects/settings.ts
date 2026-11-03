@@ -29,7 +29,25 @@ export function isValidBranchName(val: string): boolean {
   return true;
 }
 
+export const RemoteDeployHealthCheckSchema = z.object({
+  url: z.string().min(1),
+  expectStatusBelow: z.number().int().default(500),
+  contains: z.string().optional(),
+});
+export type RemoteDeployHealthCheck = z.infer<typeof RemoteDeployHealthCheckSchema>;
+
+export const RemoteDeploySettingsSchema = z.object({
+  enabled: z.boolean().default(false),
+  trigger: z.enum(['after-gitea-sync', 'manual']).default('manual'),
+  steps: z.array(z.array(z.string())).default([]),
+  healthChecks: z.array(RemoteDeployHealthCheckSchema).default([]),
+  waitMinutes: z.number().min(0).default(15),
+  timeoutSec: z.number().int().positive().default(1800),
+});
+export type RemoteDeploySettings = z.infer<typeof RemoteDeploySettingsSchema>;
+
 export const ProjectSettingsSchema = z.object({
+  remoteDeploy: RemoteDeploySettingsSchema.default({}),
   openproject: z.object({
     enabled: z.boolean().default(false),
     sourceId: z.string().min(1).nullable().default(null),
@@ -110,6 +128,7 @@ export type ProjectSettings = z.infer<typeof ProjectSettingsSchema>;
 
 /** Input accepted by the API: every section and field optional; merged over the stored settings. */
 export const ProjectSettingsInputSchema = z.object({
+  remoteDeploy: ProjectSettingsSchema.shape.remoteDeploy.removeDefault().partial().optional(),
   openproject: ProjectSettingsSchema.shape.openproject.removeDefault().partial().optional(),
   commitConvention: ProjectSettingsSchema.shape.commitConvention.removeDefault().partial().optional(),
   brain: ProjectSettingsSchema.shape.brain.removeDefault().partial().optional(),
@@ -133,9 +152,10 @@ export type ProjectSettingsInput = z.infer<typeof ProjectSettingsInputSchema>;
 const parsedDefaultProjectSettings = ProjectSettingsSchema.parse({});
 // Keep the legacy serialized/default shape stable while exposing the new section to callers.
 Object.defineProperty(parsedDefaultProjectSettings, 'openproject', { value: parsedDefaultProjectSettings.openproject, enumerable: false, writable: true });
+Object.defineProperty(parsedDefaultProjectSettings, 'remoteDeploy', { value: parsedDefaultProjectSettings.remoteDeploy, enumerable: false, writable: true });
 Object.defineProperty(parsedDefaultProjectSettings, 'toJSON', {
   value: function (this: ProjectSettings) {
-    return { ...this, openproject: this.openproject };
+    return { ...this, openproject: this.openproject, remoteDeploy: this.remoteDeploy };
   },
   enumerable: false,
   writable: true,
@@ -153,9 +173,10 @@ export function parseProjectSettings(raw: string | null | undefined): ProjectSet
     parsed.review.autoMerge = effectiveAutoMerge;
     parsed.integration.autoMerge = effectiveAutoMerge;
     Object.defineProperty(parsed, 'openproject', { value: parsed.openproject, enumerable: false, writable: true });
+    Object.defineProperty(parsed, 'remoteDeploy', { value: parsed.remoteDeploy, enumerable: false, writable: true });
     Object.defineProperty(parsed, 'toJSON', {
       value: function (this: ProjectSettings) {
-        return { ...this, openproject: this.openproject };
+        return { ...this, openproject: this.openproject, remoteDeploy: this.remoteDeploy };
       },
       enumerable: false,
       writable: true,
@@ -199,6 +220,14 @@ export function mergeProjectSettings(current: ProjectSettings, input: ProjectSet
     planning: input.planning !== undefined ? (input.planning ? { ...current.planning, ...input.planning } : undefined) : current.planning,
     brain: { ...current.brain, ...input.brain },
     openproject: { ...current.openproject, ...input.openproject },
+    remoteDeploy: input.remoteDeploy
+      ? {
+          ...current.remoteDeploy,
+          ...input.remoteDeploy,
+          ...(input.remoteDeploy.steps ? { steps: input.remoteDeploy.steps } : {}),
+          ...(input.remoteDeploy.healthChecks ? { healthChecks: input.remoteDeploy.healthChecks } : {}),
+        }
+      : current.remoteDeploy,
     commitConvention: { ...current.commitConvention, ...input.commitConvention },
     worktree: { ...current.worktree, ...input.worktree },
     integration: {

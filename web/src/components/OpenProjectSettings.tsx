@@ -16,7 +16,37 @@ export const OpenProjectSettings: React.FC = () => {
   useEffect(() => { if (!draft && sources[0]) setDraft({ ...sources[0] }); }, [sources, draft]);
   const save = useMutation({ mutationFn: async () => { if (!draft) throw new Error('missing'); const saved = await saveOpenProjectSource(draft.id, draft); if (key.trim()) await saveOpenProjectKey(draft.id, key.trim()); return saved; }, onSuccess: () => { setKey(''); setMessage(t('integrations.saved')); qc.invalidateQueries({ queryKey: ['openproject-sources'] }); } });
   const remove = useMutation({ mutationFn: deleteOpenProjectSource, onSuccess: () => { setDraft(null); qc.invalidateQueries({ queryKey: ['openproject-sources'] }); } });
-  const action = async (fn: () => Promise<unknown>) => { try { const result = await fn(); setMessage(JSON.stringify(result)); } catch (e) { setMessage((e as Error).message); } };
+  const handleTestConnection = async () => {
+    if (!draft) return;
+    try {
+      const res = await testOpenProjectConnection(draft.id);
+      const name = res?.name;
+      setMessage(name ? t('integrations.testOkWithName', { name }) : t('integrations.testOk'));
+    } catch (e) {
+      setMessage((e as Error).message);
+    }
+  };
+
+  const handleSyncNow = async () => {
+    if (!draft) return;
+    try {
+      const res = (await syncOpenProject(draft.id)) as { imported?: number } | undefined;
+      const count = res?.imported ?? 0;
+      setMessage(t('integrations.syncSuccess', { count }));
+    } catch (e) {
+      setMessage((e as Error).message);
+    }
+  };
+
+  const handleDailyReport = async () => {
+    if (!draft) return;
+    try {
+      await createOpenProjectDailyReport(draft.id);
+      setMessage(t('integrations.dailyReportSuccess'));
+    } catch (e) {
+      setMessage((e as Error).message);
+    }
+  };
   const set = (patch: Partial<OpenProjectSourceInput>) => setDraft((d) => d ? { ...d, ...patch } : d);
   if (isLoading) return <section className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-5">{t('common.loading')}</section>;
   return <section className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-5 space-y-4" data-testid="openproject-global-settings">
@@ -31,7 +61,7 @@ export const OpenProjectSettings: React.FC = () => {
       <label className="flex gap-2 items-center"><input type="checkbox" checked={draft.autoStart} onChange={(e) => set({ autoStart: e.target.checked })} />{t('integrations.autoStart')}</label><label className="flex gap-2 items-center"><input type="checkbox" checked={draft.autoResolve} onChange={(e) => set({ autoResolve: e.target.checked })} />{t('integrations.autoResolve')}</label>
       <div className="sm:col-span-2 grid gap-3 rounded-lg border border-[var(--t-border)] p-3 sm:grid-cols-2"><strong className="sm:col-span-2 text-xs">{t('integrations.dailyReportConfig')}</strong><label className="space-y-1 text-xs"><span>{t('integrations.reportTime')}</span><input type="time" value={draft.dailyReport?.time || '18:00'} onChange={(e) => set({ dailyReport: { ...(draft.dailyReport || { weekdaysOnly: true, maxItems: 10, telegram: false }), time: e.target.value } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label><label className="space-y-1 text-xs"><span>{t('integrations.reportDirectory')}</span><input value={draft.dailyReport?.dir || ''} onChange={(e) => set({ dailyReport: { ...(draft.dailyReport || { time: '18:00', weekdaysOnly: true, maxItems: 10, telegram: false }), dir: e.target.value } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label><label className="space-y-1 text-xs"><span>{t('integrations.maxReportItems')}</span><input type="number" value={draft.dailyReport?.maxItems ?? 10} onChange={(e) => set({ dailyReport: { ...(draft.dailyReport || { time: '18:00', weekdaysOnly: true, maxItems: 10, telegram: false }), maxItems: Number(e.target.value) } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.dailyReport?.weekdaysOnly ?? true} onChange={(e) => set({ dailyReport: { ...(draft.dailyReport || { time: '18:00', maxItems: 10, telegram: false }), weekdaysOnly: e.target.checked } })} />{t('integrations.weekdaysOnly')}</label><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.dailyReport?.telegram ?? false} onChange={(e) => set({ dailyReport: { ...(draft.dailyReport || { time: '18:00', weekdaysOnly: true, maxItems: 10 }), telegram: e.target.checked } })} />Telegram</label></div>
       <label className="sm:col-span-2 space-y-1"><span>{t('integrations.apiKey')}</span><input type="password" value={key} placeholder={sources.find((s) => s.id === draft.id)?.keyConfigured ? t('integrations.configured') : ''} onChange={(e) => setKey(e.target.value)} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label>
-      <div className="sm:col-span-2 flex flex-wrap gap-2"><button type="button" onClick={() => save.mutate()} className="rounded-lg bg-[var(--t-accent)] px-3 py-2 text-xs text-[var(--t-on-accent)]">{t('common.save')}</button><button type="button" onClick={() => action(() => testOpenProjectConnection(draft.id))} className="rounded-lg border px-3 py-2 text-xs">{t('integrations.testConnection')}</button><button type="button" onClick={() => action(() => syncOpenProject(draft.id))} className="rounded-lg border px-3 py-2 text-xs">{t('integrations.syncNow')}</button><button type="button" onClick={() => action(() => createOpenProjectDailyReport(draft.id))} className="rounded-lg border px-3 py-2 text-xs">{t('integrations.dailyReport')}</button><button type="button" onClick={() => remove.mutate(draft.id)} className="rounded-lg border border-[var(--t-crit)] px-3 py-2 text-xs text-[var(--t-crit)]"><Trash2 className="inline h-3 w-3" /> {t('common.delete')}</button></div>
+      <div className="sm:col-span-2 flex flex-wrap gap-2"><button type="button" onClick={() => save.mutate()} className="rounded-lg bg-[var(--t-accent)] px-3 py-2 text-xs text-[var(--t-on-accent)]">{t('common.save')}</button><button type="button" onClick={handleTestConnection} className="rounded-lg border px-3 py-2 text-xs">{t('integrations.testConnection')}</button><button type="button" onClick={handleSyncNow} className="rounded-lg border px-3 py-2 text-xs">{t('integrations.syncNow')}</button><button type="button" onClick={handleDailyReport} className="rounded-lg border px-3 py-2 text-xs">{t('integrations.dailyReport')}</button><button type="button" onClick={() => remove.mutate(draft.id)} className="rounded-lg border border-[var(--t-crit)] px-3 py-2 text-xs text-[var(--t-crit)]"><Trash2 className="inline h-3 w-3" /> {t('common.delete')}</button></div>
       {message && <p role="status" className="sm:col-span-2 text-xs text-[var(--t-text-2)]"><CheckCircle2 className="inline h-3 w-3" /> {message}</p>}
     </div>}
   </section>;

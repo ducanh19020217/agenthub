@@ -828,6 +828,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             level: string;
             attempt: number;
             reviewerEscalated?: number;
+            reviewRound?: number;
+            reviewMaxRounds?: number;
           }>
         >('GET', `/api/tasks${query}`);
 
@@ -838,7 +840,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         }
         const lines = [`Tasks (${tasks.length}):`];
         for (const t of tasks) {
-          lines.push(`- [${t.status}] ${t.id} - ${t.title} (level: ${t.level}, attempt: ${t.attempt})`);
+          const round = t.reviewRound && t.reviewMaxRounds ? `, Vòng duyệt ${t.reviewRound}/${t.reviewMaxRounds}` : '';
+          lines.push(`- [${t.status}] ${t.id} - ${t.title} (level: ${t.level}, attempt: ${t.attempt}${round})`);
         }
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       } catch (err: unknown) {
@@ -869,6 +872,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             worktreePath?: string | null;
             baseRef?: string | null;
             dependsOn?: string[];
+            reviewRound?: number;
+            reviewMaxRounds?: number;
           };
           runs: Array<{
             id: string;
@@ -901,6 +906,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           `Task: ${t.id} [${t.status}]`,
           `Tiêu đề: ${t.title}`,
           `Level: ${t.level} | Lượt chạy: ${t.attempt}`,
+          ...(typeof t.reviewRound === 'number' && typeof t.reviewMaxRounds === 'number' ? [`Vòng duyệt: ${t.reviewRound}/${t.reviewMaxRounds}`] : []),
           `Branch: ${t.branch || '(chưa tạo)'}`,
           `Worktree: ${t.worktreePath || '(chưa tạo)'}`,
           `Base ref: ${t.baseRef || '(mặc định)'}`,
@@ -987,6 +993,10 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
       verdict: z.enum(['approved', 'changes_requested']).describe('Kết quả review'),
       feedback: z.string().optional().describe('Góp ý hoặc yêu cầu sửa (bắt buộc khi verdict là changes_requested)'),
       merge: z.boolean().optional().describe('Khi approved, merge vào worktree tích hợp đã cấu hình'),
+      source: z
+        .enum(['content', 'operational'])
+        .optional()
+        .describe('Phân loại review: "content" (mặc định) cho đánh giá chất lượng mã nguồn; "operational" cho yêu cầu gỡ xung đột merge conflict hoặc các vấn đề vận hành/hạ tầng (không tính vào giới hạn vòng review)'),
     },
     async (args) => {
       try {
@@ -997,6 +1007,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           verdict: args.verdict,
           feedback: args.feedback,
           merge: args.merge,
+          source: args.source,
           by: 'claude-review',
         });
         try {

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { detectClaudeQuota } from '../src/chat/parse.js';
 import { ClaudeFailoverState } from '../src/chat/failover.js';
-import { buildReviewerPrompt, parseReviewerOutput } from '../src/reviewer.js';
+import { buildReviewerPrompt, extractMissedEarlierFindings, parseReviewerOutput } from '../src/reviewer.js';
 import { loadConfig } from '../src/config.js';
 import { makeTestTempDir } from './temp.js';
 
@@ -93,6 +93,30 @@ describe('Codex reviewer output', () => {
     expect(prompt).toContain('CANONICAL CHECK');
     expect(prompt).not.toContain('WORKTREE ATTACK');
     fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('requires a complete repository-wide review and includes prior feedback', () => {
+    const prompt = buildReviewerPrompt('Task', '/tmp/worktree', [], [], '/tmp/project', [{
+      actor: 'codex-reviewer',
+      verdict: 'changes_requested',
+      feedback: 'P1: src/old.ts:10 còn lỗi',
+      createdAt: '2026-11-03T00:00:00Z',
+    }]);
+    expect(prompt).toContain('grep toàn repo');
+    expect(prompt).toContain('danh sách ĐẦY ĐỦ');
+    expect(prompt).toContain('src/old.ts:10 còn lỗi');
+    expect(prompt).toContain('### Lượt review 1 (codex-reviewer, changes_requested, 2026-11-03T00:00:00Z)');
+    expect(prompt).toContain('missed-earlier');
+
+    const sampleFeedback = [
+      '1. P1 - src/new.ts:5 lỗi mới phát sinh',
+      '2. P1 - missed-earlier: src/notify.ts:433 chưa bỏ fallback_changed',
+      '3. P2 - missed-earlier: src/brain/digest.ts:305 còn sót tham chiếu',
+    ].join('\n');
+    const missed = extractMissedEarlierFindings(sampleFeedback);
+    expect(missed).toHaveLength(2);
+    expect(missed[0]).toContain('src/notify.ts:433');
+    expect(missed[1]).toContain('src/brain/digest.ts:305');
   });
 
   it('rejects a checklist symlink escaping the canonical project', () => {

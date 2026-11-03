@@ -76,6 +76,7 @@ import type { PerfCollector } from '../perf.js';
 import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../presets.js';
 import type { SetupTools } from '../setup-tools.js';
 import { computeEffectiveConfig } from '../effective-config.js';
+import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
 
 const execFileAsync = promisify(execFile);
 const CODEX_EMAIL_RECHECK_MS = 10 * 60 * 1000;
@@ -404,6 +405,7 @@ export const ReviewTaskSchema = z.object({
   verdict: z.enum(['approved', 'changes_requested']),
   feedback: z.string().optional(),
   by: z.string().optional(),
+  source: z.enum(['content', 'operational']).optional().default('content'),
   merge: z.boolean().optional().default(false),
 }).refine(
   (d) => d.verdict !== 'changes_requested' || (typeof d.feedback === 'string' && d.feedback.trim().length > 0),
@@ -2836,9 +2838,13 @@ export class AppService {
       const reviewer = reviewerRun
         ? (reviewerRun.engine.id === 'claude' ? 'claude' : 'codex')
         : (isFallback ? fallbackReviewer : (reviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex'));
+      const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
+      const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
       return {
         ...apiTask(task),
         reviewChain,
+        reviewRound,
+        reviewMaxRounds,
         reviewer,
         checks: this.scheduler.getCheckResults(task.id),
         paused: Boolean(run?.paused),
@@ -2977,6 +2983,8 @@ export class AppService {
       ? (reviewerRun.engine.id === 'claude' ? 'claude' : 'codex')
       : (isFallback ? fallbackReviewer : (reviews.at(-1)?.actor === 'claude-reviewer' ? 'claude' : (activeReviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex')));
 
+    const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
+    const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
     return {
       ...apiTask(task),
       reviewer,
@@ -3002,7 +3010,8 @@ export class AppService {
       mergeAvailable: configuredMerge,
       mergeUnavailableReason: configuredMerge ? null : 'Project chưa cấu hình merge tự động. Mở Cài đặt dự án → Integration để bật.',
       reviewStep: task.reviewStep ?? 0,
-      reviewMaxRounds: reviewSettings?.maxRounds || 2,
+      reviewRound,
+      reviewMaxRounds,
       doneContent,
       blockedContent,
       modelWarnings,
@@ -3696,16 +3705,17 @@ export class AppService {
       }
     }
 
-    const reviewId = crypto.randomUUID();
-    this.reviewRepo.insert({
-      id: reviewId,
-      taskId,
-      verdict: parsed.verdict,
-      feedback: parsed.feedback || null,
-      actor: parsed.by || 'claude',
-    });
+    if (!['codex-reviewer', 'claude-reviewer', 'claude-review'].includes(parsed.by || '')) {
+      this.reviewRepo.insert({
+        id: crypto.randomUUID(),
+        taskId,
+        verdict: parsed.verdict,
+        feedback: parsed.feedback || null,
+        actor: parsed.by || 'claude',
+      });
+    }
 
-    this.scheduler.reviewTask(taskId, parsed.verdict, parsed.feedback, parsed.by);
+    this.scheduler.reviewTask(taskId, parsed.verdict, parsed.feedback, parsed.by, parsed.source);
     if (parsed.verdict === 'approved' && this.knowledgeRepo) {
       const completed = this.taskRepo.get(taskId);
       const donePath = completed?.worktreePath ? path.join(completed.worktreePath, '.agenthub', 'DONE') : null;
@@ -3809,6 +3819,7 @@ export class AppService {
       await this.reviewTask(toRouteId(taskId), {
         verdict: 'changes_requested',
         by: 'auto-escalation',
+        source: 'operational',
         feedback: `${feedback}\n\n(Reviewer đã yêu cầu sửa quá số vòng cho phép; giao lại một lần với ${ESCALATION_MODEL}.)`,
       });
     } catch (error) {
@@ -3909,7 +3920,6 @@ export class AppService {
       transientRetries: 0,
       notBefore: null,
       body: newBody,
-      reviewerChangesRequested: 0,
       reviewerEscalated: 0,
       reviewerEscalatedAt: null,
       reviewerEscalationReason: null,

@@ -495,7 +495,8 @@ export class WorktreeService {
     }
 
     if (feedback) {
-      content += '\n\n## Feedback review\n\n' + feedback;
+      content += '\n\n## Feedback review\n\n' + feedback
+        + '\n\nĐây là danh sách đầy đủ các mục cần sửa. Trước khi báo xong, hãy tự grep các chỗ tương tự trên toàn repo, sửa tất cả mục liên quan và ghi trong DONE: "đã kiểm tra tương tự ở: …".';
     }
 
     fs.writeFileSync(path.join(agentHubDir, 'task.md'), content, 'utf-8');

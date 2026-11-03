@@ -909,8 +909,18 @@ export function openDatabase(dbPath: string): Database.Database {
   }
   ensureProfileAvatarColumn(db);
   ensureSchedulerLimitColumns(db);
+  cleanExpiredClaudeLimits(db);
 
   return db;
+}
+
+function cleanExpiredClaudeLimits(db: Database.Database): void {
+  try {
+    const threshold = Math.floor(Date.now() / 1000) - 24 * 3600;
+    db.prepare('UPDATE claude_sessions SET limitResetAt = NULL, limitHitAt = NULL WHERE limitResetAt IS NOT NULL AND limitResetAt <= ?').run(threshold);
+  } catch {
+    // claude_sessions table may not exist in early migration states
+  }
 }
 
 function hasColumn(db: Database.Database, table: string, column: string): boolean {

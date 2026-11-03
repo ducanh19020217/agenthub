@@ -306,7 +306,11 @@ export function isSystemIncident(
   if (type === 'hub.restart_failed' || type === 'system.error') return true;
 
   if (type === 'quota.exhausted') {
-    if (isQuotaEventEngineWide(p, profileRepo, quotaMarkRepo, now)) return true;
+    if (profileRepo && quotaMarkRepo) {
+      const quotaService = new QuotaService(quotaMarkRepo, profileRepo);
+      return quotaService.runnableCapacity(undefined, Math.floor(now / 1000)).length === 0;
+    }
+    return Boolean(p.allExhausted === true);
   }
 
   return false;

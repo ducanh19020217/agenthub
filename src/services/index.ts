@@ -35,6 +35,7 @@ import {
 } from '../db/index.js';
 import type { CiWatchService } from '../ci.js';
 import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
+import type { DailyReportService } from '../integrations/openproject/daily-report.js';
 import type { GiteaSyncService } from '../integrations/gitea/service.js';
 import { isGiteaTokenConfigured, saveGiteaToken } from '../integrations/gitea/secrets.js';
 import { BulletinService } from '../bulletin.js';
@@ -911,6 +912,7 @@ export class AppService {
   public ciRepo?: CiRepo;
   public ciService?: CiWatchService;
   public intakeService?: OpenProjectIntakeService;
+  public dailyReportService?: DailyReportService;
   public giteaSyncService?: GiteaSyncService;
   private perfCollector?: PerfCollector;
   private profileChecks = new Set<string>();

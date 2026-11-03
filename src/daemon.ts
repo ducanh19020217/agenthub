@@ -28,6 +28,7 @@ import {
 } from './db/index.js';
 import { CiWatchService } from './ci.js';
 import { OpenProjectIntakeService } from './integrations/openproject/intake.js';
+import { DailyReportService, parseDateNoon } from './integrations/openproject/daily-report.js';
 import { SetupTools } from './setup-tools.js';
 import { OpenProjectWritebackService } from './integrations/openproject/writeback.js';
 import { GiteaSyncService } from './integrations/gitea/service.js';
@@ -108,6 +109,7 @@ export interface DaemonContext {
   trackerRepo: TrackerItemRepo;
   intakeService: OpenProjectIntakeService;
   writebackService: OpenProjectWritebackService;
+  dailyReportService: DailyReportService;
   giteaSyncService: GiteaSyncService;
   perfCollector: PerfCollector;
 }
@@ -388,6 +390,12 @@ export function createContext(
     eventBus: scheduler.getEventBus(),
   });
 
+  const dailyReportService = new DailyReportService({
+    config,
+    eventBus: scheduler.getEventBus(),
+  });
+  service.dailyReportService = dailyReportService;
+
   const giteaSyncService = new GiteaSyncService({
     config,
     projectRepo,
@@ -466,6 +474,7 @@ export function createContext(
     trackerRepo,
     intakeService,
     writebackService,
+    dailyReportService,
     giteaSyncService,
     perfCollector,
   };
@@ -509,6 +518,11 @@ export function closeContext(ctx: DaemonContext): void {
   }
   try {
     ctx.writebackService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.dailyReportService?.stop();
   } catch {
     // ignore
   }
@@ -588,6 +602,7 @@ export async function startDaemon(
   ctx.ciService.start();
   ctx.intakeService.start();
   ctx.writebackService.start();
+  ctx.dailyReportService.start();
   ctx.giteaSyncService.start();
   ctx.perfCollector.start();
 
@@ -599,6 +614,12 @@ export async function startDaemon(
   // Start Fastify HTTP server with security and API endpoints
   const fastify = await createServer(ctx.service, config, {
     openProjectSync: (sourceId) => ctx.intakeService.sync(sourceId),
+    openProjectDailyReport: (sourceId, date) =>
+      ctx.dailyReportService.generateReport(
+        sourceId,
+        date ? parseDateNoon(date) : undefined,
+        { overwrite: true },
+      ),
     onShutdown: (disable) => {
       if (disable) {
         try {

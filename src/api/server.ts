@@ -16,6 +16,7 @@ import { registerBrainRoutes } from '../brain.js';
 import { registerChatRoutes } from '../chat/service.js';
 import { brandingLogoPath, saveBrandingLogo } from '../branding.js';
 import { decodeCursor } from '../pagination.js';
+import { registerOpenProjectRoutes } from '../integrations/openproject/routes.js';
 
 export function resolveWebDistDir(customDir?: string): string {
   return path.resolve(customDir || resolveWebDir(import.meta.url, process.env));
@@ -125,6 +126,7 @@ export async function createServer(
   fastify.get('/api/status', async () => {
     return service.getStatus();
   });
+  registerOpenProjectRoutes(fastify, config);
 
   fastify.post('/api/hub/shutdown', async (req) => {
     const body = (req.body || {}) as { disable?: unknown };
@@ -242,6 +244,14 @@ export async function createServer(
     const { id } = req.params as { id: string };
     return service.updateDepartmentProfiles(id, req.body);
   });
+  fastify.put('/api/departments/:id/projects', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.updateDepartmentProjects(id, req.body);
+  });
+  fastify.post('/api/departments/:id/projects', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.updateDepartmentProjects(id, req.body);
+  });
 
   // --- Projects API ---
   fastify.get('/api/projects', async (req: FastifyRequest) => {
@@ -276,6 +286,11 @@ export async function createServer(
   fastify.get('/api/projects/:id', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
     return service.getProject(id);
+  });
+
+  fastify.get('/api/projects/:id/effective-config', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getEffectiveConfig(id);
   });
 
   fastify.get('/api/projects/:id/deploy', async (req: FastifyRequest) => {
@@ -592,6 +607,9 @@ export async function createServer(
   });
 
   // --- Config API ---
+  fastify.get('/api/presets', async () => service.getPresets());
+  fastify.post('/api/presets/apply', async (req: FastifyRequest) => service.applyPreset(req.body));
+
   fastify.get('/api/config', async () => {
     return service.getConfig();
   });

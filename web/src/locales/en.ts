@@ -437,6 +437,7 @@ export const en: typeof vi = {
     thToggle: 'Enable / Disable',
     thActions: 'Actions',
     busyTag: 'BUSY',
+    coolingUntil: 'Cooling until {time}',
     notLoggedIn: 'Not logged in', needsLogin: 'Sign in again',
     loginNow: 'Log in now',
     duplicateEmail: 'Duplicate email with: {emails}',

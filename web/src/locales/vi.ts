@@ -435,6 +435,7 @@ export const vi = {
     thToggle: 'Bật / Tắt',
     thActions: 'Hành động',
     busyTag: 'BẬN',
+    coolingUntil: 'Đang cooling đến {time}',
     notLoggedIn: 'Chưa đăng nhập',
     needsLogin: 'Cần đăng nhập lại',
     loginNow: 'Đăng nhập ngay',

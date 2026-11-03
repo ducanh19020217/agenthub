@@ -129,3 +129,17 @@
 - **Hệ quả**:
   - Khắc phục hoàn toàn lỗi thiếu `node_modules` trên worktree tích hợp.
   - Tách biệt rõ ràng trách nhiệm giữa lỗi code do worker và sự cố môi trường hệ thống.
+
+## DEC-012: Di chuyển cấu hình brain của phòng ban sang 'inherit' và thứ tự ưu tiên cấu hình
+
+- **Bối cảnh**:
+  - Trước đây, bảng `departments` có các trường `brain*` với mặc định: `brainEngine = 'claude'`, `brainModel = 'sonnet'`, `brainPermissions = 'full'`, `brainMaxTurnsPerHour = 20`. Mọi project đều thuộc phòng ban `chung`.
+  - Điều này dẫn đến việc các thiết lập mặc định của phòng ban vô tình đè lên cấu hình toàn cục (`brain.permissions = standard`) và lựa chọn của project (ví dụ cấu hình wizard chọn "sensitive", cấu hình `maxTurnsPerHour` hoặc `dailyTokenBudget`).
+  - Do SQLite không lưu lịch sử chỉnh sửa từng cột, không thể phân biệt được giá trị nào do người dùng chủ động sửa tay trùng với giá trị mặc định cũ và giá trị nào do hệ thống tự sinh ra.
+- **Quyết định**:
+  1. **Thứ tự ưu tiên cấu hình**: Luôn tuân theo thứ tự rõ ràng: **`project > department > global`**.
+  2. **Giá trị mặc định**: Mọi trường `brain*` của phòng ban hỗ trợ `'inherit'` (hoặc `0` đối với budget/turns), và mặc định khi tạo mới là `'inherit'`.
+  3. **Migration 58**: Đổi toàn bộ các giá trị phòng ban đang bằng giá trị mặc định cũ (`brainEngine = 'claude'`, `brainModel = 'sonnet'`, `brainPermissions = 'full'`, `brainMaxTurnsPerHour = 20`) sang `'inherit'` (và `0` cho turns).
+- **Hệ quả**:
+  - Project được tôn trọng các thiết lập `maxTurnsPerHour`, `dailyTokenBudget`, `permissions`, `engine`, `model`.
+  - Cấu hình phòng ban chỉ ghi đè khi được người dùng chủ động cấu hình khác `'inherit'`.

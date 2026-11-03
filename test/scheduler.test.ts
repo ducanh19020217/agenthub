@@ -825,7 +825,7 @@ describe('Codex reviewer failover lifecycle', () => {
 
   it('reuses the worker Codex profile when chain Claude fallback is disabled', () => {
     const { scheduler } = makeReviewer('reviewer-approved');
-    config.reviewer.claudeFallback = false;
+    config.reviewer.fallback.onUnavailable = false;
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
     db.prepare("INSERT INTO runs (id, taskId, engine, model, profileName, kind) VALUES ('chain-worker', 'test-project/review', 'codex', 'codex:gpt-5.6-luna', 'codex-1', 'worker')").run();
 

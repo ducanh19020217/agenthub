@@ -297,7 +297,8 @@ export class NotificationService {
 
       case 'task.blocked': {
         const title = this.resolveTaskTitle(taskId, p);
-        this.notify(`${this.appName}: ${title} bị chặn`, 'normal');
+        const reason = typeof p.message === 'string' ? `: ${p.message}` : typeof p.reason === 'string' ? ` (${p.reason})` : '';
+        this.notify(`${this.appName}: ${title} bị chặn${reason}`, 'normal');
         break;
       }
 

@@ -4,10 +4,10 @@ import { BrainDirectiveRepo, BrainTurnRepo, ChatSessionRepo, DepartmentRepo, Kno
 import { resolveClaudeProfile, resolveCodexProfile } from '../profiles/index.js';
 import type { ChatService } from '../chat/service.js';
 import { EventBus } from '../scheduler/index.js';
-import { effectiveBrainMode, effectiveBrainPermission, type EffectiveBrainMode } from './mode.js';
+import { effectiveBrainMode, type EffectiveBrainMode } from './mode.js';
 import { projectSettings } from '../projects/settings.js';
 import { buildProjectKnowledgeContext } from '../projects/knowledge-context.js';
-import { effectiveBrainCodexProfile, effectiveBrainEngine } from './engine.js';
+import { effectiveBrainCodexProfile } from './engine.js';
 
 const EVENT_TYPES = new Set(['task.review_ready', 'task.failed', 'task.blocked', 'task.done', 'batch.created', 'batch.dispatched', 'merge.failed', 'merge.conflict', 'quota.exhausted', 'claude.quota_exhausted', 'disk.low', 'load.high', 'brain.directive_added', 'brain.department_summary', 'brain.profile_transfer', 'ci.failed', 'brain.trust_changed', 'config.updated']);
 const SYSTEM_EVENTS = new Set(['quota.exhausted', 'claude.quota_exhausted', 'disk.low', 'load.high']);
@@ -135,10 +135,23 @@ export class BrainRunner {
     const settings = this.projectSettings(projectId);
     const department = this.department(projectId);
     const departmentId = department?.id;
-    const maxTurns = departmentId ? (department.brainMaxTurnsPerHour || this.opts.config.maxTurnsPerHour) : (settings.brain.maxTurnsPerHour ?? this.opts.config.maxTurnsPerHour);
-    const budget = departmentId ? (department.brainDailyTokenBudget || this.opts.config.dailyTokenBudget) : (settings.brain.dailyTokenBudget ?? this.opts.config.dailyTokenBudget);
-    const count = departmentId ? this.opts.turnRepo.countSinceDepartment(now - 3600000, departmentId) : this.opts.turnRepo.countSince(now - 3600000, projectId);
-    const tokens = departmentId ? this.opts.turnRepo.tokensSinceDepartment(day.toISOString(), departmentId) : this.opts.turnRepo.tokensSince(day.toISOString(), projectId);
+    // Priority: project > department > global for maxTurnsPerHour and dailyTokenBudget
+    const projectMaxTurns = settings.brain.maxTurnsPerHour;
+    const deptMaxTurns = departmentId && department.brainMaxTurnsPerHour && department.brainMaxTurnsPerHour > 0 ? department.brainMaxTurnsPerHour : undefined;
+    const maxTurns = projectMaxTurns ?? deptMaxTurns ?? this.opts.config.maxTurnsPerHour;
+    const projectBudget = settings.brain.dailyTokenBudget;
+    const deptBudget = departmentId && department.brainDailyTokenBudget && department.brainDailyTokenBudget > 0 ? department.brainDailyTokenBudget : undefined;
+    const budget = projectBudget ?? deptBudget ?? this.opts.config.dailyTokenBudget;
+    const count = projectMaxTurns !== undefined
+      ? this.opts.turnRepo.countSince(now - 3600000, projectId)
+      : departmentId
+        ? this.opts.turnRepo.countSinceDepartment(now - 3600000, departmentId)
+        : this.opts.turnRepo.countSince(now - 3600000, projectId);
+    const tokens = projectBudget !== undefined
+      ? this.opts.turnRepo.tokensSince(day.toISOString(), projectId)
+      : departmentId
+        ? this.opts.turnRepo.tokensSinceDepartment(day.toISOString(), departmentId)
+        : this.opts.turnRepo.tokensSince(day.toISOString(), projectId);
     if (count >= maxTurns || (budget > 0 && tokens >= budget)) {
       this.opts.eventBus.emit('brain.limited', projectId || undefined, { reason: 'budget' });
       return 'limited';
@@ -184,11 +197,12 @@ export class BrainRunner {
     return project?.departmentId ? this.opts.departmentRepo?.get(project.departmentId) : undefined;
   }
   private mode(projectId: string | null): EffectiveBrainMode {
-    if (this.opts.config.mode === 'off' && !this.opts.config.director?.enabled) return 'off';
     const project = projectId ? this.opts.projectRepo?.get(projectId) : null;
-    const projectMode = effectiveBrainMode(projectId, project, this.opts.config);
+    const projectMode = projectSettings(project).brain.mode;
+    if (projectMode !== 'inherit') return projectMode;
     const departmentMode = this.department(projectId)?.brainMode;
-    return departmentMode && departmentMode !== 'inherit' && projectSettings(project).brain.mode === 'inherit' ? departmentMode : projectMode;
+    if (departmentMode && departmentMode !== 'inherit') return departmentMode;
+    return effectiveBrainMode(projectId, project, this.opts.config);
   }
   private sessionIdFor(projectId: string | null): string {
     const department = this.department(projectId);
@@ -201,8 +215,13 @@ export class BrainRunner {
     const id = this.sessionIdFor(projectId);
     const project = projectId ? this.opts.projectRepo?.get(projectId) : undefined;
     const department = this.department(projectId);
-    const permission = department?.brainPermissions && department.brainPermissions !== 'inherit'
-      ? department.brainPermissions : effectiveBrainPermission(project, this.opts.config);
+    // Priority: project > department > global for permissions
+    const projectSettings_ = projectSettings(project);
+    const permission = projectSettings_.brain.permissions !== 'inherit'
+      ? projectSettings_.brain.permissions
+      : (department?.brainPermissions && department.brainPermissions !== 'inherit'
+        ? department.brainPermissions
+        : this.opts.config.permissions);
     const director = !projectId ? this.opts.config.director : undefined;
     const effectivePermission = director?.permissions || permission;
     const mode = effectivePermission === 'full' ? 'full' : 'safe';
@@ -224,9 +243,15 @@ export class BrainRunner {
       }
       return this.opts.chatSessionRepo.get(existing.id) || existing;
     }
-    const engine = effectiveBrainEngine(project, this.opts.config);
-    const resolvedEngine = director?.engine || department?.brainEngine || engine;
-    const resolvedModel = director?.model || department?.brainModel || (resolvedEngine === 'codex' ? (this.opts.config.codexModel || 'gpt-5.6-luna') : this.opts.config.model);
+    // Priority: project > department > global for engine and model
+    const projectEngine = projectSettings_.brain.engine;
+    const deptEngine = department?.brainEngine && department.brainEngine !== 'inherit' ? department.brainEngine : undefined;
+    const resolvedEngine = director?.engine || (projectEngine !== 'inherit' ? projectEngine : (deptEngine ?? (this.opts.config.engine || 'claude')));
+
+    const projectModel = projectSettings_.brain.model;
+    const deptModel = department?.brainModel && department.brainModel !== 'inherit' ? department.brainModel : undefined;
+    const defaultModel = resolvedEngine === 'codex' ? (this.opts.config.codexModel || 'gpt-5.6-luna') : this.opts.config.model;
+    const resolvedModel = director?.model || (projectModel ? projectModel : (deptModel ?? defaultModel));
     this.opts.chatService.getOrCreateSession(id, {
       title: department ? `Bộ não · ${department.name}` : project ? `Bộ não · ${project.name}` : director ? 'Bộ não Giám đốc' : 'Bộ não', mode,
       model: resolvedModel,

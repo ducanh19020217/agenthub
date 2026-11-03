@@ -30,6 +30,11 @@ export function isValidBranchName(val: string): boolean {
 }
 
 export const ProjectSettingsSchema = z.object({
+  openproject: z.object({
+    enabled: z.boolean().default(false),
+    sourceId: z.string().min(1).nullable().default(null),
+    role: z.enum(['primary', 'secondary']).default('primary'),
+  }).default({}),
   commitConvention: z.object({
     branchTemplate: z.string().min(1).max(200).default('agenthub/{slug}'),
     commitTemplate: z.string().min(1).max(200).default('{type}: {summary}'),
@@ -38,6 +43,7 @@ export const ProjectSettingsSchema = z.object({
   }).default({}),
   brain: z.object({
     engine: z.enum(['inherit', 'claude', 'codex']).default('inherit'),
+    model: z.string().trim().min(1).optional(),
     codexProfile: z.string().min(1).optional(),
     /**
      * Who coordinates this project:
@@ -52,6 +58,12 @@ export const ProjectSettingsSchema = z.object({
     dailyTokenBudget: z.number().int().min(0).optional(),
     maxTurnsPerHour: z.number().int().positive().optional(),
   }).default({}),
+  preset: z.enum(['safe', 'balanced', 'auto', 'custom']).optional(),
+  autoFixOnFail: z.boolean().optional(),
+  planning: z.object({
+    requireApproval: z.boolean().optional(),
+    approvalMinTasks: z.number().int().min(0).max(100).optional(),
+  }).optional(),
   worktree: z.object({
     /** Absolute parent directory for task worktrees. Each task is created as <root>/<slug>. */
     root: z.string().min(1).refine((value) => path.isAbsolute(value), 'phải là đường dẫn tuyệt đối').optional(),
@@ -98,6 +110,7 @@ export type ProjectSettings = z.infer<typeof ProjectSettingsSchema>;
 
 /** Input accepted by the API: every section and field optional; merged over the stored settings. */
 export const ProjectSettingsInputSchema = z.object({
+  openproject: ProjectSettingsSchema.shape.openproject.removeDefault().partial().optional(),
   commitConvention: ProjectSettingsSchema.shape.commitConvention.removeDefault().partial().optional(),
   brain: ProjectSettingsSchema.shape.brain.removeDefault().partial().optional(),
   worktree: ProjectSettingsSchema.shape.worktree.removeDefault().partial().optional(),
@@ -107,20 +120,49 @@ export const ProjectSettingsInputSchema = z.object({
   references: z.array(ReferenceSchema).max(20).optional(),
   reviewChecklist: z.array(z.string().min(1).max(500).refine(isSafeProjectRelativePath, 'phải là đường dẫn tương đối trong project, không được chứa ..')).max(5).optional(),
   notifications: ProjectSettingsSchema.shape.notifications.removeDefault().partial().optional(),
+  preset: z.enum(['safe', 'balanced', 'auto', 'custom']).optional(),
+  autoFixOnFail: z.boolean().optional(),
+  planning: z.object({
+    requireApproval: z.boolean().optional(),
+    approvalMinTasks: z.number().int().min(0).max(100).optional(),
+  }).partial().optional(),
 });
 
 export type ProjectSettingsInput = z.infer<typeof ProjectSettingsInputSchema>;
 
-export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = ProjectSettingsSchema.parse({});
+const parsedDefaultProjectSettings = ProjectSettingsSchema.parse({});
+// Keep the legacy serialized/default shape stable while exposing the new section to callers.
+Object.defineProperty(parsedDefaultProjectSettings, 'openproject', { value: parsedDefaultProjectSettings.openproject, enumerable: false, writable: true });
+Object.defineProperty(parsedDefaultProjectSettings, 'toJSON', {
+  value: function (this: ProjectSettings) {
+    return { ...this, openproject: this.openproject };
+  },
+  enumerable: false,
+  writable: true,
+});
+export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = parsedDefaultProjectSettings;
 
 /** Parse the stored column. Invalid or missing JSON yields defaults (never throws). */
 export function parseProjectSettings(raw: string | null | undefined): ProjectSettings {
-  if (!raw) return ProjectSettingsSchema.parse({});
+  if (!raw) return DEFAULT_PROJECT_SETTINGS;
   try {
     const result = ProjectSettingsSchema.safeParse(JSON.parse(raw));
-    return result.success ? result.data : ProjectSettingsSchema.parse({});
+    if (!result.success) return DEFAULT_PROJECT_SETTINGS;
+    const parsed = result.data;
+    const effectiveAutoMerge = Boolean(parsed.review?.autoMerge || parsed.integration?.autoMerge);
+    parsed.review.autoMerge = effectiveAutoMerge;
+    parsed.integration.autoMerge = effectiveAutoMerge;
+    Object.defineProperty(parsed, 'openproject', { value: parsed.openproject, enumerable: false, writable: true });
+    Object.defineProperty(parsed, 'toJSON', {
+      value: function (this: ProjectSettings) {
+        return { ...this, openproject: this.openproject };
+      },
+      enumerable: false,
+      writable: true,
+    });
+    return parsed;
   } catch {
-    return ProjectSettingsSchema.parse({});
+    return DEFAULT_PROJECT_SETTINGS;
   }
 }
 
@@ -145,13 +187,27 @@ export function mergeProjectSettings(current: ProjectSettings, input: ProjectSet
     );
   }
 
+  const nextAutoMerge = input.review?.autoMerge !== undefined
+    ? input.review.autoMerge
+    : (input.integration?.autoMerge !== undefined
+      ? input.integration.autoMerge
+      : (current.review?.autoMerge || current.integration?.autoMerge || false));
+
   return ProjectSettingsSchema.parse({
+    preset: input.preset !== undefined ? input.preset : current.preset,
+    autoFixOnFail: input.autoFixOnFail !== undefined ? input.autoFixOnFail : current.autoFixOnFail,
+    planning: input.planning !== undefined ? (input.planning ? { ...current.planning, ...input.planning } : undefined) : current.planning,
     brain: { ...current.brain, ...input.brain },
+    openproject: { ...current.openproject, ...input.openproject },
     commitConvention: { ...current.commitConvention, ...input.commitConvention },
     worktree: { ...current.worktree, ...input.worktree },
-    integration: { ...current.integration, ...input.integration },
+    integration: {
+      ...current.integration,
+      ...input.integration,
+      autoMerge: nextAutoMerge,
+    },
     review: {
-      autoMerge: input.review?.autoMerge ?? current.review?.autoMerge ?? false,
+      autoMerge: nextAutoMerge,
       ...(nextReviewOrder ? { order: nextReviewOrder } : {}),
       ...(nextReviewFallback ? { fallback: nextReviewFallback } : {}),
     },

@@ -3577,7 +3577,7 @@ export class TelegramBotService {
     if ((type === 'quota.cleared' || type === 'task.queued') && this.taskRepo) this.queueWaitingQuotaCheck(notifyAllExhausted);
 
     const now = this.now();
-    if (type === 'quota.exhausted') {
+    if (type === 'quota.exhausted' || type === 'claude.quota_exhausted') {
       const snapshot = this.quotaCapacity();
       const isAllExhausted = snapshot
         ? snapshot.runnable.length === 0
@@ -3923,7 +3923,8 @@ export class TelegramBotService {
         break;
       }
 
-      case 'quota.exhausted': {
+      case 'quota.exhausted':
+      case 'claude.quota_exhausted': {
         const quotaKey = (typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '') || 'all';
         const snapshot = this.quotaCapacity();
         if (!notifyAllExhausted || this.quotaIncidentActive) return;
@@ -3957,12 +3958,6 @@ export class TelegramBotService {
           `${prefix}⏸ <b>Nhắc nhở: ${pauseBadge}</b>\nID: <code>${taskLabel}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>\nTask đã bị dừng hơn ${minutes} phút trong khi máy không quá tải.`,
           keyboard.length > 0 ? { inline_keyboard: keyboard } : undefined,
         );
-        break;
-      }
-
-      case 'claude.quota_exhausted': {
-        if (!notifyAllExhausted || p.fallbackAvailable !== false) return;
-        this.broadcastMessage('⏳ <b>Claude hết quota</b>\nKhông còn bước fallback khả dụng, cần chờ reset quota.');
         break;
       }
 
@@ -4517,6 +4512,7 @@ export class TelegramBotService {
       case 'review.fallback':
         return `${prefix}Codex hết quota, Claude đang duyệt …`;
       case 'quota.exhausted':
+      case 'claude.quota_exhausted':
         return 'Hết sạch quota ở mọi tài khoản và model';
       default:
         return taskId ? `${prefix}${type} (${taskId})` : type;

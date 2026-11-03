@@ -302,10 +302,9 @@ export function isSystemIncident(
   if (p.urgency === 'critical' || p.critical === true) return true;
 
   if (type === 'disk.low' || type === 'disk.docker_low') return true;
-  if (type === 'claude.quota_exhausted') return true;
   if (type === 'hub.restart_failed' || type === 'system.error') return true;
 
-  if (type === 'quota.exhausted') {
+  if (type === 'quota.exhausted' || type === 'claude.quota_exhausted') {
     if (profileRepo && quotaMarkRepo) {
       const quotaService = new QuotaService(quotaMarkRepo, profileRepo);
       return quotaService.runnableCapacity(undefined, Math.floor(now / 1000)).length === 0;

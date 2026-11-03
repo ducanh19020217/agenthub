@@ -166,7 +166,7 @@ export class NotificationService {
     if (level === 'off') return;
     if (level === 'important' && !new Set([
       'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
-      'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.waiting_quota',
+      'disk.low', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed', 'task.waiting_quota',
       'quota.cleared', 'remote_deploy.failed', 'remote_deploy.health_timeout',
     ]).has(type)) return;
 
@@ -196,7 +196,7 @@ export class NotificationService {
     if ((type === 'quota.cleared' || type === 'task.queued') && this.taskRepo) this.queueWaitingQuotaCheck(notifyAllExhausted);
     if (!this.eventDeduper.shouldSend(type, taskId, payload)) return;
 
-    if (type === 'quota.exhausted') {
+    if (type === 'quota.exhausted' || type === 'claude.quota_exhausted') {
       const snapshot = this.quotaCapacity();
       const isAllExhausted = snapshot
         ? snapshot.runnable.length === 0
@@ -419,7 +419,8 @@ export class NotificationService {
         break;
       }
 
-      case 'quota.exhausted': {
+      case 'quota.exhausted':
+      case 'claude.quota_exhausted': {
         const quotaKey = (typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '') || 'all';
         const snapshot = this.quotaCapacity();
         if (!notifyAllExhausted || this.quotaIncidentActive) break;

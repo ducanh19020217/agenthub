@@ -2,7 +2,7 @@ import { EventItem } from './types/api';
 import { getActiveLocale } from './utils/apiError';
 import { formatEventType } from './utils/events';
 
-const IMPORTANT = new Set(['brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.pause_reminder']);
+const IMPORTANT = new Set(['brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed', 'task.pause_reminder']);
 const DESKTOP_EVENTS = new Set([
   ...IMPORTANT,
   'batch.created', 'task.paused', 'load.task_paused', 'load.high', 'task.resumed', 'task.pause_reminder',
@@ -151,7 +151,7 @@ export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 
       ? `Docker disk space low: ${freeGB} GB (< ${minFreeGB} GB): skipping docker build/pull/compose up`
       : `Ổ đĩa Docker còn ${freeGB} GB (< ${minFreeGB} GB): không chạy docker build/pull/compose up`;
   }
-  if (event.type === 'quota.exhausted') {
+  if (event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted') {
     return isEn
       ? `${appName}: All accounts have exhausted quota`
       : `${appName}: Mọi tài khoản đều đã hết quota`;
@@ -255,10 +255,10 @@ export function shouldNotifyBrowserEvent(
   if (level === 'important' && !IMPORTANT.has(event.type)) return false;
   const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
   if (options.brainMode === 'auto' && !new Set([
-    'brain.notify', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed',
+    'brain.notify', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed',
   ]).has(event.type)) return false;
-  if (isBrowserQuietHours(options.quietHours, event.ts) && event.type !== 'disk.low' && event.type !== 'disk.docker_low' && event.type !== 'quota.exhausted') return false;
-  if (event.type === 'quota.exhausted') {
+  if (isBrowserQuietHours(options.quietHours, event.ts) && event.type !== 'disk.low' && event.type !== 'disk.docker_low' && event.type !== 'quota.exhausted' && event.type !== 'claude.quota_exhausted') return false;
+  if (event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted') {
     return isEngineWideQuotaExhausted(event, profiles);
   }
   // The scheduler emits disk.ok only after the hysteresis margin is crossed.
@@ -271,7 +271,7 @@ export function shouldNotifyBrowserEvent(
     if (!Number.isFinite(freeGB) || !Number.isFinite(minFreeGB) || !valid) return false;
   }
   if (level !== 'critical') return true;
-  return event.type === 'task.failed' || event.type === 'disk.docker_low' || (event.type === 'quota.exhausted' && isEngineWideQuotaExhausted(event, profiles));
+  return event.type === 'task.failed' || event.type === 'disk.docker_low' || ((event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted') && isEngineWideQuotaExhausted(event, profiles));
 }
 
 export function notifyBrowserEvent(
@@ -282,7 +282,7 @@ export function notifyBrowserEvent(
 ): void {
   if (typeof window === 'undefined' || !shouldNotifyBrowserEvent(event, level, profiles, options) || !('Notification' in window) || Notification.permission !== 'granted') return;
   const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
-  if (event.type === 'quota.exhausted' && !shouldNotifyBrowserEvent(event, level, profiles, options)) return;
+  if ((event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted') && !shouldNotifyBrowserEvent(event, level, profiles, options)) return;
 
   // State transition guard for disk.ok: only allowed if disk was previously in 'low' state.
   if (event.type === 'disk.ok') {
@@ -299,7 +299,7 @@ export function notifyBrowserEvent(
 
   const identity = event.type === 'disk.low' || event.type === 'disk.ok'
     ? event.type
-    : event.type === 'quota.exhausted'
+    : (event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted')
     ? 'quota:all'
     : event.type === 'task.paused' || event.type === 'load.task_paused' || event.type === 'load.high'
     ? 'load:summary'

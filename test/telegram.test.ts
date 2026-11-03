@@ -1265,6 +1265,7 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       await bot.stop();
       bot.handleEvent('quota.exhausted', undefined, { profile: 'pa-gemini', family: 'claude', engine: 'agy', allExhausted: true });
       bot.handleEvent('quota.exhausted', undefined, { profile: 'pa-gemini', family: 'gpt', engine: 'agy', allExhausted: true });
+      bot.handleEvent('claude.quota_exhausted', undefined, { fallbackAvailable: false, profileName: 'pa-gemini' });
       await new Promise((resolve) => setTimeout(resolve, 120));
       await bot.flushQueue(CHAT_ID);
 
@@ -1314,6 +1315,42 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       await bot.flushQueue(CHAT_ID);
       calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
       expect(calls.some((c) => c.body?.text?.includes('Có quota trở lại'))).toBe(true);
+    });
+
+    it('silences claude.quota_exhausted when other models/engines remain available and notifies critical outage when empty', async () => {
+      await bot.stop();
+      for (const name of ['p1', 'p2']) {
+        ctx.profileRepo.upsert({ name, engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
+      }
+      ctx.profileRepo.upsert({ name: 'codeX1', engine: 'codex', kind: 'codex', home: tmpDir, email: null, enabled: 1 });
+      const future = Math.floor(currentTime / 1000) + 3600;
+
+      for (const profile of ['p1', 'p2']) {
+        ctx.quotaMarkRepo.mark(profile, 'claude', future);
+      }
+      recordedCalls = [];
+      bot.handleEvent('claude.quota_exhausted', undefined, { fallbackAvailable: false, profileName: 'p1' });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await bot.flushQueue(CHAT_ID);
+
+      let calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(0);
+
+      // Now exhaust all remaining profiles/models:
+      for (const profile of ['p1', 'p2']) {
+        for (const family of ['gemini', 'gpt']) ctx.quotaMarkRepo.mark(profile, family, future);
+      }
+      ctx.quotaMarkRepo.mark('codeX1', 'codex', future);
+
+      recordedCalls = [];
+      bot.handleEvent('claude.quota_exhausted', undefined, { fallbackAvailable: false, profileName: 'p1' });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await bot.flushQueue(CHAT_ID);
+
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Hết sạch quota ở mọi tài khoản và model');
+      expect(calls[0].body?.text).not.toContain('Claude hết quota');
     });
 
     it('broadcasts task.waiting_quota only for no_department_profile with 30-minute dedupe', async () => {

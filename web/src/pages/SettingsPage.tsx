@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getProfiles, getModelOptions } from '../api/client';
-import type { ReviewerFallback, ReviewerOrderItem } from '../types/api';
+import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getProfiles, getModelOptions, getPresets, applyPreset } from '../api/client';
+import type { ReviewerFallback, ReviewerOrderItem, PresetLevel, ApplyPresetResult } from '../types/api';
 import { Save, CheckCircle2, AlertCircle, Info, MessageSquare, Bell, ArrowUp, ArrowDown, Plus, Trash2 } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
 import { TelegramCard } from '../components/TelegramCard';
@@ -20,7 +20,7 @@ import {
 } from '../utils/models';
 
 export const SettingsPage: React.FC = () => {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const { openTour } = useTour();
   const queryClient = useQueryClient();
   const [permissionPage, setPermissionPage] = useState(1);
@@ -89,6 +89,38 @@ export const SettingsPage: React.FC = () => {
   const [shutdownDone, setShutdownDone] = useState(false);
   const hubStatus = useQuery({ queryKey: ['status'], queryFn: getStatus, staleTime: 3000 });
   const shutdownMutation = useMutation({ mutationFn: () => shutdownHub(shutdownDisable), onSuccess: () => { setShutdownOpen(false); setShutdownDone(true); } });
+
+  const { data: presets = [] } = useQuery({ queryKey: ['presets'], queryFn: getPresets });
+  const [selectedPreset, setSelectedPreset] = useState<PresetLevel | null>(null);
+  const [diffResult, setDiffResult] = useState<ApplyPresetResult | null>(null);
+  const [presetApplySuccess, setPresetApplySuccess] = useState<string | null>(null);
+  const [presetApplyError, setPresetApplyError] = useState<string | null>(null);
+
+  const dryRunMutation = useMutation({
+    mutationFn: (preset: PresetLevel) => applyPreset({ scope: 'global', preset, dryRun: true }),
+    onSuccess: (result, preset) => {
+      setSelectedPreset(preset);
+      setDiffResult(result);
+      setPresetApplyError(null);
+    },
+    onError: (err: any) => {
+      setPresetApplyError(err?.message || t('settings.saveError'));
+    },
+  });
+
+  const confirmApplyMutation = useMutation({
+    mutationFn: (preset: PresetLevel) => applyPreset({ scope: 'global', preset, dryRun: false }),
+    onSuccess: (_result, preset) => {
+      queryClient.invalidateQueries({ queryKey: ['config'] });
+      setDiffResult(null);
+      setSelectedPreset(null);
+      setPresetApplySuccess(t('settings.presetAppliedSuccess', { preset }));
+      setTimeout(() => setPresetApplySuccess(null), 5000);
+    },
+    onError: (err: any) => {
+      setPresetApplyError(err?.message || t('settings.saveError'));
+    },
+  });
 
   const { data: config, isLoading, error } = useQuery({
     queryKey: ['config'],
@@ -454,6 +486,130 @@ export const SettingsPage: React.FC = () => {
         <button type="button" onClick={() => openTour('intro')} className="rounded-lg border border-[var(--t-border)] px-3 py-2 text-xs text-[var(--t-text-2)] hover:bg-[var(--t-hover)]">{t('tour.replay')}</button>
       </div>
 
+      {/* Global Presets */}
+      <section className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-5 space-y-4" data-testid="global-presets">
+        <div>
+          <h2 className="text-base font-semibold text-[var(--t-text)]">{t('settings.presetsTitle')}</h2>
+          <p className="text-sm text-[var(--t-text-3)]">{t('settings.presetsSubtitle')}</p>
+        </div>
+
+        {presetApplySuccess && (
+          <div role="status" className="p-3 rounded-lg bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)] border border-[var(--t-ok)] text-[var(--t-ok)] text-sm flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>{presetApplySuccess}</span>
+          </div>
+        )}
+
+        {presetApplyError && (
+          <div role="alert" className="p-3 rounded-lg bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] border border-[var(--t-crit)] text-[var(--t-crit)] text-sm flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{presetApplyError}</span>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {(['safe', 'balanced', 'auto'] as const).map((level) => {
+            const pDef = presets.find((p) => p.id === level);
+            const title = pDef?.name?.[locale as 'vi' | 'en'] || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}`);
+            const desc = pDef?.description?.[locale as 'vi' | 'en'] || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}Desc`);
+            const isSelected = selectedPreset === level;
+            return (
+              <div
+                key={level}
+                data-testid={`preset-card-${level}`}
+                onClick={() => dryRunMutation.mutate(level)}
+                className={`cursor-pointer rounded-xl border p-4 space-y-2 transition-all hover:border-[var(--t-accent)] ${
+                  isSelected
+                    ? 'border-[var(--t-accent)] bg-[color-mix(in_srgb,var(--t-accent)_8%,transparent)] ring-2 ring-[var(--t-accent)]'
+                    : 'border-[var(--t-border)] bg-[var(--t-surface-2)]'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-sm text-[var(--t-text)]">{title}</span>
+                  <button
+                    type="button"
+                    className="text-xs px-2.5 py-1 rounded bg-[var(--t-surface)] border border-[var(--t-border)] text-[var(--t-accent)] font-medium hover:bg-[var(--t-hover)]"
+                    disabled={dryRunMutation.isPending}
+                  >
+                    {dryRunMutation.isPending && dryRunMutation.variables === level ? t('settings.presetApplying') : t('settings.presetPreviewDiff')}
+                  </button>
+                </div>
+                <p className="text-xs text-[var(--t-text-3)] leading-relaxed">{desc}</p>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Diff Preview & Confirm */}
+        {diffResult && selectedPreset && (
+          <div data-testid="preset-diff-preview" className="mt-4 rounded-xl border border-[var(--t-border)] bg-[var(--t-surface-2)] p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-[var(--t-text)] flex items-center gap-2">
+                <Info className="w-4 h-4 text-[var(--t-accent)]" />
+                {t('settings.presetDiffTitle')} ({selectedPreset})
+              </h3>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setDiffResult(null); setSelectedPreset(null); }}
+                  className="text-xs px-3 py-1.5 rounded border border-[var(--t-border)] text-[var(--t-text-2)] hover:bg-[var(--t-surface)]"
+                >
+                  {t('settings.presetDiffCancel')}
+                </button>
+                <button
+                  type="button"
+                  data-testid="confirm-apply-preset-btn"
+                  onClick={() => confirmApplyMutation.mutate(selectedPreset)}
+                  disabled={confirmApplyMutation.isPending}
+                  className="text-xs px-3 py-1.5 rounded bg-[var(--t-accent)] text-[var(--t-on-accent)] font-medium hover:opacity-90 disabled:opacity-50"
+                >
+                  {confirmApplyMutation.isPending ? t('settings.presetApplying') : t('settings.presetDiffConfirm')}
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs text-left">
+                <thead>
+                  <tr className="border-b border-[var(--t-border)] text-[var(--t-text-3)]">
+                    <th className="py-2 pr-4">{t('common.details')}</th>
+                    <th className="py-2 pr-4">{t('settings.presetCurrentField')}</th>
+                    <th className="py-2">{t('settings.presetNewField')}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--t-border)]">
+                  {Object.keys(diffResult.diff.after).map((key) => {
+                    const beforeVal = JSON.stringify(diffResult.diff.before[key]);
+                    const afterVal = JSON.stringify(diffResult.diff.after[key]);
+                    const isChanged = beforeVal !== afterVal;
+                    return (
+                      <tr key={key} className={isChanged ? 'bg-[color-mix(in_srgb,var(--t-accent)_5%,transparent)]' : ''}>
+                        <td className="py-2 pr-4 font-mono font-medium">{key}</td>
+                        <td className="py-2 pr-4 font-mono text-[var(--t-text-3)]">{beforeVal ?? '—'}</td>
+                        <td className={`py-2 font-mono ${isChanged ? 'text-[var(--t-ok)] font-semibold' : 'text-[var(--t-text-2)]'}`}>
+                          {afterVal}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {diffResult.warnings && diffResult.warnings.length > 0 && (
+              <div className="p-2.5 rounded bg-[color-mix(in_srgb,var(--t-crit)_10%,transparent)] border border-[var(--t-crit)]/30 text-xs text-[var(--t-crit)] space-y-1">
+                <span className="font-semibold">{t('settings.presetWarnings')}:</span>
+                <ul className="list-disc list-inside">
+                  {diffResult.warnings.map((w, idx) => (
+                    <li key={idx}>{w}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
       <section className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-5 space-y-4">
         <div>
           <h2 className="font-semibold">{t('settings.brandingTitle')}</h2>
@@ -491,6 +647,12 @@ export const SettingsPage: React.FC = () => {
         <div className="p-8 text-center text-[var(--t-crit)] text-sm">{t('settings.loadError')}</div>
       ) : (
         <form onSubmit={handleSubmit} className="space-y-6">
+          <details data-testid="advanced-settings" className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-5 space-y-6">
+            <summary className="cursor-pointer font-semibold text-base text-[var(--t-text)] select-none">
+              <span>{t('settings.advancedSettingsTitle')}</span>
+              <span className="text-xs font-normal text-[var(--t-text-3)] block mt-0.5">{t('settings.advancedSettingsSubtitle')}</span>
+            </summary>
+            <div className="pt-4 space-y-6 border-t border-[var(--t-border)] mt-4">
           <div id="planning-approval" className="bg-[var(--t-surface)] rounded-xl border border-[var(--t-border)] p-6 space-y-3 shadow-xs" data-testid="planning-approval" data-tour="planning-approval">
             <h2 className="text-sm font-semibold">{t('extra.planningApprovalTitle')}</h2>
             <p className="text-xs text-[var(--t-text-3)]">{t('extra.planningApprovalHint')}</p>
@@ -1215,6 +1377,8 @@ export const SettingsPage: React.FC = () => {
               </div>
             </div>
           </div>
+            </div>
+          </details>
 
           <section data-testid="notifications-settings" data-tour="notifications" className="bg-[var(--t-surface)] rounded-xl border border-[var(--t-border)] p-6 space-y-6 shadow-xs">
             <div className="flex items-start justify-between gap-4">

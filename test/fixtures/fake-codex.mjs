@@ -27,13 +27,32 @@ if (process.env.FAKE_CODEX_QUOTA === '1' || prompt.includes('sim-codex-quota')) 
   process.exit(1);
 }
 
+// Check for config/startup error simulation
+if (process.env.FAKE_CODEX_CONFIG_ERROR === '1' || prompt.includes('sim-codex-config-error')) {
+  console.error('Error loading config.toml: invalid type: string "{\\"AGENTHUB_CHAT_SESSION_ID\\":\\"brain:department:chung\\"}", expected a map in `mcp_servers.agenthub.env`');
+  process.exit(1);
+}
+
 // Find MCP env or session config
 let mcpEnv = {};
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '-c' && args[i + 1]?.startsWith('mcp_servers.agenthub.env=')) {
+    const raw = args[i + 1].slice('mcp_servers.agenthub.env='.length);
     try {
-      mcpEnv = JSON.parse(args[i + 1].slice('mcp_servers.agenthub.env='.length));
-    } catch { /* ignore */ }
+      mcpEnv = JSON.parse(raw);
+    } catch {
+      mcpEnv = {};
+      const inner = raw.replace(/^\{|\}$/g, '').trim();
+      if (inner) {
+        const regex = /(?:([A-Za-z0-9_-]+)|"([^"]+)")\s*=\s*"((?:\\.|[^"\\])*)"/g;
+        let match;
+        while ((match = regex.exec(inner)) !== null) {
+          const key = match[1] || match[2];
+          const val = match[3].replace(/\\([\\"])/g, '$1');
+          mcpEnv[key] = val;
+        }
+      }
+    }
   }
 }
 

@@ -49,7 +49,7 @@ import { buildProjectKnowledgeContext } from '../projects/knowledge-context.js';
 import { projectSettings } from '../projects/settings.js';
 import { effectiveBrainCodexProfile, effectiveBrainEngine } from '../brain/engine.js';
 import { effectiveBrainPermission } from '../brain/mode.js';
-import { CodexEngine } from '../engines/index.js';
+import { CodexEngine, toTomlValue } from '../engines/index.js';
 
 async function setBrainActivity(activity: 'talking' | 'idle'): Promise<void> {
   try {
@@ -1871,14 +1871,14 @@ export class ChatService {
     const nodePath = process.execPath;
     const tomlContent = [
       '[mcp_servers.agenthub]',
-      `command = ${JSON.stringify(nodePath)}`,
-      `args = [${JSON.stringify(cliPath)}, "mcp"]`,
+      `command = ${toTomlValue(nodePath)}`,
+      `args = ${toTomlValue([cliPath, 'mcp'])}`,
       '[mcp_servers.agenthub.env]',
-      `AGENTHUB_CHAT_SESSION_ID = ${JSON.stringify(turn.sessionId)}`,
-      ...(turn.projectId ? [`AGENTHUB_MCP_PROJECT = ${JSON.stringify(turn.projectId)}`] : []),
-      ...(session.kind ? [`AGENTHUB_CHAT_KIND = ${JSON.stringify(session.kind)}`] : []),
-      `AGENTHUB_PORT = ${JSON.stringify(String(this.config.port || 7700))}`,
-      `AGENTHUB_PERMISSION_TIMEOUT_SEC = ${JSON.stringify(String(this.config.chat.permissionTimeoutSec || 600))}`,
+      `AGENTHUB_CHAT_SESSION_ID = ${toTomlValue(turn.sessionId)}`,
+      ...(turn.projectId ? [`AGENTHUB_MCP_PROJECT = ${toTomlValue(turn.projectId)}`] : []),
+      ...(session.kind ? [`AGENTHUB_CHAT_KIND = ${toTomlValue(session.kind)}`] : []),
+      `AGENTHUB_PORT = ${toTomlValue(String(this.config.port || 7700))}`,
+      `AGENTHUB_PERMISSION_TIMEOUT_SEC = ${toTomlValue(String(this.config.chat.permissionTimeoutSec || 600))}`,
     ].join('\n');
     fs.writeFileSync(configTomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
     fs.chmodSync(configTomlPath, 0o600);

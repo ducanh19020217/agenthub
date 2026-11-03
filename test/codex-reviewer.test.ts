@@ -95,6 +95,19 @@ describe('Codex reviewer output', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it('requires a complete repository-wide review and includes prior feedback', () => {
+    const prompt = buildReviewerPrompt('Task', '/tmp/worktree', [], [], '/tmp/project', [{
+      actor: 'codex-reviewer',
+      verdict: 'changes_requested',
+      feedback: 'P1: src/old.ts:10 còn lỗi',
+      createdAt: '2026-11-03T00:00:00Z',
+    }]);
+    expect(prompt).toContain('grep toàn repo');
+    expect(prompt).toContain('danh sách ĐẦY ĐỦ');
+    expect(prompt).toContain('src/old.ts:10 còn lỗi');
+    expect(prompt).toContain('missed-earlier');
+  });
+
   it('rejects a checklist symlink escaping the canonical project', () => {
     const root = makeTestTempDir('agenthub-reviewer-symlink-');
     const project = path.join(root, 'project');

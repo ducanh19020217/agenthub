@@ -1455,7 +1455,7 @@ describe('Review: DONE → review, changes_requested → re-queue', () => {
     expect(task.resume).toBe(1);
     expect(task.body).toContain('Feedback review');
     expect(task.body).toContain('Fix the linting errors');
-    expect(task.reviewerChangesRequested).toBe(0);
+    expect(task.reviewerChangesRequested).toBe(2);
     expect(task.reviewerEscalated).toBe(0);
     expect(task.reviewerEscalatedAt).toBeNull();
     expect(task.reviewerEscalationReason).toBeNull();

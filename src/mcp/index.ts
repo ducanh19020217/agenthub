@@ -828,6 +828,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             level: string;
             attempt: number;
             reviewerEscalated?: number;
+            reviewRound?: number;
+            reviewMaxRounds?: number;
           }>
         >('GET', `/api/tasks${query}`);
 
@@ -838,7 +840,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         }
         const lines = [`Tasks (${tasks.length}):`];
         for (const t of tasks) {
-          lines.push(`- [${t.status}] ${t.id} - ${t.title} (level: ${t.level}, attempt: ${t.attempt})`);
+          const round = t.reviewRound && t.reviewMaxRounds ? `, Vòng duyệt ${t.reviewRound}/${t.reviewMaxRounds}` : '';
+          lines.push(`- [${t.status}] ${t.id} - ${t.title} (level: ${t.level}, attempt: ${t.attempt}${round})`);
         }
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       } catch (err: unknown) {
@@ -869,6 +872,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             worktreePath?: string | null;
             baseRef?: string | null;
             dependsOn?: string[];
+            reviewRound?: number;
+            reviewMaxRounds?: number;
           };
           runs: Array<{
             id: string;
@@ -901,6 +906,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           `Task: ${t.id} [${t.status}]`,
           `Tiêu đề: ${t.title}`,
           `Level: ${t.level} | Lượt chạy: ${t.attempt}`,
+          ...(typeof t.reviewRound === 'number' && typeof t.reviewMaxRounds === 'number' ? [`Vòng duyệt: ${t.reviewRound}/${t.reviewMaxRounds}`] : []),
           `Branch: ${t.branch || '(chưa tạo)'}`,
           `Worktree: ${t.worktreePath || '(chưa tạo)'}`,
           `Base ref: ${t.baseRef || '(mặc định)'}`,

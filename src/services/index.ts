@@ -2836,9 +2836,15 @@ export class AppService {
       const reviewer = reviewerRun
         ? (reviewerRun.engine.id === 'claude' ? 'claude' : 'codex')
         : (isFallback ? fallbackReviewer : (reviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex'));
+      const reviewMaxRounds = project?.review
+        ? (() => { try { const value = JSON.parse(project.review!) as { maxRounds?: unknown }; return typeof value.maxRounds === 'number' && value.maxRounds > 0 ? value.maxRounds : 2; } catch { return 2; } })()
+        : (this.config.reviewer?.maxChangesRequested || 2);
+      const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
       return {
         ...apiTask(task),
         reviewChain,
+        reviewRound,
+        reviewMaxRounds,
         reviewer,
         checks: this.scheduler.getCheckResults(task.id),
         paused: Boolean(run?.paused),
@@ -2977,6 +2983,8 @@ export class AppService {
       ? (reviewerRun.engine.id === 'claude' ? 'claude' : 'codex')
       : (isFallback ? fallbackReviewer : (reviews.at(-1)?.actor === 'claude-reviewer' ? 'claude' : (activeReviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex')));
 
+    const reviewMaxRounds = reviewSettings?.maxRounds || this.config.reviewer?.maxChangesRequested || 2;
+    const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
     return {
       ...apiTask(task),
       reviewer,
@@ -3002,7 +3010,8 @@ export class AppService {
       mergeAvailable: configuredMerge,
       mergeUnavailableReason: configuredMerge ? null : 'Project chưa cấu hình merge tự động. Mở Cài đặt dự án → Integration để bật.',
       reviewStep: task.reviewStep ?? 0,
-      reviewMaxRounds: reviewSettings?.maxRounds || 2,
+      reviewRound,
+      reviewMaxRounds,
       doneContent,
       blockedContent,
       modelWarnings,

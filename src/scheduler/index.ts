@@ -212,6 +212,13 @@ function isAutoReviewer(by: string | undefined): by is ReviewerActor {
   return by === 'codex-reviewer' || by === 'claude-reviewer';
 }
 
+/** Claude's manual bridge can also report merge/operational failures. Those are not content rounds. */
+function isContentReview(by: string | undefined, feedback: string): boolean {
+  if (isAutoReviewer(by)) return true;
+  if (by !== 'claude-review') return false;
+  return !/(?:merge\s+conflict|conflicted|merge\s+failed|xung\s+đột|không thể merge)/i.test(feedback);
+}
+
 /** Times an arbiter rejection sends a task back before it is blocked for a person. */
 const ARBITER_ROUNDS = 2;
 const ARBITER_RETRY_MODEL = 'claude-opus-4-6-thinking';
@@ -2564,7 +2571,9 @@ export class Scheduler {
 
   private advanceReviewStep(task: TaskRow, chain: ReviewChainStep[], reason: string): void {
     const nextStep = (task.reviewStep ?? 0) + 1;
-    this.taskRepo.update(task.id, { reviewStep: nextStep, reviewerChangesRequested: 0 });
+    // This counter is task-scoped. Keep it across chain steps so alternating
+    // reviewers cannot reset the content-review limit.
+    this.taskRepo.update(task.id, { reviewStep: nextStep });
     if (nextStep >= chain.length || chain[nextStep]?.mode === 'final') {
       this.emitReviewReadyIfReview(task.id, { reviewChainComplete: true, reviewStep: nextStep, reason });
     } else {
@@ -2784,11 +2793,17 @@ export class Scheduler {
         runStartedAt: check.runStartedAt || 'unknown',
       }));
       const project = this.projectRepo.get(task.projectId);
+      const previousReviews = this.reviewRepo?.getByTask(task.id).map((review) => ({
+        actor: review.actor,
+        verdict: review.verdict as ReviewerVerdict,
+        feedback: review.feedback,
+        createdAt: review.createdAt,
+      })) || [];
       child = engine.spawn({
         profile,
         model: reviewerModel,
         cwd: task.worktreePath,
-        prompt: buildReviewerPrompt(task.body || task.title, task.worktreePath, checks, project ? projectSettings(project).reviewChecklist : [], project?.path),
+        prompt: buildReviewerPrompt(task.body || task.title, task.worktreePath, checks, project ? projectSettings(project).reviewChecklist : [], project?.path, previousReviews),
         logPath,
         outputPath,
         readOnly: true,
@@ -3675,8 +3690,8 @@ export class Scheduler {
       if (!feedback || feedback.trim() === '') {
         throw new Error('Feedback is required when requesting changes');
       }
-      if (isAutoReviewer(by) && this.reviewRepo) this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback, actor: by });
-      if (((isAutoReviewer(by) || by === 'claude-review') && step?.mode === 'gate') || (isAutoReviewer(by) && chain.length === 0)) {
+      if (isContentReview(by, feedback) && this.reviewRepo) this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback, actor: by || undefined });
+      if (isContentReview(by, feedback)) {
         const count = (task.reviewerChangesRequested || 0) + 1;
         const max = this.reviewMaxRoundsForTask(task);
         if (count > max) {
@@ -3685,6 +3700,8 @@ export class Scheduler {
         }
         this.taskRepo.update(taskId, { reviewerChangesRequested: count });
       } else {
+        // A non-automated return may be a merge conflict or another operational
+        // issue. It must not erase the durable content-review count.
         this.resetReviewerEscalation(taskId);
       }
       // Append feedback to task body
@@ -3715,7 +3732,6 @@ export class Scheduler {
 
   private resetReviewerEscalation(taskId: string): void {
     this.taskRepo.update(taskId, {
-      reviewerChangesRequested: 0,
       reviewerEscalated: 0,
       reviewerEscalatedAt: null,
       reviewerEscalationReason: null,

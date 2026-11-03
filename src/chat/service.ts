@@ -187,6 +187,7 @@ export class ChatService {
   private codexBinOverride?: string;
   private persistentProcesses = new Map<string, PersistentProcess>();
   private snapshotAt = new Map<string, number>();
+  private snapshotContent = new Map<string, string>();
   private snapshotEventAt = new Map<string, number>();
   private retryTimers = new Map<string, NodeJS.Timeout>();
   private telegramChatBySession = new Map<string, number>();
@@ -244,7 +245,7 @@ export class ChatService {
     const files = project ? readHubSnapshotFiles(project.path) : {};
     this.snapshotAt.set(session.id, now);
     if (this.eventRepo) this.snapshotEventAt.set(session.id, this.eventRepo.getRecent(1)[0]?.id || previousEvent);
-    return buildHubSnapshot({
+    const fullSnapshot = buildHubSnapshot({
       projects: this.projectRepo.getAll().map(({ id, name, path: projectPath, defaultBranch }) => ({ id, name, path: projectPath, defaultBranch })),
       tasks: this.taskRepo?.getAll().map(({ id, projectId, title, status }) => ({ id, projectId, title, status })) || [],
       runs: this.runRepo?.getRunning().map(({ taskId, model, outcome }) => ({ taskId, model, outcome })) || [],
@@ -256,6 +257,12 @@ export class ChatService {
       capturedAt: new Date(now).toISOString(),
       eventUpdate: updates,
     });
+    const previous = this.snapshotContent.get(session.id);
+    this.snapshotContent.set(session.id, fullSnapshot);
+    if (!previous) return fullSnapshot;
+    const oldLines = new Set(previous.split('\n'));
+    const changed = fullSnapshot.split('\n').filter((line) => !oldLines.has(line));
+    return `ẢNH CHỤP HUB — PHẦN THAY ĐỔI\nChụp lúc: ${new Date(now).toISOString()}\n${changed.join('\n') || 'Không có thay đổi.'}`.slice(0, 3000);
   }
 
   getClaudeFailover(): ReturnType<ClaudeFailoverState['snapshot']> {

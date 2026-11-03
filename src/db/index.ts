@@ -840,7 +840,14 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_tasks_project_status_created ON tasks(projectId, status, createdAt);
   PRAGMA foreign_keys = ON;
   `,
-  // Migration 58: OpenProject tracker synchronization state.
+  // Migration 58: department brain* fields default to 'inherit' so project > department > global priority works.
+  `
+  UPDATE departments SET brainEngine = 'inherit' WHERE brainEngine = 'claude';
+  UPDATE departments SET brainModel = 'inherit' WHERE brainModel = 'sonnet';
+  UPDATE departments SET brainPermissions = 'inherit' WHERE brainPermissions = 'full';
+  UPDATE departments SET brainMaxTurnsPerHour = 0 WHERE brainMaxTurnsPerHour = 20;
+  `,
+  // Migration 59: OpenProject tracker synchronization state.
   `
   CREATE TABLE IF NOT EXISTS tracker_items (
     source_id TEXT NOT NULL,
@@ -968,7 +975,7 @@ export interface DepartmentRow {
   maxParallel: number;
   claudeDailyTokenBudget: number;
   telegramTopicId: number | null;
-  brainEngine?: 'claude' | 'codex';
+  brainEngine?: 'inherit' | 'claude' | 'codex';
   brainModel?: string;
   brainCodexProfile?: string | null;
   brainMode?: 'inherit' | 'off' | 'suggest' | 'auto';
@@ -1291,9 +1298,9 @@ export class DepartmentRepo {
         brainDailyTokenBudget, brainMaxTurnsPerHour)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(row.id, row.name, row.priority, row.maxParallel, row.claudeDailyTokenBudget, row.telegramTopicId,
-      row.brainEngine || 'claude', row.brainModel || 'sonnet', row.brainCodexProfile || null,
-      row.brainMode || 'inherit', row.brainPermissions || 'full', row.brainDailyTokenBudget || 0,
-      row.brainMaxTurnsPerHour || 20);
+      row.brainEngine || 'inherit', row.brainModel || 'inherit', row.brainCodexProfile || null,
+      row.brainMode || 'inherit', row.brainPermissions || 'inherit', row.brainDailyTokenBudget || 0,
+      row.brainMaxTurnsPerHour || 0);
   }
 
   update(id: string, fields: Partial<Pick<DepartmentRow, 'name' | 'priority' | 'maxParallel' | 'claudeDailyTokenBudget' | 'telegramTopicId' | 'brainEngine' | 'brainModel' | 'brainCodexProfile' | 'brainMode' | 'brainPermissions' | 'brainDailyTokenBudget' | 'brainMaxTurnsPerHour'>>): void {

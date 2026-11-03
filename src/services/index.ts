@@ -76,23 +76,11 @@ import type { PerfCollector } from '../perf.js';
 import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../presets.js';
 import type { SetupTools } from '../setup-tools.js';
 import { computeEffectiveConfig } from '../effective-config.js';
+import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
 
 const execFileAsync = promisify(execFile);
 const CODEX_EMAIL_RECHECK_MS = 10 * 60 * 1000;
 const ESCALATION_MODEL = 'claude-opus-4-6-thinking';
-
-function reviewMaxRoundsFor(project: ProjectRow | undefined, config: AgentHubConfig): number {
-  if (project?.review) {
-    try {
-      const value = JSON.parse(project.review) as { maxRounds?: unknown };
-      if (typeof value.maxRounds === 'number' && value.maxRounds > 0) return value.maxRounds;
-    } catch {
-      // Invalid project settings use the documented default.
-    }
-    return 2;
-  }
-  return config.reviewer?.maxChangesRequested || 2;
-}
 
 function worktreeBytes(root: string): number {
   let total = 0;
@@ -3717,14 +3705,15 @@ export class AppService {
       }
     }
 
-    const reviewId = crypto.randomUUID();
-    this.reviewRepo.insert({
-      id: reviewId,
-      taskId,
-      verdict: parsed.verdict,
-      feedback: parsed.feedback || null,
-      actor: parsed.by || 'claude',
-    });
+    if (!['codex-reviewer', 'claude-reviewer', 'claude-review'].includes(parsed.by || '')) {
+      this.reviewRepo.insert({
+        id: crypto.randomUUID(),
+        taskId,
+        verdict: parsed.verdict,
+        feedback: parsed.feedback || null,
+        actor: parsed.by || 'claude',
+      });
+    }
 
     this.scheduler.reviewTask(taskId, parsed.verdict, parsed.feedback, parsed.by, parsed.source);
     if (parsed.verdict === 'approved' && this.knowledgeRepo) {

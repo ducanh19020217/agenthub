@@ -542,6 +542,7 @@ describe('AgentHub MCP Server Tools', () => {
 
     expect(opRes.content[0].text).toContain('changes_requested');
     expect(ctx.taskRepo.get('proj-op/t-conflict')?.reviewerChangesRequested).toBe(0);
+    expect(ctx.reviewRepo.getByTask('proj-op/t-conflict')).toHaveLength(1);
 
     // Default source is content and increments counter
     ctx.taskRepo.update('proj-op/t-conflict', { status: 'review' });
@@ -556,6 +557,7 @@ describe('AgentHub MCP Server Tools', () => {
 
     expect(contentRes.content[0].text).toContain('changes_requested');
     expect(ctx.taskRepo.get('proj-op/t-conflict')?.reviewerChangesRequested).toBe(1);
+    expect(ctx.reviewRepo.getByTask('proj-op/t-conflict')).toHaveLength(2);
   });
 
   it('hub_cancel cancels a task', async () => {

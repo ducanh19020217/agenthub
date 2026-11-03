@@ -49,6 +49,7 @@ import { measureProcessTree } from '../process-tree.js';
 import { ReferenceSnapshot, takeReferenceSnapshots, detectReferenceModifications, ReferenceModification } from '../references.js';
 import { normalizeReviewerModel, reviewerSettingsFromLegacy, type ReviewerOrderItem, type ReviewerFallback } from '../reviewer-config.js';
 import { cleanupTaskRunArtifacts } from '../temp-cleanup.js';
+import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
 
 type ActivitySource = 'log' | 'conversation' | 'worktree';
 
@@ -2555,19 +2556,6 @@ export class Scheduler {
     return parseReviewChain(project.reviewChain);
   }
 
-  private reviewMaxRoundsForTask(task: TaskRow): number {
-    const project = this.projectRepo.get(task.projectId);
-    if (project?.review) {
-      try {
-        const value = JSON.parse(project.review) as { maxRounds?: unknown };
-        return typeof value.maxRounds === 'number' && value.maxRounds > 0 ? value.maxRounds : 2;
-      } catch {
-        return 2;
-      }
-    }
-    return this.config.reviewer?.maxChangesRequested || 2;
-  }
-
   private advanceReviewStep(task: TaskRow, chain: ReviewChainStep[], reason: string): void {
     const nextStep = (task.reviewStep ?? 0) + 1;
     // This counter is task-scoped. Keep it across chain steps so alternating
@@ -3683,7 +3671,9 @@ export class Scheduler {
 
     if (verdict === 'approved') {
       if (isAutoReviewer(by) && (!feedback || feedback.trim() === '')) return;
-      if (isAutoReviewer(by) && this.reviewRepo) this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback: feedback || null, actor: by });
+      if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
+        this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback: feedback || null, actor: by || 'reviewer' });
+      }
       if ((isAutoReviewer(by) || by === 'claude-review') && step?.mode === 'gate') {
         this.advanceReviewStep(task, chain, 'approved');
         return;
@@ -3713,10 +3703,12 @@ export class Scheduler {
       if (!feedback || feedback.trim() === '') {
         throw new Error('Feedback is required when requesting changes');
       }
-      if (isContentReview(by, source) && this.reviewRepo) this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback, actor: by || undefined });
+      if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
+        this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback, actor: by || 'reviewer' });
+      }
       if (isContentReview(by, source)) {
         const count = (task.reviewerChangesRequested || 0) + 1;
-        const max = this.reviewMaxRoundsForTask(task);
+        const max = reviewMaxRoundsFor(this.projectRepo.get(task.projectId), this.config);
         if (count > max) {
           this.escalateReview(taskId, 'reviewer_changes_limit', feedback, by);
           return;

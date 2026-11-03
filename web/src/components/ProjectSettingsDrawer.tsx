@@ -240,11 +240,13 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   });
   const allDepartments = (departments && departments.length > 0) ? departments : remoteDepartments;
 
-  const { data: effectiveConfig } = useQuery({
+  const { data: effectiveData } = useQuery({
     queryKey: ['effective-config', project?.id],
     queryFn: () => getEffectiveConfig(project!.id),
     enabled: Boolean(isOpen && project?.id),
   });
+  const effectiveConfig = effectiveData?.effective;
+  const effectivePreset = effectiveData?.preset;
 
   const { data: presets = [] } = useQuery({
     queryKey: ['presets'],
@@ -1132,7 +1134,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 <p className="text-xs text-[var(--t-text-3)]">{t('projects.presetSubtitle')}</p>
               </div>
               <span className="text-xs px-2 py-0.5 rounded bg-[var(--t-surface-2)] border border-[var(--t-border)] font-mono text-[var(--t-text-2)]">
-                {t('projects.presetTitle')}: {draftSettings.preset || effectiveConfig?.preset || 'custom'}
+                {t('projects.presetTitle')}: {draftSettings.preset || effectivePreset || 'custom'}
               </span>
             </div>
 
@@ -1142,7 +1144,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 const pDef = presets.find((p) => p.id === level);
                 const title = pDef?.name?.[locale as 'vi' | 'en'] || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}`);
                 const desc = pDef?.description?.[locale as 'vi' | 'en'] || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}Desc`);
-                const isCurrent = (draftSettings.preset || effectiveConfig?.preset) === level;
+                const isCurrent = (draftSettings.preset || effectivePreset) === level;
                 return (
                   <div
                     key={level}
@@ -1201,7 +1203,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
           </Card>
 
           {/* Section 2: Cấu hình hiệu lực */}
-          <Card className="p-5 space-y-3" data-testid="project-effective-config">
+          <Card className="p-5 space-y-3" data-testid="effective-config-section">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-bold text-[var(--t-text)] flex items-center gap-2">
@@ -1213,7 +1215,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 </p>
               </div>
               <span className="text-xs px-2 py-0.5 rounded bg-[var(--t-surface-2)] text-[var(--t-text-2)] font-mono">
-                {effectiveConfig?.preset || 'custom'}
+                {effectivePreset || 'custom'}
               </span>
             </div>
 
@@ -1223,20 +1225,20 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 <div>
                   <span className="text-[var(--t-text-3)] block">{t('projects.brainMode')}</span>
                   <span className="font-medium text-[var(--t-text)]">
-                    {effectiveConfig?.brain.mode.value || draftSettings.brain.mode || 'inherit'}
+                    {effectiveConfig?.brain?.mode?.value || draftSettings.brain.mode || 'inherit'}
                   </span>
                 </div>
                 <span
-                  data-testid="effective-brain-mode-source"
+                  data-testid="effective-source-brainMode"
                   className={`text-[10px] px-2 py-0.5 rounded font-medium ${
-                    effectiveConfig?.brain.mode.source === 'project'
+                    effectiveConfig?.brain?.mode?.source === 'project'
                       ? 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
-                      : effectiveConfig?.brain.mode.source === 'department'
+                      : effectiveConfig?.brain?.mode?.source === 'department'
                       ? 'bg-purple-500/15 text-purple-600 dark:text-purple-300'
                       : 'bg-[var(--t-border)] text-[var(--t-text-2)]'
                   }`}
                 >
-                  {effectiveConfig?.brain.mode.source
+                  {effectiveConfig?.brain?.mode?.source
                     ? t(`projects.source${effectiveConfig.brain.mode.source.charAt(0).toUpperCase() + effectiveConfig.brain.mode.source.slice(1)}`)
                     : t('projects.sourceGlobal')}
                 </span>
@@ -1247,20 +1249,20 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 <div>
                   <span className="text-[var(--t-text-3)] block">{t('projects.brainPermissions')}</span>
                   <span className="font-medium text-[var(--t-text)]">
-                    {effectiveConfig?.brain.permissions.value || draftSettings.brain.permissions || 'standard'}
+                    {effectiveConfig?.brain?.permissions?.value || draftSettings.brain.permissions || 'standard'}
                   </span>
                 </div>
                 <span
-                  data-testid="effective-brain-permissions-source"
+                  data-testid="effective-source-permissions"
                   className={`text-[10px] px-2 py-0.5 rounded font-medium ${
-                    effectiveConfig?.brain.permissions.source === 'project'
+                    effectiveConfig?.brain?.permissions?.source === 'project'
                       ? 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
-                      : effectiveConfig?.brain.permissions.source === 'department'
+                      : effectiveConfig?.brain?.permissions?.source === 'department'
                       ? 'bg-purple-500/15 text-purple-600 dark:text-purple-300'
                       : 'bg-[var(--t-border)] text-[var(--t-text-2)]'
                   }`}
                 >
-                  {effectiveConfig?.brain.permissions.source
+                  {effectiveConfig?.brain?.permissions?.source
                     ? t(`projects.source${effectiveConfig.brain.permissions.source.charAt(0).toUpperCase() + effectiveConfig.brain.permissions.source.slice(1)}`)
                     : t('projects.sourceGlobal')}
                 </span>
@@ -1271,20 +1273,20 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 <div>
                   <span className="text-[var(--t-text-3)] block">{t('projects.brainEngine')}</span>
                   <span className="font-medium text-[var(--t-text)]">
-                    {effectiveConfig?.brain.engine.value || 'claude'} ({effectiveConfig?.brain.model.value || 'sonnet'})
+                    {effectiveConfig?.brain?.engine?.value || 'claude'} ({effectiveConfig?.brain?.model?.value || 'sonnet'})
                   </span>
                 </div>
                 <span
-                  data-testid="effective-brain-engine-source"
+                  data-testid="effective-source-engine"
                   className={`text-[10px] px-2 py-0.5 rounded font-medium ${
-                    effectiveConfig?.brain.engine.source === 'project'
+                    effectiveConfig?.brain?.engine?.source === 'project'
                       ? 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
-                      : effectiveConfig?.brain.engine.source === 'department'
+                      : effectiveConfig?.brain?.engine?.source === 'department'
                       ? 'bg-purple-500/15 text-purple-600 dark:text-purple-300'
                       : 'bg-[var(--t-border)] text-[var(--t-text-2)]'
                   }`}
                 >
-                  {effectiveConfig?.brain.engine.source
+                  {effectiveConfig?.brain?.engine?.source
                     ? t(`projects.source${effectiveConfig.brain.engine.source.charAt(0).toUpperCase() + effectiveConfig.brain.engine.source.slice(1)}`)
                     : t('projects.sourceGlobal')}
                 </span>
@@ -1295,18 +1297,18 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 <div>
                   <span className="text-[var(--t-text-3)] block">{t('settings.reviewChainTitle')}</span>
                   <span className="font-medium text-[var(--t-text)]">
-                    {(effectiveConfig?.review.chain.value || reviewChain.chain).length} {t('projects.reviewStepsCount') || 'bước'}
+                    {(effectiveConfig?.review?.chain?.value || reviewChain.chain).length} {t('projects.reviewStepsCount') || 'bước'}
                   </span>
                 </div>
                 <span
-                  data-testid="effective-review-chain-source"
+                  data-testid="effective-source-chain"
                   className={`text-[10px] px-2 py-0.5 rounded font-medium ${
-                    effectiveConfig?.review.chain.source === 'project'
+                    effectiveConfig?.review?.chain?.source === 'project'
                       ? 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
                       : 'bg-[var(--t-border)] text-[var(--t-text-2)]'
                   }`}
                 >
-                  {effectiveConfig?.review.chain.source
+                  {effectiveConfig?.review?.chain?.source
                     ? t(`projects.source${effectiveConfig.review.chain.source.charAt(0).toUpperCase() + effectiveConfig.review.chain.source.slice(1)}`)
                     : t('projects.sourceGlobal')}
                 </span>
@@ -1317,19 +1319,19 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
           {/* Section 3: Review & Tự động merge */}
           <Card className="p-5 space-y-5" data-testid="project-review-automerge-section">
             {/* Khối Tự động merge & Checklist autoMergeReadiness */}
-            <div className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface-2)] p-4 space-y-3" data-testid="project-automerge-block">
+            <div className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface-2)] p-4 space-y-3" data-testid="automerge-checklist">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <h4 className="text-sm font-bold text-[var(--t-text)]">{t('projects.autoMergeSectionTitle')}</h4>
                   <span
                     data-testid="automerge-readiness-badge"
                     className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
-                      effectiveConfig?.autoMergeReadiness.ready
+                      effectiveConfig?.autoMergeReadiness?.ready
                         ? 'bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)] text-[var(--t-ok)] border border-[var(--t-ok)]/30'
                         : 'bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)] border border-[var(--t-crit)]/30'
                     }`}
                   >
-                    {effectiveConfig?.autoMergeReadiness.ready
+                    {effectiveConfig?.autoMergeReadiness?.ready
                       ? t('projects.autoMergeReady')
                       : t('projects.autoMergeNotReady')}
                   </span>
@@ -1428,7 +1430,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 </div>
               </div>
 
-              {effectiveConfig?.autoMergeReadiness.missing && effectiveConfig.autoMergeReadiness.missing.length > 0 && (
+              {effectiveConfig?.autoMergeReadiness?.missing && effectiveConfig.autoMergeReadiness.missing.length > 0 && (
                 <div className="p-2 rounded bg-[color-mix(in_srgb,var(--t-crit)_8%,transparent)] text-[11px] text-[var(--t-crit)] space-y-0.5">
                   {effectiveConfig.autoMergeReadiness.missing.map((msg, i) => (
                     <div key={i}>• {msg}</div>
@@ -1438,7 +1440,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
             </div>
 
             {/* Form Checks có cấu trúc */}
-            <div className="space-y-3" data-testid="project-structured-checks">
+            <div className="space-y-3" data-testid="structured-checks-form">
               <div className="flex items-center justify-between">
                 <div>
                   <h4 className="text-sm font-bold text-[var(--t-text)]">{t('projects.structuredChecksTitle')}</h4>

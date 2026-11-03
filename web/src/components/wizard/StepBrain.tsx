@@ -22,10 +22,12 @@ export function StepBrain({ draft, update, t }: StepProps) {
     <div className="space-y-4">
       {/* Preset selection */}
       <div className="space-y-2">
-        <label className="text-xs font-semibold text-[var(--t-text)]">{t('presets.title')}</label>
+        <label className="text-xs font-semibold text-[var(--t-text)]">{t('settings.presetTitle')}</label>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
           {PRESETS.map(({ level, icon: Icon }) => {
             const isSelected = currentPreset === level;
+            const title = t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}`);
+            const desc = t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}Desc`);
             return (
               <button
                 key={level}
@@ -40,10 +42,10 @@ export function StepBrain({ draft, update, t }: StepProps) {
               >
                 <div className="flex items-center gap-1.5 font-semibold text-xs text-[var(--t-text)]">
                   <Icon size={14} className={isSelected ? 'text-[var(--t-accent)]' : 'text-[var(--t-text-3)]'} />
-                  {t(`presets.level_${level}`)}
+                  {title}
                 </div>
                 <div className="text-[11px] text-[var(--t-text-3)] mt-1 line-clamp-2">
-                  {t(`presets.desc_${level}`)}
+                  {desc}
                 </div>
               </button>
             );

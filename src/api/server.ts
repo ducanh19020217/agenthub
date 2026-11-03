@@ -17,6 +17,7 @@ import { registerChatRoutes } from '../chat/service.js';
 import { brandingLogoPath, saveBrandingLogo } from '../branding.js';
 import { decodeCursor } from '../pagination.js';
 import { registerOpenProjectRoutes } from '../integrations/openproject/routes.js';
+import { parseDateNoon } from '../integrations/openproject/daily-report.js';
 
 export function resolveWebDistDir(customDir?: string): string {
   return path.resolve(customDir || resolveWebDir(import.meta.url, process.env));
@@ -32,7 +33,12 @@ export function resolveWebDir(moduleUrl: string, env: NodeJS.ProcessEnv = {}): s
 export async function createServer(
   service: AppService,
   config: AgentHubConfig,
-  options?: { webDir?: string; onShutdown?: (disable: boolean) => void; openProjectSync?: (sourceId: string) => Promise<{ imported: number; comments: number }> },
+  options?: {
+    webDir?: string;
+    onShutdown?: (disable: boolean) => void;
+    openProjectSync?: (sourceId: string) => Promise<{ imported: number; comments: number }>;
+    openProjectDailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
+  },
 ): Promise<FastifyInstance> {
   const fastify = Fastify({ logger: false, forceCloseConnections: true });
 
@@ -126,7 +132,10 @@ export async function createServer(
   fastify.get('/api/status', async () => {
     return service.getStatus();
   });
-  registerOpenProjectRoutes(fastify, config, { sync: options?.openProjectSync });
+  registerOpenProjectRoutes(fastify, config, {
+    sync: options?.openProjectSync,
+    dailyReport: options?.openProjectDailyReport || (service.dailyReportService ? (sourceId, date) => service.dailyReportService!.generateReport(sourceId, date ? parseDateNoon(date) : undefined, { overwrite: true }) : undefined),
+  });
 
   fastify.post('/api/hub/shutdown', async (req) => {
     const body = (req.body || {}) as { disable?: unknown };

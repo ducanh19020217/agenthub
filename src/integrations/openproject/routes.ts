@@ -22,6 +22,7 @@ function persist(config: AgentHubConfig, sources: OpenProjectSource[]): void {
 export interface RegisterOpenProjectRoutesOptions {
   fetch?: typeof globalThis.fetch;
   sync?: (sourceId: string) => Promise<{ imported: number; comments: number }>;
+  dailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
 }
 
 export function registerOpenProjectRoutes(
@@ -96,5 +97,16 @@ export function registerOpenProjectRoutes(
     sourceOrThrow(config, id);
     if (!options.sync) throw new HttpError(503, 'unavailable', 'OpenProject intake chưa sẵn sàng');
     return options.sync(id);
+  });
+
+  fastify.post('/api/integrations/openproject/sources/:id/daily-report', async (req: FastifyRequest) => {
+    const { id } = idParams.parse(req.params);
+    sourceOrThrow(config, id);
+    const query = z.object({
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    }).parse(req.query || {});
+    if (!options.dailyReport) throw new HttpError(503, 'unavailable', 'DailyReportService chưa sẵn sàng');
+    const result = await options.dailyReport(id, query.date);
+    return { ok: true, ...result };
   });
 }

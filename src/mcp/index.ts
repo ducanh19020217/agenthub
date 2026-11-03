@@ -547,6 +547,34 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   );
 
   server.tool(
+    'hub_daily_report',
+    'Tạo ngay báo cáo ngày OpenProject cho một nguồn',
+    {
+      sourceId: z.string().min(1).describe('ID của nguồn OpenProject'),
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Ngày báo cáo dạng YYYY-MM-DD (mặc định hôm nay)'),
+    },
+    async (args) => {
+      try {
+        const query = args.date ? `?date=${encodeURIComponent(args.date)}` : '';
+        const result = await callApi<{ ok: boolean; path: string; content: string }>(
+          'POST',
+          `/api/integrations/openproject/sources/${encodeURIComponent(args.sourceId)}/daily-report${query}`,
+        );
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `✓ Đã tạo báo cáo ngày cho nguồn ${args.sourceId} (${result.path}):\n\n${result.content}`,
+            },
+          ],
+        };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
+  server.tool(
     'hub_create_task',
     'Tạo task mới trong AgentHub. Nếu start=true thì đưa thẳng vào hàng đợi (queued)',
     {

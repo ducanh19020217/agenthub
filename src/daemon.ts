@@ -28,6 +28,7 @@ import {
 } from './db/index.js';
 import { CiWatchService } from './ci.js';
 import { OpenProjectIntakeService } from './integrations/openproject/intake.js';
+import { DailyReportService, parseDateNoon } from './integrations/openproject/daily-report.js';
 import { ProfileService } from './profiles/index.js';
 import { Scheduler } from './scheduler/index.js';
 import { Engine, AgyEngine, CodexEngine, FakeEngine } from './engines/index.js';
@@ -101,6 +102,7 @@ export interface DaemonContext {
   ciService: CiWatchService;
   trackerRepo: TrackerItemRepo;
   intakeService: OpenProjectIntakeService;
+  dailyReportService: DailyReportService;
   perfCollector: PerfCollector;
 }
 
@@ -366,6 +368,12 @@ export function createContext(
   });
   service.intakeService = intakeService;
 
+  const dailyReportService = new DailyReportService({
+    config,
+    eventBus: scheduler.getEventBus(),
+  });
+  service.dailyReportService = dailyReportService;
+
   const notifier = new NotificationService({
     eventBus: scheduler.getEventBus(),
     config,
@@ -432,6 +440,7 @@ export function createContext(
     ciService,
     trackerRepo,
     intakeService,
+    dailyReportService,
     perfCollector,
   };
 }
@@ -464,6 +473,11 @@ export function closeContext(ctx: DaemonContext): void {
   }
   try {
     ctx.intakeService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.dailyReportService?.stop();
   } catch {
     // ignore
   }
@@ -537,6 +551,7 @@ export async function startDaemon(
   ctx.brainRunner.start();
   ctx.ciService.start();
   ctx.intakeService.start();
+  ctx.dailyReportService.start();
   ctx.perfCollector.start();
 
   // Start Telegram bot if enabled
@@ -547,6 +562,12 @@ export async function startDaemon(
   // Start Fastify HTTP server with security and API endpoints
   const fastify = await createServer(ctx.service, config, {
     openProjectSync: (sourceId) => ctx.intakeService.sync(sourceId),
+    openProjectDailyReport: (sourceId, date) =>
+      ctx.dailyReportService.generateReport(
+        sourceId,
+        date ? parseDateNoon(date) : undefined,
+        { overwrite: true },
+      ),
     onShutdown: (disable) => {
       if (disable) {
         try {

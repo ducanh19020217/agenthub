@@ -6,6 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { getTokenPath, readExistingToken } from '../auth.js';
 import { toRouteId, toTaskId } from '../services/index.js';
+import { formatRunnableCapacity, QuotaCapacitySnapshot } from '../quota/index.js';
 
 export class DaemonDownError extends Error {
   constructor(message = 'AgentHub daemon chưa chạy: `agenthub install-service` hoặc `agenthub daemon`') {
@@ -270,6 +271,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             slotsUsed?: number;
             slotsTotal?: number;
           }>;
+          quotaCapacity?: QuotaCapacitySnapshot;
         }>('GET', '/api/status');
 
         const lines: string[] = [];
@@ -277,6 +279,19 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         lines.push(
           `Đang chạy ${tasks.running || 0}${tasks.checking ? ` · đang kiểm tra ${tasks.checking}` : ''} · chờ review ${tasks.review || 0} · chờ quota ${tasks.waiting_quota || 0} · lỗi ${tasks.failed || 0}`,
         );
+
+        if (data.quotaCapacity) {
+          if (data.quotaCapacity.runnable.length === 0) {
+            const next = data.quotaCapacity.nextReset;
+            const resetStr = next ? ` (sớm nhất: ${next.profileName}/${next.model})` : '';
+            lines.push(`🚨 Hết sạch quota ở mọi tài khoản và model — Hệ thống tạm dừng thực thi task${resetStr}`);
+          } else {
+            const hasMarks = (data.profiles || []).some((p) => (p.quotaMarks || []).length > 0);
+            if (hasMarks) {
+              lines.push(`Quota: Vẫn chạy bằng ${formatRunnableCapacity(data.quotaCapacity)}`);
+            }
+          }
+        }
 
         lines.unshift(formatBestQuotaLine(data.profiles || [], 'claude'));
         lines.unshift(formatBestQuotaLine(data.profiles || [], 'gemini'));

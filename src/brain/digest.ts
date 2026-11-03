@@ -468,7 +468,7 @@ export function generateDigest(opts: GenerateDigestOptions): DigestData {
   } else if (runnable.length > 0 && exhaustedList.length === 0) {
     quotaSummary = `Tất cả tài khoản đều sẵn sàng (${profiles.length}/${profiles.length})`;
   } else if (runnable.length === 0) {
-    quotaSummary = `Mọi tài khoản đều hết quota (0/${profiles.length})`;
+    quotaSummary = `Mọi tài khoản đều hết quota (0/${profiles.length}). Hệ thống tạm dừng thực thi task.`;
   } else {
     quotaSummary = `${runnable.length} tổ hợp profile/model còn chạy được`;
   }

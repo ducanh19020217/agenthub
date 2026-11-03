@@ -186,7 +186,11 @@ export class NotificationService {
     if (type === 'quota.cleared') {
       this.allQuotaNotified.delete('all');
       if (typeof p.family === 'string') this.allQuotaNotified.delete(p.family);
-      this.lastSent.delete('critical:AgentHub: Mọi tài khoản đều đã hết quota');
+      for (const key of this.lastSent.keys()) {
+        if (key.includes('Mọi tài khoản đều đã hết quota') || key.includes('Hết sạch quota')) {
+          this.lastSent.delete(key);
+        }
+      }
       this.quotaInfoNotified.clear();
       const snapshot = this.quotaCapacity();
       if (this.quotaIncidentActive) {

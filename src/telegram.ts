@@ -381,7 +381,7 @@ export class TelegramBotService {
   private quotaIncidentMessage(snapshot: QuotaCapacitySnapshot | null): string {
     const next = snapshot?.nextReset;
     const reset = next ? ` Sớm nhất có lại: ${this.escapeHtml(next.profileName)}/${this.escapeHtml(next.model)} lúc ${this.escapeHtml(formatReset(next.at, this.now()))}.` : '';
-    return `🚨 <b>Hết sạch quota ở mọi tài khoản và model</b> — các task đang chờ quota.${reset}`;
+    return `🚨 <b>Hết sạch quota ở mọi tài khoản và model</b> — các task đang chờ quota.${reset}\nHệ thống tạm dừng thực thi task.`;
   }
 
   setToken(token: string | null): void {
@@ -3512,7 +3512,7 @@ export class TelegramBotService {
         if (key.startsWith('quota.exhausted:')) this.lastNotificationTime.delete(key);
       }
       for (const key of this.lastBroadcast.keys()) {
-        if (key.includes('Mọi tài khoản đều đã hết quota')) this.lastBroadcast.delete(key);
+        if (key.includes('Mọi tài khoản đều đã hết quota') || key.includes('Hết sạch quota')) this.lastBroadcast.delete(key);
       }
       const snapshot = this.quotaCapacity();
       if (this.quotaIncidentActive) {
@@ -3853,6 +3853,10 @@ export class TelegramBotService {
         const isAllExhausted = snapshot ? snapshot.runnable.length === 0 : isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, now);
         const engineWide = isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, now);
         if (!isAllExhausted) this.allQuotaNotified.delete(quotaKey);
+        if (!isAllExhausted && this.quotaIncidentActive) {
+          this.quotaIncidentActive = false;
+          if (snapshot && snapshot.runnable.length > 0) this.broadcastMessage('✅ <b>Có quota trở lại</b>');
+        }
         if (effectiveMode === 'auto') {
           if (isAllExhausted && notifyAllExhausted && !this.quotaIncidentActive) {
             this.allQuotaNotified.add(quotaKey);

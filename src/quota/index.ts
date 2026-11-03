@@ -119,6 +119,11 @@ export class QuotaService {
     const candidates = models || [...KNOWN_AGY_MODELS, 'codex:gpt-5.6-luna'];
     const runnable = this.runnableCapacity(candidates, now);
     const marks = this.quotaMarkRepo.getActive(now);
+    const eligibleProfiles = new Map(
+      this.profileRepo.getEnabled()
+        .filter((profile) => !profile.authState || profile.authState === 'ok')
+        .map((profile) => [profile.name, profile]),
+    );
     // A reset is actionable only when that engine/family has no runnable profile.
     // Marks on a family that still has another available account must not hide the
     // earliest reset for the exhausted family being reported.
@@ -126,7 +131,7 @@ export class QuotaService {
     const resetCandidates = marks
       .flatMap((mark) => candidates
         .filter((model) => {
-          const profile = this.profileRepo.get(mark.profileName);
+          const profile = eligibleProfiles.get(mark.profileName);
           const engine = getModelEngine(model);
           return getModelFamily(model) === mark.family && profile?.engine === engine && !runnableFamilies.has(`${engine}:${mark.family}`);
         })

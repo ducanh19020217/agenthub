@@ -309,6 +309,14 @@ export async function rescanClaudeSessions(): Promise<{ ok: boolean }> {
   return apiFetch<{ ok: boolean }>('/api/claude/sessions/rescan', { method: 'POST' });
 }
 
+export async function dismissClaudeSessionLimit(sessionId: string): Promise<{ ok: boolean; sessionId: string }> {
+  return apiFetch<{ ok: boolean; sessionId: string }>(`/api/claude/sessions/${encodeURIComponent(sessionId)}/dismiss-limit`, { method: 'POST' });
+}
+
+export async function cleanResetClaudeSessions(): Promise<{ ok: boolean; cleared: number }> {
+  return apiFetch<{ ok: boolean; cleared: number }>('/api/claude/sessions/clean-reset', { method: 'POST' });
+}
+
 export async function getProjects(): Promise<Project[]> {
   return apiFetch<Project[]>('/api/projects');
 }

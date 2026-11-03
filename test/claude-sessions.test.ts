@@ -540,3 +540,124 @@ describe('ClaudeSessionRepo giữ dữ liệu khi cập nhật thiếu trường
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe('Claude limited sessions accurate filtering and auto-cleanup (h-limited-sessions-accurate)', () => {
+  it('filters limited sessions according to reset time, autoResume, and hub origin', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-claude-test-'));
+    dirs.push(root);
+    const db = openDatabase(path.join(root, 'hub.db'));
+    const repo = new ClaudeSessionRepo(db);
+    const worktreesDir = path.join(root, 'worktrees');
+    fs.mkdirSync(worktreesDir, { recursive: true });
+
+    const { AppService } = await import('../src/services/index.js');
+    const service = Object.create(AppService.prototype);
+    Object.assign(service, {
+      claudeSessionRepo: repo,
+      config: { hubHome: root, worktreesDir },
+      scheduler: { getDatabase: () => db },
+      projectRepo: { getAll: () => [] },
+    });
+
+    const now = Math.floor(Date.now() / 1000);
+    const profile: ProfileRow = {
+      name: 'claude-system',
+      engine: 'claude',
+      kind: 'system',
+      enabled: 1,
+      home: null,
+      accountType: 'personal',
+      email: 'user@example.com',
+      loggedIn: 1,
+      createdAt: '2026-01-01',
+    };
+
+    // 1. Phiên có reset trong tương lai: HIỆN
+    repo.upsert({ sessionId: 's-future', cwd: '/work/user-proj', limitResetAt: now + 3600, autoResumeEnabled: 0 });
+
+    // 2. Phiên đã reset, không bật autoResume: KHÔNG HIỆN
+    repo.upsert({ sessionId: 's-past-no-auto', cwd: '/work/user-proj', limitResetAt: now - 3600, autoResumeEnabled: 0 });
+
+    // 3. Phiên bật autoResume chưa chạy lại: VẪN HIỆN
+    repo.upsert({ sessionId: 's-past-auto', cwd: '/work/user-proj', limitResetAt: now - 600, autoResumeEnabled: 1 });
+
+    // 4. Phiên reviewer/worker của hub (cwd nằm trong worktreesDir): KHÔNG HIỆN
+    repo.upsert({ sessionId: 's-worker-wt', cwd: path.join(worktreesDir, 'proj', 'task-1'), limitResetAt: now + 3600, autoResumeEnabled: 0 });
+
+    // 5. Phiên hub chat: KHÔNG HIỆN
+    repo.upsert({ sessionId: 's-hub-chat', cwd: '/work/user-proj', isHubChat: 1, limitResetAt: now + 3600 });
+
+    // 6. Phiên brain/chat có bản ghi trong chat_sessions: KHÔNG HIỆN
+    db.prepare("INSERT INTO chat_sessions (id, title, claudeSessionId, mode) VALUES ('cs-1', 'Bộ não', 's-brain', 'safe')").run();
+    repo.upsert({ sessionId: 's-brain', cwd: '/work/user-proj', limitResetAt: now + 3600 });
+
+    // 7. Phiên có bản ghi trong claude_task_usage: KHÔNG HIỆN
+    db.prepare("INSERT INTO claude_task_usage (taskId, sessionId, turnId, effectiveTokens) VALUES ('t1', 's-task-usage', 'turn-1', 100)").run();
+    repo.upsert({ sessionId: 's-task-usage', cwd: '/work/user-proj', limitResetAt: now + 3600 });
+
+    // 8. Phiên reviewer theo tiêu đề: KHÔNG HIỆN
+    repo.upsert({ sessionId: 's-reviewer-prompt', cwd: '/work/other', title: 'Bạn là reviewer dự phòng…', limitResetAt: now + 3600 });
+
+    const limited = service.getClaudeProfileLimitedSessions(profile);
+    const ids = limited.map((s: { sessionId: string }) => s.sessionId);
+
+    expect(ids).toContain('s-future');
+    expect(ids).toContain('s-past-auto');
+    expect(ids).not.toContain('s-past-no-auto');
+    expect(ids).not.toContain('s-worker-wt');
+    expect(ids).not.toContain('s-hub-chat');
+    expect(ids).not.toContain('s-brain');
+    expect(ids).not.toContain('s-task-usage');
+    expect(ids).not.toContain('s-reviewer-prompt');
+
+    // 9. Nút "Bỏ qua" gọi dismissClaudeSessionLimit: gỡ cờ phiên
+    const dismissRes = service.dismissClaudeSessionLimit('s-future');
+    expect(dismissRes).toEqual({ ok: true, sessionId: 's-future' });
+    expect(repo.get('s-future')?.limitResetAt).toBeNull();
+    expect(repo.get('s-future')?.limitHitAt).toBeNull();
+
+    // 10. Nút "Dọn" gọi cleanResetClaudeSessions: dọn các phiên đã reset trong quá khứ
+    const cleanRes = service.cleanResetClaudeSessions();
+    expect(cleanRes.ok).toBe(true);
+    expect(cleanRes.cleared).toBeGreaterThanOrEqual(1);
+    expect(repo.get('s-past-auto')?.limitResetAt).toBeNull();
+
+    db.close();
+  });
+
+  it('automatically clears flags for sessions where reset is older than 24 hours', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-claude-test-'));
+    dirs.push(root);
+    const db = openDatabase(path.join(root, 'hub.db'));
+    const repo = new ClaudeSessionRepo(db);
+
+    const now = Math.floor(Date.now() / 1000);
+    // Quá 24 giờ (25 giờ trước)
+    repo.upsert({
+      sessionId: 's-expired-24h',
+      cwd: '/work/user-proj',
+      limitResetAt: now - 25 * 3600,
+      limitHitAt: new Date(Date.now() - 26 * 3600_000).toISOString(),
+    });
+    // Chưa quá 24 giờ (10 giờ trước)
+    repo.upsert({
+      sessionId: 's-recent-10h',
+      cwd: '/work/user-proj',
+      limitResetAt: now - 10 * 3600,
+      limitHitAt: new Date(Date.now() - 11 * 3600_000).toISOString(),
+    });
+
+    const scanner = new ClaudeSessionScanner(db, {
+      dir: path.join(root, 'projects'),
+      hubHome: root,
+    });
+
+    scanner.cleanExpiredLimits();
+
+    expect(repo.get('s-expired-24h')?.limitResetAt).toBeNull();
+    expect(repo.get('s-expired-24h')?.limitHitAt).toBeNull();
+    expect(repo.get('s-recent-10h')?.limitResetAt).toBe(now - 10 * 3600);
+
+    db.close();
+  });
+});

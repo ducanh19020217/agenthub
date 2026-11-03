@@ -771,6 +771,15 @@ export async function createServer(
     if (typeof body?.enabled !== 'boolean') throw new HttpError(400, 'bad_request', 'enabled phải là boolean');
     return service.setClaudeAutoResume((req.params as { id: string }).id, body.enabled);
   });
+  fastify.post('/api/claude/sessions/:id/dismiss-limit', async (req: FastifyRequest) => {
+    return service.dismissClaudeSessionLimit((req.params as { id: string }).id);
+  });
+  fastify.delete('/api/claude/sessions/:id/limit', async (req: FastifyRequest) => {
+    return service.dismissClaudeSessionLimit((req.params as { id: string }).id);
+  });
+  fastify.post('/api/claude/sessions/clean-reset', async () => {
+    return service.cleanResetClaudeSessions();
+  });
   fastify.post('/api/claude/sessions/rescan', async () => service.rescanClaudeSessions());
   fastify.get('/api/claude/quota', async () => service.getClaudeQuota());
   fastify.get('/api/claude/failover', async () => service.getClaudeFailover());

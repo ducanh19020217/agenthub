@@ -1125,6 +1125,20 @@ export class AppService {
     if (!session) throw new HttpError(404, 'not_found', `Claude session "${id}" không tồn tại`);
     return this.claudeSessionRepo.setAutoResume(id, enabled);
   }
+  dismissClaudeSessionLimit(id: string) {
+    if (!this.claudeSessionRepo) throw new HttpError(500, 'internal_error', 'Claude session service chưa sẵn sàng');
+    const session = this.claudeSessionRepo.get(id);
+    if (!session) throw new HttpError(404, 'not_found', `Claude session "${id}" không tồn tại`);
+    this.claudeSessionRepo.setLimit(id, null, null);
+    return { ok: true, sessionId: id };
+  }
+  cleanResetClaudeSessions() {
+    const db = this.scheduler.getDatabase();
+    if (!db) throw new HttpError(500, 'internal_error', 'Database chưa sẵn sàng');
+    const nowSec = Math.floor(Date.now() / 1000);
+    const result = db.prepare('UPDATE claude_sessions SET limitResetAt = NULL, limitHitAt = NULL WHERE limitResetAt IS NOT NULL AND limitResetAt <= ?').run(nowSec);
+    return { ok: true, cleared: result.changes };
+  }
   async rescanClaudeSessions() { await this.claudeScanner?.scan(); return { ok: true }; }
   getClaudeQuota() {
     const quota = this.claudeSessionRepo?.quota() || { status: null, resetsAt: null, rateLimitType: null, observedAt: null };
@@ -1192,13 +1206,69 @@ export class AppService {
     if (!db) return [];
 
     const limitedRows = db.prepare(`
-      SELECT sessionId, cwd, title, limitResetAt, autoResumeEnabled
+      SELECT sessionId, cwd, title, limitResetAt, autoResumeEnabled, isHubChat
       FROM claude_sessions
       WHERE limitResetAt IS NOT NULL
       ORDER BY limitResetAt ASC
-    `).all() as Array<{ sessionId: string; cwd: string; title: string | null; limitResetAt: number; autoResumeEnabled: number }>;
+    `).all() as Array<{ sessionId: string; cwd: string; title: string | null; limitResetAt: number; autoResumeEnabled: number; isHubChat: number }>;
 
     if (limitedRows.length === 0) return [];
+
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    const chatSessionIds = new Set<string>();
+    const chatRows = db.prepare('SELECT claudeSessionId FROM chat_sessions WHERE claudeSessionId IS NOT NULL').all() as Array<{ claudeSessionId: string }>;
+    for (const r of chatRows) chatSessionIds.add(r.claudeSessionId);
+
+    const taskUsageSessionIds = new Set<string>();
+    const taskUsageRows = db.prepare('SELECT DISTINCT sessionId FROM claude_task_usage').all() as Array<{ sessionId: string }>;
+    for (const r of taskUsageRows) taskUsageSessionIds.add(r.sessionId);
+
+    const taskCreationSessionIds = new Set<string>();
+    const taskCreationRows = db.prepare('SELECT DISTINCT creationSessionId FROM tasks WHERE creationSessionId IS NOT NULL').all() as Array<{ creationSessionId: string }>;
+    for (const r of taskCreationRows) taskCreationSessionIds.add(r.creationSessionId);
+
+    const worktreeRoots: string[] = [];
+    if (this.config?.worktreesDir) worktreeRoots.push(path.resolve(this.config.worktreesDir));
+    const projects = this.projectRepo?.getAll ? this.projectRepo.getAll() : [];
+    for (const project of projects) {
+      for (const root of projectWorktreeRoots(project, this.config?.hubHome, this.config?.worktreesDir)) {
+        if (root) worktreeRoots.push(path.resolve(root));
+      }
+    }
+
+    const taskWorktrees = (db.prepare('SELECT DISTINCT worktreePath FROM tasks WHERE worktreePath IS NOT NULL').all() as Array<{ worktreePath: string }>)
+      .map((r) => path.resolve(r.worktreePath));
+
+    const isWithin = (child: string, root: string): boolean => {
+      const relative = path.relative(root, path.resolve(child));
+      return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+    };
+
+    const isHubWorktree = (cwd: string | null) => {
+      if (!cwd) return false;
+      const resolved = path.resolve(cwd);
+      if (taskWorktrees.some((wt) => resolved === wt || isWithin(resolved, wt))) return true;
+      if (worktreeRoots.some((root) => isWithin(resolved, root) && resolved !== root)) return true;
+      return false;
+    };
+
+    const filteredRows = limitedRows.filter((row) => {
+      // Exclude hub one-off sessions (reviewer, worker, brain, hub chat)
+      if (row.isHubChat === 1) return false;
+      if (chatSessionIds.has(row.sessionId)) return false;
+      if (taskUsageSessionIds.has(row.sessionId)) return false;
+      if (taskCreationSessionIds.has(row.sessionId)) return false;
+      if (isHubWorktree(row.cwd)) return false;
+      if (row.title && (row.title.startsWith('Bạn là reviewer') || row.title.startsWith('Bạn là bộ não'))) return false;
+
+      // Keep only if limitResetAt is in future OR autoResumeEnabled is 1 (and not yet auto-resumed)
+      const inFuture = row.limitResetAt > nowSec;
+      const waitingAutoResume = row.autoResumeEnabled === 1;
+      return inFuture || waitingAutoResume;
+    });
+
+    if (filteredRows.length === 0) return [];
 
     const scanRows = db.prepare('SELECT path FROM claude_scan_state').all() as Array<{ path: string }>;
     const sessionConfigDirs = new Map<string, string>();
@@ -1213,7 +1283,7 @@ export class AppService {
     const profileHome = profile.home ? path.resolve(profile.home) : null;
     const profileClaudeDir = profileHome ? path.join(profileHome, '.claude') : null;
 
-    const matched = limitedRows.filter((row) => {
+    const matched = filteredRows.filter((row) => {
       const configDir = sessionConfigDirs.get(row.sessionId);
       if (isSystemProfile) {
         return !configDir || configDir === defaultClaudeConfigDir;

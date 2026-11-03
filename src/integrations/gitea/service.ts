@@ -509,6 +509,8 @@ export class GiteaSyncService {
         prNumber: pr.number,
         url: prUrl,
         commit: pushedCommit,
+        pushedCommit,
+        merged: true,
       });
 
       return {

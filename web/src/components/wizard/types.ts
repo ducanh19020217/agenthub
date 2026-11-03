@@ -1,4 +1,4 @@
-import type { ProjectInspection, ProjectSettings } from '../../types/api';
+import type { PresetLevel, ProjectInspection, ProjectSettings } from '../../types/api';
 
 export type WizardMode = 'existing' | 'new';
 export type Check = { name: string; cmd: string[]; reason: string };
@@ -10,6 +10,8 @@ export interface WizardDraft {
   name: string;
   path: string;
   branch: string;
+  preset?: PresetLevel;
+  departmentId?: string;
   settings: ProjectSettings;
   skipInstall: boolean;
   skipHooks: boolean;
@@ -48,6 +50,8 @@ export function emptyDraft(): WizardDraft {
     name: '',
     path: '',
     branch: 'main',
+    preset: 'balanced',
+    departmentId: 'chung',
     settings: {
       brain: { mode: 'inherit', permissions: 'standard' },
       worktree: { install: 'auto', gitHooks: 'run' },

@@ -174,7 +174,7 @@ export class NotificationService {
     if (level === 'important' && !new Set([
       'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
       'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.waiting_quota',
-      'quota.cleared',
+      'quota.cleared', 'remote_deploy.failed', 'remote_deploy.health_timeout',
     ]).has(type)) return;
 
     const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
@@ -229,6 +229,7 @@ export class NotificationService {
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||
+        type.startsWith('remote_deploy.') ||
         allExhausted ||
         (type === 'task.waiting_quota' && p.reason === 'no_department_profile');
 
@@ -510,6 +511,31 @@ export class NotificationService {
         const sha = typeof p.sha === 'string' ? p.sha.slice(0, 7) : '';
         const msg = `CI đã xanh: [${projId}] ${workflow}${sha ? ` @ ${sha}` : ''}`;
         this.notify(msg, 'normal');
+        break;
+      }
+
+      case 'remote_deploy.started': {
+        const proj = typeof p.projectId === 'string' ? p.projectId : 'dự án';
+        this.notify(`${this.appName}: Bắt đầu remote deploy cho ${proj}`, 'normal');
+        break;
+      }
+
+      case 'remote_deploy.succeeded': {
+        const proj = typeof p.projectId === 'string' ? p.projectId : 'dự án';
+        this.notify(`${this.appName}: Remote deploy thành công cho ${proj}`, 'normal');
+        break;
+      }
+
+      case 'remote_deploy.failed': {
+        const proj = typeof p.projectId === 'string' ? p.projectId : 'dự án';
+        const err = typeof p.error === 'string' ? `: ${p.error}` : '';
+        this.notify(`${this.appName}: Remote deploy thất bại cho ${proj}${err}`, 'critical');
+        break;
+      }
+
+      case 'remote_deploy.health_timeout': {
+        const proj = typeof p.projectId === 'string' ? p.projectId : 'dự án';
+        this.notify(`${this.appName}: Remote deploy hết thời gian chờ health check cho ${proj}`, 'critical');
         break;
       }
     }

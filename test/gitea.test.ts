@@ -474,6 +474,7 @@ describe('Gitea Integration', () => {
 
       const succeededEvent = events.find((e) => e.type === 'gitea.sync.succeeded');
       expect(succeededEvent).toBeDefined();
+      expect(succeededEvent?.payload).toMatchObject({ merged: true, pushedCommit: expect.any(String) });
       expect((succeededEvent?.payload as any).prNumber).toBe(10);
       expect((succeededEvent?.payload as any).commit).toBe(result.commit);
     });

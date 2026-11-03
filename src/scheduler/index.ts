@@ -2010,7 +2010,7 @@ export class Scheduler {
       await this.runChecksForTask(taskId, rt.runId);
     } else if (marker === 'blocked') {
       this.runRepo.finish(rt.runId, 'blocked');
-      this.taskRepo.update(taskId, { status: 'blocked', transientRetries: 0, notBefore: null });
+      this.taskRepo.update(taskId, { status: 'blocked', blockedReport: markers.blockedContent || currentTask.blockedReport, transientRetries: 0, notBefore: null });
       this.eventBus.emit('task.blocked', taskId);
     } else if (this.hasCommitAfter(currentTask, rt.startTime)) {
       if (this.recordWorkerCrash(taskId, rt, 'resume_after_progress')) return;

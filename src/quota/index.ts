@@ -1,6 +1,19 @@
 import { QuotaMarkRepo, ProfileRepo } from '../db/index.js';
 import { sameAccount } from '../profiles/account.js';
 
+export interface RunnableCapacityEntry {
+  profileName: string;
+  engine: 'agy' | 'codex';
+  family: string;
+  model: string;
+}
+
+export interface QuotaCapacitySnapshot {
+  runnable: RunnableCapacityEntry[];
+  nextResetAt: number | null;
+  nextReset?: { profileName: string; model: string; at: number };
+}
+
 export class QuotaService {
   constructor(
     private quotaMarkRepo: QuotaMarkRepo,
@@ -62,6 +75,36 @@ export class QuotaService {
     const profiles = this.profileRepo.getEnabled().filter((profile) => profile.engine === engine);
     if (profiles.length === 0) return false;
     return profiles.every((profile) => this.quotaMarkRepo.isExhausted(profile.name, family));
+  }
+
+  /**
+   * Return the quota-bearing profile/model combinations the scheduler can use.
+   * This is deliberately independent of a particular quota event: consumers
+   * must answer “can anything run?” rather than “is this family exhausted?”.
+   */
+  runnableCapacity(models: string[] = [...KNOWN_AGY_MODELS, 'codex:gpt-5.6-luna'], now = Math.floor(Date.now() / 1000)): RunnableCapacityEntry[] {
+    const profiles = this.profileRepo.getEnabled().filter((profile) => !profile.authState || profile.authState === 'ok');
+    return models.flatMap((model) => {
+      const family = getModelFamily(model);
+      const engine = getModelEngine(model);
+      return profiles
+        .filter((profile) => profile.engine === engine && !this.quotaMarkRepo.getActive(now).some((mark) => mark.profileName === profile.name && mark.family === family))
+        .map((profile) => ({ profileName: profile.name, engine, family, model }));
+    });
+  }
+
+  /** Central quota state used by notification, digest and status consumers. */
+  capacitySnapshot(models?: string[], now = Math.floor(Date.now() / 1000)): QuotaCapacitySnapshot {
+    const candidates = models || [...KNOWN_AGY_MODELS, 'codex:gpt-5.6-luna'];
+    const runnable = this.runnableCapacity(candidates, now);
+    const marks = this.quotaMarkRepo.getActive(now);
+    const nextResetAt = marks.length > 0 ? Math.min(...marks.map((mark) => mark.until)) : null;
+    const next = marks
+      .flatMap((mark) => candidates
+        .filter((model) => getModelFamily(model) === mark.family && this.profileRepo.get(mark.profileName)?.engine === getModelEngine(model))
+        .map((model) => ({ profileName: mark.profileName, model, at: mark.until })))
+      .sort((a, b) => a.at - b.at)[0];
+    return { runnable, nextResetAt, nextReset: next };
   }
 
   /**

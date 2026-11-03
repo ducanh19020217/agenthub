@@ -1402,15 +1402,49 @@ export class TelegramBotService {
         await this.handleRejectCommand(chatId, args);
         break;
 
-      case '/pause':
+      case '/pause': {
+        const trimmed = argStr.trim();
+        if (trimmed) {
+          const resolved = this.resolveTask(trimmed);
+          if ('error' in resolved) {
+            await this.sendMessage(chatId, `❌ ${resolved.error}`);
+            break;
+          }
+          try {
+            this.service.pauseTask(resolved.id, 'manual');
+            await this.sendMessage(chatId, `⏸ Đã tạm dừng task <b>${this.escapeHtml(resolved.id)}</b>.`);
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await this.sendMessage(chatId, `❌ Lỗi khi tạm dừng task: ${errMsg}`);
+          }
+          break;
+        }
         this.service.pauseScheduler();
         await this.sendMessage(chatId, '⏸ Đã tạm dừng giao task mới. Các task đang chạy vẫn tiếp tục.');
         break;
+      }
 
-      case '/resume':
+      case '/resume': {
+        const trimmed = argStr.trim();
+        if (trimmed) {
+          const resolved = this.resolveTask(trimmed);
+          if ('error' in resolved) {
+            await this.sendMessage(chatId, `❌ ${resolved.error}`);
+            break;
+          }
+          try {
+            this.service.resumeTask(resolved.id);
+            await this.sendMessage(chatId, `▶️ Đã tiếp tục task <b>${this.escapeHtml(resolved.id)}</b>.`);
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await this.sendMessage(chatId, `❌ Lỗi khi tiếp tục task: ${errMsg}`);
+          }
+          break;
+        }
         this.service.resumeScheduler();
         await this.sendMessage(chatId, '▶️ Đã tiếp tục giao task mới.');
         break;
+      }
 
       default:
         await this.sendMessage(chatId, `Lệnh không hợp lệ: ${cmd}. Gõ /help để xem hướng dẫn.`);
@@ -2398,6 +2432,16 @@ export class TelegramBotService {
             await this.answerCallbackQuery(query.id, 'Lỗi retry.');
             await this.sendMessage(chatId, `❌ Lỗi khi retry task: ${errMsg}`);
           }
+        } else if (action === 'resume') {
+          try {
+            this.service.resumeTask(resolved.id);
+            await this.answerCallbackQuery(query.id, 'Đã tiếp tục task.');
+            await this.sendMessage(chatId, `▶️ Đã tiếp tục task <b>${this.escapeHtml(resolved.id)}</b>.`);
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await this.answerCallbackQuery(query.id, 'Lỗi tiếp tục task.');
+            await this.sendMessage(chatId, `❌ Lỗi khi tiếp tục task: ${errMsg}`);
+          }
         } else if (action === 'log') {
           if (this.isMinimalProject(resolved.projectId)) {
             await this.answerCallbackQuery(query.id, 'Dự án này ẩn nội dung trên Telegram, xem trên dashboard');
@@ -2672,7 +2716,10 @@ export class TelegramBotService {
       for (const r of running) {
         const taskObj = this.taskRepo.get(r.taskId);
         const titleStr = taskObj?.title || r.taskId;
-        text = text + `• <code>${r.taskId}</code> (${r.profileName}/${r.model})\n  <i>${this.escapeHtml(titleStr)}</i>\n`;
+        const pauseBadge = r.paused
+          ? (r.pauseReason === 'load' || r.pauseReason === 'brain_load' ? ' ⏸ [Tạm dừng (quá tải)]' : ' ⏸ [Tạm dừng (thủ công)]')
+          : '';
+        text = text + `• <code>${r.taskId}</code> (${r.profileName}/${r.model})${pauseBadge}\n  <i>${this.escapeHtml(titleStr)}</i>\n`;
       }
     }
 
@@ -2861,7 +2908,12 @@ export class TelegramBotService {
       const title = this.isMinimalProject(t.projectId)
         ? '(nội dung ẩn trên Telegram, xem trên dashboard)'
         : this.escapeHtml(t.title);
-      text = text + `• [${t.status}] <code>${t.id}</code>: ${title}\n`;
+      const taskWithPaused = t as TaskRow & { paused?: boolean; pauseReason?: string | null };
+      const isPaused = Boolean(taskWithPaused.paused);
+      const pauseBadge = isPaused
+        ? (taskWithPaused.pauseReason === 'load' || taskWithPaused.pauseReason === 'brain_load' ? ' [Tạm dừng (quá tải)]' : ' [Tạm dừng (thủ công)]')
+        : '';
+      text = text + `• [${t.status}]${pauseBadge} <code>${t.id}</code>: ${title}\n`;
     }
 
     if (tasks.length > 15) {
@@ -2897,10 +2949,14 @@ export class TelegramBotService {
     }
 
     const dashboardUrl = `http://127.0.0.1:${this.config.port}/#/tasks/${toRouteId(resolved.id)}`;
+    const isPaused = Boolean(detail.paused);
+    const pauseBadge = isPaused
+      ? (detail.pauseReason === 'load' || detail.pauseReason === 'brain_load' ? ' [Tạm dừng (quá tải)]' : ' [Tạm dừng (thủ công)]')
+      : '';
 
     let text = `📌 <b>Task: ${resolved.id}</b>\n\n`;
     text = text + `• Tiêu đề: <b>${this.escapeHtml(detail.title)}</b>\n`;
-    text = text + `• Trạng thái: <code>${detail.status}</code> (${detail.level})\n`;
+    text = text + `• Trạng thái: <code>${detail.status}</code>${pauseBadge} (${detail.level})\n`;
     text = text + `• Nhánh: <code>${detail.branch || 'mặc định'}</code> (gốc: ${detail.baseRef || 'main'})\n`;
     text = text + `• Kiểm tra: ${checksText}\n`;
     text = text + `• Lượt chạy: ${detail.runs?.length || 0}\n`;
@@ -2920,7 +2976,12 @@ export class TelegramBotService {
         { text: '📄 Xem log', callback_data: `task:log:${resolved.id}` },
       ]);
     } else if (detail.status === 'running' || detail.status === 'queued') {
-      buttons.push([{ text: '🛑 Hủy task', callback_data: `cancel:confirm:${resolved.id}` }]);
+      const row: InlineKeyboardButton[] = [];
+      if (isPaused) {
+        row.push({ text: '▶️ Tiếp tục', callback_data: `task:resume:${resolved.id}` });
+      }
+      row.push({ text: '🛑 Hủy task', callback_data: `cancel:confirm:${resolved.id}` });
+      buttons.push(row);
     }
 
     await this.sendMessage(chatId, text, buttons.length > 0 ? { inline_keyboard: buttons } : undefined);
@@ -3904,6 +3965,24 @@ export class TelegramBotService {
         if (now - this.lastSentLoadSummary < 15 * 60_000) break;
         this.lastSentLoadSummary = now;
         this.broadcastMessage(`⚠️ <b>AgentHub tạm dừng/gặp tải cao</b> — xem dashboard để biết chi tiết.`);
+        break;
+      }
+
+      case 'task.pause_reminder': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const minutes = typeof p.pausedMinutes === 'number' ? p.pausedMinutes : 30;
+        const taskLabel = taskId || 'Task';
+        const pauseBadge = (p.reason === 'load' || p.reason === 'brain_load') ? 'Tạm dừng (quá tải)' : 'Tạm dừng (thủ công)';
+        const keyboard: InlineKeyboardButton[][] = [];
+        if (taskId) {
+          keyboard.push([
+            { text: '▶️ Tiếp tục', callback_data: `task:resume:${taskId}` },
+          ]);
+        }
+        this.broadcastMessage(
+          `${prefix}⏸ <b>Nhắc nhở: ${pauseBadge}</b>\nID: <code>${taskLabel}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>\nTask đã bị dừng hơn ${minutes} phút trong khi máy không quá tải.`,
+          keyboard.length > 0 ? { inline_keyboard: keyboard } : undefined,
+        );
         break;
       }
 

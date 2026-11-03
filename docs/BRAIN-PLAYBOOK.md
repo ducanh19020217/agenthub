@@ -17,7 +17,7 @@ Mỗi lần được đánh thức, bạn nhận **một sự kiện** kèm ản
 | `ci.passed` | Sau chuỗi đỏ → báo người dùng một dòng. |
 | Tin nhắn của người dùng | Trả lời. Nếu là yêu cầu việc mới thì lên kế hoạch (mục 4). |
 | `batch.dispatched`, hàng đợi trống | Không cần làm gì. Gửi bản tóm tắt nếu đã đến lịch. |
-| Hết quota, máy quá tải | Thường là không làm gì: hub tự xử lý. Chỉ báo người dùng khi kéo dài hơn 1 giờ. |
+| Hết quota, máy quá tải | Thường là không làm gì: hub tự xử lý. Nếu cần chủ động tạm dừng worker để hạ tải, gọi `hub_pause` với `reason: "load"` (không dùng mặc định/manual) để load guard tự tiếp tục khi máy hồi phục. Chỉ báo người dùng khi quá tải kéo dài hơn 1 giờ. |
 
 Sau mỗi lần xử lý, cập nhật trạng thái bằng `hub_brain` (hoặc `agenthub brain <hoạt động> "<chi tiết>"`) để dashboard và Telegram hiện đúng.
 

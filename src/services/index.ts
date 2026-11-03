@@ -755,6 +755,9 @@ export function formatEventSummary(
         ? `${taskLabel} tạm dừng do quá tải`
         : `${taskLabel} đã tạm dừng`;
 
+    case 'task.pause_reminder':
+      return `${taskLabel} đã tạm dừng hơn ${(p && p.pausedMinutes) || 30} phút`;
+
     case 'task.resumed':
       return `${taskLabel} tiếp tục chạy`;
 
@@ -3565,7 +3568,7 @@ export class AppService {
     return this.taskRepo.get(taskId)!;
   }
 
-  pauseTask(idParam: string): { ok: boolean; paused: boolean } {
+  pauseTask(idParam: string, reason: 'manual' | 'load' | 'brain_load' = 'manual'): { ok: boolean; paused: boolean } {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) {
@@ -3575,7 +3578,7 @@ export class AppService {
     if (!rt) {
       throw new HttpError(400, 'bad_request', `Task "${taskId}" không ở trạng thái running`);
     }
-    this.scheduler.pauseTask(taskId, 'manual');
+    this.scheduler.pauseTask(taskId, reason);
     return { ok: true, paused: true };
   }
 

@@ -525,7 +525,8 @@ export async function createServer(
 
   fastify.post('/api/tasks/:id/pause', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
-    return service.pauseTask(id);
+    const body = (req.body || {}) as { reason?: 'manual' | 'load' | 'brain_load' };
+    return service.pauseTask(id, body.reason);
   });
 
   fastify.post('/api/tasks/:id/resume', async (req: FastifyRequest) => {

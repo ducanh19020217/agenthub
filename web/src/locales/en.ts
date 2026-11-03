@@ -47,6 +47,7 @@ export const en: typeof vi = {
     error: 'Error',
     focusBanner: 'Focused on {project} — {count} other task(s) are waiting',
     stopFocus: 'Stop focus',
+    resume: 'Resume',
   },
   status: {
     queued: 'Queued',
@@ -65,6 +66,7 @@ export const en: typeof vi = {
     checking: 'Checking',
     paused: 'Paused',
     pausedOverload: 'Paused (overloaded)',
+    pausedManual: 'Paused (manual)',
     pausedFocus: 'Paused because another project is focused',
   },
   waitReason: {
@@ -1503,6 +1505,7 @@ export const en: typeof vi = {
       note: "Task note",
       overlap: "Task overlap",
       paused: "Task paused",
+      pause_reminder: "Task pause reminder",
       queued: "Task queued",
       resumed: "Task resumed",
       review_ready: "Task ready for review",

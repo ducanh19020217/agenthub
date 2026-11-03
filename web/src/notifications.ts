@@ -2,10 +2,10 @@ import { EventItem } from './types/api';
 import { getActiveLocale } from './utils/apiError';
 import { formatEventType } from './utils/events';
 
-const IMPORTANT = new Set(['brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed']);
+const IMPORTANT = new Set(['brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.pause_reminder']);
 const DESKTOP_EVENTS = new Set([
   ...IMPORTANT,
-  'batch.created', 'task.paused', 'load.task_paused', 'load.high', 'task.resumed',
+  'batch.created', 'task.paused', 'load.task_paused', 'load.high', 'task.resumed', 'task.pause_reminder',
   'load.task_resumed', 'disk.ok', 'claude.fallback_changed', 'claude.auto_resumed',
   'profile.auth_expired', 'ci.passed',
 ]);
@@ -71,6 +71,12 @@ export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 
     return isEn
       ? `${appName}: Task paused or high load; check dashboard for details`
       : `${appName}: Đã tạm dừng task hoặc gặp tải cao; xem dashboard để biết chi tiết`;
+  }
+  if (event.type === 'task.pause_reminder') {
+    const min = typeof payload.pausedMin === 'number' ? payload.pausedMin : 30;
+    return isEn
+      ? `${appName}: Task paused for ${min}m; check dashboard to resume`
+      : `${appName}: Task đã tạm dừng ${min} phút; vào dashboard để tiếp tục`;
   }
   if (event.type === 'disk.low') {
     const freeGB = typeof payload.freeGB === 'number' ? payload.freeGB : (payload.freeGB ?? '?');

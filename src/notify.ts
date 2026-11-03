@@ -327,6 +327,13 @@ export class NotificationService {
         break;
       }
 
+      case 'task.pause_reminder': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const minutes = typeof p.pausedMinutes === 'number' ? p.pausedMinutes : 30;
+        this.notify(`Nhắc nhở: Task ${title} đã tạm dừng hơn ${minutes} phút (máy không quá tải)`, 'normal');
+        break;
+      }
+
       case 'task.resumed':
       case 'load.task_resumed': {
         const title = this.resolveTaskTitle(taskId, p);

@@ -45,6 +45,7 @@ export const vi = {
     error: 'Lỗi',
     focusBanner: 'Đang tập trung cho {project} — {count} task khác đang chờ',
     stopFocus: 'Tắt tập trung',
+    resume: 'Tiếp tục',
   },
   status: {
     queued: 'Chờ chạy',
@@ -62,7 +63,8 @@ export const vi = {
     cancelled: 'Đã hủy',
     checking: 'Đang kiểm tra',
     paused: 'Tạm dừng',
-    pausedOverload: 'Tạm dừng do quá tải',
+    pausedOverload: 'Tạm dừng (quá tải)',
+    pausedManual: 'Tạm dừng (thủ công)',
     pausedFocus: 'Tạm dừng vì đang tập trung project khác',
   },
   waitReason: {
@@ -1531,6 +1533,7 @@ export const vi = {
       note: "Ghi chú task",
       overlap: "Task trùng lặp",
       paused: "Task tạm dừng",
+      pause_reminder: "Nhắc nhở task tạm dừng",
       queued: "Task vào hàng đợi",
       resumed: "Task tiếp tục",
       review_ready: "Task sẵn sàng duyệt",

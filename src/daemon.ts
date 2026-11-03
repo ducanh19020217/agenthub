@@ -28,6 +28,7 @@ import {
 } from './db/index.js';
 import { CiWatchService } from './ci.js';
 import { OpenProjectIntakeService } from './integrations/openproject/intake.js';
+import { GiteaSyncService } from './integrations/gitea/service.js';
 import { ProfileService } from './profiles/index.js';
 import { Scheduler } from './scheduler/index.js';
 import { Engine, AgyEngine, CodexEngine, FakeEngine } from './engines/index.js';
@@ -102,6 +103,7 @@ export interface DaemonContext {
   ciService: CiWatchService;
   trackerRepo: TrackerItemRepo;
   intakeService: OpenProjectIntakeService;
+  giteaSyncService: GiteaSyncService;
   perfCollector: PerfCollector;
 }
 
@@ -368,6 +370,14 @@ export function createContext(
   });
   service.intakeService = intakeService;
 
+  const giteaSyncService = new GiteaSyncService({
+    config,
+    projectRepo,
+    eventBus: scheduler.getEventBus(),
+    service,
+  });
+  service.giteaSyncService = giteaSyncService;
+
   const notifier = new NotificationService({
     eventBus: scheduler.getEventBus(),
     config,
@@ -436,6 +446,7 @@ export function createContext(
     ciService,
     trackerRepo,
     intakeService,
+    giteaSyncService,
     perfCollector,
   };
 }
@@ -463,6 +474,11 @@ export function closeContext(ctx: DaemonContext): void {
   }
   try {
     ctx.ciService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.giteaSyncService?.stop();
   } catch {
     // ignore
   }
@@ -541,6 +557,7 @@ export async function startDaemon(
   ctx.brainRunner.start();
   ctx.ciService.start();
   ctx.intakeService.start();
+  ctx.giteaSyncService.start();
   ctx.perfCollector.start();
 
   // Start Telegram bot if enabled

@@ -35,6 +35,8 @@ import {
 } from '../db/index.js';
 import type { CiWatchService } from '../ci.js';
 import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
+import type { GiteaSyncService } from '../integrations/gitea/service.js';
+import { isGiteaTokenConfigured, saveGiteaToken } from '../integrations/gitea/secrets.js';
 import { BulletinService } from '../bulletin.js';
 import { ProfileService as CoreProfileService, accountKey, isProfileLoggedIn, exchangeAgyRefreshToken, writeAgyIsolatedToken, fetchAgyGoogleUserInfo, fetchAgyGoogleUserInfoDetailed, inspectAgyAccessToken } from '../profiles/index.js';
 import { Scheduler } from '../scheduler/index.js';
@@ -903,6 +905,7 @@ export class AppService {
   public ciRepo?: CiRepo;
   public ciService?: CiWatchService;
   public intakeService?: OpenProjectIntakeService;
+  public giteaSyncService?: GiteaSyncService;
   private perfCollector?: PerfCollector;
   private profileChecks = new Set<string>();
   private reviewingTasks = new Set<string>();
@@ -1642,6 +1645,39 @@ export class AppService {
     this.getProject(id);
     if (!this.deployService) throw new HttpError(503, 'unavailable', 'Deploy service chưa sẵn sàng');
     return this.deployService.pushNow(id);
+  }
+
+  getGiteaStatus(id: string) {
+    this.getProject(id);
+    if (!this.giteaSyncService) {
+      return {
+        tokenConfigured: isGiteaTokenConfigured(this.config.hubHome, id),
+        enabled: false,
+        running: false,
+        lastSync: null,
+      };
+    }
+    return this.giteaSyncService.getStatus(id);
+  }
+
+  saveGiteaToken(id: string, token: string) {
+    this.getProject(id);
+    if (!token || typeof token !== 'string' || !token.trim()) {
+      throw new HttpError(400, 'bad_request', 'Token không được để trống');
+    }
+    if (this.giteaSyncService) {
+      return this.giteaSyncService.saveToken(id, token);
+    }
+    saveGiteaToken(this.config.hubHome, id, token.trim());
+    return { configured: true };
+  }
+
+  async triggerGiteaSync(id: string) {
+    this.getProject(id);
+    if (!this.giteaSyncService) {
+      throw new HttpError(503, 'unavailable', 'Gitea sync service chưa sẵn sàng');
+    }
+    return this.giteaSyncService.syncProject(id);
   }
 
   createProject(raw: unknown): ProjectRow {

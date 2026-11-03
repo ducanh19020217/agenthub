@@ -308,6 +308,25 @@ export async function createServer(
     return reply.status(202).send(service.rerunDeploy(id));
   });
 
+  fastify.put('/api/projects/:id/gitea/token', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as { token?: string };
+    if (!body.token || typeof body.token !== 'string' || !body.token.trim()) {
+      throw new HttpError(400, 'bad_request', 'Token không được để trống');
+    }
+    return service.saveGiteaToken(id, body.token);
+  });
+
+  fastify.get('/api/projects/:id/gitea/status', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getGiteaStatus(id);
+  });
+
+  fastify.post('/api/projects/:id/gitea/sync', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.triggerGiteaSync(id);
+  });
+
   fastify.post('/api/projects', async (req: FastifyRequest, reply: FastifyReply) => {
     const project = service.createProject(req.body);
     return reply.status(201).send(project);

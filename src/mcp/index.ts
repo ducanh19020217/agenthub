@@ -1471,6 +1471,21 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     },
   );
 
+  server.tool(
+    'hub_gitea_sync',
+    'Đồng bộ mã nguồn với Gitea theo cấu hình project (tạo PR, merge)',
+    { projectId: z.string().optional() },
+    async (args) => {
+      try {
+        const targetProject = args.projectId ?? scopedProject();
+        if (!targetProject) throw new Error('projectId là bắt buộc');
+        assertProject(targetProject, 'Đồng bộ Gitea');
+        const result = await callApi<Record<string, unknown>>('POST', `/api/projects/${encodeURIComponent(targetProject)}/gitea/sync`);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err: unknown) { return handleError(err); }
+    },
+  );
+
   return server;
 }
 

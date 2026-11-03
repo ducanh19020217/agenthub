@@ -1326,12 +1326,15 @@ export class AppService {
       const marks = quotaMarks.filter((m) => m.profileName === p.name);
       const isBusy = Array.from(runningMap.values()).some((r) => r.profileName === p.name);
       const slots = this.lockService.getSlotsSync(p);
+      const coolingUntil = p.coolingUntil && p.coolingUntil > Math.floor(now / 1000) ? p.coolingUntil : null;
       return {
         ...apiProfile(p),
         quotaMarks: marks,
         slotsUsed: Math.max(slots.slotsUsed, isBusy ? 1 : 0),
         slotsTotal: slots.slotsTotal,
         busy: slots.busy || isBusy,
+        crashCount: p.consecutiveCrashes || 0,
+        coolingUntil,
         usage: this.usageService.getForProfile(p.name),
         ...(p.engine === 'claude' ? {
           claudeTokens: this.getClaudeTokenTotals(),
@@ -3802,6 +3805,11 @@ export class AppService {
       reviewerEscalated: 0,
       reviewerEscalatedAt: null,
       reviewerEscalationReason: null,
+      runCount: 0,
+      consecutiveCrashes: 0,
+    });
+    this.runRepo.getByTask(taskId).forEach((run) => {
+      if (run.profileName) this.profileRepo.resetCrashes(run.profileName);
     });
 
     // Retry reuses the existing worktree. Old worker markers must not be

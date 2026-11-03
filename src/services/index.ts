@@ -503,14 +503,10 @@ export const UpdateConfigSchema = z.object({
     .optional(),
   reviewer: z.object({
     enabled: z.boolean().optional(),
-    model: reviewerModelValidator.or(z.literal('')).optional(),
     timeoutSec: z.number().int().positive().optional(),
     failoverSec: z.number().int().positive().optional(),
     maxChangesRequested: z.number().int().positive().optional(),
-    claudeFallback: z.boolean().optional(),
     claudeProfiles: z.array(z.string().min(1)).max(20).optional(),
-    claudeModel: z.enum(['opus', 'sonnet', 'haiku']).optional(),
-    claudeFallbackAfterMin: z.number().int().min(1).max(1440).optional(),
     order: ReviewerOrderSchema.optional(),
     fallback: ReviewerFallbackSchema.partial().optional(),
     arbiter: ReviewerArbiterSchema.optional(),
@@ -3651,8 +3647,13 @@ export class AppService {
     if (!project) return;
     const settings = projectSettings(project);
     if (!(settings.review.autoMerge || settings.integration.autoMerge)) return;
+    const chain = project.review
+      ? (() => { try { return (JSON.parse(project.review) as { chain?: Array<{ reviewer?: string }> }).chain || []; } catch { return []; } })()
+      : project.reviewChain
+        ? (() => { try { return JSON.parse(project.reviewChain) as Array<{ reviewer?: string }>; } catch { return []; } })()
+        : [];
     const last = this.reviewRepo.getByTask(taskId).at(-1);
-    if (!last || (last.actor !== 'codex-reviewer' && last.actor !== 'claude-reviewer') || last.verdict !== 'approved') return;
+    if (!chain.length || !chain.at(-1)?.reviewer?.startsWith('codex:') || !last || last.actor !== 'codex-reviewer' || last.verdict !== 'approved') return;
     const checks = this.scheduler.getCheckResults(taskId);
     if (checks.length === 0 || checks.some((c) => !c.ok)) return;
     if (this.failedAutoMerges.has(taskId)) return;
@@ -4316,7 +4317,11 @@ export class AppService {
         suggestions.add('codex:gpt-5.6-luna');
       }
     }
-    const configured = [...this.config.defaultModelChains.hard, ...this.config.defaultModelChains.easy, this.config.reviewer.model];
+    const configured = [
+      ...this.config.defaultModelChains.hard,
+      ...this.config.defaultModelChains.easy,
+      ...this.config.reviewer.order.map((item) => `${item.engine}:${item.model}`),
+    ];
     const configuredModels = [...new Set(configured.filter(Boolean))];
     return { suggestions: [...suggestions].sort(), configured: configuredModels };
   }

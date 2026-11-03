@@ -142,8 +142,16 @@ export class BrainRunner {
     const projectBudget = settings.brain.dailyTokenBudget;
     const deptBudget = departmentId && department.brainDailyTokenBudget && department.brainDailyTokenBudget > 0 ? department.brainDailyTokenBudget : undefined;
     const budget = projectBudget ?? deptBudget ?? this.opts.config.dailyTokenBudget;
-    const count = departmentId ? this.opts.turnRepo.countSinceDepartment(now - 3600000, departmentId) : this.opts.turnRepo.countSince(now - 3600000, projectId);
-    const tokens = departmentId ? this.opts.turnRepo.tokensSinceDepartment(day.toISOString(), departmentId) : this.opts.turnRepo.tokensSince(day.toISOString(), projectId);
+    const count = projectMaxTurns !== undefined
+      ? this.opts.turnRepo.countSince(now - 3600000, projectId)
+      : departmentId
+        ? this.opts.turnRepo.countSinceDepartment(now - 3600000, departmentId)
+        : this.opts.turnRepo.countSince(now - 3600000, projectId);
+    const tokens = projectBudget !== undefined
+      ? this.opts.turnRepo.tokensSince(day.toISOString(), projectId)
+      : departmentId
+        ? this.opts.turnRepo.tokensSinceDepartment(day.toISOString(), departmentId)
+        : this.opts.turnRepo.tokensSince(day.toISOString(), projectId);
     if (count >= maxTurns || (budget > 0 && tokens >= budget)) {
       this.opts.eventBus.emit('brain.limited', projectId || undefined, { reason: 'budget' });
       return 'limited';
@@ -189,7 +197,6 @@ export class BrainRunner {
     return project?.departmentId ? this.opts.departmentRepo?.get(project.departmentId) : undefined;
   }
   private mode(projectId: string | null): EffectiveBrainMode {
-    if (this.opts.config.mode === 'off' && !this.opts.config.director?.enabled) return 'off';
     const project = projectId ? this.opts.projectRepo?.get(projectId) : null;
     const projectMode = projectSettings(project).brain.mode;
     if (projectMode !== 'inherit') return projectMode;

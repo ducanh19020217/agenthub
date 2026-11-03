@@ -1164,7 +1164,159 @@ describe('Quota → profile marked → task runs on another profile', () => {
     expect(task.worktreePath).toBe(worktreePath);
     expect(fs.readFileSync(logPath, 'utf8')).toContain('Failover: p1/gemini-3.8-flash-medium → p2/gemini-3.8-flash-medium; reason');
     const failover = eventRepo.getRecent(20).find((event) => event.type === 'task.failover');
-    expect(failover?.payload).toContain('p2');
+    expect(failover).toBeDefined();
+    const payload = JSON.parse(failover!.payload);
+    expect(payload.from).toEqual({ profile: 'p1', model: 'gemini-3.8-flash-medium', engine: 'agy' });
+    expect(payload.to).toEqual({ profile: 'p2', model: 'gemini-3.8-flash-medium', engine: 'agy' });
+    expect(payload.reason).toContain('quota exhausted on agy/gemini-3.8-flash-medium');
+    expect(payload.worktreePath).toBe(worktreePath);
+    expect(payload.runId).toBe('quota-run');
+    scheduler.stop();
+  });
+
+  it('fails over to another profile with the exact same model when profile A exhausts quota for model M', () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+
+    profileRepo.upsert({ name: 'prof-a', engine: 'agy', kind: 'isolated', home: '/tmp/prof-a', email: 'a@test.com', enabled: 1 });
+    profileRepo.upsert({ name: 'prof-b', engine: 'agy', kind: 'isolated', home: '/tmp/prof-b', email: 'b@test.com', enabled: 1 });
+
+    const quotaService = new QuotaService(quotaMarkRepo, profileRepo);
+    quotaService.mark('prof-a', 'claude', 3600, 'quota hit');
+
+    taskRepo.insert({
+      id: 'test-project/same-model-failover',
+      projectId: 'test-project',
+      slug: 'same-model-failover',
+      title: 'Same Model Failover',
+      status: 'queued',
+      modelChain: JSON.stringify(['claude-sonnet-4-6']),
+    });
+
+    const fakeEngine = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    const engines = new Map<string, Engine>([['agy', fakeEngine]]);
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines);
+
+    scheduler.tick();
+
+    const runs = runRepo.getByTask('test-project/same-model-failover');
+    expect(runs).toHaveLength(1);
+    expect(runs[0].profileName).toBe('prof-b');
+    expect(runs[0].model).toBe('claude-sonnet-4-6');
+
+    scheduler.stop();
+  });
+
+  it('continues a running task into waiting_quota on same worktree when all models/profiles are exhausted', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: 'a@test.com', enabled: 1 });
+    const worktreePath = path.join(tmpDir, 'worktree-all-exhausted');
+    fs.mkdirSync(path.join(worktreePath, '.agenthub'), { recursive: true });
+    const logPath = path.join(tmpDir, 'run-all-exhausted.log');
+    fs.writeFileSync(logPath, 'worker output before quota\n');
+    taskRepo.insert({
+      id: 'test-project/exhausted-quota', projectId: 'test-project', slug: 'exhausted-quota', title: 'Exhausted quota',
+      status: 'running', worktreePath,
+    });
+    taskRepo.update('test-project/exhausted-quota', { attempt: 3 });
+    runRepo.insert({ id: 'quota-run-exhausted', taskId: 'test-project/exhausted-quota', engine: 'agy', model: 'gemini-3.8-flash-medium', profileName: 'p1', logPath });
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>());
+    const schedulerInternal = scheduler as unknown as {
+      handleRunCompletion: (taskId: string, rt: unknown) => Promise<void>;
+      running: Map<string, unknown>;
+    };
+    const rt = {
+      runId: 'quota-run-exhausted', taskId: 'test-project/exhausted-quota', pid: 999992, pidStart: null,
+      engine: { id: 'agy', detectQuota: () => ({ exhausted: true, resetSeconds: 3600 }), detectAuthError: () => ({ expired: false }), detectTransientError: () => false },
+      model: 'gemini-3.8-flash-medium', profileName: 'p1', projectId: 'test-project',
+      startTime: Date.now() - 10_000, timeoutMs: 60_000, timeoutAt: Date.now() + 60_000,
+      retryCount: 0, lastOutputAt: Date.now(), lastActivityAt: Date.now(), activitySource: 'terminal',
+      activityCheckedAt: Date.now(), cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+    };
+    schedulerInternal.running.set('test-project/exhausted-quota', rt);
+
+    await schedulerInternal.handleRunCompletion('test-project/exhausted-quota', rt);
+
+    const task = taskRepo.get('test-project/exhausted-quota')!;
+    // handleRunCompletion triggers a tick; with all profiles exhausted the task is placed in waiting_quota
+    expect(task.status).toBe('waiting_quota');
+    expect(task.waitReason).toBe('quota');
+    expect(task.attempt).toBe(3);
+    expect(task.worktreePath).toBe(worktreePath);
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('Failover: p1/gemini-3.8-flash-medium → waiting_quota; reason');
+    const failover = eventRepo.getRecent(20).find((event) => event.type === 'task.failover');
+    expect(failover).toBeDefined();
+    const payload = JSON.parse(failover!.payload);
+    expect(payload.from).toEqual({ profile: 'p1', model: 'gemini-3.8-flash-medium', engine: 'agy' });
+    expect(payload.to).toBeNull();
+    expect(payload.reason).toContain('all models/profiles unavailable');
+    scheduler.stop();
+  });
+
+  it('dispatches queued task to waiting_quota when all models in chain are exhausted, and requeues on quota reset and claude.quota_available', () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'agy-p1', engine: 'agy', kind: 'isolated', home: '/tmp/agy-p1', email: null, enabled: 1 });
+    profileRepo.upsert({ name: 'codex-p1', engine: 'codex', kind: 'codex', home: '/tmp/codex-p1', email: null, enabled: 1 });
+
+    const now = Math.floor(Date.now() / 1000);
+    // Mark both models in chain as exhausted
+    quotaMarkRepo.mark('agy-p1', 'gemini', now + 10, 'gemini quota');
+    quotaMarkRepo.mark('codex-p1', 'codex', now + 10, 'codex quota');
+
+    taskRepo.insert({
+      id: 'test-project/chain-wait',
+      projectId: 'test-project',
+      slug: 'chain-wait',
+      title: 'Chain Wait Task',
+      status: 'queued',
+      modelChain: JSON.stringify(['gemini-3.8-flash-medium', 'codex:gpt-5.6-luna']),
+    });
+
+    const fakeAgent = path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs');
+    const scheduler = new Scheduler(
+      config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['agy', new FakeEngine(fakeAgent)], ['codex', new FakeEngine(fakeAgent)]]),
+    );
+
+    // 1. When findModelProfilePair returns null, dispatch puts task into waiting_quota
+    scheduler.tick();
+    let task = taskRepo.get('test-project/chain-wait')!;
+    expect(task.status).toBe('waiting_quota');
+    expect(task.waitReason).toBe('quota');
+    const waitEvents = eventRepo.getRecent(10).filter((e) => e.type === 'task.waiting_quota' && e.taskId === 'test-project/chain-wait');
+    expect(waitEvents.length).toBeGreaterThan(0);
+
+    // 2. Next dispatch tick while quota marks are expired moves waiting_quota tasks back to queued and runs them
+    // Simulate quota expiry by marking in the past
+    quotaMarkRepo.mark('agy-p1', 'gemini', now - 10, 'expired');
+    quotaMarkRepo.mark('codex-p1', 'codex', now - 10, 'expired');
+    scheduler.tick();
+    task = taskRepo.get('test-project/chain-wait')!;
+    expect(['queued', 'running']).toContain(task.status);
+    const allRecent = eventRepo.getRecent(50);
+    expect(allRecent.some((e) => e.type === 'task.queued' && e.taskId === 'test-project/chain-wait' && (e.payload?.includes('quota_cleared') || e.payload?.includes('quota_expired')))).toBe(true);
+
+    // 3. Re-exhaust and verify wake on claude.quota_available
+    quotaMarkRepo.mark('agy-p1', 'gemini', now + 3600, 'gemini quota again');
+    quotaMarkRepo.mark('codex-p1', 'codex', now + 3600, 'codex quota again');
+    taskRepo.updateStatus('test-project/chain-wait', 'waiting_quota', 'quota');
+
+    // Emitting claude.quota_available while marks remain leaves task in waiting_quota after recheck
+    scheduler.getEventBus().emit('claude.quota_available');
+    task = taskRepo.get('test-project/chain-wait')!;
+    expect(task.status).toBe('waiting_quota');
+
+    // Clear quota mark and emit claude.quota_available -> task requeues
+    quotaMarkRepo.clear('agy-p1', 'gemini');
+    scheduler.getEventBus().emit('claude.quota_available');
+    task = taskRepo.get('test-project/chain-wait')!;
+    expect(['queued', 'running']).toContain(task.status);
+    const availableEvents = eventRepo.getRecent(10).filter((e) => e.type === 'task.queued' && e.taskId === 'test-project/chain-wait');
+    expect(availableEvents.some((e) => e.payload && e.payload.includes('quota_available'))).toBe(true);
+
     scheduler.stop();
   });
 

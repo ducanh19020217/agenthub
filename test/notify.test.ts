@@ -364,8 +364,12 @@ describe('NotificationService (Desktop Notifications)', () => {
     eventBus.emit('quota.exhausted', undefined, { profile: 'g2', family: 'claude', engine: 'agy' });
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args).not.toContain('critical');
+    expect(execCalls.some((c) => c.args.includes('critical'))).toBe(false);
     expect(execCalls[0].args.at(-1)).toContain('Hết quota Claude/GPT trên mọi tài khoản Antigravity');
     expect(execCalls[0].args.at(-1)).toContain('Vẫn chạy bằng: Gemini (4 tài khoản), Codex (codeX1)');
+    expect(execCalls[0].args.at(-1)).not.toContain('mọi tài khoản đều hết');
+    expect(execCalls[0].args.at(-1)).not.toContain('tạm dừng');
     notifier.stop();
   });
 

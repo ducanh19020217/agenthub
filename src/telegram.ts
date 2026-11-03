@@ -1394,15 +1394,49 @@ export class TelegramBotService {
         await this.handleRejectCommand(chatId, args);
         break;
 
-      case '/pause':
+      case '/pause': {
+        const trimmed = argStr.trim();
+        if (trimmed) {
+          const resolved = this.resolveTask(trimmed);
+          if ('error' in resolved) {
+            await this.sendMessage(chatId, `❌ ${resolved.error}`);
+            break;
+          }
+          try {
+            this.service.pauseTask(resolved.id, 'manual');
+            await this.sendMessage(chatId, `⏸ Đã tạm dừng task <b>${this.escapeHtml(resolved.id)}</b>.`);
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await this.sendMessage(chatId, `❌ Lỗi khi tạm dừng task: ${errMsg}`);
+          }
+          break;
+        }
         this.service.pauseScheduler();
         await this.sendMessage(chatId, '⏸ Đã tạm dừng giao task mới. Các task đang chạy vẫn tiếp tục.');
         break;
+      }
 
-      case '/resume':
+      case '/resume': {
+        const trimmed = argStr.trim();
+        if (trimmed) {
+          const resolved = this.resolveTask(trimmed);
+          if ('error' in resolved) {
+            await this.sendMessage(chatId, `❌ ${resolved.error}`);
+            break;
+          }
+          try {
+            this.service.resumeTask(resolved.id);
+            await this.sendMessage(chatId, `▶️ Đã tiếp tục task <b>${this.escapeHtml(resolved.id)}</b>.`);
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await this.sendMessage(chatId, `❌ Lỗi khi tiếp tục task: ${errMsg}`);
+          }
+          break;
+        }
         this.service.resumeScheduler();
         await this.sendMessage(chatId, '▶️ Đã tiếp tục giao task mới.');
         break;
+      }
 
       default:
         await this.sendMessage(chatId, `Lệnh không hợp lệ: ${cmd}. Gõ /help để xem hướng dẫn.`);
@@ -2390,6 +2424,16 @@ export class TelegramBotService {
             await this.answerCallbackQuery(query.id, 'Lỗi retry.');
             await this.sendMessage(chatId, `❌ Lỗi khi retry task: ${errMsg}`);
           }
+        } else if (action === 'resume') {
+          try {
+            this.service.resumeTask(resolved.id);
+            await this.answerCallbackQuery(query.id, 'Đã tiếp tục task.');
+            await this.sendMessage(chatId, `▶️ Đã tiếp tục task <b>${this.escapeHtml(resolved.id)}</b>.`);
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await this.answerCallbackQuery(query.id, 'Lỗi tiếp tục task.');
+            await this.sendMessage(chatId, `❌ Lỗi khi tiếp tục task: ${errMsg}`);
+          }
         } else if (action === 'log') {
           if (this.isMinimalProject(resolved.projectId)) {
             await this.answerCallbackQuery(query.id, 'Dự án này ẩn nội dung trên Telegram, xem trên dashboard');
@@ -2664,7 +2708,10 @@ export class TelegramBotService {
       for (const r of running) {
         const taskObj = this.taskRepo.get(r.taskId);
         const titleStr = taskObj?.title || r.taskId;
-        text = text + `• <code>${r.taskId}</code> (${r.profileName}/${r.model})\n  <i>${this.escapeHtml(titleStr)}</i>\n`;
+        const pauseBadge = r.paused
+          ? (r.pauseReason === 'load' || r.pauseReason === 'brain_load' ? ' ⏸ [Tạm dừng (quá tải)]' : ' ⏸ [Tạm dừng (thủ công)]')
+          : '';
+        text = text + `• <code>${r.taskId}</code> (${r.profileName}/${r.model})${pauseBadge}\n  <i>${this.escapeHtml(titleStr)}</i>\n`;
       }
     }
 
@@ -2853,7 +2900,12 @@ export class TelegramBotService {
       const title = this.isMinimalProject(t.projectId)
         ? '(nội dung ẩn trên Telegram, xem trên dashboard)'
         : this.escapeHtml(t.title);
-      text = text + `• [${t.status}] <code>${t.id}</code>: ${title}\n`;
+      const taskWithPaused = t as TaskRow & { paused?: boolean; pauseReason?: string | null };
+      const isPaused = Boolean(taskWithPaused.paused);
+      const pauseBadge = isPaused
+        ? (taskWithPaused.pauseReason === 'load' || taskWithPaused.pauseReason === 'brain_load' ? ' [Tạm dừng (quá tải)]' : ' [Tạm dừng (thủ công)]')
+        : '';
+      text = text + `• [${t.status}]${pauseBadge} <code>${t.id}</code>: ${title}\n`;
     }
 
     if (tasks.length > 15) {
@@ -2889,10 +2941,14 @@ export class TelegramBotService {
     }
 
     const dashboardUrl = `http://127.0.0.1:${this.config.port}/#/tasks/${toRouteId(resolved.id)}`;
+    const isPaused = Boolean(detail.paused);
+    const pauseBadge = isPaused
+      ? (detail.pauseReason === 'load' || detail.pauseReason === 'brain_load' ? ' [Tạm dừng (quá tải)]' : ' [Tạm dừng (thủ công)]')
+      : '';
 
     let text = `📌 <b>Task: ${resolved.id}</b>\n\n`;
     text = text + `• Tiêu đề: <b>${this.escapeHtml(detail.title)}</b>\n`;
-    text = text + `• Trạng thái: <code>${detail.status}</code> (${detail.level})\n`;
+    text = text + `• Trạng thái: <code>${detail.status}</code>${pauseBadge} (${detail.level})\n`;
     text = text + `• Nhánh: <code>${detail.branch || 'mặc định'}</code> (gốc: ${detail.baseRef || 'main'})\n`;
     text = text + `• Kiểm tra: ${checksText}\n`;
     text = text + `• Lượt chạy: ${detail.runs?.length || 0}\n`;
@@ -2912,7 +2968,12 @@ export class TelegramBotService {
         { text: '📄 Xem log', callback_data: `task:log:${resolved.id}` },
       ]);
     } else if (detail.status === 'running' || detail.status === 'queued') {
-      buttons.push([{ text: '🛑 Hủy task', callback_data: `cancel:confirm:${resolved.id}` }]);
+      const row: InlineKeyboardButton[] = [];
+      if (isPaused) {
+        row.push({ text: '▶️ Tiếp tục', callback_data: `task:resume:${resolved.id}` });
+      }
+      row.push({ text: '🛑 Hủy task', callback_data: `cancel:confirm:${resolved.id}` });
+      buttons.push(row);
     }
 
     await this.sendMessage(chatId, text, buttons.length > 0 ? { inline_keyboard: buttons } : undefined);
@@ -3554,7 +3615,7 @@ export class TelegramBotService {
 
     // 1. Brain auto mode: suppress raw task notifications
     try {
-      const isSystemEvent = type === 'quota.exhausted' || type === 'claude.quota_exhausted' || type.startsWith('disk.') || type.startsWith('system.') || type.startsWith('hub.') || type.startsWith('deploy.') || type === 'profile.auth_expired' || type === 'chat.limit_waiting';
+      const isSystemEvent = type === 'quota.exhausted' || type === 'claude.quota_exhausted' || type.startsWith('disk.') || type.startsWith('system.') || type.startsWith('hub.') || type.startsWith('deploy.') || type.startsWith('remote_deploy.') || type === 'profile.auth_expired' || type === 'chat.limit_waiting';
     this.notificationProjectId = isSystemEvent ? null : projectId;
     this.notificationDedupProjectId = projectId;
     const focusProjectId = this.config.focus?.projectId;
@@ -3573,6 +3634,8 @@ export class TelegramBotService {
         type === 'claude.quota_exhausted' ||
         type === 'hub.restart_failed' ||
         type.startsWith('deploy.') ||
+        type.startsWith('gitea.sync.') ||
+        type.startsWith('remote_deploy.') ||
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||
@@ -3851,6 +3914,15 @@ export class TelegramBotService {
         break;
       }
 
+      case 'tracker.ticket_imported':
+      case 'tracker.comment':
+      case 'tracker.poll_failed': {
+        const ref = typeof p.displayId === 'string' ? p.displayId : typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        const label = type === 'tracker.ticket_imported' ? 'đã nhập ticket thành task' : type === 'tracker.comment' ? 'có comment mới' : 'đồng bộ thất bại';
+        this.broadcastMessage(`${prefix}🔗 <b>${this.escapeHtml(ref)}</b> ${label}.`);
+        break;
+      }
+
       case 'quota.exhausted': {
         const quotaKey = (typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '') || 'all';
         const snapshot = this.quotaCapacity();
@@ -3867,6 +3939,24 @@ export class TelegramBotService {
         if (now - this.lastSentLoadSummary < 15 * 60_000) break;
         this.lastSentLoadSummary = now;
         this.broadcastMessage(`⚠️ <b>AgentHub tạm dừng/gặp tải cao</b> — xem dashboard để biết chi tiết.`);
+        break;
+      }
+
+      case 'task.pause_reminder': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const minutes = typeof p.pausedMinutes === 'number' ? p.pausedMinutes : 30;
+        const taskLabel = taskId || 'Task';
+        const pauseBadge = (p.reason === 'load' || p.reason === 'brain_load') ? 'Tạm dừng (quá tải)' : 'Tạm dừng (thủ công)';
+        const keyboard: InlineKeyboardButton[][] = [];
+        if (taskId) {
+          keyboard.push([
+            { text: '▶️ Tiếp tục', callback_data: `task:resume:${taskId}` },
+          ]);
+        }
+        this.broadcastMessage(
+          `${prefix}⏸ <b>Nhắc nhở: ${pauseBadge}</b>\nID: <code>${taskLabel}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>\nTask đã bị dừng hơn ${minutes} phút trong khi máy không quá tải.`,
+          keyboard.length > 0 ? { inline_keyboard: keyboard } : undefined,
+        );
         break;
       }
 
@@ -3925,6 +4015,27 @@ export class TelegramBotService {
         const icon = isFailure ? '🚨' : isSuccess ? '✅' : '🚀';
         const details = typeof p.error === 'string' ? `\n${this.escapeHtml(p.error)}` : typeof p.message === 'string' ? `\n${this.escapeHtml(p.message)}` : '';
         this.broadcastMessage(`${icon} <b>${title}</b>${details}`);
+        break;
+      }
+
+      case 'remote_deploy.started':
+      case 'remote_deploy.succeeded':
+      case 'remote_deploy.failed':
+      case 'remote_deploy.health_timeout': {
+        if (!notify.fallback) return;
+        const isFailure = type === 'remote_deploy.failed' || type === 'remote_deploy.health_timeout';
+        const isSuccess = type === 'remote_deploy.succeeded';
+        const title = isSuccess
+          ? 'Remote deploy thành công'
+          : type === 'remote_deploy.health_timeout'
+            ? 'Remote deploy hết thời gian chờ health check'
+            : isFailure
+              ? 'Remote deploy thất bại'
+              : 'Bắt đầu remote deploy';
+        const icon = isSuccess ? '✅' : isFailure ? '🚨' : '🚀';
+        const proj = typeof p.projectId === 'string' ? ` [${this.escapeHtml(p.projectId)}]` : '';
+        const details = typeof p.error === 'string' ? `\n${this.escapeHtml(p.error)}` : typeof p.message === 'string' ? `\n${this.escapeHtml(p.message)}` : '';
+        this.broadcastMessage(`${icon} <b>${title}</b>${proj}${details}`);
         break;
       }
 
@@ -4023,6 +4134,56 @@ export class TelegramBotService {
           keyboard.push([{ text: '🔗 Xem trên GitHub', url: p.url }]);
         }
         this.broadcastMessage(text, keyboard.length > 0 ? { inline_keyboard: keyboard } : undefined);
+        break;
+      }
+
+      case 'gitea.sync.started': {
+        const source = typeof p.sourceBranch === 'string' ? p.sourceBranch : '';
+        const target = typeof p.targetBranch === 'string' ? p.targetBranch : '';
+        this.broadcastMessage(`${prefix}🔄 <b>Bắt đầu đồng bộ Gitea</b>: <code>${this.escapeHtml(source)}</code> → <code>${this.escapeHtml(target)}</code>`);
+        break;
+      }
+
+      case 'gitea.sync.skipped': {
+        const reason = typeof p.reason === 'string' ? p.reason : 'Không có commit mới';
+        this.broadcastMessage(`${prefix}⏭️ <b>Bỏ qua đồng bộ Gitea</b>: ${this.escapeHtml(reason)}`);
+        break;
+      }
+
+      case 'gitea.sync.succeeded': {
+        const prNum = typeof p.prNumber === 'number' ? `PR #${p.prNumber}` : 'PR';
+        const commit = typeof p.commit === 'string' ? ` (<code>${this.escapeHtml(p.commit.slice(0, 7))}</code>)` : '';
+        const keyboard: InlineKeyboardButton[][] = [];
+        if (typeof p.url === 'string' && p.url) {
+          keyboard.push([{ text: '🔗 Xem trên Gitea', url: p.url }]);
+        }
+        this.broadcastMessage(
+          `${prefix}✅ <b>Đồng bộ Gitea thành công</b>: ${prNum}${commit}`,
+          keyboard.length ? { inline_keyboard: keyboard } : undefined,
+        );
+        break;
+      }
+
+      case 'gitea.sync.failed': {
+        const err = typeof p.error === 'string' ? p.error : 'Lỗi không xác định';
+        const prNum = typeof p.prNumber === 'number' ? ` (PR #${p.prNumber})` : '';
+        const keyboard: InlineKeyboardButton[][] = [];
+        if (typeof p.url === 'string' && p.url) {
+          keyboard.push([{ text: '🔗 Xem trên Gitea', url: p.url }]);
+        }
+        this.broadcastMessage(
+          `${prefix}❌ <b>Đồng bộ Gitea thất bại</b>${prNum}: ${this.escapeHtml(err)}`,
+          keyboard.length ? { inline_keyboard: keyboard } : undefined,
+        );
+        break;
+      }
+
+      case 'gitea.sync.conflict': {
+        const files = Array.isArray(p.conflictingFiles) ? (p.conflictingFiles as string[]) : [];
+        const fileList = files.length > 0
+          ? `\n\n<b>File xung đột:</b>\n${files.slice(0, 5).map((f) => `• <code>${this.escapeHtml(f)}</code>`).join('\n')}`
+          : '';
+        this.broadcastMessage(`${prefix}⚠️ <b>Xung đột khi đồng bộ Gitea</b>: đã tạo task gỡ xung đột${fileList}`);
         break;
       }
       }
@@ -4337,6 +4498,18 @@ export class TelegramBotService {
         return minimal ? `${prefix}CI thất bại` : `${prefix}CI thất bại: ${p?.workflow || 'CI'}`;
       case 'ci.passed':
         return minimal ? `${prefix}CI đã xanh` : `${prefix}CI đã xanh: ${p?.workflow || 'CI'}`;
+      case 'tracker.ticket_imported':
+        return `${prefix}Đã nhập ticket ${p?.displayId || 'OpenProject'} thành task`;
+      case 'tracker.comment':
+        return `${prefix}Ticket ${p?.displayId || 'OpenProject'} có comment mới`;
+      case 'tracker.poll_failed':
+        return `${prefix}Đồng bộ OpenProject thất bại: ${p?.sourceId || ''}`;
+      case 'gitea.sync.succeeded':
+        return `${prefix}Đồng bộ Gitea thành công`;
+      case 'gitea.sync.failed':
+        return `${prefix}Đồng bộ Gitea thất bại: ${p?.error || ''}`;
+      case 'gitea.sync.conflict':
+        return `${prefix}Xung đột khi đồng bộ Gitea`;
       case 'merge.conflict':
         return `${prefix}Xung đột khi merge tự động (${taskId || 'task'})`;
       case 'merge.failed':

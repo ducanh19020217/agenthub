@@ -24,8 +24,11 @@ import {
   BrainTurnRepo,
   BrainDirectiveRepo,
   CiRepo,
+  TrackerItemRepo,
 } from './db/index.js';
 import { CiWatchService } from './ci.js';
+import { OpenProjectIntakeService } from './integrations/openproject/intake.js';
+import { GiteaSyncService } from './integrations/gitea/service.js';
 import { ProfileService } from './profiles/index.js';
 import { Scheduler } from './scheduler/index.js';
 import { Engine, AgyEngine, CodexEngine, FakeEngine } from './engines/index.js';
@@ -55,6 +58,7 @@ import { BrainPolicy, projectBrainPolicy, assistantPolicy, globalAssistantPolicy
 import { BrainRunner } from './brain/runner.js';
 import { type DiskSpace } from './disk.js';
 import { DeployService } from './deploy.js';
+import { RemoteDeployService } from './remote-deploy.js';
 import { PerfCollector } from './perf.js';
 import { pruneNodeModulesCache } from './cache.js';
 import { cleanupStaleAgentHubTempDirs } from './temp-cleanup.js';
@@ -96,8 +100,12 @@ export interface DaemonContext {
   brainRunner: BrainRunner;
   directiveRepo: BrainDirectiveRepo;
   deployService: DeployService;
+  remoteDeployService: RemoteDeployService;
   ciRepo: CiRepo;
   ciService: CiWatchService;
+  trackerRepo: TrackerItemRepo;
+  intakeService: OpenProjectIntakeService;
+  giteaSyncService: GiteaSyncService;
   perfCollector: PerfCollector;
 }
 
@@ -131,6 +139,7 @@ export function createContext(
   const profileRepo = new ProfileRepo(db);
   const quotaMarkRepo = new QuotaMarkRepo(db);
   const taskRepo = new TaskRepo(db);
+  const trackerRepo = new TrackerItemRepo(db);
   const runRepo = new RunRepo(db);
   const runMetricsRepo = new RunMetricsRepo(db);
   const reviewRepo = new ReviewRepo(db);
@@ -284,6 +293,9 @@ export function createContext(
   });
   deployService.start();
 
+  const remoteDeployService = new RemoteDeployService(config, projectRepo, scheduler.getEventBus());
+  remoteDeployService.start();
+
   const bulletinService = new BulletinService({
     config,
     taskRepo,
@@ -322,6 +334,7 @@ export function createContext(
     departmentRepo,
   );
   service.deployService = deployService;
+  service.remoteDeployService = remoteDeployService;
   scheduler.getEventBus().on('task.review_ready', (taskId, payload) => {
     const data = payload && typeof payload === 'object' ? payload as { reviewChainComplete?: unknown } : {};
     if (taskId && data.reviewChainComplete === true) {
@@ -353,6 +366,23 @@ export function createContext(
   });
   service.ciRepo = ciRepo;
   service.ciService = ciService;
+  const intakeService = new OpenProjectIntakeService({
+    config,
+    projectRepo,
+    taskRepo,
+    trackerRepo,
+    taskService: service,
+    eventBus: scheduler.getEventBus(),
+  });
+  service.intakeService = intakeService;
+
+  const giteaSyncService = new GiteaSyncService({
+    config,
+    projectRepo,
+    eventBus: scheduler.getEventBus(),
+    service,
+  });
+  service.giteaSyncService = giteaSyncService;
 
   const notifier = new NotificationService({
     eventBus: scheduler.getEventBus(),
@@ -418,8 +448,12 @@ export function createContext(
     brainRunner,
     directiveRepo,
     deployService,
+    remoteDeployService,
     ciRepo,
     ciService,
+    trackerRepo,
+    intakeService,
+    giteaSyncService,
     perfCollector,
   };
 }
@@ -447,6 +481,21 @@ export function closeContext(ctx: DaemonContext): void {
   }
   try {
     ctx.ciService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.giteaSyncService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.intakeService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.remoteDeployService?.stop();
   } catch {
     // ignore
   }
@@ -519,6 +568,8 @@ export async function startDaemon(
   ctx.bulletinService.start();
   ctx.brainRunner.start();
   ctx.ciService.start();
+  ctx.intakeService.start();
+  ctx.giteaSyncService.start();
   ctx.perfCollector.start();
 
   // Start Telegram bot if enabled
@@ -528,6 +579,7 @@ export async function startDaemon(
 
   // Start Fastify HTTP server with security and API endpoints
   const fastify = await createServer(ctx.service, config, {
+    openProjectSync: (sourceId) => ctx.intakeService.sync(sourceId),
     onShutdown: (disable) => {
       if (disable) {
         try {

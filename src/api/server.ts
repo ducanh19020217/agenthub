@@ -32,7 +32,7 @@ export function resolveWebDir(moduleUrl: string, env: NodeJS.ProcessEnv = {}): s
 export async function createServer(
   service: AppService,
   config: AgentHubConfig,
-  options?: { webDir?: string; onShutdown?: (disable: boolean) => void },
+  options?: { webDir?: string; onShutdown?: (disable: boolean) => void; openProjectSync?: (sourceId: string) => Promise<{ imported: number; comments: number }> },
 ): Promise<FastifyInstance> {
   const fastify = Fastify({ logger: false, forceCloseConnections: true });
 
@@ -126,7 +126,7 @@ export async function createServer(
   fastify.get('/api/status', async () => {
     return service.getStatus();
   });
-  registerOpenProjectRoutes(fastify, config);
+  registerOpenProjectRoutes(fastify, config, { sync: options?.openProjectSync });
 
   fastify.post('/api/hub/shutdown', async (req) => {
     const body = (req.body || {}) as { disable?: unknown };
@@ -306,6 +306,47 @@ export async function createServer(
       return reply.status(result.status === 'failed' ? 500 : 200).send(result);
     }
     return reply.status(202).send(service.rerunDeploy(id));
+  });
+
+  fastify.put('/api/projects/:id/gitea/token', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as { token?: string };
+    if (!body.token || typeof body.token !== 'string' || !body.token.trim()) {
+      throw new HttpError(400, 'bad_request', 'Token không được để trống');
+    }
+    return service.saveGiteaToken(id, body.token);
+  });
+
+  fastify.get('/api/projects/:id/gitea/status', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getGiteaStatus(id);
+  });
+
+  fastify.post('/api/projects/:id/gitea/sync', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.triggerGiteaSync(id);
+  });
+
+  fastify.put('/api/projects/:id/remote-deploy/env', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.saveRemoteDeployEnv(id, req.body);
+  });
+
+  fastify.post('/api/projects/:id/remote-deploy', async (req: FastifyRequest, reply: FastifyReply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as { commit?: string };
+    const status = service.triggerRemoteDeploy(id, { trigger: 'manual', commit: body.commit });
+    return reply.status(202).send(status);
+  });
+
+  fastify.get('/api/projects/:id/remote-deploy/status', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getRemoteDeployStatus(id) ?? { projectId: id, status: 'idle' };
+  });
+
+  fastify.get('/api/projects/:id/remote-deploy', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getRemoteDeployStatus(id) ?? { projectId: id, status: 'idle' };
   });
 
   fastify.post('/api/projects', async (req: FastifyRequest, reply: FastifyReply) => {
@@ -503,7 +544,8 @@ export async function createServer(
 
   fastify.post('/api/tasks/:id/pause', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
-    return service.pauseTask(id);
+    const body = (req.body || {}) as { reason?: 'manual' | 'load' | 'brain_load' };
+    return service.pauseTask(id, body.reason);
   });
 
   fastify.post('/api/tasks/:id/resume', async (req: FastifyRequest) => {

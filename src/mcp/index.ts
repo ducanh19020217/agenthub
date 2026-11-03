@@ -548,6 +548,20 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
 
   // 5. hub_create_task
   server.tool(
+    'hub_tracker_sync',
+    'Chạy ngay một lượt đồng bộ ticket OpenProject cho một nguồn',
+    { sourceId: z.string().min(1) },
+    async (args) => {
+      try {
+        const result = await callApi<{ imported: number; comments: number }>('POST', `/api/integrations/openproject/sources/${encodeURIComponent(args.sourceId)}/sync`);
+        return { content: [{ type: 'text', text: `✓ Đã đồng bộ nguồn ${args.sourceId}: ${result.imported} task mới, ${result.comments} comment.` }] };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
+  server.tool(
     'hub_create_task',
     'Tạo task mới trong AgentHub. Nếu start=true thì đưa thẳng vào hàng đợi (queued)',
     {
@@ -1440,9 +1454,16 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   server.tool(
     'hub_pause',
     'Tạm dừng một task',
-    { id: z.string() },
-    async ({ id }) => {
-      try { assertTaskId(id, 'Tạm dừng task'); await callApi('POST', `/api/tasks/${toRouteId(id)}/pause`); return { content: [{ type: 'text', text: `✓ Đã tạm dừng ${id}` }] }; }
+    {
+      id: z.string().describe('ID của task cần tạm dừng'),
+      reason: z.enum(['manual', 'load', 'brain_load']).optional().describe('Lý do tạm dừng: load (khi máy quá tải để tự tiếp tục khi hạ tải) hoặc manual (tạm dừng thủ công)'),
+    },
+    async ({ id, reason }) => {
+      try {
+        assertTaskId(id, 'Tạm dừng task');
+        await callApi('POST', `/api/tasks/${toRouteId(id)}/pause`, { reason });
+        return { content: [{ type: 'text', text: `✓ Đã tạm dừng ${id}` }] };
+      }
       catch (err: unknown) { return handleError(err); }
     },
   );
@@ -1454,6 +1475,37 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     async ({ id }) => {
       try { assertTaskId(id, 'Tiếp tục task'); await callApi('POST', `/api/tasks/${toRouteId(id)}/resume`); return { content: [{ type: 'text', text: `✓ Đã tiếp tục ${id}` }] }; }
       catch (err: unknown) { return handleError(err); }
+    },
+  );
+
+  server.tool(
+    'hub_gitea_sync',
+    'Đồng bộ mã nguồn với Gitea theo cấu hình project (tạo PR, merge)',
+    { projectId: z.string().optional() },
+    async (args) => {
+      try {
+        const targetProject = args.projectId ?? scopedProject();
+        if (!targetProject) throw new Error('projectId là bắt buộc');
+        assertProject(targetProject, 'Đồng bộ Gitea');
+        const result = await callApi<Record<string, unknown>>('POST', `/api/projects/${encodeURIComponent(targetProject)}/gitea/sync`);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err: unknown) { return handleError(err); }
+    },
+  );
+
+  server.tool(
+    'hub_remote_deploy',
+    'Kích hoạt remote deploy cho một project',
+    { projectId: z.string().describe('ID của project') },
+    async ({ projectId }) => {
+      try {
+        const targetProject = projectId || scopedProject();
+        if (!targetProject) throw new Error('Cần cung cấp projectId');
+        const result = await callApi('POST', `/api/projects/${encodeURIComponent(targetProject)}/remote-deploy`);
+        return { content: [{ type: 'text', text: `✓ Đã kích hoạt remote deploy cho project "${targetProject}": ${JSON.stringify(result)}` }] };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
     },
   );
 

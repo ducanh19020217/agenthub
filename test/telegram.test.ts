@@ -739,6 +739,64 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(ctx.service.isSchedulerPaused()).toBe(false);
     });
 
+    it('/pause <id> and /resume <id> pause and resume specific task', async () => {
+      const pauseSpy = vi.spyOn(ctx.service, 'pauseTask').mockReturnValue({ ok: true, paused: true });
+      const resumeSpy = vi.spyOn(ctx.service, 'resumeTask').mockReturnValue({ ok: true, paused: false });
+
+      await bot.handleUpdate({
+        update_id: 171,
+        message: {
+          message_id: 171,
+          date: 123456,
+          chat: { id: CHAT_ID, type: 'private' },
+          text: '/pause p1/task-run',
+        },
+      });
+      expect(pauseSpy).toHaveBeenCalledWith('p1/task-run', 'manual');
+
+      await bot.handleUpdate({
+        update_id: 172,
+        message: {
+          message_id: 172,
+          date: 123456,
+          chat: { id: CHAT_ID, type: 'private' },
+          text: '/resume p1/task-run',
+        },
+      });
+      expect(resumeSpy).toHaveBeenCalledWith('p1/task-run');
+    });
+
+    it('/task shows paused badge and resume button when task is paused', async () => {
+      vi.spyOn(ctx.service, 'getTask').mockResolvedValueOnce({
+        id: 'p1/task-run',
+        projectId: 'p1',
+        slug: 'task-run',
+        title: 'Task Paused',
+        status: 'running',
+        level: 'easy',
+        paused: true,
+        pauseReason: 'load',
+        runs: [],
+      } as unknown as Awaited<ReturnType<typeof ctx.service.getTask>>);
+
+      await bot.handleUpdate({
+        update_id: 173,
+        message: {
+          message_id: 173,
+          date: 123456,
+          chat: { id: CHAT_ID, type: 'private' },
+          text: '/task task-run',
+        },
+      });
+
+      const calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      const text = String(calls[calls.length - 1].body?.text);
+      expect(text).toContain('[Tạm dừng (quá tải)]');
+      const markup = calls[calls.length - 1].body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+      expect(markup.inline_keyboard[0][0].callback_data).toBe('task:resume:p1/task-run');
+      expect(markup.inline_keyboard[0][0].text).toContain('Tiếp tục');
+    });
+
     it('/cancel sends confirmation prompt with inline buttons', async () => {
       await bot.handleUpdate({
         update_id: 18,
@@ -1029,6 +1087,26 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(calls[0].body?.text).toContain('Diff tóm tắt');
       expect(calls[0].body?.text).toContain('2 files changed, 15 insertions(+)');
     });
+
+    it('task:resume resumes paused task', async () => {
+      const resumeSpy = vi.spyOn(ctx.service, 'resumeTask').mockReturnValue({ ok: true, paused: false });
+      await bot.handleUpdate({
+        update_id: 35,
+        callback_query: {
+          id: 'cb-resume',
+          from: { id: CHAT_ID },
+          message: {
+            message_id: 35,
+            chat: { id: CHAT_ID },
+          },
+          data: 'task:resume:p1/task-cb-run',
+        },
+      });
+
+      expect(resumeSpy).toHaveBeenCalledWith('p1/task-cb-run');
+      const calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls[0].body?.text).toContain('Đã tiếp tục task');
+    });
   });
 
   describe('5. EventBus notifications and deduplication', () => {
@@ -1081,6 +1159,25 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
       expect(calls[0].body?.text).toContain('Task bị chặn');
       expect(calls[0].body?.text).toContain('Thiếu key');
+    });
+
+    it('broadcasts task.pause_reminder with resume button', async () => {
+      ctx.scheduler.getEventBus().emit('task.pause_reminder', 'p1/task-paused', {
+        title: 'Task Đang Tạm Dừng',
+        pausedMinutes: 35,
+        reason: 'load',
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      const calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Nhắc nhở: Tạm dừng (quá tải)');
+      expect(calls[0].body?.text).toContain('p1/task-paused');
+      expect(calls[0].body?.text).toContain('35 phút');
+
+      const markup = calls[0].body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+      expect(markup.inline_keyboard[0][0].callback_data).toBe('task:resume:p1/task-paused');
+      expect(markup.inline_keyboard[0][0].text).toContain('Tiếp tục');
     });
 
     it('suppresses duplicate event notifications within 10 seconds', async () => {

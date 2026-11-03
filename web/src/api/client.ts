@@ -34,6 +34,10 @@ import {
   PerfReport,
   Department,
   EventItem,
+  PresetDetails,
+  ApplyPresetInput,
+  ApplyPresetResult,
+  EffectiveConfigResponse,
 } from '../types/api';
 import { getActiveLocale, translateApiErrorMessage } from '../utils/apiError';
 
@@ -314,6 +318,11 @@ export const createDepartment = (data: Partial<Department> & { name: string }) =
 export const updateDepartment = (id: string, data: Partial<Department>) => apiFetch<Department>(`/api/departments/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) });
 export const deleteDepartment = (id: string) => apiFetch<{ ok: boolean }>(`/api/departments/${encodeURIComponent(id)}`, { method: 'DELETE' });
 export const updateDepartmentProfiles = (id: string, profiles: Array<Pick<Department['profiles'][number], 'profileName' | 'share'>>) => apiFetch<Department>(`/api/departments/${encodeURIComponent(id)}/profiles`, { method: 'PUT', body: JSON.stringify({ profiles }) });
+export const updateDepartmentProjects = (id: string, data: { projectIds?: string[]; projectId?: string }) => apiFetch<Department>(`/api/departments/${encodeURIComponent(id)}/projects`, { method: 'PUT', body: JSON.stringify(data) });
+
+export const getPresets = () => apiFetch<PresetDetails[]>('/api/presets');
+export const applyPreset = (input: ApplyPresetInput) => apiFetch<ApplyPresetResult>('/api/presets/apply', { method: 'POST', body: JSON.stringify(input) });
+export const getEffectiveConfig = (projectId: string) => apiFetch<EffectiveConfigResponse>(`/api/projects/${encodeURIComponent(projectId)}/effective-config`);
 
 export async function getArchivedProjects(): Promise<Project[]> {
   return apiFetch<Project[]>('/api/projects?archived=true');

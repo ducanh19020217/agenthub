@@ -167,7 +167,7 @@ export class NotificationService {
     if (level === 'important' && !new Set([
       'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
       'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.waiting_quota',
-      'quota.cleared',
+      'quota.cleared', 'remote_deploy.failed', 'remote_deploy.health_timeout',
     ]).has(type)) return;
 
     const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
@@ -232,9 +232,12 @@ export class NotificationService {
         type === 'disk.docker_low' ||
         type === 'claude.quota_exhausted' ||
         type === 'hub.restart_failed' ||
+        type.startsWith('deploy.') ||
+        type.startsWith('gitea.sync.') ||
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||
+        type.startsWith('remote_deploy.') ||
         type === 'quota.exhausted' ||
         (type === 'task.waiting_quota' && p.reason === 'no_department_profile');
 
@@ -310,9 +313,66 @@ export class NotificationService {
         break;
       }
 
+      case 'tracker.ticket_imported': {
+        const ref = typeof p.displayId === 'string' ? p.displayId : 'ticket';
+        this.notify(`${this.appName}: đã nhập ticket ${ref} thành task`, 'normal');
+        break;
+      }
+
+      case 'tracker.comment': {
+        const ref = typeof p.displayId === 'string' ? p.displayId : 'ticket';
+        this.notify(`${this.appName}: ticket ${ref} có comment mới`, 'normal');
+        break;
+      }
+
+      case 'tracker.poll_failed': {
+        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        this.notify(`${this.appName}: đồng bộ ${source} thất bại`, 'critical');
+        break;
+      }
+
+      case 'gitea.sync.started': {
+        const source = typeof p.sourceBranch === 'string' ? p.sourceBranch : '';
+        const target = typeof p.targetBranch === 'string' ? p.targetBranch : '';
+        this.notify(`${this.appName}: bắt đầu đồng bộ Gitea ${source} → ${target}`, 'normal');
+        break;
+      }
+
+      case 'gitea.sync.skipped': {
+        const reason = typeof p.reason === 'string' ? p.reason : 'Không có commit mới';
+        this.notify(`${this.appName}: bỏ qua đồng bộ Gitea: ${reason}`, 'normal');
+        break;
+      }
+
+      case 'gitea.sync.succeeded': {
+        const prNum = typeof p.prNumber === 'number' ? `PR #${p.prNumber}` : 'PR';
+        const commit = typeof p.commit === 'string' ? ` (${p.commit.slice(0, 7)})` : '';
+        this.notify(`${this.appName}: đồng bộ Gitea thành công: ${prNum}${commit}`, 'normal');
+        break;
+      }
+
+      case 'gitea.sync.failed': {
+        const err = typeof p.error === 'string' ? `: ${p.error}` : '';
+        this.notify(`${this.appName}: đồng bộ Gitea thất bại${err}`, 'critical');
+        break;
+      }
+
+      case 'gitea.sync.conflict': {
+        const count = Array.isArray(p.conflictingFiles) ? ` (${p.conflictingFiles.length} file)` : '';
+        this.notify(`${this.appName}: xung đột đồng bộ Gitea${count}: đã tạo task gỡ xung đột`, 'critical');
+        break;
+      }
+
       case 'task.paused':
       case 'load.task_paused': {
         this.notifyLoadSummary(now, p.reason === 'load' ? 'quá tải hệ thống' : 'yêu cầu tạm dừng');
+        break;
+      }
+
+      case 'task.pause_reminder': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const minutes = typeof p.pausedMinutes === 'number' ? p.pausedMinutes : 30;
+        this.notify(`Nhắc nhở: Task ${title} đã tạm dừng hơn ${minutes} phút (máy không quá tải)`, 'normal');
         break;
       }
 
@@ -433,6 +493,31 @@ export class NotificationService {
         const sha = typeof p.sha === 'string' ? p.sha.slice(0, 7) : '';
         const msg = `CI đã xanh: [${projId}] ${workflow}${sha ? ` @ ${sha}` : ''}`;
         this.notify(msg, 'normal');
+        break;
+      }
+
+      case 'remote_deploy.started': {
+        const proj = typeof p.projectId === 'string' ? p.projectId : 'dự án';
+        this.notify(`${this.appName}: Bắt đầu remote deploy cho ${proj}`, 'normal');
+        break;
+      }
+
+      case 'remote_deploy.succeeded': {
+        const proj = typeof p.projectId === 'string' ? p.projectId : 'dự án';
+        this.notify(`${this.appName}: Remote deploy thành công cho ${proj}`, 'normal');
+        break;
+      }
+
+      case 'remote_deploy.failed': {
+        const proj = typeof p.projectId === 'string' ? p.projectId : 'dự án';
+        const err = typeof p.error === 'string' ? `: ${p.error}` : '';
+        this.notify(`${this.appName}: Remote deploy thất bại cho ${proj}${err}`, 'critical');
+        break;
+      }
+
+      case 'remote_deploy.health_timeout': {
+        const proj = typeof p.projectId === 'string' ? p.projectId : 'dự án';
+        this.notify(`${this.appName}: Remote deploy hết thời gian chờ health check cho ${proj}`, 'critical');
         break;
       }
     }

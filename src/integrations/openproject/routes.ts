@@ -21,6 +21,7 @@ function persist(config: AgentHubConfig, sources: OpenProjectSource[]): void {
 
 export interface RegisterOpenProjectRoutesOptions {
   fetch?: typeof globalThis.fetch;
+  sync?: (sourceId: string) => Promise<{ imported: number; comments: number }>;
 }
 
 export function registerOpenProjectRoutes(
@@ -88,5 +89,12 @@ export function registerOpenProjectRoutes(
     } catch {
       throw new HttpError(502, 'openproject_error', 'Không thể kết nối OpenProject');
     }
+  });
+
+  fastify.post('/api/integrations/openproject/sources/:id/sync', async (req: FastifyRequest) => {
+    const { id } = idParams.parse(req.params);
+    sourceOrThrow(config, id);
+    if (!options.sync) throw new HttpError(503, 'unavailable', 'OpenProject intake chưa sẵn sàng');
+    return options.sync(id);
   });
 }

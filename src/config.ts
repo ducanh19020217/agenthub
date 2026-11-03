@@ -114,11 +114,13 @@ export const DEFAULT_SAVINGS_CONFIG: SavingsConfig = {
 export interface SchedulerLimitsConfig {
   maxRunsPerTask: number;
   maxConsecutiveCrashesPerTask: number;
+  maxPausedMin?: number;
 }
 
 export const DEFAULT_SCHEDULER_LIMITS: SchedulerLimitsConfig = {
   maxRunsPerTask: 15,
   maxConsecutiveCrashesPerTask: 3,
+  maxPausedMin: 30,
 };
 
 export interface ProfileCoolingConfig {
@@ -1370,6 +1372,7 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
       return {
         maxRunsPerTask: typeof raw.maxRunsPerTask === 'number' && raw.maxRunsPerTask > 0 ? Math.floor(raw.maxRunsPerTask) : DEFAULT_SCHEDULER_LIMITS.maxRunsPerTask,
         maxConsecutiveCrashesPerTask: typeof raw.maxConsecutiveCrashesPerTask === 'number' && raw.maxConsecutiveCrashesPerTask > 0 ? Math.floor(raw.maxConsecutiveCrashesPerTask) : DEFAULT_SCHEDULER_LIMITS.maxConsecutiveCrashesPerTask,
+        maxPausedMin: typeof raw.maxPausedMin === 'number' && raw.maxPausedMin > 0 ? Math.floor(raw.maxPausedMin) : DEFAULT_SCHEDULER_LIMITS.maxPausedMin,
       };
     })(),
     schedulerLimits: (() => {
@@ -1381,6 +1384,9 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
         maxConsecutiveCrashesPerTask: typeof raw.maxConsecutiveCrashesPerTask === 'number' && raw.maxConsecutiveCrashesPerTask > 0
           ? Math.floor(raw.maxConsecutiveCrashesPerTask)
           : DEFAULT_SCHEDULER_LIMITS.maxConsecutiveCrashesPerTask,
+        maxPausedMin: typeof raw.maxPausedMin === 'number' && raw.maxPausedMin > 0
+          ? Math.floor(raw.maxPausedMin)
+          : DEFAULT_SCHEDULER_LIMITS.maxPausedMin,
       };
     })(),
     profileCooling: (() => {

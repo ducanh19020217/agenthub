@@ -3080,5 +3080,6 @@ export class TrackerItemRepo {
     return this.get(row.source_id, row.wp_id)!;
   }
   list(sourceId: string): TrackerItemRow[] { return this.db.prepare('SELECT * FROM tracker_items WHERE source_id = ? ORDER BY wp_id').all(sourceId) as TrackerItemRow[]; }
+  listAll(): TrackerItemRow[] { return this.db.prepare('SELECT * FROM tracker_items ORDER BY source_id, wp_id').all() as TrackerItemRow[]; }
 }
 

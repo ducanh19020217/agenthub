@@ -34,6 +34,9 @@ import {
   CiRepo,
 } from '../db/index.js';
 import type { CiWatchService } from '../ci.js';
+import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
+import type { GiteaSyncService } from '../integrations/gitea/service.js';
+import { isGiteaTokenConfigured, saveGiteaToken } from '../integrations/gitea/secrets.js';
 import { BulletinService } from '../bulletin.js';
 import { ProfileService as CoreProfileService, accountKey, isProfileLoggedIn, exchangeAgyRefreshToken, writeAgyIsolatedToken, fetchAgyGoogleUserInfo, fetchAgyGoogleUserInfoDetailed, inspectAgyAccessToken } from '../profiles/index.js';
 import { Scheduler } from '../scheduler/index.js';
@@ -67,6 +70,7 @@ import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, Re
 import { SetupManager } from '../tools/setup.js';
 import { createNewGitProject, inspectProject, readClaudeSessionExcerpt } from '../projects/inspect.js';
 import type { DeployService } from '../deploy.js';
+import type { RemoteDeployService, RemoteDeployStatus } from '../remote-deploy.js';
 import type { PerfCollector } from '../perf.js';
 import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../presets.js';
 import { computeEffectiveConfig } from '../effective-config.js';
@@ -752,6 +756,9 @@ export function formatEventSummary(
         ? `${taskLabel} tạm dừng do quá tải`
         : `${taskLabel} đã tạm dừng`;
 
+    case 'task.pause_reminder':
+      return `${taskLabel} đã tạm dừng hơn ${(p && p.pausedMinutes) || 30} phút`;
+
     case 'task.resumed':
       return `${taskLabel} tiếp tục chạy`;
 
@@ -898,8 +905,11 @@ export function formatEventSummary(
 
 export class AppService {
   public deployService?: DeployService;
+  public remoteDeployService?: RemoteDeployService;
   public ciRepo?: CiRepo;
   public ciService?: CiWatchService;
+  public intakeService?: OpenProjectIntakeService;
+  public giteaSyncService?: GiteaSyncService;
   private perfCollector?: PerfCollector;
   private profileChecks = new Set<string>();
   private reviewingTasks = new Set<string>();
@@ -1019,6 +1029,7 @@ export class AppService {
     const chatPids = this.chatService?.getRunningPids?.() || [];
     this.chatService?.stop();
     this.deployService?.stop();
+    this.remoteDeployService?.stop();
     this.ciService?.stop();
     void this.telegramBotService?.stop();
     return {
@@ -1639,6 +1650,60 @@ export class AppService {
     this.getProject(id);
     if (!this.deployService) throw new HttpError(503, 'unavailable', 'Deploy service chưa sẵn sàng');
     return this.deployService.pushNow(id);
+  }
+
+  getGiteaStatus(id: string) {
+    this.getProject(id);
+    return this.giteaSyncService?.getStatus(id) || {
+      tokenConfigured: isGiteaTokenConfigured(this.config.hubHome, id),
+    };
+  }
+
+  saveGiteaToken(id: string, token: string) {
+    this.getProject(id);
+    if (!token || typeof token !== 'string' || !token.trim()) {
+      throw new HttpError(400, 'bad_request', 'Token không được để trống');
+    }
+    if (this.giteaSyncService) {
+      return this.giteaSyncService.saveToken(id, token);
+    }
+    saveGiteaToken(this.config.hubHome, id, token.trim());
+    return { configured: true };
+  }
+
+  async triggerGiteaSync(id: string) {
+    this.getProject(id);
+    if (!this.giteaSyncService) {
+      throw new HttpError(503, 'unavailable', 'Gitea sync service chưa sẵn sàng');
+    }
+    return this.giteaSyncService.syncProject(id);
+  }
+
+  getRemoteDeployStatus(id: string): RemoteDeployStatus | null {
+    this.getProject(id);
+    return this.remoteDeployService?.getStatus(id) || null;
+  }
+
+  triggerRemoteDeploy(id: string, options?: { trigger?: 'manual' | 'after-gitea-sync'; commit?: string }): RemoteDeployStatus {
+    this.getProject(id);
+    if (!this.remoteDeployService) throw new HttpError(503, 'unavailable', 'Remote deploy service chưa sẵn sàng');
+    return this.remoteDeployService.trigger(id, options);
+  }
+
+  saveRemoteDeployEnv(id: string, raw: unknown): string[] {
+    this.getProject(id);
+    if (!this.remoteDeployService) throw new HttpError(503, 'unavailable', 'Remote deploy service chưa sẵn sàng');
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new HttpError(400, 'bad_request', 'Body phải là map env dạng key-value');
+    }
+    const envMap: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof v !== 'string') {
+        throw new HttpError(400, 'bad_request', `Giá trị của key "${k}" phải là chuỗi`);
+      }
+      envMap[k] = v;
+    }
+    return this.remoteDeployService.saveSecrets(id, envMap);
   }
 
   createProject(raw: unknown): ProjectRow {
@@ -3532,7 +3597,7 @@ export class AppService {
     return this.taskRepo.get(taskId)!;
   }
 
-  pauseTask(idParam: string): { ok: boolean; paused: boolean } {
+  pauseTask(idParam: string, reason: 'manual' | 'load' | 'brain_load' = 'manual'): { ok: boolean; paused: boolean } {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) {
@@ -3542,7 +3607,7 @@ export class AppService {
     if (!rt) {
       throw new HttpError(400, 'bad_request', `Task "${taskId}" không ở trạng thái running`);
     }
-    this.scheduler.pauseTask(taskId, 'manual');
+    this.scheduler.pauseTask(taskId, reason);
     return { ok: true, paused: true };
   }
 

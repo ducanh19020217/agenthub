@@ -242,6 +242,14 @@ export async function createServer(
     const { id } = req.params as { id: string };
     return service.updateDepartmentProfiles(id, req.body);
   });
+  fastify.put('/api/departments/:id/projects', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.updateDepartmentProjects(id, req.body);
+  });
+  fastify.post('/api/departments/:id/projects', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.updateDepartmentProjects(id, req.body);
+  });
 
   // --- Projects API ---
   fastify.get('/api/projects', async (req: FastifyRequest) => {

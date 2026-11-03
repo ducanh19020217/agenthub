@@ -989,6 +989,23 @@ export class AppService {
     return this.getDepartment(id);
   }
 
+  updateDepartmentProjects(id: string, raw: unknown) {
+    if (!this.departmentRepo?.get(id)) throw new HttpError(404, 'not_found', `Department "${id}" không tồn tại`);
+    const schema = z.object({
+      projectIds: z.array(z.string().min(1)).optional(),
+      projectId: z.string().min(1).optional(),
+    }).refine((data) => data.projectIds !== undefined || data.projectId !== undefined, {
+      message: 'projectIds hoặc projectId là bắt buộc',
+    });
+    const parsed = schema.parse(raw);
+    const projectIds = parsed.projectIds ?? (parsed.projectId ? [parsed.projectId] : []);
+    for (const projectId of projectIds) {
+      if (!this.projectRepo.get(projectId)) throw new HttpError(404, 'not_found', `Project "${projectId}" không tồn tại`);
+      this.updateProject(projectId, { departmentId: id });
+    }
+    return this.getDepartment(id);
+  }
+
   setPerfCollector(collector: PerfCollector): void { this.perfCollector = collector; }
 
   shutdownForUser(): { queued: number; reviewers: number; childPids: number[] } {

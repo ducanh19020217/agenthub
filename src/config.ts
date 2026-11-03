@@ -294,17 +294,10 @@ export interface AgentHubConfig {
   claudeSessions: ClaudeSessionsConfig;
   reviewer: {
     enabled: boolean;
-    model: string;
     timeoutSec: number;
     failoverSec: number;
     maxChangesRequested: number;
-    /** Review with Claude when every Codex account is out of quota or logged out. */
-    claudeFallback: boolean;
-    /** Claude profiles to use for that fallback, in order; empty = any logged-in Claude profile. */
     claudeProfiles: string[];
-    claudeModel: string;
-    /** Minutes a review may wait for a busy Codex account before Claude reviews instead. */
-    claudeFallbackAfterMin: number;
     order: ReviewerOrderItem[];
     fallback: ReviewerFallback;
     arbiter: ReviewerArbiter;
@@ -1160,16 +1153,12 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
     },
     reviewer: {
       enabled: reviewerRaw.enabled !== false,
-      model: typeof reviewerRaw.model === 'string' ? reviewerRaw.model : 'codex:gpt-5.6-luna',
       timeoutSec: typeof reviewerRaw.timeoutSec === 'number' ? reviewerRaw.timeoutSec : 900,
       failoverSec: typeof reviewerRaw.failoverSec === 'number' ? reviewerRaw.failoverSec : 5 * 60 * 60,
       maxChangesRequested: typeof reviewerRaw.maxChangesRequested === 'number' ? reviewerRaw.maxChangesRequested : 2,
-      claudeFallback: reviewerRaw.claudeFallback !== false,
       claudeProfiles: Array.isArray(reviewerRaw.claudeProfiles)
         ? reviewerRaw.claudeProfiles.filter((name): name is string => typeof name === 'string' && name.length > 0)
         : [],
-      claudeModel: typeof reviewerRaw.claudeModel === 'string' && reviewerRaw.claudeModel ? reviewerRaw.claudeModel : 'sonnet',
-      claudeFallbackAfterMin: typeof reviewerRaw.claudeFallbackAfterMin === 'number' ? reviewerRaw.claudeFallbackAfterMin : 10,
       ...(() => {
         const migrated = reviewerSettingsFromLegacy(reviewerRaw);
         return {

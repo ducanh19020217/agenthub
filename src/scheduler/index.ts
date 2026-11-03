@@ -2221,7 +2221,8 @@ export class Scheduler {
         continue;
       }
       if (!task.worktreePath) continue;
-      const model = reviewerModel(step || { reviewer: this.config.reviewer?.model || 'codex:gpt-5.6-luna', mode: 'gate' }) || this.config.reviewer?.model || 'codex:gpt-5.6-luna';
+      const defaultReviewer = this.config.reviewer?.order?.[0];
+      const model = reviewerModel(step || { reviewer: defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna', mode: 'gate' }) || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna');
       const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
       // Same model as the worker: still review, but from another Codex account in a fresh session.
       const picked = chain.length > 0
@@ -2316,7 +2317,7 @@ export class Scheduler {
     const errorCount = this.reviewerErrorCounts.get(task.id) || 0;
     const settings = this.reviewerSettingsForTask(task);
     const waitedMs = Date.now() - parseDbTime(task.updatedAt);
-    const claudeBudgetUnavailable = this.config.reviewer?.claudeFallback !== false && !this.claudeBudgetAvailable(task);
+    const claudeBudgetUnavailable = !this.claudeBudgetAvailable(task);
     const workerOnly = Boolean(avoidProfile) && eligibleCodexProfiles.length > 0 && eligibleCodexProfiles.every((profile) => profile.name === avoidProfile);
     const shouldFallback = (workerOnly || eligibleCodexProfiles.length === 0)
       ? settings.fallback.onUnavailable
@@ -2371,10 +2372,9 @@ export class Scheduler {
   }
 
   private pickChainClaudeFallback(task: TaskRow, settings: { order: ReviewerOrderItem[]; fallback: ReviewerFallback }): ReviewerPick | null {
-    if (this.config.reviewer?.claudeFallback === false) return null;
     const item = settings.order.find((candidate) => candidate.engine === 'claude') || {
       engine: 'claude' as const,
-      model: this.config.reviewer?.claudeModel || 'sonnet',
+      model: 'sonnet',
       profiles: this.config.reviewer?.claudeProfiles || [],
     };
     if (!this.claudeBudgetAvailable(task)) {
@@ -2510,7 +2510,7 @@ export class Scheduler {
 
   private reviewWaitedTooLong(task: TaskRow): boolean {
     const waitedMs = Date.now() - parseDbTime(task.updatedAt);
-    return Number.isFinite(waitedMs) && waitedMs >= (this.config.reviewer?.claudeFallbackAfterMin ?? 10) * 60_000;
+    return Number.isFinite(waitedMs) && waitedMs >= (this.config.reviewer?.fallback.onBusyAfterMin ?? 10) * 60_000;
   }
 
   private codexReviewUnavailable(): boolean {
@@ -2555,8 +2555,8 @@ export class Scheduler {
 
     const arbiterEngine = this.config.reviewer?.arbiter?.engine ?? 'claude';
     if (arbiterEngine === 'codex') {
-      const claude = this.engines.get(CLAUDE_REVIEW_ENGINE_KEY);
-      if (!claude || !task.worktreePath || !this.claudeBudgetAvailable(task)) return;
+      const claudeEngine = this.engines.get(CLAUDE_REVIEW_ENGINE_KEY);
+      if (!claudeEngine || !task.worktreePath || !this.claudeBudgetAvailable(task)) return;
       const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
       const candidates = this.profileRepo.getEnabled()
         .filter((profile) => profile.engine === 'claude'
@@ -2570,12 +2570,13 @@ export class Scheduler {
       const profile = candidates[0];
       if (!profile) return;
       this.eventBus.emit('review.fallback', task.id, { from: 'codex', to: 'claude', profile: profile.name, reason: 'arbiter_unavailable' });
-      this.startReview(task, profile.name, claude, `claude:${this.config.reviewer?.claudeModel || 'sonnet'}`, 'claude-reviewer');
+      const claudeConfig = this.config.reviewer?.order?.find((item) => item.engine === 'claude');
+      this.startReview(task, profile.name, claudeEngine, `claude:${claudeConfig?.model || 'sonnet'}`, 'claude-reviewer');
       return;
     }
 
-    const codex = this.engines.get('codex');
-    if (!codex || !task.worktreePath) return;
+    const codexEngine = this.engines.get('codex');
+    if (!codexEngine || !task.worktreePath) return;
     const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
     const candidates = this.profileRepo.getEnabled()
       .filter((profile) => profile.engine === 'codex'
@@ -2588,7 +2589,8 @@ export class Scheduler {
     const profile = candidates[0];
     if (!profile) return;
     this.eventBus.emit('review.fallback', task.id, { from: 'claude', to: 'codex', profile: profile.name, reason: 'arbiter_unavailable' });
-    this.startReview(task, profile.name, codex, this.config.reviewer?.model || 'codex:gpt-5.6-luna', 'codex-reviewer');
+    const codexConfig = this.config.reviewer?.order?.find((item) => item.engine === 'codex');
+    this.startReview(task, profile.name, codexEngine, `codex:${codexConfig?.model || 'gpt-5.6-luna'}`, 'codex-reviewer');
   }
 
   private reviewerInBackoff(profileName: string): boolean {
@@ -2767,7 +2769,8 @@ export class Scheduler {
     this.runRepo.finish(runId, 'done');
     this.reviewerErrorCounts.delete(taskId);
     this.reviewTask(taskId, result.verdict, result.feedback, active.actor);
-    this.eventBus.emit('review.completed', taskId, { actor: active.actor, verdict: result.verdict, model: run?.model || this.config.reviewer?.model || 'codex:gpt-5.6-luna', runId });
+    const defaultReviewer = this.config.reviewer?.order?.[0];
+    this.eventBus.emit('review.completed', taskId, { actor: active.actor, verdict: result.verdict, model: run?.model || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna'), runId });
     if (!this.stopped) this.triggerTick();
   }
 

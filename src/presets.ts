@@ -247,7 +247,7 @@ export interface ServiceForPresets {
   getProject(id: string): ProjectRow;
   updateProject(id: string, raw: unknown): unknown;
   departmentRepo?: { get(id: string): DepartmentRow | undefined };
-  projectRepo: { get(id: string): ProjectRow | undefined };
+  projectRepo: { get(id: string): ProjectRow | undefined; getAll?: () => ProjectRow[] };
 }
 
 export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput): ApplyPresetResult {
@@ -256,12 +256,24 @@ export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput)
   const codexModel = service.config.brain.codexModel || 'gpt-5.6-luna';
   const cleanCodexModel = codexModel.startsWith('codex:') ? codexModel.slice('codex:'.length) : codexModel;
   const chain = getPresetChain(preset, cleanCodexModel);
+  const projectPatch = {
+    settings: {
+      preset,
+      autoFixOnFail: def.config.autoFixOnFail,
+      planning: def.config.planning,
+      review: { autoMerge: def.config.review.autoMerge },
+      integration: { autoMerge: def.config.review.autoMerge },
+    },
+    review: { chain, maxRounds: def.config.review.maxRounds },
+    reviewChain: chain,
+  };
 
   if (scope === 'global') {
     const currentReviewer = service.config.reviewer;
     const before: Record<string, unknown> = {
       'brain.mode': service.config.brain.mode,
       'brain.permissions': service.config.brain.permissions,
+      'review.autoMerge': service.config.reviewer.order.length > 0,
       'autoFixOnFail': service.config.autoFixOnFail,
       'planning': { ...service.config.planning },
       'reviewer.maxChangesRequested': currentReviewer?.maxChangesRequested ?? 2,
@@ -280,6 +292,7 @@ export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput)
     const after: Record<string, unknown> = {
       'brain.mode': def.config.brain.mode,
       'brain.permissions': def.config.brain.permissions,
+      'review.autoMerge': def.config.review.autoMerge,
       'autoFixOnFail': def.config.autoFixOnFail,
       'planning': { ...def.config.planning },
       'reviewer.maxChangesRequested': def.config.review.maxRounds,
@@ -299,6 +312,9 @@ export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput)
           order,
         },
       });
+      for (const project of service.projectRepo.getAll?.() || []) {
+        service.updateProject(project.id, projectPatch);
+      }
     }
 
     return {
@@ -319,11 +335,13 @@ export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput)
     const before: Record<string, unknown> = {
       brainMode: department.brainMode || 'inherit',
       brainPermissions: department.brainPermissions || 'inherit',
+      review: 'các project thuộc phòng ban',
     };
 
     const after: Record<string, unknown> = {
       brainMode: def.config.brain.mode,
       brainPermissions: def.config.brain.permissions,
+      review: { chain, maxRounds: def.config.review.maxRounds, autoMerge: def.config.review.autoMerge },
     };
 
     if (!dryRun) {
@@ -331,6 +349,9 @@ export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput)
         brainMode: after.brainMode,
         brainPermissions: after.brainPermissions,
       });
+      for (const project of service.projectRepo.getAll?.().filter((item) => item.departmentId === departmentId) || []) {
+        service.updateProject(project.id, projectPatch);
+      }
     }
 
     return {

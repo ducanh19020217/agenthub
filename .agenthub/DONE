@@ -1,0 +1,30 @@
+# Hoàn tất task quota failover và notify
+
+## Tóm tắt
+
+- Sửa `QuotaService.runnableCapacity()` để đọc active quota marks một lần.
+- Sửa `capacitySnapshot()` chỉ chọn reset có ý nghĩa cho engine/family thật sự không còn capacity; profile disabled/auth lỗi bị loại khỏi capacity.
+- Cho phép thông báo recovery `✅ Có quota trở lại` ở desktop level `important`.
+- Bổ sung test cho kịch bản bốn profile Antigravity hết Claude/GPT nhưng Gemini và Codex còn, capacity edge cases, critical dedupe/recovery, runtime failover giữ nguyên `attempt`/worktree và wake bằng `claude.quota_available`.
+
+## Kiểm tra
+
+- `npm run lint`: pass.
+- `npm run typecheck`: pass.
+- `npm run build`: pass.
+- Test mục tiêu notify/scheduler: 2 file, 134 test pass.
+- Test Telegram/status/MCP/brain liên quan: 4 file, 136 test pass.
+- Full test: 103 file, 1.200 test pass.
+
+## Việc còn thiếu
+
+Không còn việc nào trong phạm vi task.
+
+## Commit
+
+- `d0a01c6 fix: report actionable quota resets`
+- `93433b2 test: cover quota capacity and failover recovery`
+
+## Ghi chú cho task sau
+
+- Full suite vẫn in một số cảnh báo stderr không gây fail từ fixture/test git và test Telegram/network; không có test nào thất bại.

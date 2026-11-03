@@ -363,6 +363,7 @@ describe('NotificationService (Desktop Notifications)', () => {
     eventBus.emit('quota.exhausted', undefined, { profile: 'g2', family: 'gpt', engine: 'agy' });
     eventBus.emit('quota.exhausted', undefined, { profile: 'g2', family: 'claude', engine: 'agy' });
     eventBus.emit('claude.quota_exhausted', undefined, { profileName: 'g2', fallbackAvailable: false });
+    eventBus.emit('claude.fallback_changed', undefined, { step: { type: 'wait' }, reason: 'quota' });
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(execCalls).toHaveLength(0);
     notifier.stop();
@@ -390,6 +391,31 @@ describe('NotificationService (Desktop Notifications)', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(execCalls).toHaveLength(1);
     expect(execCalls[0].args.at(-1)).toContain('🚨 Hết sạch quota ở mọi tài khoản và model');
+    notifier.stop();
+  });
+
+  it('silences claude.fallback_changed when other models/engines remain available', async () => {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    quotaMarkRepo.mark('g1', 'claude', future);
+    quotaMarkRepo.mark('chinh', 'claude', future);
+
+    const notifier = new NotificationService({ eventBus, config, profileRepo, quotaMarkRepo, exec: fakeExec });
+    notifier.start();
+
+    // Claude is exhausted and has to wait, but Gemini on g1/chinh remains runnable:
+    eventBus.emit('claude.fallback_changed', undefined, { step: { type: 'wait' }, reason: 'quota' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(execCalls).toHaveLength(0);
+
+    // When all runnable capacity across all profiles is exhausted:
+    quotaMarkRepo.mark('g1', 'gemini', future);
+    quotaMarkRepo.mark('chinh', 'gemini', future);
+    quotaMarkRepo.mark('g1', 'gpt', future);
+    quotaMarkRepo.mark('chinh', 'gpt', future);
+    eventBus.emit('claude.fallback_changed', undefined, { step: { type: 'wait' }, reason: 'quota' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toBe('Claude fallback: đang dùng chờ reset');
     notifier.stop();
   });
 

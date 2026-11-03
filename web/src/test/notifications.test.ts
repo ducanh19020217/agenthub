@@ -46,6 +46,8 @@ describe('browser notification policy', () => {
     // When claude and gpt are exhausted, gemini and codex remain -> NO desktop notification
     expect(shouldNotifyBrowserEvent(event('quota.exhausted', { engine: 'agy', family: 'claude', allExhausted: true }), 'important', profiles)).toBe(false);
     expect(shouldNotifyBrowserEvent(event('claude.quota_exhausted', { fallbackAvailable: false }), 'important', profiles)).toBe(false);
+    expect(shouldNotifyBrowserEvent(event('claude.fallback_changed', { step: { type: 'wait' }, reason: 'quota' }), 'important', profiles)).toBe(false);
+    expect(shouldNotifyBrowserEvent(event('claude.fallback_changed', { step: { type: 'wait' }, reason: 'quota' }), 'all', profiles)).toBe(false);
     expect(shouldNotifyBrowserEvent(event('quota.exhausted', { engine: 'agy', family: 'gpt', allExhausted: true }), 'important', profiles)).toBe(false);
     expect(shouldNotifyBrowserEvent(event('quota.exhausted', { engine: 'agy', family: 'gemini' }), 'important', profiles)).toBe(false);
     expect(shouldNotifyBrowserEvent(event('quota.exhausted', { engine: 'codex', family: 'codex' }), 'important', profiles)).toBe(false);
@@ -60,6 +62,8 @@ describe('browser notification policy', () => {
     expect(runnableCapacity(allExhausted, undefined, 1_000)).toEqual([]);
     expect(shouldNotifyBrowserEvent(event('quota.exhausted', { allExhausted: true }), 'important', allExhausted)).toBe(true);
     expect(shouldNotifyBrowserEvent(event('claude.quota_exhausted', { allExhausted: true }), 'important', allExhausted)).toBe(true);
+    expect(shouldNotifyBrowserEvent(event('claude.fallback_changed', { step: { type: 'wait' }, reason: 'quota', allExhausted: true }), 'all', allExhausted)).toBe(true);
+    expect(shouldNotifyBrowserEvent(event('claude.fallback_changed', { step: { type: 'model', model: 'claude-sonnet' } }), 'all', allExhausted)).toBe(false);
     expect(shouldNotifyBrowserEvent(event('quota.exhausted', { allExhausted: true }), 'critical', allExhausted)).toBe(true);
     vi.restoreAllMocks();
   });

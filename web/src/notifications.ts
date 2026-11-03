@@ -257,8 +257,12 @@ export function shouldNotifyBrowserEvent(
   if (options.brainMode === 'auto' && !new Set([
     'brain.notify', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed',
   ]).has(event.type)) return false;
-  if (isBrowserQuietHours(options.quietHours, event.ts) && event.type !== 'disk.low' && event.type !== 'disk.docker_low' && event.type !== 'quota.exhausted' && event.type !== 'claude.quota_exhausted') return false;
-  if (event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted') {
+  if (isBrowserQuietHours(options.quietHours, event.ts) && event.type !== 'disk.low' && event.type !== 'disk.docker_low' && event.type !== 'quota.exhausted' && event.type !== 'claude.quota_exhausted' && event.type !== 'claude.fallback_changed') return false;
+  if (event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted' || event.type === 'claude.fallback_changed') {
+    if (event.type === 'claude.fallback_changed') {
+      const step = payload.step && typeof payload.step === 'object' ? payload.step as Record<string, unknown> : null;
+      if (payload.fallbackAvailable === true || (step && step.type !== 'wait')) return false;
+    }
     return isEngineWideQuotaExhausted(event, profiles);
   }
   // The scheduler emits disk.ok only after the hysteresis margin is crossed.
@@ -271,7 +275,7 @@ export function shouldNotifyBrowserEvent(
     if (!Number.isFinite(freeGB) || !Number.isFinite(minFreeGB) || !valid) return false;
   }
   if (level !== 'critical') return true;
-  return event.type === 'task.failed' || event.type === 'disk.docker_low' || ((event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted') && isEngineWideQuotaExhausted(event, profiles));
+  return event.type === 'task.failed' || event.type === 'disk.docker_low' || ((event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted' || event.type === 'claude.fallback_changed') && isEngineWideQuotaExhausted(event, profiles));
 }
 
 export function notifyBrowserEvent(
@@ -282,7 +286,7 @@ export function notifyBrowserEvent(
 ): void {
   if (typeof window === 'undefined' || !shouldNotifyBrowserEvent(event, level, profiles, options) || !('Notification' in window) || Notification.permission !== 'granted') return;
   const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
-  if ((event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted') && !shouldNotifyBrowserEvent(event, level, profiles, options)) return;
+  if ((event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted' || event.type === 'claude.fallback_changed') && !shouldNotifyBrowserEvent(event, level, profiles, options)) return;
 
   // State transition guard for disk.ok: only allowed if disk was previously in 'low' state.
   if (event.type === 'disk.ok') {
@@ -299,7 +303,7 @@ export function notifyBrowserEvent(
 
   const identity = event.type === 'disk.low' || event.type === 'disk.ok'
     ? event.type
-    : (event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted')
+    : (event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted' || event.type === 'claude.fallback_changed')
     ? 'quota:all'
     : event.type === 'task.paused' || event.type === 'load.task_paused' || event.type === 'load.high'
     ? 'load:summary'

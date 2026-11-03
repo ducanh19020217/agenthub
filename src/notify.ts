@@ -433,6 +433,14 @@ export class NotificationService {
       case 'claude.fallback_changed': {
         const step = p.step && typeof p.step === 'object' ? p.step as Record<string, unknown> : null;
         if (p.fallbackAvailable === true || (step && step.type !== 'wait')) break;
+        const snapshot = this.quotaCapacity();
+        const hasProfiles = Boolean(this.profileRepo && this.profileRepo.getAll().length > 0);
+        const isAllExhausted = snapshot
+          ? snapshot.runnable.length === 0
+          : (hasProfiles && this.quotaMarkRepo
+              ? new QuotaService(this.quotaMarkRepo, this.profileRepo!).runnableCapacity(undefined, Math.floor(this.now() / 1000)).length === 0
+              : Boolean(p.allExhausted !== false));
+        if (!isAllExhausted) break;
         const label = step?.type === 'model' ? `model ${String(step.model)}`
           : step?.type === 'profile' ? `tài khoản ${String(step.profile || 'khác')}`
           : step?.type === 'apiKey' ? 'API key'

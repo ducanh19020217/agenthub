@@ -2717,7 +2717,7 @@ export class TelegramBotService {
         const taskObj = this.taskRepo.get(r.taskId);
         const titleStr = taskObj?.title || r.taskId;
         const pauseBadge = r.paused
-          ? (r.pauseReason === 'load' ? ' ⏸ [Tạm dừng (quá tải)]' : ' ⏸ [Tạm dừng (thủ công)]')
+          ? (r.pauseReason === 'load' || r.pauseReason === 'brain_load' ? ' ⏸ [Tạm dừng (quá tải)]' : ' ⏸ [Tạm dừng (thủ công)]')
           : '';
         text = text + `• <code>${r.taskId}</code> (${r.profileName}/${r.model})${pauseBadge}\n  <i>${this.escapeHtml(titleStr)}</i>\n`;
       }
@@ -2911,7 +2911,7 @@ export class TelegramBotService {
       const taskWithPaused = t as TaskRow & { paused?: boolean; pauseReason?: string | null };
       const isPaused = Boolean(taskWithPaused.paused);
       const pauseBadge = isPaused
-        ? (taskWithPaused.pauseReason === 'load' ? ' [Tạm dừng (quá tải)]' : ' [Tạm dừng (thủ công)]')
+        ? (taskWithPaused.pauseReason === 'load' || taskWithPaused.pauseReason === 'brain_load' ? ' [Tạm dừng (quá tải)]' : ' [Tạm dừng (thủ công)]')
         : '';
       text = text + `• [${t.status}]${pauseBadge} <code>${t.id}</code>: ${title}\n`;
     }
@@ -2951,7 +2951,7 @@ export class TelegramBotService {
     const dashboardUrl = `http://127.0.0.1:${this.config.port}/#/tasks/${toRouteId(resolved.id)}`;
     const isPaused = Boolean(detail.paused);
     const pauseBadge = isPaused
-      ? (detail.pauseReason === 'load' ? ' [Tạm dừng (quá tải)]' : ' [Tạm dừng (thủ công)]')
+      ? (detail.pauseReason === 'load' || detail.pauseReason === 'brain_load' ? ' [Tạm dừng (quá tải)]' : ' [Tạm dừng (thủ công)]')
       : '';
 
     let text = `📌 <b>Task: ${resolved.id}</b>\n\n`;
@@ -3971,7 +3971,7 @@ export class TelegramBotService {
         const title = this.resolveTaskTitle(taskId, p);
         const minutes = typeof p.pausedMinutes === 'number' ? p.pausedMinutes : 30;
         const taskLabel = taskId || 'Task';
-        const pauseBadge = p.reason === 'load' ? 'Tạm dừng (quá tải)' : 'Tạm dừng (thủ công)';
+        const pauseBadge = (p.reason === 'load' || p.reason === 'brain_load') ? 'Tạm dừng (quá tải)' : 'Tạm dừng (thủ công)';
         const keyboard: InlineKeyboardButton[][] = [];
         if (taskId) {
           keyboard.push([

@@ -24,6 +24,7 @@ import { SessionList } from '../components/chat/SessionList';
 import { MessageList } from '../components/chat/MessageList';
 import { Composer } from '../components/chat/Composer';
 import { ContextMeter } from '../components/chat/ContextMeter';
+import { SecretRequestCard } from '../components/chat/SecretRequestCard';
 import { NewSessionModal } from '../components/chat/NewSessionModal';
 import { useLocale } from '../context/LocaleContext';
 import { UI_Z_INDEX } from '../components/ui/layers';
@@ -770,6 +771,7 @@ export const ChatPage: React.FC = () => {
         {/* Input Bar */}
         {activeSession && (
           <>
+            <SecretRequestCard />
             {/* Permission Request Dialog */}
             {permission && (
               <div

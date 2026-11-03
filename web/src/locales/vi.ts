@@ -1363,6 +1363,8 @@ export const vi = {
     retryLimit: 'Thử lại ngay',
     permissionTitle: 'Claude cần quyền: {tool}',
     permissionAria: 'Yêu cầu cấp quyền công cụ',
+    secretRequest: 'AgentHub cần bạn nhập bí mật',
+    secretValue: 'Giá trị bí mật',
     allow: 'Cho phép',
     allowAlways: 'Luôn cho phép',
     deny: 'Từ chối',

@@ -24,6 +24,7 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ de
 const SavingsPage = lazy(() => import('./pages/SavingsPage').then((m) => ({ default: m.SavingsPage })));
 const ClaudeSessionsPage = lazy(() => import('./pages/ClaudeSessionsPage').then((m) => ({ default: m.ClaudeSessionsPage })));
 const SetupPage = lazy(() => import('./pages/SetupPage').then((m) => ({ default: m.SetupPage })));
+const ChatPage = lazy(() => import('./pages/ChatPage').then((m) => ({ default: m.ChatPage })));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -80,6 +81,8 @@ const AppShell: React.FC = () => {
                 <Route path="/" element={<Layout />}>
                   <Route index element={<DashboardPage />} />
                   <Route path="setup" element={<SetupPage />} />
+                  <Route path="chat" element={<ChatPage />} />
+                  <Route path="chat/:sessionId" element={<ChatPage />} />
                   <Route path="claude-sessions" element={<ClaudeSessionsPage />} />
                   <Route path="claude-sessions/:sessionId" element={<ClaudeSessionsPage />} />
                   <Route path="plans" element={<PlansPage />} />

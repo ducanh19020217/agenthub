@@ -863,6 +863,20 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_tracker_items_source_updated ON tracker_items(source_id, updated_at);
   `,
+  // Migration 60: pending secret entry requests never store secret values in SQLite.
+  `
+  CREATE TABLE IF NOT EXISTS secret_requests (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,
+    label TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','configured','expired')),
+    createdAt INTEGER NOT NULL,
+    expiresAt INTEGER NOT NULL,
+    configuredAt INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_secret_requests_status_expiry ON secret_requests(status, expiresAt);
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {

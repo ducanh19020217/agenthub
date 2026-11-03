@@ -1335,6 +1335,8 @@ export const en: typeof vi = {
     retryLimit: 'Retry now',
     permissionTitle: 'Claude requires permission: {tool}',
     permissionAria: 'Tool permission request',
+    secretRequest: 'AgentHub needs a secret from you',
+    secretValue: 'Secret value',
     allow: 'Allow',
     allowAlways: 'Always allow',
     deny: 'Deny',

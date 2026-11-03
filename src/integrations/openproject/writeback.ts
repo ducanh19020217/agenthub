@@ -141,7 +141,9 @@ export class OpenProjectWritebackService {
   private enqueue(row: TrackerItemRow, work: () => Promise<void>): Promise<void> {
     const key = `${row.source_id}:${row.wp_id}`;
     const previous = this.queues.get(key) || Promise.resolve();
-    const next = previous.catch(() => undefined).then(work);
+    const next = previous.catch(() => undefined).then(work).catch((error) => {
+      console.error(`[openproject-writeback] ${key}: ${error instanceof Error ? error.message : String(error)}`);
+    });
     this.queues.set(key, next.finally(() => { if (this.queues.get(key) === next) this.queues.delete(key); }));
     return next;
   }
@@ -173,13 +175,10 @@ export class OpenProjectWritebackService {
     const state = parseState(row);
     if (state.linked?.[projectId]) return;
     if (!target || !settings?.openproject.enabled || settings.openproject.sourceId !== row.source_id || !source) {
-      this.eventBus.emit('tracker.writeback_failed', task.id, { sourceId: row.source_id, displayId: row.display_id, error: `Project liên kết không hợp lệ: ${projectId}`, permanent: true });
+      this.eventBus.emit('tracker.writeback_failed', undefined, { sourceId: row.source_id, displayId: row.display_id, error: `Project liên kết không hợp lệ: ${projectId}`, permanent: true });
       return;
     }
-    const key = readOpenProjectKey(this.config.hubHome, source.id);
-    if (!key) return this.retry(row, new Error('Nguồn OpenProject chưa có API key'));
     try {
-      const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
       const subject = `[${row.display_id}] Cần sửa ở ${projectId}`;
       const body = `Ticket liên kết: [${row.display_id}]\n\n${content}`;
       const slugBase = `op-${row.display_id.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${projectId.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.replace(/-+$/g, '');

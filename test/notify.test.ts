@@ -69,6 +69,15 @@ describe('NotificationService (Desktop Notifications)', () => {
     expect(execCalls).toHaveLength(0);
   });
 
+  it('notifies writeback failures without a task id', () => {
+    const notifier = new NotificationService({ eventBus, config, exec: fakeExec });
+    notifier.start();
+    eventBus.emit('tracker.writeback_failed', undefined, { sourceId: 'op', displayId: 'OP-1', error: 'Project liên kết không hợp lệ' });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.join(' ')).toContain('Project liên kết không hợp lệ');
+    notifier.stop();
+  });
+
   it('suppresses account-specific quota notifications even at all level', () => {
     const notifier = new NotificationService({ eventBus, config, profileRepo, quotaMarkRepo, exec: fakeExec });
     notifier.start();

@@ -4246,6 +4246,9 @@ export class AppService {
       brain: {
         engine: this.config.brain.engine || 'claude',
         mode: this.config.brain.mode,
+        permissions: this.config.brain.permissions,
+        maxTurnsPerHour: this.config.brain.maxTurnsPerHour,
+        dailyTokenBudget: this.config.brain.dailyTokenBudget,
         maxConcurrent: this.config.brain.maxConcurrent,
         digest: this.config.brain.digest,
         fallback: this.config.brain.fallback,

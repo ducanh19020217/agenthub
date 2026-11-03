@@ -1803,6 +1803,10 @@ export class ChatService {
       if (running && !running.cancelled) {
         const quota = this.recordClaudeQuota(accumulatedText, stderrOutput, code);
         if (!quota.exhausted && limitResetSeconds) { quota.exhausted = true; quota.resetSeconds = limitResetSeconds; }
+        if (quota.exhausted && this.forceClaude.has(turn.sessionId)) {
+          this.forceClaude.delete(turn.sessionId);
+          this.failoverState.clear();
+        }
         const fallback = this.failoverState.snapshot();
         if (this.chatSessionRepo.get(turn.sessionId)?.kind === 'brain' && quota.exhausted && fallback.step && fallback.step.type !== 'wait') {
           this.runningTurns.delete(turn.sessionId);
@@ -2190,6 +2194,10 @@ export class ChatService {
     this.runningTurns.delete(proc.sessionId);
     const quota = this.recordClaudeQuota(ev.result || '', proc.stderrOutput, 0);
     if (!quota.exhausted && proc.limitResetSeconds) { quota.exhausted = true; quota.resetSeconds = proc.limitResetSeconds; }
+    if (quota.exhausted && this.forceClaude.has(proc.sessionId)) {
+      this.forceClaude.delete(proc.sessionId);
+      this.failoverState.clear();
+    }
     if (ev.costUsd !== undefined) this.failoverState.recordCost(ev.costUsd);
     this.chatSessionRepo.setBusy(proc.sessionId, 0);
     let contextTokens = 0;
@@ -2210,7 +2218,7 @@ export class ChatService {
     if (ev.isError) {
       const session = this.chatSessionRepo.get(proc.sessionId);
       const retryTurn = this.persistentTurn(running, session);
-      if (quota.exhausted && session?.kind === 'brain' && this.failoverPersistentTurn(proc, running, retryTurn, 'claude_quota_exhausted')) {
+      if (quota.exhausted && session?.kind === 'brain' && !this.forceClaude.has(proc.sessionId) && this.failoverPersistentTurn(proc, running, retryTurn, 'claude_quota_exhausted')) {
         return;
       }
       if (quota.exhausted && retryTurn.text && this.scheduleLimitRetry(retryTurn, quota.resetSeconds, ev.result)) {
@@ -2362,10 +2370,14 @@ export class ChatService {
       this.runningTurns.delete(proc.sessionId);
       const quota = this.recordClaudeQuota('', proc.stderrOutput, null);
       if (!quota.exhausted && proc.limitResetSeconds) { quota.exhausted = true; quota.resetSeconds = proc.limitResetSeconds; }
+      if (quota.exhausted && this.forceClaude.has(proc.sessionId)) {
+        this.forceClaude.delete(proc.sessionId);
+        this.failoverState.clear();
+      }
       this.chatSessionRepo.setBusy(proc.sessionId, 0);
       const session = this.chatSessionRepo.get(proc.sessionId);
       const retryTurn = this.persistentTurn(active, session);
-      if (!active.cancelled && quota.exhausted && session?.kind === 'brain' && this.failoverPersistentTurn(proc, active, retryTurn, 'claude_quota_exhausted')) {
+      if (!active.cancelled && quota.exhausted && session?.kind === 'brain' && !this.forceClaude.has(proc.sessionId) && this.failoverPersistentTurn(proc, active, retryTurn, 'claude_quota_exhausted')) {
         return;
       }
       this.setSessionState(proc.sessionId, 'error');

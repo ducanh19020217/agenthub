@@ -206,7 +206,9 @@ export class ClaudeSessionScanner {
       : false;
     if (eligible && (metadataChanged || waitingTooLong) && Date.now() - this.lastBrainEventAt >= 10_000) {
       this.lastBrainEventAt = Date.now();
-      this.options.eventBus?.emit('brain.updated', undefined, { sessionId });
+      const eventBus = this.options.eventBus as (EventBus & { emitEphemeral?: EventBus['emitEphemeral'] }) | undefined;
+      if (eventBus?.emitEphemeral) eventBus.emitEphemeral('brain.updated', undefined, { sessionId });
+      else eventBus?.emit('brain.updated', undefined, { sessionId });
     }
   }
   private async maybeAutoResume(file: string, sessionId: string, repo: ClaudeSessionRepo, existing: { size: number; eligible: number } | undefined, stat: fs.Stats) {

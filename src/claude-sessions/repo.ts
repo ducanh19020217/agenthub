@@ -62,6 +62,12 @@ export class ClaudeSessionRepo {
   markAllowedAfter(profileName: string | null | undefined, observedAt: string): boolean {
     const current = this.quota(profileName);
     if (!current || Date.parse(observedAt) <= Date.parse(current.observedAt)) return false;
+    // A profile can produce many healthy transcript records after recovering.
+    // Announce only the transition from a limited state to an available one.
+    if (current.status === 'allowed') {
+      this.setQuota({ profileName, status: current.status, resetsAt: current.resetsAt, rateLimitType: current.rateLimitType, isUsingOverage: false, observedAt });
+      return false;
+    }
     this.setQuota({ profileName, status: 'allowed', resetsAt: current.resetsAt, rateLimitType: current.rateLimitType, isUsingOverage: false, observedAt });
     return true;
   }

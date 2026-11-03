@@ -36,12 +36,22 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
       const min = diskMinFreeGB ?? cachedStatus?.disk?.minFreeGB;
       if (free !== undefined && min !== undefined) {
         const diskName = diskLabel ?? cachedStatus?.disks?.find((disk) => disk.low)?.label;
-        label = diskName ? t('waitReason.diskNamed', { label: diskName, free, min }) : t('waitReason.disk', { free, min });
+        if (diskName && (diskName.toLowerCase().includes('dữ liệu hub') || diskName.toLowerCase().includes('hub home'))) {
+          label = t('waitReason.hubHome', { free, min });
+        } else {
+          label = diskName ? t('waitReason.diskNamed', { label: diskName, free, min }) : t('waitReason.disk', { free, min });
+        }
       } else {
         label = t('waitReason.diskShort');
       }
     } else if (waitReason === 'quota') {
       label = t('waitReason.quota');
+    } else if (waitReason === 'slot') {
+      label = t('waitReason.slot');
+    } else if (waitReason === 'load') {
+      label = t('waitReason.load');
+    } else if (waitReason === 'dependency') {
+      label = t('waitReason.dependency');
     } else if (waitReason === 'no_department_profile') {
       label = t('waitReason.no_department_profile');
     } else if (waitReason === 'no_matching_profile') {

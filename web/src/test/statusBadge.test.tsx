@@ -18,7 +18,7 @@ describe('StatusBadge Component', () => {
     expect(screen.getByText('Hoàn thành')).toBeInTheDocument();
 
     rerender(<StatusBadge status="waiting_quota" />);
-    expect(screen.getByText('Chờ quota')).toBeInTheDocument();
+    expect(screen.getByText('Đang chờ')).toBeInTheDocument();
 
     rerender(<StatusBadge status="blocked" />);
     expect(screen.getByText('Bị chặn')).toBeInTheDocument();
@@ -74,6 +74,35 @@ describe('StatusBadge Component', () => {
     const noMatchBadge = screen.getByTestId('status-badge-waiting_quota');
     expect(noMatchBadge.getAttribute('data-wait-reason')).toBe('no_matching_profile');
     expect(noMatchBadge.style.backgroundColor).toContain('var(--wait-no_matching_profile-bg)');
+
+    rerender(<StatusBadge status="waiting_quota" waitReason="slot" />);
+    expect(screen.getByText('Chờ slot chạy')).toBeInTheDocument();
+    const slotBadge = screen.getByTestId('status-badge-waiting_quota');
+    expect(slotBadge.getAttribute('data-wait-reason')).toBe('slot');
+    expect(slotBadge.style.backgroundColor).toContain('var(--wait-slot-bg)');
+
+    rerender(<StatusBadge status="waiting_quota" waitReason="load" />);
+    expect(screen.getByText('Chờ giảm tải máy')).toBeInTheDocument();
+    const loadBadge = screen.getByTestId('status-badge-waiting_quota');
+    expect(loadBadge.getAttribute('data-wait-reason')).toBe('load');
+    expect(loadBadge.style.backgroundColor).toContain('var(--wait-load-bg)');
+
+    rerender(<StatusBadge status="waiting_quota" waitReason="dependency" />);
+    expect(screen.getByText('Chờ task phụ thuộc')).toBeInTheDocument();
+    const depBadge = screen.getByTestId('status-badge-waiting_quota');
+    expect(depBadge.getAttribute('data-wait-reason')).toBe('dependency');
+    expect(depBadge.style.backgroundColor).toContain('var(--wait-dependency-bg)');
+
+    rerender(
+      <StatusBadge
+        status="waiting_quota"
+        waitReason="disk"
+        diskLabel="Dữ liệu hub (~/.agenthub)"
+        diskFreeGB={0.5}
+        diskMinFreeGB={1}
+      />
+    );
+    expect(screen.getByText('Ổ chứa dữ liệu hub (~/.agenthub) sắp đầy (còn 0.5 GB / cần 1 GB)')).toBeInTheDocument();
   });
 
   it('hiển thị đúng nhãn tiếng Anh (en) cho các waitReason mới', () => {
@@ -90,5 +119,39 @@ describe('StatusBadge Component', () => {
       </LocaleProvider>
     );
     expect(screen.getByText('Waiting for a matching account/model')).toBeInTheDocument();
+
+    rerender(
+      <LocaleProvider initialLocale="en">
+        <StatusBadge status="waiting_quota" waitReason="slot" />
+      </LocaleProvider>
+    );
+    expect(screen.getByText('Waiting for slot')).toBeInTheDocument();
+
+    rerender(
+      <LocaleProvider initialLocale="en">
+        <StatusBadge status="waiting_quota" waitReason="load" />
+      </LocaleProvider>
+    );
+    expect(screen.getByText('Waiting for machine load')).toBeInTheDocument();
+
+    rerender(
+      <LocaleProvider initialLocale="en">
+        <StatusBadge status="waiting_quota" waitReason="dependency" />
+      </LocaleProvider>
+    );
+    expect(screen.getByText('Waiting for dependency')).toBeInTheDocument();
+
+    rerender(
+      <LocaleProvider initialLocale="en">
+        <StatusBadge
+          status="waiting_quota"
+          waitReason="disk"
+          diskLabel="Dữ liệu hub (~/.agenthub)"
+          diskFreeGB={0.5}
+          diskMinFreeGB={1}
+        />
+      </LocaleProvider>
+    );
+    expect(screen.getByText('Hub data drive (~/.agenthub) almost full (0.5 GB free / 1 GB needed)')).toBeInTheDocument();
   });
 });

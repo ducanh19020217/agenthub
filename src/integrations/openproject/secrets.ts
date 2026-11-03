@@ -1,0 +1,3 @@
+import fs from 'node:fs'; import path from 'node:path';
+export function saveOpenProjectKey(hubHome: string, sourceId: string, key: string): void { const dir = path.join(hubHome, 'secrets'); fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); fs.chmodSync(dir, 0o700); const file = path.join(dir, `openproject-${sourceId}.key`); fs.writeFileSync(file, `${key.trim()}\n`, { mode: 0o600 }); fs.chmodSync(file, 0o600); }
+export function readOpenProjectKey(hubHome: string, sourceId: string): string | null { try { const file = path.join(hubHome, 'secrets', `openproject-${sourceId}.key`); const stat = fs.statSync(file); if ((stat.mode & 0o777) !== 0o600) fs.chmodSync(file, 0o600); const key = fs.readFileSync(file, 'utf8').trim(); return key || null; } catch { return null; } }

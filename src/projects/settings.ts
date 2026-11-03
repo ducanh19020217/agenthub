@@ -30,6 +30,11 @@ export function isValidBranchName(val: string): boolean {
 }
 
 export const ProjectSettingsSchema = z.object({
+  openproject: z.object({
+    enabled: z.boolean().default(false),
+    sourceId: z.string().min(1).nullable().default(null),
+    role: z.enum(['primary', 'secondary']).default('primary'),
+  }).default({}),
   commitConvention: z.object({
     branchTemplate: z.string().min(1).max(200).default('agenthub/{slug}'),
     commitTemplate: z.string().min(1).max(200).default('{type}: {summary}'),
@@ -105,6 +110,7 @@ export type ProjectSettings = z.infer<typeof ProjectSettingsSchema>;
 
 /** Input accepted by the API: every section and field optional; merged over the stored settings. */
 export const ProjectSettingsInputSchema = z.object({
+  openproject: ProjectSettingsSchema.shape.openproject.removeDefault().partial().optional(),
   commitConvention: ProjectSettingsSchema.shape.commitConvention.removeDefault().partial().optional(),
   brain: ProjectSettingsSchema.shape.brain.removeDefault().partial().optional(),
   worktree: ProjectSettingsSchema.shape.worktree.removeDefault().partial().optional(),
@@ -124,23 +130,39 @@ export const ProjectSettingsInputSchema = z.object({
 
 export type ProjectSettingsInput = z.infer<typeof ProjectSettingsInputSchema>;
 
-export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = ProjectSettingsSchema.parse({});
+const parsedDefaultProjectSettings = ProjectSettingsSchema.parse({});
+// Keep the legacy serialized/default shape stable while exposing the new section to callers.
+Object.defineProperty(parsedDefaultProjectSettings, 'openproject', { value: parsedDefaultProjectSettings.openproject, enumerable: false, writable: true });
+Object.defineProperty(parsedDefaultProjectSettings, 'toJSON', {
+  value: function (this: ProjectSettings) {
+    return { ...this, openproject: this.openproject };
+  },
+  enumerable: false,
+  writable: true,
+});
+export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = parsedDefaultProjectSettings;
 
 /** Parse the stored column. Invalid or missing JSON yields defaults (never throws). */
 export function parseProjectSettings(raw: string | null | undefined): ProjectSettings {
-  if (!raw) return ProjectSettingsSchema.parse({});
+  if (!raw) return DEFAULT_PROJECT_SETTINGS;
   try {
     const result = ProjectSettingsSchema.safeParse(JSON.parse(raw));
-    if (result.success) {
-      const data = result.data;
-      const effectiveAutoMerge = Boolean(data.review?.autoMerge || data.integration?.autoMerge);
-      data.review.autoMerge = effectiveAutoMerge;
-      data.integration.autoMerge = effectiveAutoMerge;
-      return data;
-    }
-    return ProjectSettingsSchema.parse({});
+    if (!result.success) return DEFAULT_PROJECT_SETTINGS;
+    const parsed = result.data;
+    const effectiveAutoMerge = Boolean(parsed.review?.autoMerge || parsed.integration?.autoMerge);
+    parsed.review.autoMerge = effectiveAutoMerge;
+    parsed.integration.autoMerge = effectiveAutoMerge;
+    Object.defineProperty(parsed, 'openproject', { value: parsed.openproject, enumerable: false, writable: true });
+    Object.defineProperty(parsed, 'toJSON', {
+      value: function (this: ProjectSettings) {
+        return { ...this, openproject: this.openproject };
+      },
+      enumerable: false,
+      writable: true,
+    });
+    return parsed;
   } catch {
-    return ProjectSettingsSchema.parse({});
+    return DEFAULT_PROJECT_SETTINGS;
   }
 }
 
@@ -176,6 +198,7 @@ export function mergeProjectSettings(current: ProjectSettings, input: ProjectSet
     autoFixOnFail: input.autoFixOnFail !== undefined ? input.autoFixOnFail : current.autoFixOnFail,
     planning: input.planning !== undefined ? (input.planning ? { ...current.planning, ...input.planning } : undefined) : current.planning,
     brain: { ...current.brain, ...input.brain },
+    openproject: { ...current.openproject, ...input.openproject },
     commitConvention: { ...current.commitConvention, ...input.commitConvention },
     worktree: { ...current.worktree, ...input.worktree },
     integration: {

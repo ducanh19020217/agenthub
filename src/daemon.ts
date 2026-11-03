@@ -28,6 +28,7 @@ import {
 } from './db/index.js';
 import { CiWatchService } from './ci.js';
 import { OpenProjectIntakeService } from './integrations/openproject/intake.js';
+import { SetupTools } from './setup-tools.js';
 import { OpenProjectWritebackService } from './integrations/openproject/writeback.js';
 import { GiteaSyncService } from './integrations/gitea/service.js';
 import { ProfileService } from './profiles/index.js';
@@ -335,6 +336,7 @@ export function createContext(
     directiveRepo,
     departmentRepo,
   );
+  service.setSetupTools(new SetupTools(config, db, scheduler.getEventBus(), () => service));
   service.deployService = deployService;
   service.remoteDeployService = remoteDeployService;
   scheduler.getEventBus().on('task.review_ready', (taskId, payload) => {

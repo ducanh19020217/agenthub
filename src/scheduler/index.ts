@@ -2227,7 +2227,7 @@ export class Scheduler {
         const usage = this.parallelUsage(project);
         const departmentLimited = Boolean(department && department.maxParallel > 0 && usage.department >= this.loadGuard.effectiveParallel(department.maxParallel));
         const isLoadThrottled = this.loadGuard.isOverloaded() || (usage.project >= this.effectiveParallel(project) && usage.project < project.maxParallel);
-        this.markQueuedWaiting(task, isLoadThrottled ? 'load' : (departmentLimited ? 'department_parallel' : 'slot'));
+        this.markQueuedWaiting(task, isLoadThrottled ? 'load' : (departmentLimited ? 'department_parallel' : 'parallel'));
         continue;
       }
 

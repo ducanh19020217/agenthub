@@ -881,9 +881,6 @@ describe('Gitea Integration', () => {
         }),
         getGiteaStatus: vi.fn((id: string) => ({
           tokenConfigured: isGiteaTokenConfigured(hubHome, id),
-          enabled: true,
-          running: false,
-          lastSync: null,
         })),
         triggerGiteaSync: vi.fn().mockResolvedValue({ ok: true, status: 'succeeded' }),
       };
@@ -910,9 +907,6 @@ describe('Gitea Integration', () => {
       expect(getRes1.statusCode).toBe(200);
       expect(JSON.parse(getRes1.body)).toEqual({
         tokenConfigured: false,
-        enabled: true,
-        running: false,
-        lastSync: null,
       });
 
       // PUT token

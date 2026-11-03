@@ -1649,15 +1649,9 @@ export class AppService {
 
   getGiteaStatus(id: string) {
     this.getProject(id);
-    if (!this.giteaSyncService) {
-      return {
-        tokenConfigured: isGiteaTokenConfigured(this.config.hubHome, id),
-        enabled: false,
-        running: false,
-        lastSync: null,
-      };
-    }
-    return this.giteaSyncService.getStatus(id);
+    return this.giteaSyncService?.getStatus(id) || {
+      tokenConfigured: isGiteaTokenConfigured(this.config.hubHome, id),
+    };
   }
 
   saveGiteaToken(id: string, token: string) {

@@ -77,20 +77,8 @@ export class GiteaSyncService {
     }
   }
 
-  getStatus(projectId: string): {
-    tokenConfigured: boolean;
-    enabled: boolean;
-    running: boolean;
-    lastSync: GiteaSyncResult | null;
-  } {
-    const project = this.projectRepo.get(projectId);
-    const settings = project ? projectSettings(project) : null;
-    return {
-      tokenConfigured: isGiteaTokenConfigured(this.config.hubHome, projectId),
-      enabled: settings?.gitea?.enabled ?? false,
-      running: this.runningProjects.has(projectId),
-      lastSync: this.lastSyncResults.get(projectId) || null,
-    };
+  getStatus(projectId: string): { tokenConfigured: boolean } {
+    return { tokenConfigured: isGiteaTokenConfigured(this.config.hubHome, projectId) };
   }
 
   saveToken(projectId: string, token: string): { configured: boolean } {

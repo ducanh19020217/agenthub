@@ -194,7 +194,7 @@ interface RunningTask {
   lastTicks?: number;
   lastTicksAt?: number;
   paused?: boolean;
-  pauseReason?: 'manual' | 'load' | 'focus' | null;
+  pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
   pausedAt?: number | null;
   referenceSnapshots?: ReferenceSnapshot[];
 }
@@ -571,7 +571,7 @@ export class Scheduler {
     return this.paused;
   }
 
-  pauseTask(taskId: string, reason: 'manual' | 'load' | 'focus' = 'manual'): boolean {
+  pauseTask(taskId: string, reason: 'manual' | 'load' | 'brain_load' | 'focus' = 'manual'): boolean {
     const rt = this.running.get(taskId);
     if (!rt) return false;
     if (rt.paused) return true;

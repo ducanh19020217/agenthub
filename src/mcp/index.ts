@@ -1454,9 +1454,16 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   server.tool(
     'hub_pause',
     'Tạm dừng một task',
-    { id: z.string() },
-    async ({ id }) => {
-      try { assertTaskId(id, 'Tạm dừng task'); await callApi('POST', `/api/tasks/${toRouteId(id)}/pause`); return { content: [{ type: 'text', text: `✓ Đã tạm dừng ${id}` }] }; }
+    {
+      id: z.string().describe('ID của task cần tạm dừng'),
+      reason: z.enum(['manual', 'load', 'brain_load']).optional().describe('Lý do tạm dừng: load (khi máy quá tải để tự tiếp tục khi hạ tải) hoặc manual (tạm dừng thủ công)'),
+    },
+    async ({ id, reason }) => {
+      try {
+        assertTaskId(id, 'Tạm dừng task');
+        await callApi('POST', `/api/tasks/${toRouteId(id)}/pause`, { reason });
+        return { content: [{ type: 'text', text: `✓ Đã tạm dừng ${id}` }] };
+      }
       catch (err: unknown) { return handleError(err); }
     },
   );

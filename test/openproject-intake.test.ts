@@ -7,6 +7,9 @@ import { openDatabase, ProjectRepo, TaskRepo, TrackerItemRepo } from '../src/db/
 import { mergeProjectSettings, DEFAULT_PROJECT_SETTINGS } from '../src/projects/settings.js';
 import { OpenProjectIntakeService } from '../src/integrations/openproject/intake.js';
 import { saveOpenProjectKey } from '../src/integrations/openproject/secrets.js';
+import Fastify from 'fastify';
+import { registerOpenProjectRoutes } from '../src/integrations/openproject/routes.js';
+import { Scheduler } from '../src/scheduler/index.js';
 
 describe('OpenProjectIntakeService', () => {
   let home: string;
@@ -91,6 +94,9 @@ describe('OpenProjectIntakeService', () => {
     expect(await intake.sync('demo')).toEqual({ imported: 1, comments: 0 });
     expect(created[0]).toMatchObject({ slug: 'op-op-123', externalRef: 'OP-123', start: false });
     expect(String(created[0].body)).toContain('## Comment cho tester');
+    expect(String(created[0].body)).toContain('## Cần quyết định');
+    expect(String(created[0].body)).toContain('## Cần sửa ở project');
+    expect(String(created[0].body)).not.toContain('<quy ước DONE/BLOCKED ở mục 4.2>');
     expect(fs.existsSync(path.join(home, 'tracker', 'demo', '42', 'ticket.md'))).toBe(true);
     expect(await intake.sync('demo')).toEqual({ imported: 0, comments: 0 });
     expect(created).toHaveLength(1);
@@ -144,5 +150,60 @@ describe('OpenProjectIntakeService', () => {
     expect(events.at(-1)?.payload).toMatchObject({ retryInSec: 1800 });
     intake.stop();
     vi.useRealTimers();
+  });
+
+  it('copies matching tracker ticket context into a prepared worktree only', () => {
+    const worktree = path.join(home, 'worktree');
+    const matching = path.join(home, 'tracker', 'demo', '42');
+    const other = path.join(home, 'tracker', 'demo', '99');
+    fs.mkdirSync(matching, { recursive: true });
+    fs.mkdirSync(other, { recursive: true });
+    fs.writeFileSync(path.join(matching, 'ticket.md'), 'matching ticket');
+    fs.writeFileSync(path.join(other, 'ticket.md'), 'other ticket');
+    trackerRepo.upsert({ source_id: 'demo', wp_id: 42, display_id: 'OP-123', status_id: 1, updated_at: '', last_comment_id: null, task_ids: '[]', writeback: '{}' });
+    projectRepo.insert({ id: 'other', name: 'Other', path: home, defaultBranch: 'main', envTemplate: null, maxParallel: 1, settings: '{}' });
+
+    const writeTaskFile = vi.fn();
+    const fakeScheduler = {
+      projectRepo,
+      config,
+      trackerRepo,
+      knowledgeRepo: undefined,
+      worktreeService: { writeTaskFile },
+      getDependencyContext: () => [],
+    } as unknown as Scheduler;
+    const writeTaskFiles = (Scheduler.prototype as unknown as {
+      writeTaskFiles: (task: unknown, body: string, resume: boolean) => void;
+    }).writeTaskFiles;
+    writeTaskFiles.call(fakeScheduler, { projectId: 'primary', worktreePath: worktree, externalRef: 'OP-123' }, 'body', false);
+    expect(fs.readFileSync(path.join(worktree, '.agenthub/context/ticket/ticket.md'), 'utf8')).toBe('matching ticket');
+
+    const unmatched = path.join(home, 'unmatched');
+    writeTaskFiles.call(fakeScheduler, { projectId: 'primary', worktreePath: unmatched, externalRef: 'OP-999' }, 'body', false);
+    expect(fs.existsSync(path.join(unmatched, '.agenthub/context/ticket'))).toBe(false);
+  });
+
+  it('sync route invokes intake without exposing its secret and returns 503 when unavailable', async () => {
+    config.integrations.openproject.sources = [source];
+    saveOpenProjectKey(home, 'demo', 'route-secret');
+    const app = Fastify();
+    registerOpenProjectRoutes(app, config, { sync: async (sourceId) => {
+      expect(sourceId).toBe('demo');
+      return { imported: 2, comments: 1 };
+    } });
+    await app.ready();
+    const response = await app.inject({ method: 'POST', url: '/api/integrations/openproject/sources/demo/sync' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ imported: 2, comments: 1 });
+    expect(response.body).not.toContain('route-secret');
+    await app.close();
+
+    const unavailable = Fastify();
+    registerOpenProjectRoutes(unavailable, config);
+    await unavailable.ready();
+    const unavailableResponse = await unavailable.inject({ method: 'POST', url: '/api/integrations/openproject/sources/demo/sync' });
+    expect(unavailableResponse.statusCode).toBe(503);
+    expect(unavailableResponse.body).not.toContain('route-secret');
+    await unavailable.close();
   });
 });

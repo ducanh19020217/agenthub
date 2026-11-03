@@ -1290,6 +1290,7 @@ export const vi = {
     quickChatError: 'Lỗi gửi tin nhắn nhanh', diskFree: 'Ổ đĩa: {free} / {total} GB trống',
     diskFreeWithMin: 'Ổ đĩa: {free} / {total} GB trống (ngưỡng {min} GB)',
     waitingQueue: 'Hàng đợi chờ', waitingCount: '{count} task đang chờ', noWaitingTasks: 'Không có task nào đang chờ.',
+    reviewRound: 'Vòng duyệt {current}/{max}',
     quickChat: 'Chat nhanh với Claude:', quickChatPlaceholder: 'Nhập câu hỏi... (VD: Tình hình các task thế nào?)',
     send: 'Gửi', sending: 'Đang gửi...', workersExecuting: '{count} worker đang thực thi',
     noWorkers: 'Hiện không có worker nào đang chạy tác vụ.', eventStream: 'Dòng sự kiện', realtime: 'Thời gian thực',

@@ -140,6 +140,11 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
                   {t('extra.waitingApprover')}
                 </span>
               ) : null}
+              {task.status === 'review' ? (
+                <span data-testid={`task-review-round-${task.id}`} className="inline-flex mb-2 text-[11px] font-medium text-[var(--t-text-2)]">
+                  {t('extra.reviewRound', { current: task.reviewRound ?? 1, max: task.reviewMaxRounds ?? 2 })}
+                </span>
+              ) : null}
 
               {task.waitReason && (
                 <div className="mb-2">

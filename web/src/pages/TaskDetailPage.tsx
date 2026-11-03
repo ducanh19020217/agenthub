@@ -475,6 +475,11 @@ export const TaskDetailPage: React.FC = () => {
           {task.reviewerEscalationReason ? ` (${task.reviewerEscalationReason})` : ''}.
         </div>
       ) : null}
+      {(task.status === 'review' || task.reviewMaxRounds) ? (
+        <div data-testid="task-review-round" className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] px-4 py-3 text-sm text-[var(--t-text)]">
+          {t('extra.reviewRound', { current: task.reviewRound ?? 1, max: task.reviewMaxRounds ?? 2 })}
+        </div>
+      ) : null}
       {task.reviewChain && task.reviewChain.length > 0 ? (
         <div className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] px-4 py-3 text-xs">
           <div className="font-semibold mb-2">{t('taskDetail.reviewChain')}</div>

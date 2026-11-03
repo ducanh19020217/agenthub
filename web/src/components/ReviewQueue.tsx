@@ -121,6 +121,9 @@ export const ReviewQueue: React.FC<ReviewQueueProps> = ({
                         {t('extra.waitingApprover')}
                       </span>
                     ) : null}
+                    <span data-testid="review-round" className="text-xs font-medium text-[var(--t-text-2)]">
+                      {t('extra.reviewRound', { current: task.reviewRound ?? 1, max: task.reviewMaxRounds ?? 2 })}
+                    </span>
                   </div>
 
                   <div className="flex items-center gap-2 text-xs text-[var(--t-text-2)] font-mono">

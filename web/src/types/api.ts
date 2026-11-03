@@ -299,6 +299,8 @@ export interface Task {
   reviewerEscalatedAt?: string | null;
   reviewerEscalationReason?: string | null;
   reviewStep?: number;
+  reviewRound?: number;
+  reviewMaxRounds?: number;
   reviewChain?: ReviewChainStep[];
   createdAt: string;
   updatedAt: string;

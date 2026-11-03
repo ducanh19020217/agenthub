@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
-import { browserNotificationBody, notifyBrowserEvent, shouldNotifyBrowserEvent } from '../notifications';
+import { browserNotificationBody, notifyBrowserEvent, runnableCapacity, shouldNotifyBrowserEvent } from '../notifications';
 import { EventItem } from '../types/api';
 
 const event = (type: string, payload: Record<string, unknown> = {}): EventItem => ({
@@ -25,25 +25,51 @@ describe('browser notification policy', () => {
     expect(shouldNotifyBrowserEvent(event('brain.updated'), 'all')).toBe(false);
   });
 
-  it('requires engine-wide quota exhaustion at important level', () => {
+  it('requires complete quota exhaustion (allExhausted: true or empty capacity)', () => {
     expect(shouldNotifyBrowserEvent(event('quota.exhausted', { profile: 'g1' }), 'important')).toBe(false);
-    expect(shouldNotifyBrowserEvent(event('quota.exhausted', { allExhausted: true }), 'important')).toBe(false);
-    expect(shouldNotifyBrowserEvent(event('quota.exhausted', { allExhausted: true, engine: 'agy', family: 'gemini' }), 'important')).toBe(true);
+    expect(shouldNotifyBrowserEvent(event('quota.exhausted', { allExhausted: true }), 'important')).toBe(true);
     expect(shouldNotifyBrowserEvent(event('quota.exhausted', { profile: 'g1' }), 'all')).toBe(false);
-    expect(shouldNotifyBrowserEvent(event('quota.exhausted', { allExhausted: true }), 'all')).toBe(false);
-    expect(shouldNotifyBrowserEvent(event('quota.exhausted', { allExhausted: true, engine: 'agy', family: 'gemini' }), 'all')).toBe(true);
+    expect(shouldNotifyBrowserEvent(event('quota.exhausted', { allExhausted: true }), 'all')).toBe(true);
   });
 
-  it('derives engine-wide quota from enabled profiles and normalized families', () => {
+  it('silences partial quota exhaustion when other models/engines remain (incident 2026-11-03)', () => {
     const profiles = [
-      { name: 'g1', engine: 'agy', enabled: true, quotaMarks: [{ family: 'gemini', until: 2_000 }] },
-      { name: 'g2', engine: 'agy', enabled: true, quotaMarks: [{ family: 'gemini', until: 2_000 }] },
-      { name: 'c1', engine: 'codex', enabled: true, quotaMarks: [] },
+      { name: 'g2', engine: 'agy', enabled: true, quotaMarks: [{ family: 'claude', until: 2_000 }, { family: 'gpt', until: 2_000 }] },
+      { name: 'g3', engine: 'agy', enabled: true, quotaMarks: [{ family: 'claude', until: 2_000 }, { family: 'gpt', until: 2_000 }] },
+      { name: 'g4', engine: 'agy', enabled: true, quotaMarks: [{ family: 'claude', until: 2_000 }, { family: 'gpt', until: 2_000 }] },
+      { name: 'pa-gemini', engine: 'agy', enabled: true, quotaMarks: [{ family: 'claude', until: 2_000 }, { family: 'gpt', until: 2_000 }] },
+      { name: 'codeX1', engine: 'codex', enabled: true, quotaMarks: [] },
     ];
     vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
-    expect(shouldNotifyBrowserEvent(event('quota.exhausted', { engine: 'agy', family: 'gemini-2.5' }), 'important', profiles)).toBe(true);
+    expect(runnableCapacity(profiles, undefined, 1_000).length).toBeGreaterThan(0);
+
+    // When claude and gpt are exhausted, gemini and codex remain -> NO desktop notification
+    expect(shouldNotifyBrowserEvent(event('quota.exhausted', { engine: 'agy', family: 'claude', allExhausted: true }), 'important', profiles)).toBe(false);
+    expect(shouldNotifyBrowserEvent(event('quota.exhausted', { engine: 'agy', family: 'gpt', allExhausted: true }), 'important', profiles)).toBe(false);
+    expect(shouldNotifyBrowserEvent(event('quota.exhausted', { engine: 'agy', family: 'gemini' }), 'important', profiles)).toBe(false);
     expect(shouldNotifyBrowserEvent(event('quota.exhausted', { engine: 'codex', family: 'codex' }), 'important', profiles)).toBe(false);
+
+    // Only when all runnable capacity is exhausted across all engines & models:
+    const allExhausted = profiles.map((p) => {
+      if (p.engine === 'agy') {
+        return { ...p, quotaMarks: [...(p.quotaMarks || []), { family: 'gemini', until: 2_000 }] };
+      }
+      return { ...p, quotaMarks: [{ family: 'codex', until: 2_000 }] };
+    });
+    expect(runnableCapacity(allExhausted, undefined, 1_000)).toEqual([]);
+    expect(shouldNotifyBrowserEvent(event('quota.exhausted', { allExhausted: true }), 'important', allExhausted)).toBe(true);
+    expect(shouldNotifyBrowserEvent(event('quota.exhausted', { allExhausted: true }), 'critical', allExhausted)).toBe(true);
     vi.restoreAllMocks();
+  });
+
+  it('runnableCapacity ignores disabled or unauthenticated profiles', () => {
+    const profiles = [
+      { name: 'p1', engine: 'agy', enabled: false, quotaMarks: [] },
+      { name: 'p2', engine: 'agy', enabled: true, authState: 'not_logged_in', quotaMarks: [] },
+      { name: 'p3', engine: 'agy', enabled: true, authState: 'error', quotaMarks: [] },
+    ];
+    expect(runnableCapacity(profiles)).toEqual([]);
+    expect(shouldNotifyBrowserEvent(event('quota.exhausted', { allExhausted: true }), 'important', profiles)).toBe(true);
   });
 
   it('throttles changing disk messages by state for one hour', () => {
@@ -67,10 +93,11 @@ describe('browser notification policy', () => {
     expect(localStorage.length).toBe(1);
   });
 
-  it('keeps engine and family quota notifications independent', () => {
+  it('throttles quota exhaustion under a single identity', () => {
+    notifyBrowserEvent(event('quota.exhausted', { allExhausted: true }), 'all');
     notifyBrowserEvent(event('quota.exhausted', { allExhausted: true, engine: 'agy', family: 'gemini' }), 'all');
-    notifyBrowserEvent(event('quota.exhausted', { allExhausted: true, engine: 'codex', family: 'codex' }), 'all');
-    expect(localStorage.length).toBe(2);
+    expect(localStorage.length).toBe(1);
+    expect(localStorage.getItem('agenthub:notification:quota:all')).toBeTruthy();
   });
 
   it('uses the same grouped body for the load/pause notification family', () => {

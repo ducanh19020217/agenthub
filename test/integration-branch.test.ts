@@ -401,7 +401,7 @@ describe('Integration branch and cross-project dependencies', () => {
     ctx.scheduler.getEventBus().on('merge.failed', (id) => emitted.push(id));
 
     await ctx.service.autoMergeReviewedTask(task2.id);
-    expect(ctx.taskRepo.get(task2.id)!.status).toBe('review');
+    expect(ctx.taskRepo.get(task2.id)!.status).toBe('queued');
     expect(emitted).toContain(task2.id);
 
     // Calling it again does not retry continuously

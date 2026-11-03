@@ -159,6 +159,7 @@ describe('Claude session privacy and quota handling', () => {
     expect(repo.quota('claude-may')).toMatchObject({ status: 'allowed', observedAt: '2026-10-21T08:05:00.000Z' });
     expect(repo.quota('claude-other')).toMatchObject({ status: 'rejected' });
     expect(repo.markAllowedAfter('claude-may', '2026-10-21T08:04:00.000Z')).toBe(false);
+    expect(repo.markAllowedAfter('claude-may', '2026-10-21T08:06:00.000Z')).toBe(false);
     db.close();
   });
 

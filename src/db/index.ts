@@ -847,12 +847,11 @@ export const MIGRATIONS: string[] = [
     wp_id INTEGER NOT NULL,
     display_id TEXT NOT NULL,
     status_id INTEGER,
-    updated_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_comment_id INTEGER,
     task_ids TEXT NOT NULL DEFAULT '[]',
     writeback TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at_local TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (source_id, wp_id)
   );
   CREATE INDEX IF NOT EXISTS idx_tracker_items_source_updated ON tracker_items(source_id, updated_at);
@@ -3028,15 +3027,15 @@ export class CiRepo {
 }
 
 export interface TrackerItemRow {
-  source_id: string; wp_id: number; display_id: string; status_id: number | null; updated_at: string | null;
-  last_comment_id: number | null; task_ids: string; writeback: string; created_at: string; updated_at_local: string;
+  source_id: string; wp_id: number; display_id: string; status_id: number | null; updated_at: string;
+  last_comment_id: number | null; task_ids: string; writeback: string; created_at: string;
 }
 
 export class TrackerItemRepo {
   constructor(private db: Database.Database) {}
   get(sourceId: string, wpId: number): TrackerItemRow | undefined { return this.db.prepare('SELECT * FROM tracker_items WHERE source_id = ? AND wp_id = ?').get(sourceId, wpId) as TrackerItemRow | undefined; }
-  upsert(row: Omit<TrackerItemRow, 'created_at' | 'updated_at_local'>): TrackerItemRow {
-    this.db.prepare(`INSERT INTO tracker_items (source_id,wp_id,display_id,status_id,updated_at,last_comment_id,task_ids,writeback) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(source_id,wp_id) DO UPDATE SET display_id=excluded.display_id,status_id=excluded.status_id,updated_at=excluded.updated_at,last_comment_id=excluded.last_comment_id,task_ids=excluded.task_ids,writeback=excluded.writeback,updated_at_local=datetime('now')`).run(row.source_id,row.wp_id,row.display_id,row.status_id,row.updated_at,row.last_comment_id,row.task_ids,row.writeback);
+  upsert(row: Omit<TrackerItemRow, 'created_at'>): TrackerItemRow {
+    this.db.prepare(`INSERT INTO tracker_items (source_id,wp_id,display_id,status_id,updated_at,last_comment_id,task_ids,writeback) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(source_id,wp_id) DO UPDATE SET display_id=excluded.display_id,status_id=excluded.status_id,updated_at=excluded.updated_at,last_comment_id=excluded.last_comment_id,task_ids=excluded.task_ids,writeback=excluded.writeback`).run(row.source_id,row.wp_id,row.display_id,row.status_id,row.updated_at,row.last_comment_id,row.task_ids,row.writeback);
     return this.get(row.source_id, row.wp_id)!;
   }
   list(sourceId: string): TrackerItemRow[] { return this.db.prepare('SELECT * FROM tracker_items WHERE source_id = ? ORDER BY wp_id').all(sourceId) as TrackerItemRow[]; }

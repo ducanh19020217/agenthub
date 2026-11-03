@@ -786,6 +786,14 @@ describe('OpenProject Integration', () => {
     });
 
     it('creates and manages tracker_items rows with TrackerItemRepo', () => {
+      const columns = (db.prepare('PRAGMA table_info(tracker_items)').all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      );
+      expect(columns).toEqual([
+        'source_id', 'wp_id', 'display_id', 'status_id', 'updated_at', 'last_comment_id',
+        'task_ids', 'writeback', 'created_at',
+      ]);
+
       const row1 = repo.upsert({
         source_id: 'src1',
         wp_id: 100,

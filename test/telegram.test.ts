@@ -1165,8 +1165,9 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
         ctx.quotaMarkRepo.mark(profile, 'gpt', future);
       }
       recordedCalls = [];
-      ctx.scheduler.getEventBus().emit('quota.exhausted', undefined, { profile: 'pa-gemini', family: 'claude', engine: 'agy', allExhausted: true });
-      ctx.scheduler.getEventBus().emit('quota.exhausted', undefined, { profile: 'pa-gemini', family: 'gpt', engine: 'agy', allExhausted: true });
+      await bot.stop();
+      bot.handleEvent('quota.exhausted', undefined, { profile: 'pa-gemini', family: 'claude', engine: 'agy', allExhausted: true });
+      bot.handleEvent('quota.exhausted', undefined, { profile: 'pa-gemini', family: 'gpt', engine: 'agy', allExhausted: true });
       await new Promise((resolve) => setTimeout(resolve, 120));
       await bot.flushQueue(CHAT_ID);
 
@@ -1181,6 +1182,7 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
     });
 
     it('uses info for partial exhaustion and deduplicates critical outage until recovery', async () => {
+      await bot.stop();
       for (const name of ['p1', 'p2']) {
         ctx.profileRepo.upsert({ name, engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
       }

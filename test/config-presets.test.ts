@@ -119,8 +119,12 @@ describe('Config Presets, Priority, and Effective Config', () => {
       const dbPath = path.join(tmpDir, 'migration-test.db');
       const db = new Database(dbPath);
 
-      // Run migrations up to MIGRATIONS.length - 1
-      for (let i = 0; i < MIGRATIONS.length - 1; i++) {
+      const inheritMigration = MIGRATIONS.find((sql) => sql.includes("UPDATE departments SET brainEngine = 'inherit'"));
+      expect(inheritMigration).toBeDefined();
+      const inheritIndex = MIGRATIONS.indexOf(inheritMigration!);
+
+      // Run migrations up to the migration under test; later migrations belong to other features.
+      for (let i = 0; i < inheritIndex; i++) {
         db.exec(MIGRATIONS[i]);
       }
 
@@ -133,8 +137,7 @@ describe('Config Presets, Priority, and Effective Config', () => {
         )
       `).run();
 
-      // Run migration 58 (the last migration)
-      db.exec(MIGRATIONS[MIGRATIONS.length - 1]);
+      db.exec(inheritMigration!);
 
       const row = db.prepare('SELECT * FROM departments WHERE id = ?').get('test-dept') as {
         brainEngine: string;

@@ -3827,6 +3827,21 @@ export class TelegramBotService {
         break;
       }
 
+      case 'daily_report.created': {
+        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        if (p.telegram && typeof p.content === 'string') {
+          this.broadcastMessage(this.escapeHtml(p.content));
+        }
+        break;
+      }
+
+      case 'daily_report.failed': {
+        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        const err = typeof p.error === 'string' ? `: ${p.error}` : '';
+        this.broadcastMessage(`${prefix}❌ <b>Tạo báo cáo ngày thất bại: ${this.escapeHtml(source)}</b>${this.escapeHtml(err)}`);
+        break;
+      }
+
       case 'quota.exhausted': {
         const family = typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '';
         const quotaKey = family || 'all';
@@ -4361,6 +4376,10 @@ export class TelegramBotService {
         return `${prefix}Ticket ${p?.displayId || 'OpenProject'} có comment mới`;
       case 'tracker.poll_failed':
         return `${prefix}Đồng bộ OpenProject thất bại: ${p?.sourceId || ''}`;
+      case 'daily_report.created':
+        return `${prefix}Đã tạo báo cáo ngày cho ${p?.sourceId || 'OpenProject'}`;
+      case 'daily_report.failed':
+        return `${prefix}Tạo báo cáo ngày thất bại: ${p?.sourceId || ''}`;
       case 'merge.conflict':
         return `${prefix}Xung đột khi merge tự động (${taskId || 'task'})`;
       case 'merge.failed':

@@ -281,6 +281,18 @@ export class NotificationService {
         break;
       }
 
+      case 'daily_report.created': {
+        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        this.notify(`${this.appName}: đã tạo báo cáo ngày (${source})`, 'normal');
+        break;
+      }
+
+      case 'daily_report.failed': {
+        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        this.notify(`${this.appName}: tạo báo cáo ngày (${source}) thất bại`, 'critical');
+        break;
+      }
+
       case 'task.paused':
       case 'load.task_paused': {
         this.notifyLoadSummary(now, p.reason === 'load' ? 'quá tải hệ thống' : 'yêu cầu tạm dừng');

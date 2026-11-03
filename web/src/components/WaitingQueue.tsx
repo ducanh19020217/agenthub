@@ -92,9 +92,11 @@ export const WaitingQueue: React.FC<WaitingQueueProps> = ({
                     <StatusBadge
                       status={task.status}
                       waitReason={task.waitReason}
-                      diskFreeGB={diskFreeGB}
-                      diskMinFreeGB={diskMinFreeGB}
-                      diskLabel={diskLabel}
+                      blockingDisk={task.blockingDisk}
+                      diskFreeGB={task.blockingDisk?.freeGB ?? diskFreeGB}
+                      diskMinFreeGB={task.blockingDisk?.minFreeGB ?? diskMinFreeGB}
+                      diskLabel={task.blockingDisk?.label ?? diskLabel}
+                      projectId={task.projectId || task.id.split('/')[0]}
                       size="sm"
                     />
                   </div>

@@ -103,6 +103,35 @@ describe('StatusBadge Component', () => {
       />
     );
     expect(screen.getByText('Ổ chứa dữ liệu hub (~/.agenthub) sắp đầy (còn 0.5 GB / cần 1 GB)')).toBeInTheDocument();
+
+    rerender(
+      <StatusBadge
+        status="waiting_quota"
+        waitReason="disk"
+        blockingDisk={{
+          path: '/media/veracrypt8/agenthub-worktrees',
+          label: 'Worktrees (/media/veracrypt8/agenthub-worktrees)',
+          freeGB: 0.7,
+          minFreeGB: 3,
+        }}
+      />
+    );
+    expect(screen.getByText('Chờ Worktrees (/media/veracrypt8/agenthub-worktrees) (còn 0.7 GB / cần 3 GB)')).toBeInTheDocument();
+    expect(screen.getByTestId('status-badge-waiting_quota').getAttribute('title')).toBe('/media/veracrypt8/agenthub-worktrees');
+
+    rerender(
+      <StatusBadge
+        status="waiting_quota"
+        waitReason="disk"
+        blockingDisk={{
+          path: '/home/user/.agenthub',
+          label: 'Ổ chứa dữ liệu hub (~/.agenthub)',
+          freeGB: 0.3,
+          minFreeGB: 1,
+        }}
+      />
+    );
+    expect(screen.getByText('Ổ chứa dữ liệu hub (~/.agenthub) sắp đầy (còn 0.3 GB / cần 1 GB)')).toBeInTheDocument();
   });
 
   it('hiển thị đúng nhãn tiếng Anh (en) cho các waitReason mới', () => {

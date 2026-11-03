@@ -286,6 +286,13 @@ export type WaitReason =
   | 'dependency'
   | null;
 
+export interface BlockingDiskInfo {
+  path: string;
+  label: string;
+  freeGB: number;
+  minFreeGB: number;
+}
+
 export interface Task {
   id: string; // project~slug or project/slug
   projectId: string;
@@ -300,6 +307,7 @@ export interface Task {
   worktreePath?: string | null;
   status: TaskStatus;
   waitReason?: WaitReason;
+  blockingDisk?: BlockingDiskInfo | null;
   modelWarnings?: string[];
   dependsOn: string | string[];
   attempt: number;

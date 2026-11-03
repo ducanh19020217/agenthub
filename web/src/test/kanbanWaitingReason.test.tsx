@@ -185,4 +185,140 @@ describe('Kanban Waiting Column & Wait Reason Badges', () => {
     expect(screen.getByText('Waiting for machine load')).toBeInTheDocument();
     expect(screen.getByText('Waiting for dependency')).toBeInTheDocument();
   });
+
+  it('renders accurate blockingDisk badges per task when multiple tasks have different drives', async () => {
+    const multiDiskTasks: Task[] = [
+      {
+        id: 'p1~t-d1',
+        projectId: 'p1',
+        slug: 't-d1',
+        title: 'Task on drive 1',
+        status: 'waiting_quota',
+        waitReason: 'disk',
+        blockingDisk: {
+          path: '/media/drive1',
+          label: 'Worktrees (/media/drive1)',
+          freeGB: 0.4,
+          minFreeGB: 3,
+        },
+        level: 'easy',
+        dependsOn: [],
+        attempt: 1,
+        resume: 0,
+        createdAt: '2026-10-15T00:00:00Z',
+        updatedAt: '2026-10-15T00:00:00Z',
+      },
+      {
+        id: 'p2~t-d2',
+        projectId: 'p2',
+        slug: 't-d2',
+        title: 'Task on drive 2',
+        status: 'waiting_quota',
+        waitReason: 'disk',
+        blockingDisk: {
+          path: '/media/drive2',
+          label: 'Worktrees (/media/drive2)',
+          freeGB: 1.1,
+          minFreeGB: 3,
+        },
+        level: 'easy',
+        dependsOn: [],
+        attempt: 1,
+        resume: 0,
+        createdAt: '2026-10-15T00:00:00Z',
+        updatedAt: '2026-10-15T00:00:00Z',
+      },
+    ];
+
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      const matching = multiDiskTasks.filter(
+        (task) => !params?.status || params.status === 'all' || task.status === params.status,
+      );
+      return { items: matching, total: matching.length, nextCursor: null };
+    });
+
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={queryClient}>
+          <LocaleProvider initialLocale="vi">
+            <TasksPage />
+          </LocaleProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Task on drive 1')).toBeInTheDocument();
+      expect(screen.getByText('Task on drive 2')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('Chờ Worktrees (/media/drive1) (còn 0.4 GB / cần 3 GB)')).toBeInTheDocument();
+    expect(screen.getByText('Chờ Worktrees (/media/drive2) (còn 1.1 GB / cần 3 GB)')).toBeInTheDocument();
+  });
+
+  it('renders waitReason badges in Project view and List view for waiting_quota tasks', async () => {
+    const sampleTasks: Task[] = [
+      {
+        id: 'p1~t-waiting-disk',
+        projectId: 'p1',
+        slug: 't-waiting-disk',
+        title: 'Task chờ ổ đĩa trong project/list',
+        status: 'waiting_quota',
+        waitReason: 'disk',
+        blockingDisk: {
+          path: '/media/data',
+          label: 'Worktrees (/media/data)',
+          freeGB: 0.6,
+          minFreeGB: 2,
+        },
+        level: 'easy',
+        dependsOn: [],
+        attempt: 1,
+        resume: 0,
+        createdAt: '2026-10-15T00:00:00Z',
+        updatedAt: '2026-10-15T00:00:00Z',
+      },
+    ];
+
+    vi.spyOn(client, 'getTasks').mockResolvedValue(sampleTasks);
+    vi.spyOn(client, 'getTasksPage').mockResolvedValue({
+      items: sampleTasks,
+      total: sampleTasks.length,
+      nextCursor: null,
+    });
+
+    // 1. Test Project view
+    const { unmount } = render(
+      <MemoryRouter initialEntries={['/tasks?view=project']}>
+        <QueryClientProvider client={queryClient}>
+          <LocaleProvider initialLocale="vi">
+            <TasksPage />
+          </LocaleProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Task chờ ổ đĩa trong project/list')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Chờ Worktrees (/media/data) (còn 0.6 GB / cần 2 GB)')).toBeInTheDocument();
+
+    unmount();
+
+    // 2. Test List view
+    render(
+      <MemoryRouter initialEntries={['/tasks?view=list']}>
+        <QueryClientProvider client={queryClient}>
+          <LocaleProvider initialLocale="vi">
+            <TasksPage />
+          </LocaleProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Task chờ ổ đĩa trong project/list')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Chờ Worktrees (/media/data) (còn 0.6 GB / cần 2 GB)')).toBeInTheDocument();
+  });
 });

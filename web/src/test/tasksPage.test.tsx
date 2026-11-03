@@ -323,6 +323,7 @@ describe('TasksPage & Kanban Long Lists', () => {
         pauseReason: 'load',
         currentRun: {
           startedAt: '2026-10-15T00:00:00Z',
+          lastOutputAt: '2026-10-15T00:10:00Z',
           lastActivityAt: '2026-10-15T00:10:00Z',
           activitySource: 'log',
           paused: true,
@@ -365,6 +366,7 @@ describe('TasksPage & Kanban Long Lists', () => {
         pauseReason: 'manual',
         currentRun: {
           startedAt: '2026-10-15T00:00:00Z',
+          lastOutputAt: '2026-10-15T00:10:00Z',
           lastActivityAt: '2026-10-15T00:10:00Z',
           activitySource: 'log',
           paused: true,

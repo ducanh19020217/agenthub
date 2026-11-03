@@ -263,4 +263,142 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
       customCtx.db.close();
     }
   });
+
+  it('dispatches task for project on free drive even when default worktree drive is low', () => {
+    const configuredRoot = path.join(tmpDir, 'separate-encrypted-drive');
+    fs.mkdirSync(configuredRoot);
+
+    const project2Path = path.join(tmpDir, 'repo2');
+    fs.mkdirSync(project2Path, { recursive: true });
+    execFileSync('git', ['init', '--template='], { cwd: project2Path });
+    execFileSync('git', ['checkout', '-b', 'main'], { cwd: project2Path });
+    fs.writeFileSync(path.join(project2Path, 'README.md'), '# Test 2');
+    execFileSync('git', ['add', '.'], { cwd: project2Path });
+    execFileSync('git', ['commit', '-m', 'init', '--allow-empty'], {
+      cwd: project2Path,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'test',
+        GIT_AUTHOR_EMAIL: 'test@test.com',
+        GIT_COMMITTER_NAME: 'test',
+        GIT_COMMITTER_EMAIL: 'test@test.com',
+      },
+    });
+
+    ctx.projectRepo.insert({
+      id: 'proj2',
+      name: 'Project 2',
+      path: project2Path,
+      defaultBranch: 'main',
+      maxParallel: 2,
+      settings: JSON.stringify({ worktree: { root: configuredRoot } }),
+    });
+
+    fakeDiskReader = (p: string) => {
+      const normalized = path.resolve(p);
+      if (normalized.startsWith(path.resolve(configuredRoot))) {
+        return { freeGB: 15, totalGB: 100 };
+      }
+      if (normalized.startsWith(path.resolve(config.worktreesDir))) {
+        return { freeGB: 0.5, totalGB: 100 };
+      }
+      return { freeGB: 10, totalGB: 100 };
+    };
+
+    ctx.taskRepo.insert({
+      id: 'proj/t-default',
+      projectId: 'proj',
+      slug: 't-default',
+      title: 'Task on default worktrees',
+      status: 'queued',
+      level: 'easy',
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj2/t-custom',
+      projectId: 'proj2',
+      slug: 't-custom',
+      title: 'Task on custom drive',
+      status: 'queued',
+      level: 'easy',
+    });
+
+    ctx.scheduler.tick();
+
+    expect(ctx.taskRepo.get('proj/t-default')?.status).toBe('waiting_quota');
+    expect(ctx.taskRepo.get('proj/t-default')?.waitReason).toBe('disk');
+
+    expect(ctx.taskRepo.get('proj2/t-custom')?.status).toBe('running');
+    expect(ctx.scheduler.getRunning().has('proj2/t-custom')).toBe(true);
+  });
+
+  it('blocks all projects when hub home disk is below hubHomeMinFreeGB', () => {
+    config.disk.hubHomeMinFreeGB = 1;
+    fakeDiskReader = (p: string) => {
+      const normalized = path.resolve(p);
+      if (normalized === path.resolve(config.hubHome)) {
+        return { freeGB: 0.5, totalGB: 50 };
+      }
+      return { freeGB: 50, totalGB: 100 };
+    };
+
+    const emittedEvents: Array<{ type: string; taskId?: string; payload?: Record<string, unknown> }> = [];
+    ctx.scheduler.getEventBus().on('*', (type, taskId, payload) => {
+      emittedEvents.push({ type, taskId, payload: payload as Record<string, unknown> });
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj/t-hub-home',
+      projectId: 'proj',
+      slug: 't-hub-home',
+      title: 'Task blocked by hub home',
+      status: 'queued',
+      level: 'easy',
+    });
+
+    ctx.scheduler.tick();
+
+    const task = ctx.taskRepo.get('proj/t-hub-home');
+    expect(task?.status).toBe('waiting_quota');
+    expect(task?.waitReason).toBe('disk');
+
+    const waitingEvent = emittedEvents.find((e) => e.type === 'task.waiting_quota' && e.taskId === 'proj/t-hub-home');
+    expect(waitingEvent).toBeDefined();
+    expect(waitingEvent?.payload?.message).toContain('Ổ chứa dữ liệu hub (~/.agenthub) sắp đầy');
+    expect(waitingEvent?.payload?.message).toContain(config.hubHome);
+    expect(waitingEvent?.payload?.message).toContain('0.5 GB');
+    expect(waitingEvent?.payload?.message).toContain('1 GB');
+    expect(waitingEvent?.payload?.label).toBe('Ổ chứa dữ liệu hub (~/.agenthub)');
+    expect(waitingEvent?.payload?.freeGB).toBe(0.5);
+    expect(waitingEvent?.payload?.minFreeGB).toBe(1);
+
+    expect(ctx.scheduler.getRunning().size).toBe(0);
+  });
+
+  it('formats wait message with label, path, freeGB, and minFreeGB for worktree disk', () => {
+    fakeDiskReader = (_p: string) => ({ freeGB: 1.2, totalGB: 100 });
+
+    const emittedEvents: Array<{ type: string; taskId?: string; payload?: Record<string, unknown> }> = [];
+    ctx.scheduler.getEventBus().on('*', (type, taskId, payload) => {
+      emittedEvents.push({ type, taskId, payload: payload as Record<string, unknown> });
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj/t-msg',
+      projectId: 'proj',
+      slug: 't-msg',
+      title: 'Check message format',
+      status: 'queued',
+      level: 'easy',
+    });
+
+    ctx.scheduler.tick();
+
+    const waitingEvent = emittedEvents.find((e) => e.type === 'task.waiting_quota' && e.taskId === 'proj/t-msg');
+    expect(waitingEvent?.payload?.message).toBe(
+      `Chờ Worktrees (${path.join(config.worktreesDir, 'proj')}) (còn 1.2 GB / cần 3 GB)`
+    );
+    expect(waitingEvent?.payload?.path).toBe(path.join(config.worktreesDir, 'proj'));
+    expect(waitingEvent?.payload?.label).toBe('Worktrees');
+  });
 });

@@ -47,7 +47,7 @@ import { BrainService } from '../brain.js';
 import { toApiTime } from '../db/time.js';
 import { ChatService } from '../chat/service.js';
 import type { BrainRunner } from '../brain/runner.js';
-import { getDiskSpaceSync, getMonitoredDisks } from '../disk.js';
+import { getDiskSpaceSync, getMonitoredDisks, type MonitoredDisk } from '../disk.js';
 import { WorktreeService } from '../worktrees/index.js';
 import { parseAuthState, parseCodexLoginStatus } from '../profiles/auth.js';
 import { SavingsService } from '../savings.js';
@@ -595,6 +595,7 @@ export const UpdateConfigSchema = z.object({
   }).optional(),
   disk: z.object({
     minFreeGB: z.number().positive().optional(),
+    hubHomeMinFreeGB: z.number().positive().optional(),
     extraPaths: z.array(z.object({ path: z.string().min(1), minFreeGB: z.number().positive(), label: z.string().min(1) })).optional(),
   }).optional(),
   cleanup: z.object({
@@ -770,10 +771,18 @@ export function formatEventSummary(
     case 'task.waiting_quota': {
       const reason = p && (p as Record<string, unknown>).reason;
       if (reason === 'disk') {
+        const message = p && (p as Record<string, unknown>).message;
+        if (typeof message === 'string' && message.length > 0) return `${taskLabel} ${message}`;
         return `${taskLabel} chờ dung lượng ổ đĩa`;
       }
-      if (reason === 'parallel') {
+      if (reason === 'parallel' || reason === 'department_parallel' || reason === 'slot') {
         return `${taskLabel} chờ slot song song`;
+      }
+      if (reason === 'load') {
+        return `${taskLabel} chờ giảm tải máy`;
+      }
+      if (reason === 'dependency') {
+        return `${taskLabel} chờ task phụ thuộc`;
       }
       if (reason === 'profile_busy') {
         return `${taskLabel} chờ tài khoản rảnh`;
@@ -1281,8 +1290,13 @@ export class AppService {
     }
 
     const focusWaitingTaskIds = new Set<string>();
+    const waitingReasons: Record<string, number> = {};
     for (const t of tasks) {
       byStatus[t.status] = (byStatus[t.status] || 0) + 1;
+      if (t.status === 'waiting_quota') {
+        const reason = t.waitReason || 'quota';
+        waitingReasons[reason] = (waitingReasons[reason] || 0) + 1;
+      }
       if (t.waitReason === 'focus') focusWaitingTaskIds.add(t.id);
       if (!tasksByProject[t.projectId]) {
         tasksByProject[t.projectId] = {
@@ -1397,7 +1411,17 @@ export class AppService {
     const diskReader = this.scheduler ? this.scheduler.getDiskReader() : getDiskSpaceSync;
     const disk = diskReader(this.config.worktreesDir);
     const worktreeRoots = [this.config.worktreesDir, ...this.projectRepo.getAll().flatMap((project) => projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir))];
-    const disks = getMonitoredDisks(worktreeRoots, this.config.disk.minFreeGB, this.config.disk.extraPaths, process.env.NODE_ENV !== 'test', diskReader);
+    const hubHomeSpace = diskReader(this.config.hubHome);
+    const hubHomeMinFreeGB = this.config.disk.hubHomeMinFreeGB ?? 1;
+    const hubHomeDisk: MonitoredDisk = {
+      path: this.config.hubHome,
+      label: 'Dữ liệu hub (~/.agenthub)',
+      minFreeGB: hubHomeMinFreeGB,
+      source: 'hub_home',
+      ...hubHomeSpace,
+      low: hubHomeSpace.freeGB < hubHomeMinFreeGB,
+    };
+    const disks = [hubHomeDisk, ...getMonitoredDisks(worktreeRoots, this.config.disk.minFreeGB, this.config.disk.extraPaths, process.env.NODE_ENV !== 'test', diskReader)];
     const runningTaskIds = runningTasks.map((r) => r.taskId);
     const overlaps = this.taskNoteRepo
       ? this.taskNoteRepo.getActiveOverlaps(runningTaskIds).map(apiTaskNote)
@@ -1405,6 +1429,7 @@ export class AppService {
 
     return {
       tasks: byStatus,
+      waitingReasons,
       tasksByProject,
       profiles: profilesStatus,
       quotaCapacity,

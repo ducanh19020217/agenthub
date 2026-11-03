@@ -1224,29 +1224,13 @@ export class Scheduler {
     } else {
       const diskSpace = disks.find((disk) => disk.source === 'worktrees')!;
       this.dockerDiskLow = false;
-      const recovered = diskSpace.freeGB >= diskSpace.minFreeGB + 1;
+      const recovered = diskSpace ? diskSpace.freeGB >= diskSpace.minFreeGB + 1 : true;
       if (this.diskLow && recovered) {
         this.diskLow = false;
         this.eventBus.emit('disk.ok', undefined, {
-          freeGB: diskSpace.freeGB,
+          freeGB: diskSpace?.freeGB ?? 0,
           minFreeGB: this.config.disk.minFreeGB,
         });
-      }
-      if (this.tasksWaitingForDisk.size > 0) {
-        for (const taskId of [...this.tasksWaitingForDisk]) {
-          const task = this.taskRepo.get(taskId);
-          if (task && this.projectRepo.get(task.projectId) && (task.status === 'waiting_quota' || (task.status as string) === 'waiting_disk')) {
-            this.taskRepo.updateStatus(taskId, 'queued');
-            this.eventBus.emit('task.queued', taskId, { reason: 'disk_ready' });
-          }
-        }
-        this.tasksWaitingForDisk.clear();
-      }
-      const diskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
-      for (const t of diskWaiters) {
-        if (!this.projectRepo.get(t.projectId)) continue;
-        this.taskRepo.updateStatus(t.id, 'queued');
-        this.eventBus.emit('task.queued', t.id, { reason: 'disk_ready' });
       }
       if (this.recheckWaitingOnDiskOk) {
         // tasksWaitingForDisk chỉ nằm trong bộ nhớ: sau khi daemon restart, task đã vào
@@ -1257,14 +1241,46 @@ export class Scheduler {
       }
     }
 
-    // 0b. Resume parallel waiters if project slot is available
-    const parallelWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'parallel' || t.waitReason === 'department_parallel');
-    for (const task of parallelWaiters) {
+    // Resume disk waiters individually if their specific blocking disk is now free
+    const diskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
+    for (const t of diskWaiters) {
+      if (!this.projectRepo.get(t.projectId)) continue;
+      if (!this.getBlockingDiskForTask(t)) {
+        this.tasksWaitingForDisk.delete(t.id);
+        this.taskRepo.updateStatus(t.id, 'queued');
+        this.eventBus.emit('task.queued', t.id, { reason: 'disk_ready' });
+      }
+    }
+
+    // 0b. Resume slot / parallel waiters if project slot is available
+    const slotWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'slot' || t.waitReason === 'parallel' || t.waitReason === 'department_parallel');
+    for (const task of slotWaiters) {
       const project = this.projectRepo.get(task.projectId);
       if (!project) continue;
       if (this.hasParallelCapacity(project)) {
         this.taskRepo.updateStatus(task.id, 'queued');
         this.eventBus.emit('task.queued', task.id, { reason: 'parallel_available' });
+      }
+    }
+
+    // 0b2. Resume dependency waiters if dependencies are met
+    const dependencyWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'dependency');
+    for (const task of dependencyWaiters) {
+      if (this.areDependenciesMet(task)) {
+        this.taskRepo.updateStatus(task.id, 'queued');
+        this.eventBus.emit('task.queued', task.id, { reason: 'dependency_met' });
+      }
+    }
+
+    // 0b3. Resume load waiters if system is no longer overloaded
+    if (!this.loadGuard.isOverloaded()) {
+      const loadWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'load');
+      for (const task of loadWaiters) {
+        const project = this.projectRepo.get(task.projectId);
+        if (project && this.hasParallelCapacity(project)) {
+          this.taskRepo.updateStatus(task.id, 'queued');
+          this.eventBus.emit('task.queued', task.id, { reason: 'load_recovered' });
+        }
       }
     }
 
@@ -1376,8 +1392,10 @@ export class Scheduler {
     const waitingTasks = this.taskRepo.getByStatus('waiting_quota');
     for (const task of waitingTasks) {
       if (!this.projectRepo.get(task.projectId)) continue;
-      if (reason !== 'startup_recheck' && task.waitReason === 'disk') {
-        if (this.getMonitoredDisks().some((disk) => disk.low)) continue;
+      if (reason !== 'startup_recheck') {
+        if (task.waitReason === 'disk' && this.getBlockingDiskForTask(task)) continue;
+        if (task.waitReason === 'dependency' && !this.areDependenciesMet(task)) continue;
+        if (task.waitReason === 'load' && this.loadGuard.isOverloaded()) continue;
       }
       this.taskRepo.updateStatus(task.id, 'queued');
       this.eventBus.emit('task.queued', task.id, { reason });
@@ -2179,7 +2197,10 @@ export class Scheduler {
       if (this.blockForRunLimit(task)) continue;
       if (task.notBefore != null && task.notBefore > Math.floor(Date.now() / 1000)) continue;
       // Check dependencies
-      if (!this.areDependenciesMet(task)) continue;
+      if (!this.areDependenciesMet(task)) {
+        this.markQueuedWaiting(task, 'dependency');
+        continue;
+      }
 
       if (this.getModelChain(task).length === 0) {
         this.taskRepo.updateStatus(task.id, 'failed');
@@ -2205,18 +2226,19 @@ export class Scheduler {
         const department = project.departmentId ? this.departmentRepo?.get(project.departmentId) : undefined;
         const usage = this.parallelUsage(project);
         const departmentLimited = Boolean(department && department.maxParallel > 0 && usage.department >= this.loadGuard.effectiveParallel(department.maxParallel));
-        this.markQueuedWaiting(task, departmentLimited ? 'department_parallel' : 'parallel');
+        const isLoadThrottled = this.loadGuard.isOverloaded() || (usage.project >= this.effectiveParallel(project) && usage.project < project.maxParallel);
+        this.markQueuedWaiting(task, isLoadThrottled ? 'load' : (departmentLimited ? 'department_parallel' : 'slot'));
         continue;
       }
 
       // Find a suitable (model, profile) pair
       const pair = this.findModelProfilePair(task);
       if (pair) {
-        const disk = this.getBlockingDisk();
+        const disk = this.getBlockingDiskForTask(task);
         if (disk) {
           this.tasksWaitingForDisk.add(task.id);
           this.taskRepo.updateStatus(task.id, 'waiting_quota', 'disk');
-          this.eventBus.emit('task.waiting_quota', task.id, { reason: 'disk', label: disk.label, freeGB: disk.freeGB, minFreeGB: disk.minFreeGB, message: this.diskWaitMessage(disk) });
+          this.eventBus.emit('task.waiting_quota', task.id, { reason: 'disk', label: disk.label, path: disk.path, freeGB: disk.freeGB, minFreeGB: disk.minFreeGB, message: this.diskWaitMessage(disk) });
           this.markDiskLow(disk);
           continue;
         }
@@ -2970,8 +2992,8 @@ export class Scheduler {
     return 50;
   }
 
-  /** Task chờ slot/tài khoản vẫn ở `queued`; chỉ ghi DB và phát sự kiện khi lý do chờ đổi. */
-  private markQueuedWaiting(task: TaskRow, reason: 'parallel' | 'department_parallel' | 'profile_busy'): void {
+  /** Task chờ slot/tài khoản/phụ thuộc/tải vẫn ở `queued`; chỉ ghi DB và phát sự kiện khi lý do chờ đổi. */
+  private markQueuedWaiting(task: TaskRow, reason: 'parallel' | 'department_parallel' | 'profile_busy' | 'slot' | 'load' | 'dependency'): void {
     if (task.status === 'queued' && task.waitReason === reason) return;
     this.taskRepo.update(task.id, { status: 'queued', waitReason: reason });
     const project = this.projectRepo.get(task.projectId);
@@ -3221,11 +3243,11 @@ export class Scheduler {
 
   async startTask(task: TaskRow, model: string, profileName: string, retryCount = 0): Promise<void> {
     const stopGeneration = this.stopGeneration;
-    const disk = this.getBlockingDisk();
+    const disk = this.getBlockingDiskForTask(task);
     if (disk) {
       this.tasksWaitingForDisk.add(task.id);
       this.taskRepo.updateStatus(task.id, 'waiting_quota', 'disk');
-      this.eventBus.emit('task.waiting_quota', task.id, { reason: 'disk', label: disk.label, freeGB: disk.freeGB, minFreeGB: disk.minFreeGB, message: this.diskWaitMessage(disk) });
+      this.eventBus.emit('task.waiting_quota', task.id, { reason: 'disk', label: disk.label, path: disk.path, freeGB: disk.freeGB, minFreeGB: disk.minFreeGB, message: this.diskWaitMessage(disk) });
       this.markDiskLow(disk);
       return;
     }
@@ -3765,17 +3787,63 @@ export class Scheduler {
     return this.diskReader;
   }
 
+  private getHubHomeDisk(): MonitoredDisk {
+    const space = this.diskReader(this.config.hubHome);
+    const minFreeGB = this.config.disk.hubHomeMinFreeGB ?? 1;
+    return {
+      path: this.config.hubHome,
+      label: 'Ổ chứa dữ liệu hub (~/.agenthub)',
+      minFreeGB,
+      source: 'hub_home',
+      ...space,
+      low: space.freeGB < minFreeGB,
+    };
+  }
+
   private getMonitoredDisks(): MonitoredDisk[] {
     const roots = [this.config.worktreesDir, ...this.projectRepo.getAll().flatMap((project) => projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir))];
-    return getMonitoredDisks(roots, this.config.disk.minFreeGB, this.config.disk.extraPaths, process.env.NODE_ENV !== 'test', this.diskReader);
+    const disks = getMonitoredDisks(roots, this.config.disk.minFreeGB, this.config.disk.extraPaths, process.env.NODE_ENV !== 'test', this.diskReader);
+    return [this.getHubHomeDisk(), ...disks];
   }
 
   private getBlockingDisk(): MonitoredDisk | undefined {
     return this.getMonitoredDisks().find((disk) => disk.low);
   }
 
+  private getBlockingDiskForTask(task: TaskRow): MonitoredDisk | undefined {
+    // 1. Hub home check: blocks all tasks if low
+    const hubHome = this.getHubHomeDisk();
+    if (hubHome.low) return hubHome;
+
+    // 2. Project's own worktree root check
+    const project = this.projectRepo.get(task.projectId);
+    const projectRoot = project ? projectWorktreeRoot(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir;
+    const projectSpace = this.diskReader(projectRoot);
+    const projectMinFreeGB = this.config.disk.minFreeGB;
+    if (projectSpace.freeGB < projectMinFreeGB) {
+      return {
+        path: projectRoot,
+        label: 'Worktrees',
+        minFreeGB: projectMinFreeGB,
+        source: 'worktrees',
+        ...projectSpace,
+        low: true,
+      };
+    }
+
+    // 3. Extra paths check (and Docker if included)
+    const extraDisks = getMonitoredDisks([], projectMinFreeGB, this.config.disk.extraPaths, process.env.NODE_ENV !== 'test', this.diskReader);
+    const blockedExtra = extraDisks.find((disk) => disk.source === 'extra' && disk.low);
+    if (blockedExtra) return blockedExtra;
+
+    return undefined;
+  }
+
   private diskWaitMessage(disk: MonitoredDisk): string {
-    return `Chờ ${disk.label} (còn ${disk.freeGB} GB / cần ${disk.minFreeGB} GB)`;
+    if (disk.source === 'hub_home') {
+      return `Ổ chứa dữ liệu hub (~/.agenthub) sắp đầy (${disk.path}) (còn ${disk.freeGB} GB / cần ${disk.minFreeGB} GB)`;
+    }
+    return `Chờ ${disk.label} (${disk.path}) (còn ${disk.freeGB} GB / cần ${disk.minFreeGB} GB)`;
   }
 
   private markDiskLow(disk: MonitoredDisk): void {

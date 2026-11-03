@@ -1600,4 +1600,7 @@ export const en: typeof vi = {
     review_rounds_exhausted: "Review rounds exhausted",
     exit: "Process exited",
   },
+  integrations: {
+    openProjectTitle: 'Integrations → OpenProject', openProjectDescription: 'Manage OpenProject sources and sync actions.', addSource: 'Add source', saved: 'Saved', saveSecret: 'Save secret', id: 'Source ID', url: 'URL', project: 'Project', language: 'Language', watchStatusIds: 'Watch status IDs', reopenedStatusIds: 'Reopened status IDs', openStatusIds: 'Open status IDs', pollInterval: 'Interval (seconds)', minTicket: 'Minimum ticket', autoStart: 'Auto-create tasks', autoResolve: 'Auto-resolve', apiKey: 'API key', configured: 'Configured', testConnection: 'Test connection', syncNow: 'Sync now', dailyReport: 'Create daily report', projectOpenProject: 'OpenProject', enabled: 'Enabled', source: 'Source', role: 'Role', sourceBranch: 'Source branch', targetBranch: 'Target branch', schedule: 'Schedule (HH:MM)', weekdaysOnly: 'Weekdays only', checks: 'Checks (one command per line)', unionMergeGlobs: 'Union merge globs', token: 'Token', writeOnly: 'Write-only', lastSync: 'Latest sync', remoteDeploy: 'Remote deploy', trigger: 'Trigger', waitMinutes: 'Wait (minutes)', steps: 'Steps (one command per line)', healthChecks: 'Health checks', deploySecrets: 'Environment secrets (KEY=VALUE)', deployNow: 'Deploy now', lastDeploy: 'Latest deploy',
+  },
 };

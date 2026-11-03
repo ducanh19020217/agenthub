@@ -38,6 +38,7 @@ import {
   ApplyPresetInput,
   ApplyPresetResult,
   EffectiveConfigResponse,
+  OpenProjectSource, OpenProjectSourceInput, GiteaStatus, RemoteDeployStatus,
 } from '../types/api';
 import { getActiveLocale, translateApiErrorMessage } from '../utils/apiError';
 
@@ -312,6 +313,20 @@ export async function rescanClaudeSessions(): Promise<{ ok: boolean }> {
 export async function getProjects(): Promise<Project[]> {
   return apiFetch<Project[]>('/api/projects');
 }
+
+export const getOpenProjectSources = () => apiFetch<OpenProjectSource[]>('/api/integrations/openproject/sources');
+export const saveOpenProjectSource = (id: string, data: OpenProjectSourceInput) => apiFetch<OpenProjectSource>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) });
+export const deleteOpenProjectSource = (id: string) => apiFetch<{ ok: boolean }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export const saveOpenProjectKey = (id: string, key: string) => apiFetch<{ configured: boolean }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/key`, { method: 'PUT', body: JSON.stringify({ key }) });
+export const testOpenProjectConnection = (id: string) => apiFetch<{ ok: boolean; name?: string }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/test`, { method: 'POST' });
+export const syncOpenProject = (id: string) => apiFetch<{ imported: number; comments: number }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/sync`, { method: 'POST' });
+export const createOpenProjectDailyReport = (id: string) => apiFetch<{ ok: boolean; path: string; content: string }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/daily-report`, { method: 'POST' });
+export const saveGiteaToken = (projectId: string, token: string) => apiFetch<{ configured: boolean }>(`/api/projects/${encodeURIComponent(projectId)}/gitea/token`, { method: 'PUT', body: JSON.stringify({ token }) });
+export const getGiteaStatus = (projectId: string) => apiFetch<GiteaStatus>(`/api/projects/${encodeURIComponent(projectId)}/gitea/status`);
+export const syncGitea = (projectId: string) => apiFetch<GiteaStatus>(`/api/projects/${encodeURIComponent(projectId)}/gitea/sync`, { method: 'POST' });
+export const saveRemoteDeployEnv = (projectId: string, env: Record<string, string>) => apiFetch<{ keys: string[] }>(`/api/projects/${encodeURIComponent(projectId)}/remote-deploy/env`, { method: 'PUT', body: JSON.stringify(env) });
+export const triggerRemoteDeploy = (projectId: string) => apiFetch<RemoteDeployStatus>(`/api/projects/${encodeURIComponent(projectId)}/remote-deploy`, { method: 'POST' });
+export const getRemoteDeployStatus = (projectId: string) => apiFetch<RemoteDeployStatus>(`/api/projects/${encodeURIComponent(projectId)}/remote-deploy/status`);
 
 export const getDepartments = () => apiFetch<Department[]>('/api/departments');
 export const createDepartment = (data: Partial<Department> & { name: string }) => apiFetch<Department>('/api/departments', { method: 'POST', body: JSON.stringify(data) });

@@ -1628,4 +1628,7 @@ export const vi = {
     review_rounds_exhausted: "Hết số lượt review tối đa",
     exit: "Tiến trình kết thúc",
   },
+  integrations: {
+    openProjectTitle: 'Tích hợp → OpenProject', openProjectDescription: 'Quản lý nguồn OpenProject và các thao tác đồng bộ.', addSource: 'Thêm nguồn', saved: 'Đã lưu', saveSecret: 'Lưu bí mật', id: 'Mã nguồn', url: 'URL', project: 'Project', language: 'Ngôn ngữ', watchStatusIds: 'Trạng thái theo dõi', reopenedStatusIds: 'Trạng thái mở lại', openStatusIds: 'Trạng thái mở', pollInterval: 'Chu kỳ (giây)', minTicket: 'Số ticket tối thiểu', autoStart: 'Tự tạo task', autoResolve: 'Tự resolve', apiKey: 'API key', configured: 'Đã cấu hình', testConnection: 'Kiểm tra kết nối', syncNow: 'Đồng bộ ngay', dailyReport: 'Tạo báo cáo ngày', projectOpenProject: 'OpenProject', enabled: 'Bật', source: 'Nguồn', role: 'Vai trò', sourceBranch: 'Nhánh nguồn', targetBranch: 'Nhánh đích', schedule: 'Lịch (HH:MM)', weekdaysOnly: 'Chỉ ngày làm việc', checks: 'Checks (mỗi dòng một lệnh)', unionMergeGlobs: 'Union merge globs', token: 'Token', writeOnly: 'Chỉ ghi', lastSync: 'Lượt sync gần nhất', remoteDeploy: 'Deploy từ xa', trigger: 'Trigger', waitMinutes: 'Chờ (phút)', steps: 'Steps (mỗi dòng một lệnh)', healthChecks: 'Health checks', deploySecrets: 'Bí mật env (KEY=VALUE)', deployNow: 'Deploy ngay', lastDeploy: 'Lượt deploy gần nhất',
+  },
 };

@@ -232,7 +232,21 @@ export interface ProjectSettings {
   references: Array<{ name: string; path: string; inject: boolean }>;
   reviewChecklist?: string[];
   notifications: { telegramContent: 'full' | 'minimal' };
+  openproject?: { enabled: boolean; sourceId: string | null; role: 'primary' | 'secondary' };
+  gitea?: { enabled: boolean; url?: string; sourceBranch?: string; targetBranch?: string; schedule: string[]; weekdaysOnly: boolean; checks: string[][]; unionMergeGlobs: string[] };
+  remoteDeploy?: { enabled: boolean; trigger: 'after-gitea-sync' | 'manual'; steps: string[][]; healthChecks: Array<{ url: string; expectStatusBelow: number; contains?: string }>; waitMinutes: number; timeoutSec?: number };
 }
+
+export interface OpenProjectSource {
+  id: string; url: string; project: string; keyConfigured?: boolean;
+  pollIntervalSec: number; watchStatusIds: number[]; reopenedStatusIds: number[];
+  resolvedStatusId: number | null; reviewStatusId: number | null; openStatusIds: number[];
+  minTicketNumber: number; autoStart: boolean; autoResolve: boolean; language: string;
+  dailyReport?: { time: string; weekdaysOnly: boolean; dir?: string; maxItems: number; telegram: boolean };
+}
+export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured'> { key?: string; }
+export interface GiteaStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
+export interface RemoteDeployStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
 
 export interface KnowledgeEntry {
   id: number;

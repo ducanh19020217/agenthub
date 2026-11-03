@@ -155,7 +155,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   const scopedProject = (): string | undefined => options?.projectId || process.env.AGENTHUB_MCP_PROJECT || undefined;
   const assistantSession = (): boolean => (process.env.AGENTHUB_CHAT_KIND || '') === 'assistant';
   const assertAssistantAllowed = (toolName: string): void => {
-    if (assistantSession() && ['hub_review', 'hub_dispatch_batch'].includes(toolName)) {
+    if (assistantSession() && ['hub_review', 'hub_dispatch_batch', 'hub_request_secret'].includes(toolName)) {
       throw new Error(`Trợ lý không được gọi ${toolName}; việc này thuộc về bộ não`);
     }
   };
@@ -1518,12 +1518,12 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     try { assertSetupWriteAllowed('hub_config_set', args.dryRun); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/config-set', args)) }] }; }
     catch (err: unknown) { return handleError(err); }
   });
-  server.tool('hub_integration_discover', 'Dò thông tin tích hợp chỉ đọc', { kind: z.enum(['openproject', 'gitea', 'checks']), sourceId: z.string().optional(), url: z.string().optional(), key: z.string().optional(), project: z.string().optional() }, async (args) => {
+  server.tool('hub_integration_discover', 'Dò thông tin tích hợp chỉ đọc', { kind: z.enum(['openproject', 'gitea', 'checks']), sourceId: z.string().optional(), url: z.string().optional(), project: z.string().optional() }, async (args) => {
     try { if (args.project) assertProject(args.project, 'Dò tích hợp'); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/integration-discover', args)) }] }; }
     catch (err: unknown) { return handleError(err); }
   });
   server.tool('hub_request_secret', 'Yêu cầu người dùng nhập bí mật qua giao diện an toàn', { kind: z.enum(['openproject-key', 'gitea-token', 'deploy-env', 'telegram-token']), target: z.string(), label: z.string() }, async (args) => {
-    try { const result = await callApi<{ requestId: string; url: string }>('POST', '/api/secrets/requests', args); return { content: [{ type: 'text', text: `Đã tạo yêu cầu ${result.requestId}. Mở ${result.url}; AgentHub không trả giá trị bí mật.` }] }; }
+    try { const result = await callApi<{ configured: boolean; reason?: string; url?: string }>('POST', '/api/secrets/requests', args, 10 * 60 * 1000 + 30_000); return { content: [{ type: 'text', text: JSON.stringify(result) }] }; }
     catch (err: unknown) { return handleError(err); }
   });
 

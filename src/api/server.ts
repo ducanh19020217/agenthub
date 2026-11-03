@@ -148,7 +148,7 @@ export async function createServer(
     return service.getSetupTools().configSet(body.path, body.value, body.dryRun !== false);
   });
   fastify.post('/api/setup/integration-discover', async (req) => {
-    const body = (req.body || {}) as { kind: 'openproject' | 'gitea' | 'checks'; sourceId?: string; url?: string; key?: string; project?: string };
+    const body = (req.body || {}) as { kind: 'openproject' | 'gitea' | 'checks'; sourceId?: string; url?: string; project?: string };
     return service.getSetupTools().discover(body.kind, body);
   });
   fastify.post('/api/secrets/requests', async (req) => service.getSetupTools().requestSecret(SetupSecretRequestSchema.parse(req.body)));

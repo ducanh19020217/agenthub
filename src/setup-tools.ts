@@ -8,7 +8,7 @@ import type { AgentHubConfig } from './config.js';
 import { OpenProjectClient } from './integrations/openproject/client.js';
 import { readOpenProjectKey } from './integrations/openproject/secrets.js';
 import { inspectProject } from './projects/inspect.js';
-import { parseProjectSettings, ProjectSettingsInputSchema } from './projects/settings.js';
+import { mergeProjectSettings, parseProjectSettings, ProjectSettingsInputSchema } from './projects/settings.js';
 import type { EventBus } from './scheduler/index.js';
 
 const SecretKind = z.enum(['openproject-key', 'gitea-token', 'deploy-env', 'telegram-token']);
@@ -19,6 +19,19 @@ function stable(value: unknown): string { return JSON.stringify(value, null, 2);
 function diff(before: unknown, after: unknown): { changed: boolean; before: unknown; after: unknown } {
   return { changed: stable(before) !== stable(after), before, after };
 }
+
+interface SetupProjectRow {
+  path: string;
+  defaultBranch?: string;
+  settings?: string | Record<string, unknown> | null;
+  checks?: string | unknown[] | null;
+  reviewChain?: string | unknown[] | null;
+}
+
+const SetupProjectPatchSchema = ProjectSettingsInputSchema.extend({
+  checks: z.array(z.object({ name: z.string().min(1), cmd: z.array(z.string()).min(1), timeoutSec: z.number().int().positive().optional() })).nullable().optional(),
+  reviewChain: z.array(z.record(z.unknown())).nullable().optional(),
+});
 
 export class SetupTools {
   constructor(
@@ -34,7 +47,7 @@ export class SetupTools {
       updateDepartment(id: string, input: unknown): unknown;
       updateDepartmentProjects(id: string, input: unknown): unknown;
       applyPreset(input: unknown): unknown;
-      getProject(id: string): any;
+      getProject(id: string): SetupProjectRow;
       updateProject(id: string, input: unknown): unknown;
       getConfig(): unknown;
       updateConfig(input: unknown): unknown;
@@ -53,19 +66,26 @@ export class SetupTools {
 
   applyPreset(input: { scope: string; preset: string; dryRun?: boolean }) {
     const dryRun = input.dryRun !== false;
-    const before = input.scope === 'global' ? this.service().getConfig() : this.service().getEffectiveConfig(input.scope);
-    if (dryRun) return { dryRun: true, diff: diff(before, { preset: input.preset, scope: input.scope }) };
-    const result = this.service().applyPreset({ scope: input.scope, preset: input.preset });
-    return { dryRun: false, result, diff: diff(before, result) };
+    const result = this.service().applyPreset({ scope: input.scope, preset: input.preset, dryRun });
+    return { dryRun, ...(result as Record<string, unknown>) };
   }
 
   projectSettings(project: string, patch: unknown, dryRun = true) {
-    const parsed = ProjectSettingsInputSchema.parse(patch);
+    const parsed = SetupProjectPatchSchema.parse(patch);
     const current = this.service().getProject(project);
-    const before = parseProjectSettings(current.settings);
-    if (dryRun) return { dryRun: true, diff: diff(before, { ...before, ...parsed }) };
-    const result = this.service().updateProject(project, { settings: parsed });
-    return { dryRun: false, result, diff: diff(before, result) };
+    const before = parseProjectSettings(typeof current.settings === 'string' ? current.settings : current.settings ? JSON.stringify(current.settings) : null);
+    const settingsPatch = parsed;
+    const { checks, reviewChain, ...settingsOnly } = settingsPatch;
+    const nextSettings = mergeProjectSettings(before, settingsOnly);
+    const snapshot = (row: SetupProjectRow) => ({
+      settings: row.settings && typeof row.settings !== 'string' ? row.settings : parseProjectSettings(row.settings || null),
+      checks: row.checks && typeof row.checks !== 'string' ? row.checks : (row.checks ? JSON.parse(row.checks) : null),
+      reviewChain: row.reviewChain && typeof row.reviewChain !== 'string' ? row.reviewChain : (row.reviewChain ? JSON.parse(row.reviewChain) : null),
+    });
+    const after = { settings: nextSettings, checks: checks === undefined ? snapshot(current).checks : checks, reviewChain: reviewChain === undefined ? snapshot(current).reviewChain : reviewChain };
+    if (dryRun) return { dryRun: true, diff: diff(snapshot(current), after) };
+    const result = this.service().updateProject(project, { settings: settingsOnly, ...(checks !== undefined ? { checks } : {}), ...(reviewChain !== undefined ? { reviewChain } : {}) });
+    return { dryRun: false, result, diff: diff(snapshot(current), snapshot(result as SetupProjectRow)) };
   }
 
   department(id: string | undefined, patch: unknown, assignProjects: string[] | undefined, dryRun = true) {
@@ -79,27 +99,42 @@ export class SetupTools {
   }
 
   configSet(pathName: string, value: unknown, dryRun = true) {
-    const allowed = /^(brain\.(engine|model|codexProfile|mode|permissions|maxTurnsPerHour|dailyTokenBudget)|reviewer\.(order|fallback|arbiter)|notifications\.[a-zA-Z0-9_.-]+|planning\.[a-zA-Z0-9_.-]+|scheduler\.[a-zA-Z0-9_.-]+|integrations\.openproject\.sources)$/.test(pathName);
+    const allowed = new Set([
+      'brain.engine', 'brain.model', 'brain.codexProfile', 'brain.mode', 'brain.permissions', 'brain.maxTurnsPerHour', 'brain.dailyTokenBudget',
+      'reviewer.order', 'reviewer.fallback', 'reviewer.arbiter', 'notifications.desktop', 'notifications.desktopLevel',
+      'planning.requireApproval', 'planning.approvalMinTasks', 'scheduler.maxRunsPerTask', 'scheduler.maxConsecutiveCrashesPerTask',
+      'integrations.openproject.sources',
+    ]).has(pathName);
     if (!allowed || pathName.includes('..')) throw new Error(`Config path không được phép: ${pathName}`);
     const before = this.service().getConfig();
     const root: Record<string, unknown> = {};
     let cursor = root;
     const parts = pathName.split('.');
     parts.forEach((part, index) => { if (index === parts.length - 1) cursor[part] = value; else cursor = (cursor[part] ||= {}) as Record<string, unknown>; });
-    if (dryRun) return { dryRun: true, diff: diff(before, root) };
+    const merged = JSON.parse(JSON.stringify(before)) as Record<string, unknown>;
+    let mergedCursor = merged;
+    parts.forEach((part, index) => {
+      if (index === parts.length - 1) mergedCursor[part] = value;
+      else mergedCursor = (mergedCursor[part] ||= {}) as Record<string, unknown>;
+    });
+    if (dryRun) return { dryRun: true, diff: diff(before, merged) };
     const result = this.service().updateConfig(root);
     return { dryRun: false, result, diff: diff(before, result) };
   }
 
-  async discover(kind: 'openproject' | 'gitea' | 'checks', input: { sourceId?: string; url?: string; key?: string; project?: string }) {
+  async discover(kind: 'openproject' | 'gitea' | 'checks', input: { sourceId?: string; url?: string; project?: string }) {
     if (kind === 'checks') {
-      const project = this.service().getProject(input.project || '');
+      if (!input.project) throw new Error('Project là bắt buộc khi dò checks');
+      const project = this.service().getProject(input.project);
       const inspected = inspectProject(project.path);
       return inspected.suggestedSettings.checks;
     }
     if (kind === 'gitea') {
-      const project = this.service().getProject(input.project || '');
-      const remote = execFileSync('git', ['-C', project.path, 'remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim();
+      if (!input.project) throw new Error('Project là bắt buộc khi dò Gitea');
+      const project = this.service().getProject(input.project);
+      let remote: string;
+      try { remote = execFileSync('git', ['-C', project.path, 'remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim(); }
+      catch { throw new Error(`Project "${input.project}" chưa có remote origin`); }
       const match = remote.match(/(?:\/|:)([^/]+)\/([^/]+?)(?:\.git)?$/);
       const branches = execFileSync('git', ['-C', project.path, 'for-each-ref', '--format=%(refname:short)', 'refs/remotes'], { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
       const names = branches.filter((b) => !b.endsWith('/HEAD')).map((b) => b.replace(/^origin\//, ''));
@@ -108,25 +143,35 @@ export class SetupTools {
     }
     const source = this.config.integrations.openproject.sources.find((item) => item.id === input.sourceId);
     if (!source) throw new Error(`Không tìm thấy OpenProject source "${input.sourceId || ''}"`);
-    const key = input.key || readOpenProjectKey(this.config.hubHome, source.id);
+    const key = readOpenProjectKey(this.config.hubHome, source.id);
     if (!key) throw new Error(`Chưa cấu hình key cho OpenProject source "${source.id}"`);
     const client = new OpenProjectClient({ baseUrl: input.url || source.url, apiKey: key });
-    const fetcher = (client as any).options?.fetch;
-    const request = async (url: string) => fetcher ? fetcher(url) : fetch(`${input.url || source.url}${url}`, { headers: { Authorization: `Basic ${Buffer.from(`apikey:${key}`).toString('base64')}`, Accept: 'application/hal+json' } }).then((r) => r.json());
-    const [me, projects, statuses] = await Promise.all([client.me(), request('/api/v3/projects?pageSize=100'), request('/api/v3/statuses?pageSize=100')]);
-    const rows = (statuses?._embedded?.elements || statuses?.elements || []) as Array<{ id: number; name: string; isClosed?: boolean }>;
-    const aliases: Record<string, string[]> = { watch: ['new', 'open', 'nieuw', 'mới', 'đang mở'], reopened: ['reopen', 'reopened', 'mở lại', 'mở lại'], resolved: ['resolved', 'closed', 'done', 'đã giải quyết', 'hoàn tất'], review: ['review', 'testing', 'kiểm thử', 'chờ duyệt'], open: ['open', 'new', 'mới', 'đang mở'] };
-    const suggestions = Object.fromEntries(Object.entries(aliases).map(([keyName, terms]) => [keyName, rows
-      .map((row) => ({ ...row, confidence: terms.some((term) => row.name.toLowerCase().includes(term)) ? 0.9 : 0 }))
-      .filter((row: { confidence: number }) => row.confidence > 0)]));
-    return { me, projects: projects?._embedded?.elements || projects?.elements || [], statuses: rows, suggestions };
+    const [me, projects, statusCollection] = await Promise.all([client.me(), client.listProjects(), client.listStatuses()]);
+    const rows = statusCollection._embedded?.elements || [];
+    const terms: Record<string, string[]> = { watch: ['watch', 'new', 'open', 'mới', 'đang mở'], reopened: ['reopen', 'reopened', 'mở lại'], resolved: ['resolved', 'closed', 'done', 'đã giải quyết', 'hoàn tất'], review: ['review', 'testing', 'kiểm thử', 'chờ duyệt'] };
+    const suggestions = Object.fromEntries(Object.entries(terms).map(([name, aliases]) => [name, rows.flatMap((row) => {
+      const normalized = row.name.toLocaleLowerCase();
+      const textMatch = aliases.some((term) => normalized.includes(term));
+      const closedMatch = name === 'resolved' ? row.isClosed === true : name === 'watch' || name === 'reopened' ? row.isClosed === false : undefined;
+      const confidence = textMatch && closedMatch === true ? 1 : textMatch ? 0.8 : closedMatch === true ? 0.55 : 0;
+      return confidence ? [{ ...row, confidence }] : [];
+    })]));
+    return { me, projects: projects._embedded?.elements || [], statuses: rows, suggestions };
   }
 
-  requestSecret(input: { kind: SecretKind; target: string; label: string }) {
+  async requestSecret(input: { kind: SecretKind; target: string; label: string }) {
     const id = crypto.randomUUID(); const now = Date.now(); const expiresAt = now + 10 * 60 * 1000;
     this.db.prepare('INSERT INTO secret_requests (id,kind,target,label,status,createdAt,expiresAt) VALUES (?,?,?,?,?,?,?)').run(id, input.kind, input.target, input.label, 'pending', now, expiresAt);
     this.eventBus.emit('secret.requested', undefined, { requestId: id, kind: input.kind, target: input.target, label: input.label });
-    return { requestId: id, url: `http://127.0.0.1:${this.config.port}/secrets/${id}`, expiresAt };
+    const url = `http://127.0.0.1:${this.config.port}/secrets/${id}`;
+    while (Date.now() < expiresAt) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const current = this.getSecretRequest(id);
+      if (current?.status === 'configured') return { configured: true, requestId: id };
+      if (current?.status === 'expired') return { configured: false, reason: 'expired', url };
+    }
+    this.expireSecret(id);
+    return { configured: false, reason: 'expired', url };
   }
 
   getSecretRequest(id: string) {

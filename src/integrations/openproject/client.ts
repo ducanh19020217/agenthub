@@ -98,6 +98,14 @@ export class OpenProjectClient {
     return this.request<OpenProjectUser>('/api/v3/users/me');
   }
 
+  async listProjects(): Promise<OpenProjectCollection<Record<string, unknown>>> {
+    return this.request<OpenProjectCollection<Record<string, unknown>>>('/api/v3/projects?pageSize=100');
+  }
+
+  async listStatuses(): Promise<OpenProjectCollection<{ id: number; name: string; isClosed?: boolean }>> {
+    return this.request<OpenProjectCollection<{ id: number; name: string; isClosed?: boolean }>>('/api/v3/statuses?pageSize=100');
+  }
+
   async listWatched(statusIds: number[]): Promise<OpenProjectWorkPackage[]> {
     const out: OpenProjectWorkPackage[] = [];
     let page = 1;

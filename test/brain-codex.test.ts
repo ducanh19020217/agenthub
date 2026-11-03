@@ -441,5 +441,47 @@ describe('Brain Codex Engine Integration and Failover', () => {
       expect(notifications[0].text).toContain('lỗi cấu hình hoặc khởi động với Codex');
       expect(ctx.chatService.getLastEngine(sessionId)).toBe('claude');
     });
+
+    it('fails over to claude and emits brain.notify even when failoverState is already active', async () => {
+      ctx.profileRepo.upsert({ name: 'claude-default', engine: 'claude', kind: 'system', home: os.homedir(), email: null, enabled: 1 });
+      createCodexProfile('codex-active-failover-err');
+      ctx.config.brain.engine = 'codex';
+      ctx.config.brain.codexProfile = 'codex-active-failover-err';
+
+      // Activate failoverState beforehand (e.g. following previous Claude quota fallback)
+      ctx.chatService.configureFailoverSteps([{ type: 'engine', engine: 'codex' }]);
+      ctx.chatService['failoverState'].activate(3600, 'claude_usage_limit');
+      expect(ctx.chatService.getClaudeFailover().active).toBe(true);
+
+      const sessionId = 'brain:active-failover-state';
+      ctx.chatSessionRepo.insert({
+        id: sessionId,
+        title: 'Brain Active Failover State',
+        mode: 'safe',
+        model: 'gpt-5.6-luna',
+        profileName: 'codex-active-failover-err',
+        kind: 'brain',
+      });
+
+      const notifications: Array<{ level?: string; text?: string }> = [];
+      ctx.scheduler.getEventBus().on('brain.notify', (_id, payload) => {
+        notifications.push(payload as { level?: string; text?: string });
+      });
+
+      const donePromise = new Promise<void>((resolve) => {
+        ctx.scheduler.getEventBus().on('chat.done', (_id, payload) => {
+          if ((payload as { sessionId?: string })?.sessionId === sessionId) resolve();
+        });
+      });
+
+      await ctx.chatService.sendMessage(sessionId, 'hello sim-codex-config-fail');
+      await donePromise;
+
+      // Verify brain.notify was emitted and failover to Claude occurred despite failoverState.active === true
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0].level).toBe('warn');
+      expect(notifications[0].text).toContain('lỗi cấu hình hoặc khởi động với Codex');
+      expect(ctx.chatService.getLastEngine(sessionId)).toBe('claude');
+    });
   });
 });

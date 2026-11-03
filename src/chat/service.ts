@@ -2061,7 +2061,7 @@ export class ChatService {
           this.executeTurn(turn);
           return;
         }
-        if (session.kind === 'brain' && !this.failoverState.snapshot().active) {
+        if (session.kind === 'brain') {
           this.eventBus.emit('brain.notify', undefined, {
             level: 'warn',
             text: `Bộ não gặp lỗi cấu hình hoặc khởi động với Codex (${message.slice(0, 300)}), tự chuyển sang engine dự phòng Claude cho lượt này.`,

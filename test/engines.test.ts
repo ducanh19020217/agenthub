@@ -451,6 +451,15 @@ describe('TOML serialization helpers', () => {
     expect(escapeTomlString('Tiếng Việt và emoji 🚀')).toBe('Tiếng Việt và emoji 🚀');
   });
 
+  it('escapes C1 control characters (U+0080-U+009F) while preserving non-control unicode above U+009F', () => {
+    // C1 control characters boundary and representatives: U+0080, U+0085 (NEL), U+009F
+    expect(escapeTomlString('\x80\x85\x9f')).toBe('\\u0080\\u0085\\u009f');
+    expect(escapeTomlString('before\u0080after')).toBe('before\\u0080after');
+    expect(escapeTomlString('before\u009fafter')).toBe('before\\u009fafter');
+    // U+00A0 is non-breaking space (not a control character), should remain unescaped
+    expect(escapeTomlString('\u00a0')).toBe('\u00a0');
+  });
+
   it('formats bare keys and quoted keys properly', () => {
     expect(toTomlKey('AGENTHUB_PORT')).toBe('AGENTHUB_PORT');
     expect(toTomlKey('chat-session_123')).toBe('chat-session_123');

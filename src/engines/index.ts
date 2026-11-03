@@ -699,11 +699,11 @@ export class FakeEngine implements Engine {
 
 /**
  * Escapes a string for use in TOML basic strings (double quoted).
- * Escapes quotation mark, backslash, control characters (\b, \t, \n, \f, \r, \u00xx), and \u007f.
+ * Escapes quotation mark, backslash, control characters (\b, \t, \n, \f, \r, \u00xx), and \u007f-\u009f (DEL and C1 controls).
  */
 export function escapeTomlString(str: string): string {
-  // eslint-disable-next-line no-control-regex -- control characters must be escaped in TOML basic strings
-  return str.replace(/[\x00-\x1f\x7f"\\]/g, (c) => {
+  // eslint-disable-next-line no-control-regex -- control characters (C0, DEL, C1) must be escaped in TOML basic strings
+  return str.replace(/[\x00-\x1f\x7f-\x9f"\\]/g, (c) => {
     switch (c) {
       case '"': return '\\"';
       case '\\': return '\\\\';

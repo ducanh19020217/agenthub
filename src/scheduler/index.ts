@@ -2934,10 +2934,24 @@ export class Scheduler {
   private escalateReview(taskId: string, reason: string, feedback: string, actor?: string): void {
     const task = this.taskRepo.get(taskId);
     if (!task || task.reviewerEscalated) return;
-    const openFeedback = this.reviewRepo?.getByTask(taskId)
-      .filter((review) => review.verdict === 'changes_requested' && review.feedback)
-      .map((review, index) => `${index + 1}. [${review.actor || 'reviewer'}] ${review.feedback}`)
-      .join('\n') || feedback;
+    const allChanges = this.reviewRepo?.getByTask(taskId)
+      .filter((review) => review.verdict === 'changes_requested' && review.feedback) || [];
+    const openSections: string[] = [];
+    if (feedback) {
+      openSections.push(`[Lỗi vòng hiện tại] ${feedback}`);
+    }
+    const priorMissed = allChanges.slice(0, -1).filter((r) => r.feedback && /missed-earlier/i.test(r.feedback));
+    for (const item of priorMissed) {
+      if (item.feedback && item.feedback !== feedback) {
+        openSections.push(`[Lỗi bỏ sót ghi nhận từ vòng trước (missed-earlier - ${item.actor || 'reviewer'})] ${item.feedback}`);
+      }
+    }
+    const historyList = allChanges
+      .map((review, index) => `${index + 1}. [Lịch sử vòng ${index + 1} - ${review.actor || 'reviewer'}] ${review.feedback}`);
+    const openFeedback = [
+      ...openSections,
+      ...(historyList.length > 0 ? ['Lịch sử các vòng review:', ...historyList] : []),
+    ].join('\n\n') || feedback;
     this.taskRepo.update(taskId, {
       status: 'review',
       reviewerEscalated: 1,

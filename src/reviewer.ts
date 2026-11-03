@@ -104,3 +104,10 @@ export function isReviewerQuotaError(output: string): boolean {
   const tail = output.split('\n').slice(-8).join('\n');
   return /(?:usage\s+limit|rate\s+limit|insufficient_quota).*(?:reached|exceeded|exhausted|hit|reset|try again)|(?:quota).*(?:reached|exceeded|exhausted|reset|try again)/i.test(tail);
 }
+
+export function extractMissedEarlierFindings(feedback: string): string[] {
+  return feedback
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /missed-earlier/i.test(line));
+}

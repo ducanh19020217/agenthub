@@ -3829,7 +3829,6 @@ export class TelegramBotService {
       }
 
       case 'daily_report.created': {
-        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
         if (p.telegram && typeof p.content === 'string') {
           this.broadcastMessage(this.escapeHtml(p.content));
         }

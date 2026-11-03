@@ -9,7 +9,6 @@ import {
   DailyReportService,
   extractTodaySection,
   findLatestPreviousReportFile,
-  formatDailyReport,
   formatDDMMYYYY,
   formatSlashDate,
   formatYYYYMMDD,
@@ -527,11 +526,11 @@ describe('DailyReportService & Daily Report Integration', () => {
       };
       const bot = new TelegramBotService({
         config: tgConfig,
-        projectRepo: { get: () => null } as any,
-        taskRepo: { get: () => null } as any,
-        profileRepo: { getAll: () => [] } as any,
-        quotaMarkRepo: { getAll: () => [] } as any,
-        eventBus: { emit: () => true, on: () => {}, off: () => {} } as any,
+        projectRepo: { get: () => null } as unknown as import('../src/db/index.js').ProjectRepo,
+        taskRepo: { get: () => null } as unknown as import('../src/db/index.js').TaskRepo,
+        profileRepo: { getAll: () => [] } as unknown as import('../src/db/index.js').ProfileRepo,
+        quotaMarkRepo: { getAll: () => [] } as unknown as import('../src/db/index.js').QuotaMarkRepo,
+        eventBus: { emit: () => true, on: () => {}, off: () => {} } as unknown as import('../src/scheduler/index.js').EventBus,
       });
       vi.spyOn(bot, 'broadcastMessage').mockImplementation((text) => {
         sentMessages.push(text);

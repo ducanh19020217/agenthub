@@ -286,6 +286,11 @@ export async function createServer(
     return service.getProject(id);
   });
 
+  fastify.get('/api/projects/:id/effective-config', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getEffectiveConfig(id);
+  });
+
   fastify.get('/api/projects/:id/deploy', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
     return service.getDeployStatus(id);
@@ -600,6 +605,9 @@ export async function createServer(
   });
 
   // --- Config API ---
+  fastify.get('/api/presets', async () => service.getPresets());
+  fastify.post('/api/presets/apply', async (req: FastifyRequest) => service.applyPreset(req.body));
+
   fastify.get('/api/config', async () => {
     return service.getConfig();
   });

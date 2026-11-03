@@ -68,6 +68,8 @@ import { SetupManager } from '../tools/setup.js';
 import { createNewGitProject, inspectProject, readClaudeSessionExcerpt } from '../projects/inspect.js';
 import type { DeployService } from '../deploy.js';
 import type { PerfCollector } from '../perf.js';
+import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../presets.js';
+import { computeEffectiveConfig } from '../effective-config.js';
 
 const execFileAsync = promisify(execFile);
 const CODEX_EMAIL_RECHECK_MS = 10 * 60 * 1000;
@@ -4353,5 +4355,18 @@ export class AppService {
     this.chatService.setClaudeApiKey(value);
     this.scheduler.getEventBus().emit('config.updated', undefined, { brain: { apiKey: 'configured' } });
     return this.getClaudeApiKeyStatus();
+  }
+
+  getPresets() {
+    return Object.values(PRESET_DEFINITIONS);
+  }
+
+  applyPreset(raw: unknown) {
+    const parsed = ApplyPresetInputSchema.parse(raw);
+    return applyPreset(this, parsed);
+  }
+
+  getEffectiveConfig(projectId: string) {
+    return computeEffectiveConfig(this, projectId);
   }
 }

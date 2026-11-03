@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -13,6 +13,9 @@ import { loadConfig } from '../src/config.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { createMcpServer } from '../src/mcp/index.js';
 import { Engine } from '../src/engines/index.js';
+import { saveOpenProjectKey } from '../src/integrations/openproject/secrets.js';
+import { OpenProjectSourceSchema } from '../src/config.js';
+import { DailyReportService } from '../src/integrations/openproject/daily-report.js';
 
 describe('AgentHub MCP Server Tools', () => {
   let tmpDir: string;
@@ -748,6 +751,52 @@ describe('AgentHub MCP Server Tools', () => {
     })) as { content: Array<{ type: string; text: string }>; isError?: boolean };
     expect(largeDiff.isError).toBeUndefined();
     expect(largeDiff.content[0].text).toContain('[output truncated at 64KB]');
+  });
+
+  it('hub_daily_report triggers daily report generation via API', async () => {
+    const source = OpenProjectSourceSchema.parse({
+      id: 'op-demo',
+      url: 'https://op.example.test',
+      project: 'demo',
+      openStatusIds: [],
+      dailyReport: {
+        enabled: true,
+        time: '08:00',
+        weekdaysOnly: true,
+        maxItems: 10,
+        telegram: false,
+      },
+    });
+    ctx.config.integrations.openproject.sources = [source];
+    saveOpenProjectKey(ctx.config.hubHome, 'op-demo', 'test-key');
+
+    const fakeFetch = vi.fn(async (url: string | URL) => {
+      const urlStr = url.toString();
+      if (urlStr.includes('/users/me')) {
+        return new Response(JSON.stringify({ id: 1, name: 'Alice' }));
+      }
+      return new Response(JSON.stringify({ total: 0, _embedded: { elements: [] } }));
+    });
+
+    ctx.dailyReportService = new DailyReportService({
+      config: ctx.config,
+      eventBus: ctx.scheduler.getEventBus(),
+      fetchFn: fakeFetch as unknown as typeof fetch,
+      now: () => new Date('2026-11-03T12:00:00Z').getTime(),
+    });
+    ctx.service.dailyReportService = ctx.dailyReportService;
+
+    const res = (await client.callTool({
+      name: 'hub_daily_report',
+      arguments: {
+        sourceId: 'op-demo',
+        date: '2026-11-03',
+      },
+    })) as { content: Array<{ type: string; text: string }>; isError?: boolean };
+
+    expect(res.isError).toBeUndefined();
+    expect(res.content[0].text).toContain('✓ Đã tạo báo cáo ngày cho nguồn op-demo');
+    expect(res.content[0].text).toContain('Ngày: 03/11/2026');
   });
 });
 

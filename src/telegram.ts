@@ -3517,7 +3517,7 @@ export class TelegramBotService {
 
     // 1. Brain auto mode: suppress raw task notifications
     try {
-      const isSystemEvent = type === 'quota.exhausted' || type === 'claude.quota_exhausted' || type.startsWith('disk.') || type.startsWith('system.') || type.startsWith('hub.') || type.startsWith('deploy.') || type === 'profile.auth_expired' || type === 'chat.limit_waiting';
+      const isSystemEvent = type === 'quota.exhausted' || type === 'claude.quota_exhausted' || type.startsWith('disk.') || type.startsWith('system.') || type.startsWith('hub.') || type.startsWith('deploy.') || type === 'profile.auth_expired' || type === 'chat.limit_waiting' || type.startsWith('daily_report.');
     this.notificationProjectId = isSystemEvent ? null : projectId;
     this.notificationDedupProjectId = projectId;
     const focusProjectId = this.config.focus?.projectId;
@@ -3540,6 +3540,7 @@ export class TelegramBotService {
         type === 'claude.quota_exhausted' ||
         type === 'hub.restart_failed' ||
         type.startsWith('deploy.') ||
+        type.startsWith('daily_report.') ||
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||

@@ -854,4 +854,23 @@ describe('NotificationService (Desktop Notifications)', () => {
 
     notifier.stop();
   });
+
+  it('notifies for daily_report.created and daily_report.failed events', () => {
+    const notifier = new NotificationService({
+      eventBus,
+      config,
+      exec: fakeExec,
+    });
+    notifier.start();
+
+    eventBus.emit('daily_report.created', undefined, { sourceId: 'demo-source', path: '/reports/demo-source/bao-cao-03-11-2026.txt' });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('đã tạo báo cáo ngày (demo-source)');
+
+    eventBus.emit('daily_report.failed', undefined, { sourceId: 'demo-source', error: 'Network error' });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('tạo báo cáo ngày (demo-source) thất bại');
+
+    notifier.stop();
+  });
 });

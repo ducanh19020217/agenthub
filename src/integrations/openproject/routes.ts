@@ -102,11 +102,16 @@ export function registerOpenProjectRoutes(
   fastify.post('/api/integrations/openproject/sources/:id/daily-report', async (req: FastifyRequest) => {
     const { id } = idParams.parse(req.params);
     sourceOrThrow(config, id);
-    const query = z.object({
-      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-    }).parse(req.query || {});
+    const query = (req.query || {}) as Record<string, unknown>;
+    let dateStr: string | undefined;
+    if (query.date !== undefined) {
+      if (typeof query.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(query.date)) {
+        throw new HttpError(400, 'bad_request', 'Tham số date phải có định dạng YYYY-MM-DD');
+      }
+      dateStr = query.date;
+    }
     if (!options.dailyReport) throw new HttpError(503, 'unavailable', 'DailyReportService chưa sẵn sàng');
-    const result = await options.dailyReport(id, query.date);
+    const result = await options.dailyReport(id, dateStr);
     return { ok: true, ...result };
   });
 }

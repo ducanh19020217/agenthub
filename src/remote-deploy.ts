@@ -203,56 +203,55 @@ export class RemoteDeployService {
   }
 
   private async executeDeploy(projectId: string, trigger: 'manual' | 'after-gitea-sync', commit?: string): Promise<void> {
-    const project = this.projectRepo.get(projectId);
-    if (!project) {
-      this.running.delete(projectId);
-      return;
-    }
-
-    const settings = projectSettings(project).remoteDeploy;
-    const timestamp = Date.now();
-    const logDir = path.join(this.config.hubHome, 'logs', 'remote-deploy');
-    fs.mkdirSync(logDir, { recursive: true });
-    const logPath = path.join(logDir, `${projectId}-${timestamp}.log`);
-
-    const secrets = loadRemoteDeploySecrets(this.config.hubHome, projectId);
-    const secretValues = Object.values(secrets);
-    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...secrets };
-
-    const appendLog = (text: string) => {
-      const redacted = redactSecrets(text, secretValues);
-      try {
-        fs.appendFileSync(logPath, redacted + '\n', 'utf8');
-      } catch {
-        // best effort
-      }
-    };
-
-    const status: RemoteDeployStatus = {
-      projectId,
-      status: 'running',
-      startedAt: new Date().toISOString(),
-      trigger,
-      commit,
-      logPath,
-    };
-    this.latest.set(projectId, status);
-    this.eventBus.emit('remote_deploy.started', undefined, { projectId, trigger, commit, logPath });
-
-    appendLog(`[${new Date().toISOString()}] Remote deploy started for project "${projectId}" (trigger: ${trigger})`);
-    if (commit) {
-      appendLog(`[${new Date().toISOString()}] Commit: ${commit}`);
-    }
-
-    const steps = settings.steps || [];
-    const timeoutSec = settings.timeoutSec ?? 1800;
-    const totalTimeoutMs = timeoutSec * 1000;
-    const startTime = Date.now();
-
-    let failed = false;
-    let failError = '';
-
     try {
+      const project = this.projectRepo.get(projectId);
+      if (!project) {
+        return;
+      }
+
+      const settings = projectSettings(project).remoteDeploy;
+      const timestamp = Date.now();
+      const logDir = path.join(this.config.hubHome, 'logs', 'remote-deploy');
+      fs.mkdirSync(logDir, { recursive: true });
+      const logPath = path.join(logDir, `${projectId}-${timestamp}.log`);
+
+      const secrets = loadRemoteDeploySecrets(this.config.hubHome, projectId);
+      const secretValues = Object.values(secrets);
+      const childEnv: NodeJS.ProcessEnv = { ...process.env, ...secrets };
+
+      const appendLog = (text: string) => {
+        const redacted = redactSecrets(text, secretValues);
+        try {
+          fs.appendFileSync(logPath, redacted + '\n', 'utf8');
+        } catch {
+          // best effort
+        }
+      };
+
+      const status: RemoteDeployStatus = {
+        projectId,
+        status: 'running',
+        startedAt: new Date().toISOString(),
+        trigger,
+        commit,
+        logPath,
+      };
+      this.latest.set(projectId, status);
+      this.eventBus.emit('remote_deploy.started', undefined, { projectId, trigger, commit, logPath });
+
+      appendLog(`[${new Date().toISOString()}] Remote deploy started for project "${projectId}" (trigger: ${trigger})`);
+      if (commit) {
+        appendLog(`[${new Date().toISOString()}] Commit: ${commit}`);
+      }
+
+      const steps = settings.steps || [];
+      const timeoutSec = settings.timeoutSec ?? 1800;
+      const totalTimeoutMs = timeoutSec * 1000;
+      const startTime = Date.now();
+
+      let failed = false;
+      let failError = '';
+
       for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
         if (!step || step.length === 0) continue;
@@ -416,6 +415,8 @@ export class RemoteDeployService {
           });
         }
       }
+    } catch (unexpected) {
+      console.error(`[remote-deploy] Unexpected error executing deploy for ${projectId}:`, unexpected);
     } finally {
       const queuedRun = this.queued.get(projectId);
       if (queuedRun) {

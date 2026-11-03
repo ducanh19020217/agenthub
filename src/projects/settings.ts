@@ -41,7 +41,7 @@ export const RemoteDeploySettingsSchema = z.object({
   trigger: z.enum(['after-gitea-sync', 'manual']).default('manual'),
   steps: z.array(z.array(z.string())).default([]),
   healthChecks: z.array(RemoteDeployHealthCheckSchema).default([]),
-  waitMinutes: z.number().int().min(0).default(15),
+  waitMinutes: z.number().min(0).default(15),
   timeoutSec: z.number().int().positive().default(1800),
 });
 export type RemoteDeploySettings = z.infer<typeof RemoteDeploySettingsSchema>;

@@ -3906,6 +3906,24 @@ export class TelegramBotService {
         break;
       }
 
+      case 'task.pause_reminder': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const minutes = typeof p.pausedMinutes === 'number' ? p.pausedMinutes : 30;
+        const taskLabel = taskId || 'Task';
+        const pauseBadge = p.reason === 'load' ? 'Tạm dừng (quá tải)' : 'Tạm dừng (thủ công)';
+        const keyboard: InlineKeyboardButton[][] = [];
+        if (taskId) {
+          keyboard.push([
+            { text: '▶️ Tiếp tục', callback_data: `task:resume:${taskId}` },
+          ]);
+        }
+        this.broadcastMessage(
+          `${prefix}⏸ <b>Nhắc nhở: ${pauseBadge}</b>\nID: <code>${taskLabel}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>\nTask đã bị dừng hơn ${minutes} phút trong khi máy không quá tải.`,
+          keyboard.length > 0 ? { inline_keyboard: keyboard } : undefined,
+        );
+        break;
+      }
+
       case 'claude.quota_exhausted': {
         if (!notifyAllExhausted || p.fallbackAvailable !== false) return;
         this.broadcastMessage('⏳ <b>Claude hết quota</b>\nKhông còn bước fallback khả dụng, cần chờ reset quota.');

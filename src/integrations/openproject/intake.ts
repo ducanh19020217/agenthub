@@ -170,7 +170,7 @@ export class OpenProjectIntakeService {
           writeback: '{}',
           created_at: new Date(this.now()).toISOString(),
         };
-        const importedResult = await this.handleTicket(source, attached.primary, client, wp, activities, seed, false);
+        const importedResult = await this.handleTicket(source, attached.primary, client, wp, activities, seed, 'new');
         imported += importedResult.imported;
         comments += importedResult.comments;
         this.trackerRepo.upsert({ ...importedResult.row, status_id: currentStatus, updated_at: wp.updatedAt || new Date(this.now()).toISOString(), last_comment_id: lastComment });
@@ -190,8 +190,11 @@ export class OpenProjectIntakeService {
       }
 
       let row = previous;
-      if (reopened || (changed && freshComments.length > 0)) {
-        const importedResult = await this.handleTicket(source, attached.primary, client, wp, activities, row, reopened);
+      const hasTasks = taskIds(previous).length > 0;
+      const isNew = !hasTasks && !changed;
+      if (reopened || (changed && freshComments.length > 0) || isNew) {
+        const event = reopened ? 'reopened' : isNew ? 'new' : 'comment';
+        const importedResult = await this.handleTicket(source, attached.primary, client, wp, activities, row, event);
         imported += importedResult.imported;
         comments += importedResult.comments;
         row = importedResult.row;
@@ -202,10 +205,10 @@ export class OpenProjectIntakeService {
     return { imported, comments };
   }
 
-  private async handleTicket(source: OpenProjectSource, primary: ProjectRow, client: OpenProjectClient, wp: OpenProjectWorkPackage, activities: OpenProjectActivity[], previous: TrackerItemRow, reopened: boolean): Promise<{ row: TrackerItemRow; imported: number; comments: number }> {
+  private async handleTicket(source: OpenProjectSource, primary: ProjectRow, client: OpenProjectClient, wp: OpenProjectWorkPackage, activities: OpenProjectActivity[], previous: TrackerItemRow, event: 'new' | 'reopened' | 'comment'): Promise<{ row: TrackerItemRow; imported: number; comments: number }> {
     const ids = taskIds(previous);
     const openTasks = ids.map((id) => this.taskRepo.get(id)).filter((task): task is NonNullable<ReturnType<TaskRepo['get']>> => Boolean(task && OPEN_TASK_STATUSES.has(task.status)));
-    const isNewTaskEvent = reopened || previous.status_id !== statusId(wp) || !ids.length;
+    const isNewTaskEvent = event === 'new' || event === 'reopened';
     const number = ticketNumber(displayId(wp));
     let imported = 0;
     let comments = 0;
@@ -224,7 +227,7 @@ export class OpenProjectIntakeService {
       this.eventBus.emit('tracker.ticket_imported', task.id, { sourceId: source.id, wpId: wp.id, displayId: displayId(wp) });
     } else if (openTasks.length > 0) {
       await writeTicketDirectory(client, wp, activities, dir, source.url);
-      if (!isNewTaskEvent) {
+      if (event === 'comment') {
         comments = 1;
         this.eventBus.emit('tracker.comment', openTasks[0].id, { sourceId: source.id, wpId: wp.id, displayId: displayId(wp), comment: activities.at(-1)?.comment?.raw || '' });
       }

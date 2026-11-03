@@ -34,6 +34,7 @@ import {
   CiRepo,
 } from '../db/index.js';
 import type { CiWatchService } from '../ci.js';
+import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
 import { BulletinService } from '../bulletin.js';
 import { ProfileService as CoreProfileService, accountKey, isProfileLoggedIn, exchangeAgyRefreshToken, writeAgyIsolatedToken, fetchAgyGoogleUserInfo, fetchAgyGoogleUserInfoDetailed, inspectAgyAccessToken } from '../profiles/index.js';
 import { Scheduler } from '../scheduler/index.js';
@@ -901,6 +902,7 @@ export class AppService {
   public deployService?: DeployService;
   public ciRepo?: CiRepo;
   public ciService?: CiWatchService;
+  public intakeService?: OpenProjectIntakeService;
   private perfCollector?: PerfCollector;
   private profileChecks = new Set<string>();
   private reviewingTasks = new Set<string>();

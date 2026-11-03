@@ -24,8 +24,10 @@ import {
   BrainTurnRepo,
   BrainDirectiveRepo,
   CiRepo,
+  TrackerItemRepo,
 } from './db/index.js';
 import { CiWatchService } from './ci.js';
+import { OpenProjectIntakeService } from './integrations/openproject/intake.js';
 import { ProfileService } from './profiles/index.js';
 import { Scheduler } from './scheduler/index.js';
 import { Engine, AgyEngine, CodexEngine, FakeEngine } from './engines/index.js';
@@ -97,6 +99,8 @@ export interface DaemonContext {
   deployService: DeployService;
   ciRepo: CiRepo;
   ciService: CiWatchService;
+  trackerRepo: TrackerItemRepo;
+  intakeService: OpenProjectIntakeService;
   perfCollector: PerfCollector;
 }
 
@@ -130,6 +134,7 @@ export function createContext(
   const profileRepo = new ProfileRepo(db);
   const quotaMarkRepo = new QuotaMarkRepo(db);
   const taskRepo = new TaskRepo(db);
+  const trackerRepo = new TrackerItemRepo(db);
   const runRepo = new RunRepo(db);
   const runMetricsRepo = new RunMetricsRepo(db);
   const reviewRepo = new ReviewRepo(db);
@@ -351,6 +356,15 @@ export function createContext(
   });
   service.ciRepo = ciRepo;
   service.ciService = ciService;
+  const intakeService = new OpenProjectIntakeService({
+    config,
+    projectRepo,
+    taskRepo,
+    trackerRepo,
+    taskService: service,
+    eventBus: scheduler.getEventBus(),
+  });
+  service.intakeService = intakeService;
 
   const notifier = new NotificationService({
     eventBus: scheduler.getEventBus(),
@@ -416,6 +430,8 @@ export function createContext(
     deployService,
     ciRepo,
     ciService,
+    trackerRepo,
+    intakeService,
     perfCollector,
   };
 }
@@ -443,6 +459,11 @@ export function closeContext(ctx: DaemonContext): void {
   }
   try {
     ctx.ciService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.intakeService?.stop();
   } catch {
     // ignore
   }
@@ -515,6 +536,7 @@ export async function startDaemon(
   ctx.bulletinService.start();
   ctx.brainRunner.start();
   ctx.ciService.start();
+  ctx.intakeService.start();
   ctx.perfCollector.start();
 
   // Start Telegram bot if enabled
@@ -524,6 +546,7 @@ export async function startDaemon(
 
   // Start Fastify HTTP server with security and API endpoints
   const fastify = await createServer(ctx.service, config, {
+    openProjectSync: (sourceId) => ctx.intakeService.sync(sourceId),
     onShutdown: (disable) => {
       if (disable) {
         try {

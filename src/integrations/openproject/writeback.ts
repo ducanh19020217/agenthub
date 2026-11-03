@@ -10,9 +10,9 @@ type GitRunner = (cwd: string, args: string[]) => Promise<{ code: number; output
 type WritebackState = {
   linked?: Record<string, string>;
   merged?: Record<string, string>;
+  reviewRequested?: Record<string, string>;
   commented?: boolean;
   resolved?: boolean;
-  reviewRequested?: boolean;
   pushWarning?: boolean;
   failed?: string;
 };
@@ -72,6 +72,8 @@ export class OpenProjectWritebackService {
   private readonly timerMs: number;
   private readonly now: () => number;
   private readonly retryTimers = new Map<string, NodeJS.Timeout>();
+  private readonly retryAttempts = new Map<string, number>();
+  private readonly queues = new Map<string, Promise<void>>();
   private readonly bound = (type: string, taskId?: string, payload?: unknown) => {
     if (type === 'task.done' || type === 'task.merged' || type === 'task.blocked') void this.handleTaskEvent(type, taskId, payload);
     if (type === 'deploy.succeeded' || type === 'gitea.sync.succeeded') void this.handlePushEvent(type, payload);
@@ -104,6 +106,8 @@ export class OpenProjectWritebackService {
     this.eventBus.off('*', this.bound);
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
+    this.retryAttempts.clear();
+    this.queues.clear();
   }
 
   private async handleTaskEvent(type: string, taskId?: string, payload?: unknown): Promise<void> {
@@ -111,15 +115,15 @@ export class OpenProjectWritebackService {
     const task = this.taskRepo.get(taskId);
     if (!task?.externalRef) return;
     const matches = this.trackerRepo.listAll().filter((row) => row.display_id === task.externalRef && parseIds(row).includes(taskId));
-    for (const row of matches) {
-      if (type === 'task.done') await this.createLinkedTasks(row, task);
+    for (const row of matches) await this.enqueue(row, async () => {
+      if (type === 'task.done') await this.createLinkedTasks(this.latest(row), task);
       if (type === 'task.merged') {
         const merge = payload && typeof payload === 'object' ? payload as { mergeCommit?: string } : {};
-        await this.markMerged(row, taskId, merge.mergeCommit);
+        await this.markMerged(this.latest(row), taskId, merge.mergeCommit);
       }
-      if (type === 'task.blocked') await this.requestReview(row, task);
-      await this.process(row);
-    }
+      if (type === 'task.blocked') await this.requestReview(this.latest(row), task);
+      await this.process(this.latest(row));
+    });
   }
 
   private async handlePushEvent(type: string, payload: unknown): Promise<void> {
@@ -127,12 +131,29 @@ export class OpenProjectWritebackService {
     if (type === 'gitea.sync.succeeded' && p.merged !== true) return;
     const projectId = typeof p.projectId === 'string' ? p.projectId : undefined;
     if (!projectId) return;
-    for (const row of this.trackerRepo.listAll()) await this.process(row, projectId);
+    for (const row of this.trackerRepo.listAll()) await this.enqueue(row, () => this.process(this.latest(row), projectId));
+  }
+
+  private latest(row: TrackerItemRow): TrackerItemRow {
+    return this.trackerRepo.get(row.source_id, row.wp_id) || row;
+  }
+
+  private enqueue(row: TrackerItemRow, work: () => Promise<void>): Promise<void> {
+    const key = `${row.source_id}:${row.wp_id}`;
+    const previous = this.queues.get(key) || Promise.resolve();
+    const next = previous.catch(() => undefined).then(work);
+    this.queues.set(key, next.finally(() => { if (this.queues.get(key) === next) this.queues.delete(key); }));
+    return next;
   }
 
   private async markMerged(row: TrackerItemRow, taskId: string, commit?: string): Promise<void> {
+    row = this.latest(row);
     const state = parseState(row);
     state.merged = { ...(state.merged || {}), [taskId]: commit || 'merged' };
+    if (state.reviewRequested) {
+      delete state.reviewRequested[taskId];
+      if (Object.keys(state.reviewRequested).length === 0) delete state.reviewRequested;
+    }
     this.save(row, state);
   }
 
@@ -161,7 +182,6 @@ export class OpenProjectWritebackService {
       const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
       const subject = `[${row.display_id}] Cần sửa ở ${projectId}`;
       const body = `Ticket liên kết: [${row.display_id}]\n\n${content}`;
-      await client.createWorkPackage({ project: source.project, subject, description: body });
       const slugBase = `op-${row.display_id.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${projectId.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.replace(/-+$/g, '');
       let slug = slugBase || 'op-linked';
       let n = 1;
@@ -175,10 +195,11 @@ export class OpenProjectWritebackService {
   }
 
   private async requestReview(row: TrackerItemRow, task: TaskRow): Promise<void> {
+    row = this.latest(row);
     const state = parseState(row);
-    if (state.reviewRequested) return;
     const content = section(task.blockedReport, '## Cần quyết định');
     if (!content) return;
+    if (state.reviewRequested?.[task.id] === content) return;
     const source = sourceFor(this.config, row.source_id);
     const key = source && readOpenProjectKey(this.config.hubHome, source.id);
     if (!source || !key) return;
@@ -186,7 +207,7 @@ export class OpenProjectWritebackService {
       const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
       await client.addComment(row.wp_id, `**[Cần duyệt]**\n${content}`);
       if (source.reviewStatusId !== null) await client.setStatus(row.wp_id, source.reviewStatusId);
-      state.reviewRequested = true;
+      state.reviewRequested = { ...(state.reviewRequested || {}), [task.id]: content };
       this.save(row, state);
       this.eventBus.emit('tracker.review_requested', task.id, { sourceId: row.source_id, displayId: row.display_id });
     } catch (error) { await this.handleError(row, error, 'review request'); }
@@ -208,48 +229,60 @@ export class OpenProjectWritebackService {
   }
 
   private async process(row: TrackerItemRow, changedProjectId?: string): Promise<void> {
+    row = this.latest(row);
     const source = sourceFor(this.config, row.source_id);
     const ids = parseIds(row);
     const state = parseState(row);
-    if (!source || state.resolved || state.reviewRequested) return;
+    if (!source || state.resolved) return;
     if (changedProjectId && !ids.some((id) => id.startsWith(`${changedProjectId}/`))) return;
     const tasks = ids.map((id) => this.taskRepo.get(id)).filter((task): task is TaskRow => Boolean(task));
-    if (tasks.length === 0 || !tasks.every((task) => state.merged?.[task.id])) return;
+    for (const task of tasks) {
+      if (task.doneReport && !state.linked?.[task.projectId]) await this.createLinkedTasks(this.latest(row), task);
+    }
+    row = this.latest(row);
+    const currentState = parseState(row);
+    if (tasks.length === 0 || !tasks.every((task) => currentState.merged?.[task.id])) return;
     const comments = tasks.map((task) => section(task.doneReport, '## Comment cho tester')).filter(Boolean) as string[];
     const push = tasks.map((task) => this.hasPush(task.projectId));
     for (let i = 0; i < tasks.length; i++) {
       if (!push[i]) {
-        if (!state.pushWarning) { console.warn(`[openproject-writeback] ${row.display_id}: project không cấu hình push`); state.pushWarning = true; this.save(row, state); }
+        if (!currentState.pushWarning) { console.warn(`[openproject-writeback] ${row.display_id}: project không cấu hình push`); currentState.pushWarning = true; this.save(row, currentState); }
         continue;
       }
       const project = this.projectRepo.get(tasks[i].projectId);
-      const commit = state.merged?.[tasks[i].id];
+      const commit = currentState.merged?.[tasks[i].id];
       if (!project || !commit || commit === 'merged' || !(await this.pushed(project, commit, push[i]!))) return;
     }
     const key = readOpenProjectKey(this.config.hubHome, source.id);
     if (!key) return this.retry(row, new Error('Nguồn OpenProject chưa có API key'));
     try {
       const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
-      if (!state.commented) {
+      if (!currentState.commented) {
         await client.addComment(row.wp_id, `**[AgentHub] Đã sửa**\n${comments.map((text, i) => `### ${tasks[i].id}\n${text}`).join('\n\n')}`);
-        state.commented = true;
+        currentState.commented = true;
       }
-      if (source.autoResolve && source.resolvedStatusId !== null && !state.resolved) {
+      if (source.autoResolve && source.resolvedStatusId !== null && !currentState.resolved) {
         await client.setStatus(row.wp_id, source.resolvedStatusId);
-        state.resolved = true;
+        currentState.resolved = true;
         this.eventBus.emit('tracker.resolved', tasks[0].id, { sourceId: row.source_id, displayId: row.display_id });
       }
-      this.save(row, state);
+      this.save(this.latest(row), currentState);
     } catch (error) { await this.handleError(row, error, 'resolve writeback'); }
   }
 
   private retry(row: TrackerItemRow, error: unknown): void {
     const key = `${row.source_id}:${row.wp_id}`;
     if (this.retryTimers.has(key)) return;
-    const timer = setTimeout(() => { this.retryTimers.delete(key); void this.process(row); }, this.timerMs);
+    const attempt = this.retryAttempts.get(key) || 0;
+    this.retryAttempts.set(key, attempt + 1);
+    const delay = Math.min(this.timerMs * (2 ** attempt), 30 * 60_000);
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(key);
+      void this.enqueue(row, () => this.process(this.latest(row)));
+    }, delay);
     timer.unref?.();
     this.retryTimers.set(key, timer);
-    console.warn(`[openproject-writeback] retry ${key}: ${error instanceof Error ? error.message : String(error)}`);
+    console.warn(`[openproject-writeback] retry ${key} in ${delay}ms: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   private async handleError(row: TrackerItemRow, error: unknown, operation: string): Promise<void> {

@@ -3847,6 +3847,15 @@ export class TelegramBotService {
         break;
       }
 
+      case 'tracker.ticket_imported':
+      case 'tracker.comment':
+      case 'tracker.poll_failed': {
+        const ref = typeof p.displayId === 'string' ? p.displayId : typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        const label = type === 'tracker.ticket_imported' ? 'đã nhập ticket thành task' : type === 'tracker.comment' ? 'có comment mới' : 'đồng bộ thất bại';
+        this.broadcastMessage(`${prefix}🔗 <b>${this.escapeHtml(ref)}</b> ${label}.`);
+        break;
+      }
+
       case 'quota.exhausted': {
         const family = typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '';
         const quotaKey = family || 'all';
@@ -4407,6 +4416,12 @@ export class TelegramBotService {
         return minimal ? `${prefix}CI thất bại` : `${prefix}CI thất bại: ${p?.workflow || 'CI'}`;
       case 'ci.passed':
         return minimal ? `${prefix}CI đã xanh` : `${prefix}CI đã xanh: ${p?.workflow || 'CI'}`;
+      case 'tracker.ticket_imported':
+        return `${prefix}Đã nhập ticket ${p?.displayId || 'OpenProject'} thành task`;
+      case 'tracker.comment':
+        return `${prefix}Ticket ${p?.displayId || 'OpenProject'} có comment mới`;
+      case 'tracker.poll_failed':
+        return `${prefix}Đồng bộ OpenProject thất bại: ${p?.sourceId || ''}`;
       case 'merge.conflict':
         return `${prefix}Xung đột khi merge tự động (${taskId || 'task'})`;
       case 'merge.failed':

@@ -302,6 +302,24 @@ export class NotificationService {
         break;
       }
 
+      case 'tracker.ticket_imported': {
+        const ref = typeof p.displayId === 'string' ? p.displayId : 'ticket';
+        this.notify(`${this.appName}: đã nhập ticket ${ref} thành task`, 'normal');
+        break;
+      }
+
+      case 'tracker.comment': {
+        const ref = typeof p.displayId === 'string' ? p.displayId : 'ticket';
+        this.notify(`${this.appName}: ticket ${ref} có comment mới`, 'normal');
+        break;
+      }
+
+      case 'tracker.poll_failed': {
+        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        this.notify(`${this.appName}: đồng bộ ${source} thất bại`, 'critical');
+        break;
+      }
+
       case 'task.paused':
       case 'load.task_paused': {
         this.notifyLoadSummary(now, p.reason === 'load' ? 'quá tải hệ thống' : 'yêu cầu tạm dừng');

@@ -19,6 +19,7 @@ import {
   ProfileRow,
   KnowledgeRepo,
   TaskNoteRepo,
+  TrackerItemRepo,
 } from '../db/index.js';
 import { projectSettings } from '../projects/settings.js';
 import { renderCommitTemplate, renderTaskBranch } from '../commit-convention.js';
@@ -270,6 +271,7 @@ export class Scheduler {
   private checkRunner?: CheckRunner;
   private db?: Database.Database;
   private taskNoteRepo?: TaskNoteRepo;
+  private trackerRepo?: TrackerItemRepo;
   private runMetricsRepo?: RunMetricsRepo;
   private knowledgeRepo?: KnowledgeRepo;
   private reviewRepo?: ReviewRepo;
@@ -330,6 +332,7 @@ export class Scheduler {
     if (db) {
       this.checkRunner = new CheckRunner(db);
       this.taskNoteRepo = new TaskNoteRepo(db);
+      this.trackerRepo = new TrackerItemRepo(db);
     }
 
     if (engineOverrides && !(engineOverrides instanceof Map) && 'diskSpace' in engineOverrides) {
@@ -3185,6 +3188,18 @@ export class Scheduler {
       project?.path,
       settings?.reviewChecklist || [],
     );
+    const ticketContext = path.join(task.worktreePath, '.agenthub', 'context', 'ticket');
+    if (task.externalRef && this.trackerRepo) {
+      const item = this.trackerRepo.listAll().find((row) => row.display_id === task.externalRef);
+      if (item) {
+        const sourceDir = path.join(this.config.hubHome, 'tracker', item.source_id, String(item.wp_id));
+        if (fs.existsSync(sourceDir)) {
+          fs.rmSync(ticketContext, { recursive: true, force: true });
+          fs.mkdirSync(path.dirname(ticketContext), { recursive: true });
+          fs.cpSync(sourceDir, ticketContext, { recursive: true });
+        }
+      }
+    }
   }
 
   private isProfileBusy(profileName: string): boolean {

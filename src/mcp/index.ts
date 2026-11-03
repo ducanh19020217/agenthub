@@ -548,6 +548,20 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
 
   // 5. hub_create_task
   server.tool(
+    'hub_tracker_sync',
+    'Chạy ngay một lượt đồng bộ ticket OpenProject cho một nguồn',
+    { sourceId: z.string().min(1) },
+    async (args) => {
+      try {
+        const result = await callApi<{ imported: number; comments: number }>('POST', `/api/integrations/openproject/sources/${encodeURIComponent(args.sourceId)}/sync`);
+        return { content: [{ type: 'text', text: `✓ Đã đồng bộ nguồn ${args.sourceId}: ${result.imported} task mới, ${result.comments} comment.` }] };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
+  server.tool(
     'hub_create_task',
     'Tạo task mới trong AgentHub. Nếu start=true thì đưa thẳng vào hàng đợi (queued)',
     {

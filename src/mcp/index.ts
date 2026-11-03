@@ -1471,6 +1471,22 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     },
   );
 
+  server.tool(
+    'hub_remote_deploy',
+    'Kích hoạt remote deploy cho một project',
+    { projectId: z.string().describe('ID của project') },
+    async ({ projectId }) => {
+      try {
+        const targetProject = projectId || scopedProject();
+        if (!targetProject) throw new Error('Cần cung cấp projectId');
+        const result = await callApi('POST', `/api/projects/${encodeURIComponent(targetProject)}/remote-deploy`);
+        return { content: [{ type: 'text', text: `✓ Đã kích hoạt remote deploy cho project "${targetProject}": ${JSON.stringify(result)}` }] };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
   return server;
 }
 

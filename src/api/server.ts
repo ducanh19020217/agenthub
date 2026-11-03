@@ -308,6 +308,28 @@ export async function createServer(
     return reply.status(202).send(service.rerunDeploy(id));
   });
 
+  fastify.put('/api/projects/:id/remote-deploy/env', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.saveRemoteDeployEnv(id, req.body);
+  });
+
+  fastify.post('/api/projects/:id/remote-deploy', async (req: FastifyRequest, reply: FastifyReply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as { commit?: string };
+    const status = service.triggerRemoteDeploy(id, { trigger: 'manual', commit: body.commit });
+    return reply.status(202).send(status);
+  });
+
+  fastify.get('/api/projects/:id/remote-deploy/status', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getRemoteDeployStatus(id) ?? { projectId: id, status: 'idle' };
+  });
+
+  fastify.get('/api/projects/:id/remote-deploy', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getRemoteDeployStatus(id) ?? { projectId: id, status: 'idle' };
+  });
+
   fastify.post('/api/projects', async (req: FastifyRequest, reply: FastifyReply) => {
     const project = service.createProject(req.body);
     return reply.status(201).send(project);

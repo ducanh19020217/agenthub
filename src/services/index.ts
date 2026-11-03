@@ -68,6 +68,7 @@ import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, Re
 import { SetupManager } from '../tools/setup.js';
 import { createNewGitProject, inspectProject, readClaudeSessionExcerpt } from '../projects/inspect.js';
 import type { DeployService } from '../deploy.js';
+import type { RemoteDeployService, RemoteDeployStatus } from '../remote-deploy.js';
 import type { PerfCollector } from '../perf.js';
 import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../presets.js';
 import { computeEffectiveConfig } from '../effective-config.js';
@@ -900,6 +901,7 @@ export function formatEventSummary(
 
 export class AppService {
   public deployService?: DeployService;
+  public remoteDeployService?: RemoteDeployService;
   public ciRepo?: CiRepo;
   public ciService?: CiWatchService;
   public intakeService?: OpenProjectIntakeService;
@@ -1022,6 +1024,7 @@ export class AppService {
     const chatPids = this.chatService?.getRunningPids?.() || [];
     this.chatService?.stop();
     this.deployService?.stop();
+    this.remoteDeployService?.stop();
     this.ciService?.stop();
     void this.telegramBotService?.stop();
     return {
@@ -1642,6 +1645,33 @@ export class AppService {
     this.getProject(id);
     if (!this.deployService) throw new HttpError(503, 'unavailable', 'Deploy service chưa sẵn sàng');
     return this.deployService.pushNow(id);
+  }
+
+  getRemoteDeployStatus(id: string): RemoteDeployStatus | null {
+    this.getProject(id);
+    return this.remoteDeployService?.getStatus(id) || null;
+  }
+
+  triggerRemoteDeploy(id: string, options?: { trigger?: 'manual' | 'after-gitea-sync'; commit?: string }): RemoteDeployStatus {
+    this.getProject(id);
+    if (!this.remoteDeployService) throw new HttpError(503, 'unavailable', 'Remote deploy service chưa sẵn sàng');
+    return this.remoteDeployService.trigger(id, options);
+  }
+
+  saveRemoteDeployEnv(id: string, raw: unknown): string[] {
+    this.getProject(id);
+    if (!this.remoteDeployService) throw new HttpError(503, 'unavailable', 'Remote deploy service chưa sẵn sàng');
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new HttpError(400, 'bad_request', 'Body phải là map env dạng key-value');
+    }
+    const envMap: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof v !== 'string') {
+        throw new HttpError(400, 'bad_request', `Giá trị của key "${k}" phải là chuỗi`);
+      }
+      envMap[k] = v;
+    }
+    return this.remoteDeployService.saveSecrets(id, envMap);
   }
 
   createProject(raw: unknown): ProjectRow {

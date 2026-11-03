@@ -94,15 +94,66 @@ export function structuredToChecksArray(list: StructuredCheckItem[]): Array<{ na
 
 /** Split a command line without invoking a shell; supports quoted strings and backslash escapes. */
 export function parseArgv(input: string): string[] {
-  const result: string[] = []; let current = ''; let quote = ''; let escaped = false;
+  const result: string[] = [];
+  let current = '';
+  let quote = '';
+  let escaped = false;
+  let inToken = false;
+
   for (const char of input.trim()) {
-    if (escaped) { current += char; escaped = false; continue; }
-    if (char === '\\' && quote !== "'") { escaped = true; continue; }
-    if (quote) { if (char === quote) quote = ''; else current += char; continue; }
-    if (char === '"' || char === "'") { quote = char; continue; }
-    if (/\s/.test(char)) { if (current) { result.push(current); current = ''; } } else current += char;
+    if (escaped) {
+      current += char;
+      escaped = false;
+      inToken = true;
+      continue;
+    }
+    if (char === '\\' && quote !== "'") {
+      escaped = true;
+      inToken = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        quote = '';
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      inToken = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (inToken) {
+        result.push(current);
+        current = '';
+        inToken = false;
+      }
+    } else {
+      current += char;
+      inToken = true;
+    }
   }
-  if (escaped) current += '\\'; if (current) result.push(current); return result;
+  if (escaped) current += '\\';
+  if (inToken) result.push(current);
+  return result;
+}
+
+/** Parse KEY=VALUE lines for deploy secrets, preserving any '=' in the value. */
+export function parseDeployEnv(input: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const line of input.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf('=');
+    if (idx <= 0) continue;
+    const key = trimmed.slice(0, idx).trim();
+    const val = trimmed.slice(idx + 1);
+    if (key) result[key] = val;
+  }
+  return result;
 }
 
 export interface ProjectSettingsDrawerProps {
@@ -310,6 +361,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const [showCommitExample, setShowCommitExample] = useState(false);
   const [giteaToken, setGiteaToken] = useState('');
   const [deployEnv, setDeployEnv] = useState('');
+  const [savedDeployKeys, setSavedDeployKeys] = useState<string[]>([]);
 
   const [reviewerOrder, setReviewerOrder] = useState<
     Array<{ engine: 'codex' | 'claude'; model: string; profiles: string[] }>
@@ -930,7 +982,15 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const giteaSyncMutation = useMutation({ mutationFn: () => syncGitea(project!.id), onSuccess: () => giteaStatus.refetch() });
   const deployNowMutation = useMutation({ mutationFn: () => triggerRemoteDeploy(project!.id), onSuccess: () => remoteDeployStatus.refetch() });
   const saveGiteaTokenMutation = useMutation({ mutationFn: () => saveGiteaToken(project!.id, giteaToken), onSuccess: () => setGiteaToken('') });
-  const saveDeployEnvMutation = useMutation({ mutationFn: () => saveRemoteDeployEnv(project!.id, Object.fromEntries(deployEnv.split('\n').map((line) => line.split('=' , 2)).filter(([name, value]) => name?.trim() && value !== undefined).map(([name, value]) => [name.trim(), value]))), onSuccess: () => setDeployEnv('') });
+  const saveDeployEnvMutation = useMutation({
+    mutationFn: () => saveRemoteDeployEnv(project!.id, parseDeployEnv(deployEnv)),
+    onSuccess: (res) => {
+      const parsedKeys = Object.keys(parseDeployEnv(deployEnv));
+      const keys = Array.isArray(res) ? res : (res as any)?.keys || parsedKeys;
+      setSavedDeployKeys(keys);
+      setDeployEnv('');
+    },
+  });
 
   // Save Mutation
   const saveMutation = useMutation({
@@ -2182,7 +2242,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
             <div className="grid gap-3 sm:grid-cols-2"><label className="text-xs space-y-1"><span>{t('integrations.trigger')}</span><select value={draftSettings.remoteDeploy?.trigger || 'manual'} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, trigger: e.target.value as 'manual' | 'after-gitea-sync' } }))} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2"><option value="manual">manual</option><option value="after-gitea-sync">after-gitea-sync</option></select></label><Input type="number" ariaLabel={t('integrations.waitMinutes')} value={draftSettings.remoteDeploy?.waitMinutes ?? 15} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, waitMinutes: Number(e.target.value) } }))} /></div>
             <label className="text-xs space-y-1 block"><span>{t('integrations.steps')}</span><textarea value={(draftSettings.remoteDeploy?.steps || []).map((argv) => argv.map((arg) => /\s/.test(arg) ? JSON.stringify(arg) : arg).join(' ')).join('\n')} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, steps: e.target.value.split('\n').map(parseArgv).filter((v) => v.length) } }))} rows={3} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2 font-mono" /></label>
             <label className="text-xs space-y-1 block"><span>{t('integrations.healthChecks')}</span><textarea value={(draftSettings.remoteDeploy?.healthChecks || []).map((h) => `${h.url} ${h.expectStatusBelow}${h.contains ? ` ${JSON.stringify(h.contains)}` : ''}`).join('\n')} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, healthChecks: e.target.value.split('\n').filter(Boolean).map((line) => { const a = parseArgv(line); return { url: a[0] || '', expectStatusBelow: Number(a[1]) || 500, ...(a[2] ? { contains: a[2] } : {}) }; }) } }))} rows={2} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2 font-mono" /></label>
-            <div className="flex gap-2"><Input type="password" ariaLabel={t('integrations.deploySecrets')} value={deployEnv} onChange={(e) => setDeployEnv(e.target.value)} placeholder="KEY=VALUE" /><Button type="button" size="sm" variant="secondary" onClick={() => saveDeployEnvMutation.mutate()} disabled={!deployEnv}>{t('integrations.saveSecret')}</Button><Button type="button" size="sm" variant="secondary" onClick={() => deployNowMutation.mutate()}>{t('integrations.deployNow')}</Button></div><p className="text-xs text-[var(--t-text-3)]">{t('integrations.lastDeploy')}: {remoteDeployStatus.data?.status || '—'}</p>
+            <div className="flex gap-2"><Input type="password" ariaLabel={t('integrations.deploySecrets')} value={deployEnv} onChange={(e) => setDeployEnv(e.target.value)} placeholder="KEY=VALUE" /><Button type="button" size="sm" variant="secondary" onClick={() => saveDeployEnvMutation.mutate()} disabled={!deployEnv.trim()}>{t('integrations.saveSecret')}</Button><Button type="button" size="sm" variant="secondary" onClick={() => deployNowMutation.mutate()}>{t('integrations.deployNow')}</Button></div>{savedDeployKeys.length > 0 && <p className="text-xs text-[var(--t-text-3)]" data-testid="saved-deploy-keys">{t('integrations.savedKeys')}: {savedDeployKeys.join(', ')}</p>}<p className="text-xs text-[var(--t-text-3)]">{t('integrations.lastDeploy')}: {remoteDeployStatus.data?.status || '—'}</p>
           </Card>
 
           {/* Section 4: Tham chiếu chỉ đọc (Read-only References) */}

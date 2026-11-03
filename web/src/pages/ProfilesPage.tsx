@@ -525,7 +525,9 @@ function ProfileCard({
               )}
               {profile.coolingUntil && profile.coolingUntil > Math.floor(Date.now() / 1000) && (
                 <span className="rounded bg-[var(--t-warn)]/15 px-1.5 py-0.5 text-[10px] font-bold text-[var(--t-warn)]">
-                  Cooling đến {new Date(profile.coolingUntil * 1000).toLocaleTimeString()}
+                  {t('profiles.coolingUntil', {
+                    time: new Date(profile.coolingUntil * 1000).toLocaleTimeString(locale === 'vi' ? 'vi-VN' : 'en-US'),
+                  })}
                 </span>
               )}
             </div>

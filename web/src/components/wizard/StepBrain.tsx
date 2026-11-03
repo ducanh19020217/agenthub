@@ -33,7 +33,7 @@ export function StepBrain({ draft, update, t }: StepProps) {
                 key={level}
                 type="button"
                 data-testid={`wizard-preset-${level}`}
-                onClick={() => update({ preset: level, ...(level === 'safe' ? { sensitive: true } : {}) })}
+                onClick={() => update({ preset: level, sensitive: level === 'safe' })}
                 className={`flex flex-col items-start p-2.5 rounded-lg border text-left transition-all ${
                   isSelected
                     ? 'border-[var(--t-accent)] bg-[var(--t-accent)]/10 text-[var(--t-accent)] shadow-sm'

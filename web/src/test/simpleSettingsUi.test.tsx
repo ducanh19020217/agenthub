@@ -9,7 +9,7 @@ import { DepartmentsPage } from '../pages/DepartmentsPage';
 import { ProjectSettingsDrawer } from '../components/ProjectSettingsDrawer';
 import { ProjectWizard } from '../components/ProjectWizard';
 import * as client from '../api/client';
-import type { Department, EffectiveConfigResponse, PresetDetails, Profile, Project } from '../types/api';
+import type { Department, EffectiveConfigResponse, PresetDetails, Profile, Project, ProjectInspection } from '../types/api';
 
 const mockProject: Project = {
   id: 'test-project',
@@ -537,6 +537,53 @@ describe('Simple Settings UI (f-simple-settings-ui)', () => {
         const safeBtn = screen.getByTestId('wizard-preset-safe');
         expect(safeBtn.className).toContain('border-[var(--t-accent)]');
       });
+    });
+
+    it('clears the sensitive override when switching from safe to another preset', async () => {
+      const inspectSpy = vi.spyOn(client, 'inspectProject').mockResolvedValue({
+        exists: true,
+        isDirectory: true,
+        isGitRepo: true,
+        currentBranch: 'main',
+        branches: ['main'],
+        remoteHost: null,
+        estimatedSizeBytes: 100,
+        sizeTruncated: false,
+        lockfiles: [],
+        monorepo: { detected: false, type: null },
+        gitHooks: { husky: false, commitlint: false },
+        language: 'TypeScript',
+        projectFiles: [],
+        guidanceFiles: [],
+        mount: { mountpoint: '/media/usb', temporary: false, encrypted: false },
+        claudeSessions: [],
+        claudeSessionPreviews: [],
+        hasClaudeMemory: false,
+        memoryPreview: null,
+        path: '/media/usb/repo',
+        suggestedSettings: { skipInstall: false, skipGitHooks: false, sensitiveProject: false, checks: [] },
+      } satisfies ProjectInspection);
+      const createSpy = vi.spyOn(client, 'createProject').mockResolvedValue(mockProject);
+
+      renderWithProviders(<ProjectWizard onClose={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Tiếp' }));
+      fireEvent.change(screen.getByPlaceholderText(/vd: XFarm/), { target: { value: 'Preset switch' } });
+      fireEvent.change(screen.getByPlaceholderText(/vd: \/home/), { target: { value: '/media/usb/repo' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Tiếp' }));
+      await waitFor(() => expect(inspectSpy).toHaveBeenCalled());
+
+      fireEvent.click(screen.getByRole('button', { name: 'Tiếp' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Tiếp' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Tiếp' }));
+      fireEvent.click(screen.getByTestId('wizard-preset-safe'));
+      fireEvent.click(screen.getByTestId('wizard-preset-auto'));
+      fireEvent.click(screen.getByRole('button', { name: 'Tiếp' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Tạo dự án' }));
+
+      await waitFor(() => expect(createSpy).toHaveBeenCalled());
+      expect(createSpy).toHaveBeenCalledWith(expect.objectContaining({
+        settings: expect.objectContaining({ preset: 'auto' }),
+      }));
     });
   });
 });

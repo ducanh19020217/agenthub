@@ -60,7 +60,10 @@ export function StepSuggestions({
       {sensitiveReason && (
         <Suggestion
           checked={draft.sensitive}
-          onChange={(value) => update({ sensitive: value, ...(value ? { preset: 'safe' } : {}) })}
+          onChange={(value) => update({
+            sensitive: value,
+            ...(value ? { preset: 'safe' } : draft.preset === 'safe' ? { preset: 'balanced' } : {}),
+          })}
           label={t('projects.wizardSensitive')}
           reason={sensitiveReason}
         />

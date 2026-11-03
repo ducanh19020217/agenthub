@@ -1066,6 +1066,41 @@ describe('Codex reviewer failover lifecycle', () => {
     recovery.stop();
   });
 
+  it('counts content feedback across reviewers and steps, but not operational returns', () => {
+    const { scheduler } = makeReviewer('reviewer-changes');
+    projectRepo.update('test-project', {
+      review: JSON.stringify({ maxRounds: 2, chain: [
+        { reviewer: 'codex:gpt-5.6-luna', mode: 'gate' },
+        { reviewer: 'claude:sonnet', mode: 'gate' },
+      ] }),
+    });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'merge failed is mentioned, but this is a real code defect', 'claude-review');
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(1);
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'Xung đột is mentioned in a code comment, still a content defect', 'claude-review');
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(2);
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'merge conflict: operational failure', 'claude-review', 'operational');
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(2);
+    expect(taskRepo.get('test-project/review')?.reviewerEscalated).toBe(0);
+    scheduler.stop();
+  });
+
+  it('escalation includes all open findings and the reviewer actor', () => {
+    const { scheduler } = makeReviewer('reviewer-changes');
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'first missing case', 'codex-reviewer');
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'second missing case', 'claude-reviewer');
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'third missing case', 'claude-reviewer');
+    const event = eventRepo.getRecent(30).find((entry) => entry.type === 'review.escalated');
+    expect(event?.payload).toContain('first missing case');
+    expect(event?.payload).toContain('second missing case');
+    expect(event?.payload).toContain('third missing case');
+    expect(event?.payload).toContain('claude-reviewer');
+    scheduler.stop();
+  });
+
   it('recovers a durable reviewer run without putting it in the worker map', () => {
     const { scheduler, failover } = makeReviewer('reviewer-approved');
     runRepo.insert({ id: 'old-review', taskId: 'test-project/review', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-1', kind: 'reviewer' });

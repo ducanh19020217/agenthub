@@ -81,6 +81,19 @@ const execFileAsync = promisify(execFile);
 const CODEX_EMAIL_RECHECK_MS = 10 * 60 * 1000;
 const ESCALATION_MODEL = 'claude-opus-4-6-thinking';
 
+function reviewMaxRoundsFor(project: ProjectRow | undefined, config: AgentHubConfig): number {
+  if (project?.review) {
+    try {
+      const value = JSON.parse(project.review) as { maxRounds?: unknown };
+      if (typeof value.maxRounds === 'number' && value.maxRounds > 0) return value.maxRounds;
+    } catch {
+      // Invalid project settings use the documented default.
+    }
+    return 2;
+  }
+  return config.reviewer?.maxChangesRequested || 2;
+}
+
 function worktreeBytes(root: string): number {
   let total = 0;
   let entries: fs.Dirent[];
@@ -404,6 +417,7 @@ export const ReviewTaskSchema = z.object({
   verdict: z.enum(['approved', 'changes_requested']),
   feedback: z.string().optional(),
   by: z.string().optional(),
+  source: z.enum(['content', 'operational']).optional().default('content'),
   merge: z.boolean().optional().default(false),
 }).refine(
   (d) => d.verdict !== 'changes_requested' || (typeof d.feedback === 'string' && d.feedback.trim().length > 0),
@@ -2836,9 +2850,7 @@ export class AppService {
       const reviewer = reviewerRun
         ? (reviewerRun.engine.id === 'claude' ? 'claude' : 'codex')
         : (isFallback ? fallbackReviewer : (reviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex'));
-      const reviewMaxRounds = project?.review
-        ? (() => { try { const value = JSON.parse(project.review!) as { maxRounds?: unknown }; return typeof value.maxRounds === 'number' && value.maxRounds > 0 ? value.maxRounds : 2; } catch { return 2; } })()
-        : (this.config.reviewer?.maxChangesRequested || 2);
+      const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
       const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
       return {
         ...apiTask(task),
@@ -2983,7 +2995,7 @@ export class AppService {
       ? (reviewerRun.engine.id === 'claude' ? 'claude' : 'codex')
       : (isFallback ? fallbackReviewer : (reviews.at(-1)?.actor === 'claude-reviewer' ? 'claude' : (activeReviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex')));
 
-    const reviewMaxRounds = reviewSettings?.maxRounds || this.config.reviewer?.maxChangesRequested || 2;
+    const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
     const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
     return {
       ...apiTask(task),
@@ -3714,7 +3726,7 @@ export class AppService {
       actor: parsed.by || 'claude',
     });
 
-    this.scheduler.reviewTask(taskId, parsed.verdict, parsed.feedback, parsed.by);
+    this.scheduler.reviewTask(taskId, parsed.verdict, parsed.feedback, parsed.by, parsed.source);
     if (parsed.verdict === 'approved' && this.knowledgeRepo) {
       const completed = this.taskRepo.get(taskId);
       const donePath = completed?.worktreePath ? path.join(completed.worktreePath, '.agenthub', 'DONE') : null;

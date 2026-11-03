@@ -212,11 +212,10 @@ function isAutoReviewer(by: string | undefined): by is ReviewerActor {
   return by === 'codex-reviewer' || by === 'claude-reviewer';
 }
 
-/** Claude's manual bridge can also report merge/operational failures. Those are not content rounds. */
-function isContentReview(by: string | undefined, feedback: string): boolean {
-  if (isAutoReviewer(by)) return true;
-  if (by !== 'claude-review') return false;
-  return !/(?:merge\s+conflict|conflicted|merge\s+failed|xung\s+đột|không thể merge)/i.test(feedback);
+type ReviewSource = 'content' | 'operational';
+
+function isContentReview(by: string | undefined, source: ReviewSource): boolean {
+  return source === 'content' && (isAutoReviewer(by) || by === 'claude-review');
 }
 
 /** Times an arbiter rejection sends a task back before it is blocked for a person. */
@@ -2932,16 +2931,26 @@ export class Scheduler {
     return remaining.length <= 80;
   }
 
-  private escalateReview(taskId: string, reason: string, feedback: string): void {
+  private escalateReview(taskId: string, reason: string, feedback: string, actor?: string): void {
     const task = this.taskRepo.get(taskId);
     if (!task || task.reviewerEscalated) return;
+    const openFeedback = this.reviewRepo?.getByTask(taskId)
+      .filter((review) => review.verdict === 'changes_requested' && review.feedback)
+      .map((review, index) => `${index + 1}. [${review.actor || 'reviewer'}] ${review.feedback}`)
+      .join('\n') || feedback;
     this.taskRepo.update(taskId, {
       status: 'review',
       reviewerEscalated: 1,
       reviewerEscalatedAt: new Date().toISOString(),
       reviewerEscalationReason: reason,
     });
-    this.eventBus.emit('review.escalated', taskId, { actor: 'codex-reviewer', reason, feedback, title: task.title });
+    this.eventBus.emit('review.escalated', taskId, {
+      actor: actor || 'codex-reviewer',
+      reason,
+      feedback: openFeedback,
+      openFeedback,
+      title: task.title,
+    });
   }
 
   private areDependenciesMet(task: TaskRow): boolean {
@@ -3651,7 +3660,7 @@ export class Scheduler {
   /**
    * Review a task
    */
-  reviewTask(taskId: string, verdict: 'approved' | 'changes_requested', feedback?: string, by?: string): void {
+  reviewTask(taskId: string, verdict: 'approved' | 'changes_requested', feedback?: string, by?: string, source: ReviewSource = 'content'): void {
     const task = this.taskRepo.get(taskId);
     if (!task || task.status !== 'review') return;
     this.reviewNotified.delete(taskId);
@@ -3690,12 +3699,12 @@ export class Scheduler {
       if (!feedback || feedback.trim() === '') {
         throw new Error('Feedback is required when requesting changes');
       }
-      if (isContentReview(by, feedback) && this.reviewRepo) this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback, actor: by || undefined });
-      if (isContentReview(by, feedback)) {
+      if (isContentReview(by, source) && this.reviewRepo) this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback, actor: by || undefined });
+      if (isContentReview(by, source)) {
         const count = (task.reviewerChangesRequested || 0) + 1;
         const max = this.reviewMaxRoundsForTask(task);
         if (count > max) {
-          this.escalateReview(taskId, 'reviewer_changes_limit', feedback);
+          this.escalateReview(taskId, 'reviewer_changes_limit', feedback, by);
           return;
         }
         this.taskRepo.update(taskId, { reviewerChangesRequested: count });

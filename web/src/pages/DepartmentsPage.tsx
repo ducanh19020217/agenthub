@@ -148,7 +148,7 @@ export const DepartmentsPage: React.FC = () => {
         <div className="space-y-2 text-xs border-t border-[var(--t-border)] pt-2.5">
           <div className="font-semibold text-xs text-[var(--t-text)]">{t('departments.departmentProjectsTitle')}</div>
           {department.projects.length === 0 ? (
-            <p className="text-[11px] text-[var(--t-text-3)] italic">{t('departments.noProjectsInDept') || 'Chưa có dự án nào trong phòng ban này.'}</p>
+            <p className="text-[11px] text-[var(--t-text-3)] italic">{t('departments.noProjectsInDept')}</p>
           ) : (
             <div className="space-y-1">
               {department.projects.map((proj) => (

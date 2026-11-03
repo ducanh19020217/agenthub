@@ -69,7 +69,7 @@ export function StepSummary({
         </div>
       )}
       <div>
-        {t('settings.presetTitle')}: {draft.preset ? t(`settings.preset${draft.preset.charAt(0).toUpperCase() + draft.preset.slice(1)}`) : t('settings.presetBalanced')}
+        {t('projects.presetTitle')}: {draft.preset ? t(`settings.preset${draft.preset.charAt(0).toUpperCase() + draft.preset.slice(1)}`) : t('settings.presetBalanced')}
       </div>
       <div>
         {t('departments.title')}: {draft.departmentId || 'chung'}

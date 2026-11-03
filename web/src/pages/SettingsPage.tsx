@@ -561,7 +561,7 @@ export const SettingsPage: React.FC = () => {
                   data-testid="confirm-apply-preset-btn"
                   onClick={() => confirmApplyMutation.mutate(selectedPreset)}
                   disabled={confirmApplyMutation.isPending}
-                  className="text-xs px-3 py-1.5 rounded bg-[var(--t-accent)] text-white font-medium hover:opacity-90 disabled:opacity-50"
+                  className="text-xs px-3 py-1.5 rounded bg-[var(--t-accent)] text-[var(--t-on-accent)] font-medium hover:opacity-90 disabled:opacity-50"
                 >
                   {confirmApplyMutation.isPending ? t('settings.presetApplying') : t('settings.presetDiffConfirm')}
                 </button>

@@ -617,10 +617,10 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
           maxRounds: 3,
         }, true);
       }
-      setToastMessage(t('projects.presetAppliedSuccess', { preset }) || `Đã áp dụng preset ${preset}`);
+      setToastMessage(t('settings.presetAppliedSuccess', { preset }));
     },
     onError: (err: any) => {
-      setApiError(err?.message || 'Không thể áp dụng preset');
+      setApiError(err?.message || t('settings.saveError'));
     },
   });
 
@@ -1232,7 +1232,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                     effectiveConfig?.brain?.mode?.source === 'project'
                       ? 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
                       : effectiveConfig?.brain?.mode?.source === 'department'
-                      ? 'bg-purple-500/15 text-purple-600 dark:text-purple-300'
+                      ? 'bg-[var(--t-surface)] text-[var(--t-accent)] border border-[var(--t-border)]'
                       : 'bg-[var(--t-border)] text-[var(--t-text-2)]'
                   }`}
                 >
@@ -1256,7 +1256,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                     effectiveConfig?.brain?.permissions?.source === 'project'
                       ? 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
                       : effectiveConfig?.brain?.permissions?.source === 'department'
-                      ? 'bg-purple-500/15 text-purple-600 dark:text-purple-300'
+                      ? 'bg-[var(--t-surface)] text-[var(--t-accent)] border border-[var(--t-border)]'
                       : 'bg-[var(--t-border)] text-[var(--t-text-2)]'
                   }`}
                 >
@@ -1280,7 +1280,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                     effectiveConfig?.brain?.engine?.source === 'project'
                       ? 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
                       : effectiveConfig?.brain?.engine?.source === 'department'
-                      ? 'bg-purple-500/15 text-purple-600 dark:text-purple-300'
+                      ? 'bg-[var(--t-surface)] text-[var(--t-accent)] border border-[var(--t-border)]'
                       : 'bg-[var(--t-border)] text-[var(--t-text-2)]'
                   }`}
                 >
@@ -1295,7 +1295,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 <div>
                   <span className="text-[var(--t-text-3)] block">{t('settings.reviewChainTitle')}</span>
                   <span className="font-medium text-[var(--t-text)]">
-                    {(effectiveConfig?.review?.chain?.value || reviewChain.chain).length} {t('projects.reviewStepsCount') || 'bước'}
+                    {(effectiveConfig?.review?.chain?.value || reviewChain.chain).length} {t('projects.reviewStepsCount')}
                   </span>
                 </div>
                 <span
@@ -1442,7 +1442,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
               <div className="flex items-center justify-between">
                 <div>
                   <h4 className="text-sm font-bold text-[var(--t-text)]">{t('projects.structuredChecksTitle')}</h4>
-                  <p className="text-xs text-[var(--t-text-3)]">{t('projects.checksInfo') || 'Mỗi lệnh check kiểm tra trước khi review/merge'}</p>
+                  <p className="text-xs text-[var(--t-text-3)]">{t('projects.checksInfo')}</p>
                 </div>
                 <Button
                   type="button"
@@ -1459,7 +1459,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
 
               {structuredChecks.length === 0 ? (
                 <p className="text-xs text-[var(--t-text-3)] italic py-2">
-                  {t('projects.noChecksConfigured') || 'Chưa cấu hình check nào. Bấm "+ Thêm check" để thêm.'}
+                  {t('projects.noChecksConfigured')}
                 </p>
               ) : (
                 <div className="space-y-2">

@@ -22,7 +22,7 @@ export function StepBrain({ draft, update, t }: StepProps) {
     <div className="space-y-4">
       {/* Preset selection */}
       <div className="space-y-2">
-        <label className="text-xs font-semibold text-[var(--t-text)]">{t('settings.presetTitle')}</label>
+        <label className="text-xs font-semibold text-[var(--t-text)]">{t('projects.presetTitle')}</label>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
           {PRESETS.map(({ level, icon: Icon }) => {
             const isSelected = currentPreset === level;

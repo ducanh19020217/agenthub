@@ -927,6 +927,7 @@ export const en: typeof vi = {
     selectProjectToAssign: 'Select project to assign to department',
     noProjectsAvailable: 'No projects available',
     projectAssignedSuccess: 'Successfully assigned project',
+    noProjectsInDept: 'No projects in this department yet.',
   },
   projects: {
     title: 'Project Management',
@@ -992,6 +993,8 @@ export const en: typeof vi = {
     removeCheckBtn: 'Remove check',
     rawJsonMode: 'Raw JSON Mode',
     structuredMode: 'Structured Mode',
+    reviewStepsCount: 'step(s)',
+    noChecksConfigured: 'No checks configured yet. Click "+ Check" to add one.',
     wizardPresetTitle: 'Preset & Department',
     wizardPresetDesc: 'Choose automation level and department for project',
     emptyTitle: 'Get started with your first project',

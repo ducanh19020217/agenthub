@@ -926,6 +926,7 @@ export const vi = {
     selectProjectToAssign: 'Chọn dự án để gán vào phòng',
     noProjectsAvailable: 'Không có dự án khả dụng',
     projectAssignedSuccess: 'Đã gán dự án thành công',
+    noProjectsInDept: 'Chưa có dự án nào trong phòng ban này.',
   },
   projects: {
     title: 'Quản lý Project',
@@ -992,6 +993,8 @@ export const vi = {
     removeCheckBtn: 'Xóa check',
     rawJsonMode: 'Chế độ JSON thô',
     structuredMode: 'Chế độ biểu mẫu',
+    reviewStepsCount: 'bước',
+    noChecksConfigured: 'Chưa cấu hình check nào. Bấm "+ Check" để thêm.',
     wizardPresetTitle: 'Preset & Phòng ban',
     wizardPresetDesc: 'Chọn mức độ tự động hóa và phòng ban cho dự án',
     emptyDesc: 'Project là một repo git trên máy này; worker làm việc trong worktree riêng (nhánh agenthub/<slug>), không đụng thư mục bạn đang code.',

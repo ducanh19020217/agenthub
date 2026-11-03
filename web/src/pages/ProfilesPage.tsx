@@ -523,6 +523,11 @@ function ProfileCard({
                   {t('profiles.busyTag')}
                 </span>
               )}
+              {profile.coolingUntil && profile.coolingUntil > Math.floor(Date.now() / 1000) && (
+                <span className="rounded bg-[var(--t-warn)]/15 px-1.5 py-0.5 text-[10px] font-bold text-[var(--t-warn)]">
+                  Cooling đến {new Date(profile.coolingUntil * 1000).toLocaleTimeString()}
+                </span>
+              )}
             </div>
             <p className="truncate text-sm text-[var(--t-text-3)]">
               {logged

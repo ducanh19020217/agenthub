@@ -3791,13 +3791,14 @@ export class TelegramBotService {
 
       case 'task.blocked': {
         if (!notify.blocked) return;
+        const reason = typeof p.message === 'string' ? `\nLý do: ${this.escapeHtml(p.message)}` : '';
         if (minimal) {
           const dashboardUrl = this.getDashboardUrl(taskId ? `#/tasks/${toRouteId(taskId)}` : '');
           const keyboard: InlineKeyboardButton[][] = [
             [{ text: '🌐 Xem dashboard', url: dashboardUrl }],
           ];
           this.broadcastMessage(
-            `${prefix}⚠️ <b>Task bị chặn</b>\nID: <code>${taskId}</code>`,
+            `${prefix}⚠️ <b>Task bị chặn</b>\nID: <code>${taskId}</code>${reason}`,
             { inline_keyboard: keyboard },
           );
           break;
@@ -3811,7 +3812,7 @@ export class TelegramBotService {
         ];
 
         this.broadcastMessage(
-          `${prefix}⚠️ <b>Task bị chặn</b>\nID: <code>${taskId}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>`,
+          `${prefix}⚠️ <b>Task bị chặn</b>\nID: <code>${taskId}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>${reason}`,
           { inline_keyboard: keyboard },
         );
         break;

@@ -1253,6 +1253,7 @@ export class Scheduler {
               const pausedMinutes = Math.floor(pausedMs / 60000);
               this.eventBus.emit('task.pause_reminder', rt.taskId, {
                 pausedMinutes,
+                pausedMin: pausedMinutes,
                 reason: rt.pauseReason,
               });
             }

@@ -494,4 +494,130 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
       await server.close();
     }
   });
+
+  it('7. Brain pause với reason load tự động resume khi nhận event load.ok', async () => {
+    ctx.taskRepo.insert({
+      id: 'p-test/t-brain-load',
+      projectId: 'p-test',
+      slug: 't-brain-load',
+      title: 'Brain Load Test',
+      status: 'queued',
+    });
+
+    ctx.scheduler.tick();
+    const rt = ctx.scheduler.getRunning().get('p-test/t-brain-load')!;
+    expect(rt).toBeDefined();
+
+    // Giả lập brain gọi pause với reason 'load'
+    ctx.scheduler.pauseTask('p-test/t-brain-load', 'load');
+    expect(rt.paused).toBe(true);
+    expect(rt.pauseReason).toBe('load');
+
+    // Bắn event load.ok
+    ctx.scheduler.getEventBus().emit('load.ok');
+
+    // Scheduler lắng nghe load.ok và tự động resume task
+    expect(rt.paused).toBe(false);
+    expect(rt.pauseReason).toBeNull();
+  });
+
+  it('8. Pause manual không tự resume khi có load.ok hoặc tick không quá tải, nhưng gửi nhắc nhở sau 30 phút', async () => {
+    ctx.taskRepo.insert({
+      id: 'p-test/t-manual-remind',
+      projectId: 'p-test',
+      slug: 't-manual-remind',
+      title: 'Manual Pause Reminder Test',
+      status: 'queued',
+    });
+
+    ctx.scheduler.tick();
+    const rt = ctx.scheduler.getRunning().get('p-test/t-manual-remind')!;
+    expect(rt).toBeDefined();
+
+    // User pause thủ công
+    ctx.scheduler.pauseTask('p-test/t-manual-remind', 'manual');
+    expect(rt.paused).toBe(true);
+    expect(rt.pauseReason).toBe('manual');
+
+    // Bắn load.ok -> không được tự resume
+    ctx.scheduler.getEventBus().emit('load.ok');
+    expect(rt.paused).toBe(true);
+
+    // Thu thập event task.pause_reminder
+    const reminders: Array<{ taskId: string; payload: unknown }> = [];
+    ctx.scheduler.getEventBus().on('task.pause_reminder', (taskId, payload) => {
+      reminders.push({ taskId, payload });
+    });
+
+    // Tick bình thường (thời gian pause chưa đủ 30 phút)
+    ctx.scheduler.tick();
+    expect(rt.paused).toBe(true);
+    expect(reminders.length).toBe(0);
+
+    // Giả lập đã pause 31 phút trước
+    rt.pausedAt = Date.now() - 31 * 60 * 1000;
+
+    // Tick lần 1 -> phát thông báo nhắc nhở 1 lần
+    ctx.scheduler.tick();
+    expect(rt.paused).toBe(true); // Vẫn pause, không tự resume
+    expect(reminders.length).toBe(1);
+    expect(reminders[0].taskId).toBe('p-test/t-manual-remind');
+    expect(reminders[0].payload).toMatchObject({
+      reason: 'manual',
+      pausedMin: 31,
+    });
+
+    // Tick lần 2 -> không gửi lại (chỉ nhắc 1 lần)
+    ctx.scheduler.tick();
+    expect(reminders.length).toBe(1);
+  });
+
+  it('9. Safety net: task pause reason load tự resume trong tick nếu máy không quá tải', async () => {
+    ctx.taskRepo.insert({
+      id: 'p-test/t-load-safety',
+      projectId: 'p-test',
+      slug: 't-load-safety',
+      title: 'Load Safety Resume Test',
+      status: 'queued',
+    });
+
+    ctx.scheduler.tick();
+    const rt = ctx.scheduler.getRunning().get('p-test/t-load-safety')!;
+    expect(rt).toBeDefined();
+
+    ctx.scheduler.pauseTask('p-test/t-load-safety', 'brain_load');
+    expect(rt.paused).toBe(true);
+
+    // Máy không quá tải, gọi tick -> tự động resume
+    ctx.scheduler.tick();
+    expect(rt.paused).toBe(false);
+    expect(rt.pauseReason).toBeNull();
+  });
+
+  it('10. Watchdog stall check bỏ qua các task đang paused', async () => {
+    ctx.taskRepo.insert({
+      id: 'p-test/t-stall-paused',
+      projectId: 'p-test',
+      slug: 't-stall-paused',
+      title: 'Stall Paused Test',
+      status: 'queued',
+    });
+
+    ctx.scheduler.tick();
+    const rt = ctx.scheduler.getRunning().get('p-test/t-stall-paused')!;
+    expect(rt).toBeDefined();
+
+    ctx.scheduler.pauseTask('p-test/t-stall-paused', 'manual');
+
+    // Giả lập lastActivityAt và lastOutputAt rất cũ (> 10 phút trước)
+    rt.lastActivityAt = Date.now() - 10 * 60 * 1000;
+    rt.lastOutputAt = Date.now() - 10 * 60 * 1000;
+
+    // Check running tasks
+    await (ctx.scheduler as unknown as { checkRunningTasks: () => Promise<void> }).checkRunningTasks();
+
+    // Task không bị kill hay stall do đang paused
+    expect(ctx.scheduler.getRunning().has('p-test/t-stall-paused')).toBe(true);
+    expect(rt.paused).toBe(true);
+  });
 });

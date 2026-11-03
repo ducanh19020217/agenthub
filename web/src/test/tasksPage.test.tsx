@@ -305,4 +305,81 @@ describe('TasksPage & Kanban Long Lists', () => {
     expect(links.length).toBe(10);
     expect(screen.getByRole('button', { name: /xem thêm 10/i })).toBeInTheDocument();
   });
+
+  it('hiển thị badge "Tạm dừng (quá tải)" và nút "Tiếp tục" khi task running bị tạm dừng do tải, không hiện im lặng', async () => {
+    const resumeSpy = vi.spyOn(client, 'resumeTask').mockResolvedValue({ ok: true, paused: false });
+    const tasks: Task[] = [
+      {
+        id: 'p1~t-paused-load',
+        projectId: 'p1',
+        slug: 't-paused-load',
+        title: 'Task Tạm Dừng Quá Tải',
+        status: 'running',
+        level: 'easy',
+        dependsOn: [],
+        attempt: 1,
+        resume: 0,
+        paused: true,
+        pauseReason: 'load',
+        currentRun: {
+          startedAt: '2026-10-15T00:00:00Z',
+          lastActivityAt: '2026-10-15T00:10:00Z',
+          activitySource: 'log',
+          paused: true,
+          pauseReason: 'load',
+        },
+        createdAt: '2026-10-15T00:00:00Z',
+        updatedAt: '2026-10-15T00:10:00Z',
+      },
+    ];
+    mockKanbanTasks(tasks);
+
+    renderPage();
+
+    expect(await screen.findByText('Task Tạm Dừng Quá Tải')).toBeInTheDocument();
+    expect(screen.getByText('Tạm dừng (quá tải)')).toBeInTheDocument();
+    expect(screen.queryByText(/im lặng/i)).not.toBeInTheDocument();
+
+    const resumeBtn = screen.getByRole('button', { name: /^Tiếp tục$/i });
+    expect(resumeBtn).toBeInTheDocument();
+    fireEvent.click(resumeBtn);
+
+    await waitFor(() => {
+      expect(resumeSpy).toHaveBeenCalledWith('p1~t-paused-load');
+    });
+  });
+
+  it('hiển thị badge "Tạm dừng (thủ công)" khi task running bị tạm dừng thủ công', async () => {
+    const tasks: Task[] = [
+      {
+        id: 'p1~t-paused-manual',
+        projectId: 'p1',
+        slug: 't-paused-manual',
+        title: 'Task Tạm Dừng Thủ Công',
+        status: 'running',
+        level: 'easy',
+        dependsOn: [],
+        attempt: 1,
+        resume: 0,
+        paused: true,
+        pauseReason: 'manual',
+        currentRun: {
+          startedAt: '2026-10-15T00:00:00Z',
+          lastActivityAt: '2026-10-15T00:10:00Z',
+          activitySource: 'log',
+          paused: true,
+          pauseReason: 'manual',
+        },
+        createdAt: '2026-10-15T00:00:00Z',
+        updatedAt: '2026-10-15T00:10:00Z',
+      },
+    ];
+    mockKanbanTasks(tasks);
+
+    renderPage();
+
+    expect(await screen.findByText('Task Tạm Dừng Thủ Công')).toBeInTheDocument();
+    expect(screen.getByText('Tạm dừng (thủ công)')).toBeInTheDocument();
+    expect(screen.queryByText(/im lặng/i)).not.toBeInTheDocument();
+  });
 });

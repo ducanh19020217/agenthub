@@ -993,6 +993,10 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
       verdict: z.enum(['approved', 'changes_requested']).describe('Kết quả review'),
       feedback: z.string().optional().describe('Góp ý hoặc yêu cầu sửa (bắt buộc khi verdict là changes_requested)'),
       merge: z.boolean().optional().describe('Khi approved, merge vào worktree tích hợp đã cấu hình'),
+      source: z
+        .enum(['content', 'operational'])
+        .optional()
+        .describe('Phân loại review: "content" (mặc định) cho đánh giá chất lượng mã nguồn; "operational" cho yêu cầu gỡ xung đột merge conflict hoặc các vấn đề vận hành/hạ tầng (không tính vào giới hạn vòng review)'),
     },
     async (args) => {
       try {
@@ -1003,6 +1007,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           verdict: args.verdict,
           feedback: args.feedback,
           merge: args.merge,
+          source: args.source,
           by: 'claude-review',
         });
         try {

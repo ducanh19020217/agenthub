@@ -3830,6 +3830,7 @@ export class AppService {
       await this.reviewTask(toRouteId(taskId), {
         verdict: 'changes_requested',
         by: 'auto-escalation',
+        source: 'operational',
         feedback: `${feedback}\n\n(Reviewer đã yêu cầu sửa quá số vòng cho phép; giao lại một lần với ${ESCALATION_MODEL}.)`,
       });
     } catch (error) {

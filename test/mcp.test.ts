@@ -513,6 +513,51 @@ describe('AgentHub MCP Server Tools', () => {
     expect(['queued', 'waiting_quota']).toContain(ctx.taskRepo.get('proj/t-fail')?.status);
   });
 
+  it('hub_review supports source: operational without incrementing reviewerChangesRequested', async () => {
+    ctx.projectRepo.insert({
+      id: 'proj-op',
+      name: 'proj-op',
+      path: tmpDir,
+      defaultBranch: 'main',
+      envTemplate: null,
+      maxParallel: 1,
+    });
+    ctx.taskRepo.insert({
+      id: 'proj-op/t-conflict',
+      projectId: 'proj-op',
+      slug: 't-conflict',
+      title: 'Conflict task',
+      status: 'review',
+    });
+
+    const opRes = (await client.callTool({
+      name: 'hub_review',
+      arguments: {
+        id: 'proj-op/t-conflict',
+        verdict: 'changes_requested',
+        feedback: 'Gỡ xung đột merge conflict trên nhánh main',
+        source: 'operational',
+      },
+    })) as { content: Array<{ type: string; text: string }> };
+
+    expect(opRes.content[0].text).toContain('changes_requested');
+    expect(ctx.taskRepo.get('proj-op/t-conflict')?.reviewerChangesRequested).toBe(0);
+
+    // Default source is content and increments counter
+    ctx.taskRepo.update('proj-op/t-conflict', { status: 'review' });
+    const contentRes = (await client.callTool({
+      name: 'hub_review',
+      arguments: {
+        id: 'proj-op/t-conflict',
+        verdict: 'changes_requested',
+        feedback: 'Sửa lỗi logic code',
+      },
+    })) as { content: Array<{ type: string; text: string }> };
+
+    expect(contentRes.content[0].text).toContain('changes_requested');
+    expect(ctx.taskRepo.get('proj-op/t-conflict')?.reviewerChangesRequested).toBe(1);
+  });
+
   it('hub_cancel cancels a task', async () => {
     ctx.projectRepo.insert({
       id: 'proj',

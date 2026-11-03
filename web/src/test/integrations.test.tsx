@@ -4,6 +4,7 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { LocaleProvider } from '../context/LocaleContext';
 import { ThemeProvider } from '../context/ThemeContext';
+import type { Locale } from '../locales';
 import { ProjectSettingsDrawer, parseArgv, parseDeployEnv } from '../components/ProjectSettingsDrawer';
 import { OpenProjectSettings } from '../components/OpenProjectSettings';
 import { TasksPage } from '../pages/TasksPage';
@@ -22,6 +23,9 @@ const mockProject: Project = {
     brain: { mode: 'inherit' },
     worktree: { install: 'auto', gitHooks: 'run' },
     integration: { enabled: false },
+    ci: {},
+    references: [],
+    notifications: { telegramContent: 'full' },
     openproject: { enabled: false, sourceId: null, role: 'primary' },
     gitea: { enabled: false, schedule: ['12:00', '18:00'], weekdaysOnly: false, checks: [], unionMergeGlobs: [] },
     remoteDeploy: { enabled: false, trigger: 'manual', steps: [], healthChecks: [], waitMinutes: 15 },
@@ -63,7 +67,7 @@ const mockSources: OpenProjectSource[] = [
   },
 ];
 
-function renderWithProviders(ui: React.ReactElement, initialLocale = 'vi') {
+function renderWithProviders(ui: React.ReactElement, initialLocale: Locale = 'vi') {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false, gcTime: 0 },
@@ -86,8 +90,8 @@ describe('Integrations UI Suite', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.spyOn(client, 'getOpenProjectSources').mockResolvedValue(mockSources);
-    vi.spyOn(client, 'getGiteaStatus').mockResolvedValue({ status: 'ok', lastSyncAt: '2026-11-03T10:00:00Z' });
-    vi.spyOn(client, 'getRemoteDeployStatus').mockResolvedValue({ status: 'succeeded', lastDeployAt: '2026-11-03T11:00:00Z' });
+    vi.spyOn(client, 'getGiteaStatus').mockResolvedValue({ projectId: 'proj-1', status: 'ok', finishedAt: '2026-11-03T10:00:00Z' });
+    vi.spyOn(client, 'getRemoteDeployStatus').mockResolvedValue({ projectId: 'proj-1', status: 'succeeded', finishedAt: '2026-11-03T11:00:00Z' });
     vi.spyOn(client, 'getEffectiveConfig').mockResolvedValue({} as any);
   });
 
@@ -265,7 +269,7 @@ describe('Integrations UI Suite', () => {
 
     it('does not render Gitea token, deploy env secrets, and saves them securely', async () => {
       const saveTokenSpy = vi.spyOn(client, 'saveGiteaToken').mockResolvedValue({} as any);
-      const saveEnvSpy = vi.spyOn(client, 'saveRemoteDeployEnv').mockResolvedValue(['TOKEN']);
+      const saveEnvSpy = vi.spyOn(client, 'saveRemoteDeployEnv').mockResolvedValue({ keys: ['TOKEN'] });
 
       renderWithProviders(
         <ProjectSettingsDrawer

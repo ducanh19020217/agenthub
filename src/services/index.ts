@@ -3920,7 +3920,6 @@ export class AppService {
       transientRetries: 0,
       notBefore: null,
       body: newBody,
-      reviewerChangesRequested: 0,
       reviewerEscalated: 0,
       reviewerEscalatedAt: null,
       reviewerEscalationReason: null,

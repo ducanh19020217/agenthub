@@ -35,6 +35,23 @@ export const ProjectSettingsSchema = z.object({
     sourceId: z.string().min(1).nullable().default(null),
     role: z.enum(['primary', 'secondary']).default('primary'),
   }).default({}),
+  gitea: z.object({
+    enabled: z.boolean().default(false),
+    url: z.string().trim().refine((val) => {
+      try {
+        const parsed = new URL(val);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+      } catch {
+        return false;
+      }
+    }, 'URL phải là http(s)').optional(),
+    sourceBranch: z.string().trim().min(1, 'Tên nhánh source không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
+    targetBranch: z.string().trim().min(1, 'Tên nhánh target không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
+    schedule: z.array(z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Định dạng giờ phải là HH:MM')).default(['12:00', '18:00']),
+    weekdaysOnly: z.boolean().default(false),
+    checks: z.array(z.array(z.string().min(1))).default([]),
+    unionMergeGlobs: z.array(z.string().min(1)).default([]),
+  }).default({}),
   commitConvention: z.object({
     branchTemplate: z.string().min(1).max(200).default('agenthub/{slug}'),
     commitTemplate: z.string().min(1).max(200).default('{type}: {summary}'),
@@ -111,6 +128,7 @@ export type ProjectSettings = z.infer<typeof ProjectSettingsSchema>;
 /** Input accepted by the API: every section and field optional; merged over the stored settings. */
 export const ProjectSettingsInputSchema = z.object({
   openproject: ProjectSettingsSchema.shape.openproject.removeDefault().partial().optional(),
+  gitea: ProjectSettingsSchema.shape.gitea.removeDefault().partial().optional(),
   commitConvention: ProjectSettingsSchema.shape.commitConvention.removeDefault().partial().optional(),
   brain: ProjectSettingsSchema.shape.brain.removeDefault().partial().optional(),
   worktree: ProjectSettingsSchema.shape.worktree.removeDefault().partial().optional(),
@@ -133,9 +151,10 @@ export type ProjectSettingsInput = z.infer<typeof ProjectSettingsInputSchema>;
 const parsedDefaultProjectSettings = ProjectSettingsSchema.parse({});
 // Keep the legacy serialized/default shape stable while exposing the new section to callers.
 Object.defineProperty(parsedDefaultProjectSettings, 'openproject', { value: parsedDefaultProjectSettings.openproject, enumerable: false, writable: true });
+Object.defineProperty(parsedDefaultProjectSettings, 'gitea', { value: parsedDefaultProjectSettings.gitea, enumerable: false, writable: true });
 Object.defineProperty(parsedDefaultProjectSettings, 'toJSON', {
   value: function (this: ProjectSettings) {
-    return { ...this, openproject: this.openproject };
+    return { ...this, openproject: this.openproject, gitea: this.gitea };
   },
   enumerable: false,
   writable: true,
@@ -153,9 +172,10 @@ export function parseProjectSettings(raw: string | null | undefined): ProjectSet
     parsed.review.autoMerge = effectiveAutoMerge;
     parsed.integration.autoMerge = effectiveAutoMerge;
     Object.defineProperty(parsed, 'openproject', { value: parsed.openproject, enumerable: false, writable: true });
+    Object.defineProperty(parsed, 'gitea', { value: parsed.gitea, enumerable: false, writable: true });
     Object.defineProperty(parsed, 'toJSON', {
       value: function (this: ProjectSettings) {
-        return { ...this, openproject: this.openproject };
+        return { ...this, openproject: this.openproject, gitea: this.gitea };
       },
       enumerable: false,
       writable: true,
@@ -193,12 +213,22 @@ export function mergeProjectSettings(current: ProjectSettings, input: ProjectSet
       ? input.integration.autoMerge
       : (current.review?.autoMerge || current.integration?.autoMerge || false));
 
-  return ProjectSettingsSchema.parse({
+  const baseGitea = current.gitea || DEFAULT_PROJECT_SETTINGS.gitea;
+  const mergedGitea = input.gitea ? {
+    ...baseGitea,
+    ...input.gitea,
+    ...(input.gitea.schedule !== undefined ? { schedule: input.gitea.schedule } : {}),
+    ...(input.gitea.checks !== undefined ? { checks: input.gitea.checks } : {}),
+    ...(input.gitea.unionMergeGlobs !== undefined ? { unionMergeGlobs: input.gitea.unionMergeGlobs } : {}),
+  } : baseGitea;
+
+  const res = ProjectSettingsSchema.parse({
     preset: input.preset !== undefined ? input.preset : current.preset,
     autoFixOnFail: input.autoFixOnFail !== undefined ? input.autoFixOnFail : current.autoFixOnFail,
     planning: input.planning !== undefined ? (input.planning ? { ...current.planning, ...input.planning } : undefined) : current.planning,
     brain: { ...current.brain, ...input.brain },
     openproject: { ...current.openproject, ...input.openproject },
+    gitea: mergedGitea,
     commitConvention: { ...current.commitConvention, ...input.commitConvention },
     worktree: { ...current.worktree, ...input.worktree },
     integration: {
@@ -216,4 +246,14 @@ export function mergeProjectSettings(current: ProjectSettings, input: ProjectSet
     reviewChecklist: input.reviewChecklist ?? current.reviewChecklist,
     notifications: { ...current.notifications, ...input.notifications },
   });
+  Object.defineProperty(res, 'openproject', { value: res.openproject, enumerable: false, writable: true });
+  Object.defineProperty(res, 'gitea', { value: res.gitea, enumerable: false, writable: true });
+  Object.defineProperty(res, 'toJSON', {
+    value: function (this: ProjectSettings) {
+      return { ...this, openproject: this.openproject, gitea: this.gitea };
+    },
+    enumerable: false,
+    writable: true,
+  });
+  return res;
 }

@@ -866,6 +866,7 @@ export interface CreateNewProjectInput {
   path: string;
   defaultBranch?: string;
   maxParallel?: number;
+  departmentId?: string;
   checks?: Array<{ name: string; cmd: string[]; timeoutSec?: number }> | null;
   settings?: ProjectSettings;
 }

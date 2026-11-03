@@ -69,6 +69,12 @@ export function StepSummary({
         </div>
       )}
       <div>
+        {t('presets.title')}: {draft.preset ? t(`presets.level_${draft.preset}`) : t('presets.level_balanced')}
+      </div>
+      <div>
+        {t('departments.title')}: {draft.departmentId || 'chung'}
+      </div>
+      <div>
         {t('projects.brainMode')}: {draft.settings.brain.mode}
       </div>
       <div>

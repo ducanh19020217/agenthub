@@ -988,7 +988,7 @@ export const en: typeof vi = {
     checkNameLabel: 'Check name',
     checkCmdLabel: 'Command',
     checkTimeoutLabel: 'Timeout (sec)',
-    addCheckBtn: 'Add check',
+    addCheckBtn: '+ Check',
     removeCheckBtn: 'Remove check',
     rawJsonMode: 'Raw JSON Mode',
     structuredMode: 'Structured Mode',

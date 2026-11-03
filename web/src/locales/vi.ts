@@ -988,7 +988,7 @@ export const vi = {
     checkNameLabel: 'Tên check',
     checkCmdLabel: 'Lệnh thực thi',
     checkTimeoutLabel: 'Timeout (giây)',
-    addCheckBtn: 'Thêm check',
+    addCheckBtn: '+ Check',
     removeCheckBtn: 'Xóa check',
     rawJsonMode: 'Chế độ JSON thô',
     structuredMode: 'Chế độ biểu mẫu',

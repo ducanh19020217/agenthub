@@ -288,13 +288,13 @@ export const DepartmentInputSchema = z.object({
   maxParallel: z.number().int().nonnegative().default(0),
   claudeDailyTokenBudget: z.number().int().nonnegative().default(0),
   telegramTopicId: z.number().int().positive().nullable().default(null),
-  brainEngine: z.enum(['claude', 'codex']).default('claude'),
-  brainModel: z.string().min(1).default('sonnet'),
+  brainEngine: z.enum(['inherit', 'claude', 'codex']).nullable().transform((v) => v ?? 'inherit').default('inherit'),
+  brainModel: z.string().min(1).nullable().transform((v) => v ?? 'inherit').default('inherit'),
   brainCodexProfile: z.string().min(1).nullable().default(null),
-  brainMode: z.enum(['inherit', 'off', 'suggest', 'auto']).default('inherit'),
-  brainPermissions: z.enum(['inherit', 'standard', 'trusted', 'full']).default('full'),
-  brainDailyTokenBudget: z.number().int().nonnegative().default(0),
-  brainMaxTurnsPerHour: z.number().int().positive().default(20),
+  brainMode: z.enum(['inherit', 'off', 'suggest', 'auto']).nullable().transform((v) => v ?? 'inherit').default('inherit'),
+  brainPermissions: z.enum(['inherit', 'standard', 'trusted', 'full']).nullable().transform((v) => v ?? 'inherit').default('inherit'),
+  brainDailyTokenBudget: z.number().int().nonnegative().nullable().transform((v) => v ?? 0).default(0),
+  brainMaxTurnsPerHour: z.number().int().nonnegative().nullable().transform((v) => v ?? 0).default(0),
 });
 
 export const CreateProjectSchema = z.object({

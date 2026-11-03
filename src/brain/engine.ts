@@ -6,9 +6,14 @@ export type BrainEngine = 'claude' | 'codex';
 export function effectiveBrainEngine(
   project: { settings?: string | null } | null | undefined,
   global: Pick<BrainConfig, 'engine'>,
+  department?: { brainEngine?: string } | null,
 ): BrainEngine {
   const configured = projectSettings(project).brain.engine;
-  return configured === 'inherit' ? (global.engine || 'claude') : configured;
+  if (configured !== 'inherit') return configured;
+  if (department?.brainEngine && department.brainEngine !== 'inherit') {
+    return department.brainEngine as BrainEngine;
+  }
+  return global.engine || 'claude';
 }
 
 export function effectiveBrainCodexProfile(

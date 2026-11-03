@@ -159,11 +159,13 @@ export interface Department {
   maxParallel: number;
   claudeDailyTokenBudget: number;
   telegramTopicId: number | null;
-  brainEngine?: 'claude' | 'codex';
+  brainEngine?: 'inherit' | 'claude' | 'codex';
   brainModel?: string;
   brainCodexProfile?: string | null;
   brainMode?: 'inherit' | 'off' | 'suggest' | 'auto';
   brainPermissions?: 'inherit' | 'standard' | 'trusted' | 'full';
+  brainDailyTokenBudget?: number;
+  brainMaxTurnsPerHour?: number;
   createdAt: string;
   projectCount?: number;
   profiles: DepartmentProfile[];
@@ -211,6 +213,9 @@ export interface DeployStatus {
 
 /** Mirrors src/projects/settings.ts. */
 export interface ProjectSettings {
+  preset?: 'safe' | 'balanced' | 'auto' | 'custom' | string;
+  autoFixOnFail?: boolean;
+  planning?: { requireApproval?: boolean; approvalMinTasks?: number };
   commitConvention?: { branchTemplate: string; commitTemplate: string; commitRegex?: string; mergeMessageTemplate: string };
   brain: {
     engine?: 'inherit' | 'claude' | 'codex';
@@ -980,3 +985,77 @@ export interface TaskGraphResponse {
   maxBlockingTaskId: string | null;
   maxBlockedCount: number;
 }
+
+export type PresetLevel = 'safe' | 'balanced' | 'auto';
+
+export interface PresetDetails {
+  id: PresetLevel;
+  name: { vi: string; en: string };
+  description: { vi: string; en: string };
+  config: {
+    brain: {
+      mode: 'suggest' | 'auto';
+      permissions: 'standard' | 'trusted';
+    };
+    review: {
+      chainDescription: { vi: string; en: string };
+      maxRounds: number;
+      autoMerge: boolean;
+    };
+    autoFixOnFail: boolean;
+    planning: {
+      requireApproval: boolean;
+      approvalMinTasks: number;
+    };
+  };
+}
+
+export interface ApplyPresetInput {
+  scope: string; // 'global' | 'department:<id>' | 'project:<id>'
+  preset: PresetLevel;
+  dryRun?: boolean;
+}
+
+export interface ApplyPresetResult {
+  preset: PresetLevel;
+  scope: string;
+  applied: boolean;
+  diff: {
+    before: Record<string, unknown>;
+    after: Record<string, unknown>;
+  };
+  warnings?: string[];
+  suggestedChecks?: Array<{ name: string; cmd: string[]; reason?: string }>;
+}
+
+export type ConfigSource = 'global' | 'department' | 'project';
+
+export interface EffectiveValue<T> {
+  value: T;
+  source: ConfigSource;
+}
+
+export interface EffectiveConfigResponse {
+  brain: {
+    mode: EffectiveValue<string>;
+    permissions: EffectiveValue<string>;
+    engine: EffectiveValue<string>;
+    model: EffectiveValue<string>;
+    budgets: {
+      maxTurnsPerHour: EffectiveValue<number>;
+      dailyTokenBudget: EffectiveValue<number>;
+    };
+  };
+  review: {
+    chain: EffectiveValue<Array<{ reviewer: string; mode: 'gate' | 'final' }>>;
+    maxRounds: EffectiveValue<number>;
+    autoMerge: EffectiveValue<boolean>;
+    checks: EffectiveValue<Array<{ name: string; cmd: string[]; timeoutSec?: number }>>;
+  };
+  autoMergeReadiness: {
+    ready: boolean;
+    missing: string[];
+  };
+  preset: string;
+}
+

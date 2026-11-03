@@ -74,6 +74,7 @@ import type { DeployService } from '../deploy.js';
 import type { RemoteDeployService, RemoteDeployStatus } from '../remote-deploy.js';
 import type { PerfCollector } from '../perf.js';
 import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../presets.js';
+import type { SetupTools } from '../setup-tools.js';
 import { computeEffectiveConfig } from '../effective-config.js';
 
 const execFileAsync = promisify(execFile);
@@ -948,7 +949,11 @@ export class AppService {
     public brainRunner?: BrainRunner,
     public directiveRepo?: BrainDirectiveRepo,
     public departmentRepo?: DepartmentRepo,
+    public setupTools?: SetupTools,
   ) {}
+
+  setSetupTools(tools: SetupTools): void { this.setupTools = tools; }
+  getSetupTools(): SetupTools { if (!this.setupTools) throw new HttpError(503, 'unavailable', 'Setup tools chưa sẵn sàng'); return this.setupTools; }
 
   private validateOpenProjectBinding(projectId: string, settings: ReturnType<typeof projectSettings>): void {
     if (!settings.openproject.enabled || !settings.openproject.sourceId || settings.openproject.role !== 'primary') return;

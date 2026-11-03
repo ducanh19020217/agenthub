@@ -155,9 +155,12 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   const scopedProject = (): string | undefined => options?.projectId || process.env.AGENTHUB_MCP_PROJECT || undefined;
   const assistantSession = (): boolean => (process.env.AGENTHUB_CHAT_KIND || '') === 'assistant';
   const assertAssistantAllowed = (toolName: string): void => {
-    if (assistantSession() && ['hub_review', 'hub_dispatch_batch'].includes(toolName)) {
+    if (assistantSession() && ['hub_review', 'hub_dispatch_batch', 'hub_request_secret'].includes(toolName)) {
       throw new Error(`Trợ lý không được gọi ${toolName}; việc này thuộc về bộ não`);
     }
+  };
+  const assertSetupWriteAllowed = (toolName: string, dryRun: boolean | undefined): void => {
+    if (assistantSession() && dryRun === false) throw new Error(`Trợ lý guarded chỉ được dryRun với ${toolName}`);
   };
   const assertProject = (projectId: string | undefined, action: string): void => {
     const scope = scopedProject();
@@ -1536,6 +1539,43 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
       }
     },
   );
+
+  server.tool('hub_effective_config', 'Đọc cấu hình hiệu lực của project', { project: z.string() }, async ({ project }) => {
+    try { assertProject(project, 'Đọc cấu hình'); return { content: [{ type: 'text', text: JSON.stringify(await callApi('GET', `/api/setup/effective-config/${encodeURIComponent(project)}`)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_presets', 'Liệt kê các preset cấu hình', {}, async () => {
+    try { return { content: [{ type: 'text', text: JSON.stringify(await callApi('GET', '/api/setup/presets')) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_departments', 'Liệt kê phòng ban', {}, async () => {
+    try { return { content: [{ type: 'text', text: JSON.stringify(await callApi('GET', '/api/setup/departments')) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_preset_apply', 'Xem hoặc áp dụng preset cấu hình', { scope: z.string(), preset: z.string(), dryRun: z.boolean().default(true) }, async (args) => {
+    try { assertSetupWriteAllowed('hub_preset_apply', args.dryRun); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/preset-apply', args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_project_settings', 'Xem hoặc cập nhật settings project', { project: z.string(), patch: z.record(z.unknown()), dryRun: z.boolean().default(true) }, async (args) => {
+    try { assertProject(args.project, 'Cấu hình project'); assertSetupWriteAllowed('hub_project_settings', args.dryRun); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', `/api/setup/project-settings/${encodeURIComponent(args.project)}`, args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_department', 'Xem hoặc cập nhật phòng ban và gán project', { id: z.string().optional(), patch: z.record(z.unknown()), assignProjects: z.array(z.string()).optional(), dryRun: z.boolean().default(true) }, async (args) => {
+    try { assertSetupWriteAllowed('hub_department', args.dryRun); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/department', args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_config_set', 'Xem hoặc cập nhật một key config an toàn', { path: z.string(), value: z.unknown(), dryRun: z.boolean().default(true) }, async (args) => {
+    try { assertSetupWriteAllowed('hub_config_set', args.dryRun); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/config-set', args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_integration_discover', 'Dò thông tin tích hợp chỉ đọc', { kind: z.enum(['openproject', 'gitea', 'checks']), sourceId: z.string().optional(), url: z.string().optional(), project: z.string().optional() }, async (args) => {
+    try { if (args.project) assertProject(args.project, 'Dò tích hợp'); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/integration-discover', args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_request_secret', 'Yêu cầu người dùng nhập bí mật qua giao diện an toàn', { kind: z.enum(['openproject-key', 'gitea-token', 'deploy-env', 'telegram-token']), target: z.string(), label: z.string() }, async (args) => {
+    try { const result = await callApi<{ configured: boolean; reason?: string; url?: string }>('POST', '/api/secrets/requests', args, 10 * 60 * 1000 + 30_000); return { content: [{ type: 'text', text: JSON.stringify(result) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
 
   return server;
 }

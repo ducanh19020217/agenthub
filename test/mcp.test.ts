@@ -101,6 +101,19 @@ describe('AgentHub MCP Server Tools', () => {
     await offlineClient.close();
   });
 
+  it('exposes setup tools with dry-run defaults and no raw integration secret input', async () => {
+    const tools = await client.listTools();
+    const names = tools.tools.map((tool) => tool.name);
+    expect(names).toEqual(expect.arrayContaining([
+      'hub_effective_config', 'hub_presets', 'hub_departments', 'hub_preset_apply', 'hub_project_settings',
+      'hub_department', 'hub_config_set', 'hub_integration_discover', 'hub_request_secret',
+    ]));
+    const preset = tools.tools.find((tool) => tool.name === 'hub_preset_apply');
+    expect(preset?.inputSchema).toMatchObject({ properties: { dryRun: { default: true } } });
+    const discover = tools.tools.find((tool) => tool.name === 'hub_integration_discover');
+    expect(discover?.inputSchema.properties).not.toHaveProperty('key');
+  });
+
   it('hub_status returns overview with task counts, running tasks, and profile quota status', async () => {
     ctx.profileRepo.upsert({
       name: 'chinh',

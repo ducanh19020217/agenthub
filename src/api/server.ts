@@ -32,7 +32,7 @@ export function resolveWebDir(moduleUrl: string, env: NodeJS.ProcessEnv = {}): s
 export async function createServer(
   service: AppService,
   config: AgentHubConfig,
-  options?: { webDir?: string; onShutdown?: (disable: boolean) => void },
+  options?: { webDir?: string; onShutdown?: (disable: boolean) => void; openProjectSync?: (sourceId: string) => Promise<{ imported: number; comments: number }> },
 ): Promise<FastifyInstance> {
   const fastify = Fastify({ logger: false, forceCloseConnections: true });
 
@@ -126,7 +126,7 @@ export async function createServer(
   fastify.get('/api/status', async () => {
     return service.getStatus();
   });
-  registerOpenProjectRoutes(fastify, config);
+  registerOpenProjectRoutes(fastify, config, { sync: options?.openProjectSync });
 
   fastify.post('/api/hub/shutdown', async (req) => {
     const body = (req.body || {}) as { disable?: unknown };

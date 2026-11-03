@@ -110,6 +110,33 @@ export const DEFAULT_SAVINGS_CONFIG: SavingsConfig = {
   claudeOverheadPerTask: 40_000,
 };
 
+export interface SchedulerLimitsConfig {
+  maxRunsPerTask: number;
+  maxConsecutiveCrashesPerTask: number;
+}
+
+export const DEFAULT_SCHEDULER_LIMITS: SchedulerLimitsConfig = {
+  maxRunsPerTask: 15,
+  maxConsecutiveCrashesPerTask: 3,
+};
+
+export interface ProfileCoolingConfig {
+  /** Number of consecutive crashes across all tasks before cooling activates. */
+  threshold: number;
+  /** Time window in minutes to count consecutive crashes. */
+  windowMin: number;
+  /** Duration of cooling period in minutes. */
+  coolingMin: number;
+}
+
+export type SchedulerConfig = SchedulerLimitsConfig;
+
+export const DEFAULT_PROFILE_COOLING: ProfileCoolingConfig = {
+  threshold: 3,
+  windowMin: 30,
+  coolingMin: 30,
+};
+
 export interface StallConfig {
   noCommitMin: number;
   loopThreshold: number;
@@ -334,6 +361,9 @@ export interface AgentHubConfig {
   checks: ChecksConfig;
   branding: BrandingConfig;
   deploy: Record<string, DeployProjectConfig>;
+  scheduler: SchedulerConfig;
+  schedulerLimits: SchedulerLimitsConfig;
+  profileCooling: ProfileCoolingConfig;
 }
 
 type ReviewerConfigPatch = Partial<Omit<AgentHubConfig['reviewer'], 'fallback' | 'arbiter'>> & {
@@ -394,6 +424,8 @@ export function saveConfig(
       notify?: Partial<TelegramNotifyConfig>;
     }>;
     workers?: Partial<WorkersConfig>;
+    scheduler?: Partial<SchedulerConfig>;
+    profileCooling?: Partial<ProfileCoolingConfig>;
     ui?: Partial<UiConfig>;
     branding?: Partial<BrandingConfig>;
   }>,
@@ -583,6 +615,8 @@ export function updateConfigInMemory(
       notify?: Partial<TelegramNotifyConfig>;
     }>;
     workers?: Partial<WorkersConfig>;
+    scheduler?: Partial<SchedulerConfig>;
+    profileCooling?: Partial<ProfileCoolingConfig>;
     ui?: Partial<UiConfig>;
     branding?: Partial<BrandingConfig>;
   }>,
@@ -775,6 +809,9 @@ export function updateConfigInMemory(
       ...patch.workers,
     };
   }
+  if (patch.scheduler) config.scheduler = { ...config.scheduler, ...patch.scheduler };
+  if (patch.scheduler) config.schedulerLimits = config.scheduler;
+  if (patch.profileCooling) config.profileCooling = { ...config.profileCooling, ...patch.profileCooling };
   if (patch.ui?.tours) config.ui = { ...config.ui, tours: { ...config.ui.tours, ...patch.ui.tours } };
   if (patch.branding) config.branding = parseBranding({ ...config.branding, ...patch.branding });
   if (patch.tools?.installers) {
@@ -1263,5 +1300,37 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
     checks,
     branding,
     deploy,
+    scheduler: (() => {
+      const raw = (userConfig.scheduler as Record<string, unknown>) || {};
+      return {
+        maxRunsPerTask: typeof raw.maxRunsPerTask === 'number' && raw.maxRunsPerTask > 0 ? Math.floor(raw.maxRunsPerTask) : DEFAULT_SCHEDULER_LIMITS.maxRunsPerTask,
+        maxConsecutiveCrashesPerTask: typeof raw.maxConsecutiveCrashesPerTask === 'number' && raw.maxConsecutiveCrashesPerTask > 0 ? Math.floor(raw.maxConsecutiveCrashesPerTask) : DEFAULT_SCHEDULER_LIMITS.maxConsecutiveCrashesPerTask,
+      };
+    })(),
+    schedulerLimits: (() => {
+      const raw = (userConfig.scheduler as Record<string, unknown>) || {};
+      return {
+        maxRunsPerTask: typeof raw.maxRunsPerTask === 'number' && raw.maxRunsPerTask > 0
+          ? Math.floor(raw.maxRunsPerTask)
+          : DEFAULT_SCHEDULER_LIMITS.maxRunsPerTask,
+        maxConsecutiveCrashesPerTask: typeof raw.maxConsecutiveCrashesPerTask === 'number' && raw.maxConsecutiveCrashesPerTask > 0
+          ? Math.floor(raw.maxConsecutiveCrashesPerTask)
+          : DEFAULT_SCHEDULER_LIMITS.maxConsecutiveCrashesPerTask,
+      };
+    })(),
+    profileCooling: (() => {
+      const raw = (userConfig.profileCooling as Record<string, unknown>) || {};
+      return {
+        threshold: typeof raw.threshold === 'number' && raw.threshold > 0
+          ? Math.floor(raw.threshold)
+          : DEFAULT_PROFILE_COOLING.threshold,
+        windowMin: typeof raw.windowMin === 'number' && raw.windowMin > 0
+          ? raw.windowMin
+          : DEFAULT_PROFILE_COOLING.windowMin,
+        coolingMin: typeof raw.coolingMin === 'number' && raw.coolingMin > 0
+          ? raw.coolingMin
+          : DEFAULT_PROFILE_COOLING.coolingMin,
+      };
+    })(),
   };
 }

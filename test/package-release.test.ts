@@ -111,7 +111,11 @@ describe('release packaging and installation', () => {
       const result = run('npm', ['run', 'package']);
       expect(result.status).toBe(0);
       const releaseDir = path.resolve('release');
-      const archive = fs.readdirSync(releaseDir).find((name) => /^agenthub-.*\.tar\.gz$/.test(name));
+      const version = JSON.parse(fs.readFileSync('package.json', 'utf8')).version as string;
+      const expectedName = `agenthub-${version}-${PLATFORM_ARCH}.tar.gz`;
+      const checksumEntry = fs.readFileSync(path.join(releaseDir, 'SHA256SUMS'), 'utf8')
+        .split('\n').map((line) => line.trim().split(/\s+/)).find((parts) => parts[1] === expectedName);
+      const archive = checksumEntry?.[1] || expectedName;
       expect(archive).toBeDefined();
       const archivePath = path.join(releaseDir, archive!);
       const listing = run('tar', ['-tzf', archivePath]).stdout.split('\n').filter(Boolean);

@@ -9,7 +9,7 @@ import { DepartmentsPage } from '../pages/DepartmentsPage';
 import { ProjectSettingsDrawer } from '../components/ProjectSettingsDrawer';
 import { ProjectWizard } from '../components/ProjectWizard';
 import * as client from '../api/client';
-import type { Department, EffectiveConfigResponse, Project } from '../types/api';
+import type { Department, EffectiveConfigResponse, PresetDetails, Profile, Project } from '../types/api';
 
 const mockProject: Project = {
   id: 'test-project',
@@ -18,6 +18,7 @@ const mockProject: Project = {
   defaultBranch: 'main',
   maxParallel: 2,
   envTemplate: null,
+  review: JSON.stringify({ chain: [{ reviewer: 'claude', mode: 'final' }], maxRounds: 2 }),
   checks: [{ name: 'typecheck', cmd: ['npm', 'run', 'typecheck'], timeoutSec: 120 }],
   settings: {
     preset: 'balanced',
@@ -29,39 +30,35 @@ const mockProject: Project = {
     reviewChecklist: [],
     notifications: { telegramContent: 'full' },
     review: {
-      chain: [{ reviewer: 'claude', mode: 'final' }],
-      maxRounds: 2,
+      autoMerge: true,
     },
   },
 };
 
 const mockEffectiveConfig: EffectiveConfigResponse = {
-  projectId: 'test-project',
   preset: 'balanced',
-  effective: {
-    brain: {
-      mode: { value: 'auto', source: 'global' },
-      permissions: { value: 'standard', source: 'project' },
-      engine: { value: 'claude', source: 'department' },
-      model: { value: 'sonnet', source: 'global' },
+  brain: {
+    mode: { value: 'auto', source: 'global' },
+    permissions: { value: 'standard', source: 'project' },
+    engine: { value: 'claude', source: 'department' },
+    model: { value: 'sonnet', source: 'global' },
+    budgets: {
       dailyTokenBudget: { value: 50000, source: 'department' },
       maxTurnsPerHour: { value: 10, source: 'global' },
     },
-    review: {
-      chain: { value: [{ reviewer: 'claude', mode: 'final' }], source: 'project' },
-      maxRounds: { value: 2, source: 'global' },
-      order: { value: ['claude'], source: 'global' },
-      fallback: { value: { onUnavailable: true, onError: true, onBusyAfterMin: 10 }, source: 'global' },
-    },
+  },
+  review: {
+    chain: { value: [{ reviewer: 'claude', mode: 'final' }], source: 'project' },
+    maxRounds: { value: 2, source: 'global' },
     checks: {
       value: [{ name: 'typecheck', cmd: ['npm', 'run', 'typecheck'], timeoutSec: 120 }],
       source: 'project',
     },
     autoMerge: { value: true, source: 'project' },
-    autoMergeReadiness: {
-      ready: true,
-      missing: [],
-    },
+  },
+  autoMergeReadiness: {
+    ready: true,
+    missing: [],
   },
 };
 
@@ -77,7 +74,10 @@ const mockDepartments: Department[] = [
     brainPermissions: 'inherit',
     brainDailyTokenBudget: 0,
     brainMaxTurnsPerHour: 0,
-    profiles: [{ profileName: 'claude-default', share: 1 }],
+    claudeDailyTokenBudget: 0,
+    telegramTopicId: null,
+    createdAt: '2026-01-01T00:00:00Z',
+    profiles: [{ profileName: 'claude-default', share: 1, departmentId: 'chung' }],
     projects: [{ id: 'proj-1', name: 'Project 1' }],
   },
   {
@@ -92,9 +92,53 @@ const mockDepartments: Department[] = [
     brainPermissions: 'standard',
     brainDailyTokenBudget: 100000,
     brainMaxTurnsPerHour: 20,
-    profiles: [{ profileName: 'codex-pro', share: 0.8 }],
+    claudeDailyTokenBudget: 0,
+    telegramTopicId: null,
+    createdAt: '2026-01-01T00:00:00Z',
+    profiles: [{ profileName: 'codex-pro', share: 0.8, departmentId: 'backend' }],
     projects: [],
   },
+];
+
+const mockPresets: PresetDetails[] = [
+  {
+    id: 'safe',
+    name: { vi: 'An toàn', en: 'Safe' },
+    description: { vi: 'Mô tả an toàn', en: 'Safe description' },
+    config: {
+      brain: { mode: 'suggest', permissions: 'standard' },
+      review: { chainDescription: { vi: '1 bước', en: '1 step' }, maxRounds: 1, autoMerge: false },
+      autoFixOnFail: false,
+      planning: { requireApproval: true, approvalMinTasks: 1 },
+    },
+  },
+  {
+    id: 'balanced',
+    name: { vi: 'Cân bằng', en: 'Balanced' },
+    description: { vi: 'Mô tả cân bằng', en: 'Balanced description' },
+    config: {
+      brain: { mode: 'auto', permissions: 'trusted' },
+      review: { chainDescription: { vi: '2 bước', en: '2 steps' }, maxRounds: 2, autoMerge: false },
+      autoFixOnFail: true,
+      planning: { requireApproval: true, approvalMinTasks: 5 },
+    },
+  },
+  {
+    id: 'auto',
+    name: { vi: 'Tự động', en: 'Auto' },
+    description: { vi: 'Mô tả tự động', en: 'Auto description' },
+    config: {
+      brain: { mode: 'auto', permissions: 'trusted' },
+      review: { chainDescription: { vi: 'Tự merge', en: 'Auto merge' }, maxRounds: 3, autoMerge: true },
+      autoFixOnFail: true,
+      planning: { requireApproval: false, approvalMinTasks: 0 },
+    },
+  },
+];
+
+const mockProfiles: Profile[] = [
+  { name: 'claude-default', engine: 'claude', enabled: true, kind: 'isolated' },
+  { name: 'codex-pro', engine: 'codex', enabled: true, kind: 'codex' },
 ];
 
 function renderWithProviders(ui: React.ReactElement) {
@@ -120,17 +164,10 @@ describe('Simple Settings UI (f-simple-settings-ui)', () => {
     vi.restoreAllMocks();
     localStorage.clear();
 
-    vi.spyOn(client, 'getPresets').mockResolvedValue([
-      { level: 'safe', title: 'An toàn', description: 'Mô tả an toàn' },
-      { level: 'balanced', title: 'Cân bằng', description: 'Mô tả cân bằng' },
-      { level: 'auto', title: 'Tự động', description: 'Mô tả tự động' },
-    ]);
+    vi.spyOn(client, 'getPresets').mockResolvedValue(mockPresets);
     vi.spyOn(client, 'getDepartments').mockResolvedValue(mockDepartments);
     vi.spyOn(client, 'getProjects').mockResolvedValue([mockProject]);
-    vi.spyOn(client, 'getProfiles').mockResolvedValue([
-      { name: 'claude-default', engine: 'claude', enabled: true },
-      { name: 'codex-pro', engine: 'codex', enabled: true },
-    ]);
+    vi.spyOn(client, 'getProfiles').mockResolvedValue(mockProfiles);
     vi.spyOn(client, 'getModelOptions').mockResolvedValue({
       suggestions: ['sonnet', 'opus', 'codex:gpt-5.6', 'codex:gpt-5.6-turbo'],
       configured: ['sonnet', 'codex:gpt-5.6'],
@@ -164,7 +201,7 @@ describe('Simple Settings UI (f-simple-settings-ui)', () => {
       const applySpy = vi.spyOn(client, 'applyPreset').mockResolvedValue({
         scope: 'global',
         preset: 'safe',
-        dryRun: true,
+        applied: false,
         diff: {
           before: { 'brain.permissions': 'full', 'notifications.telegramContent': 'full' },
           after: { 'brain.permissions': 'standard', 'notifications.telegramContent': 'minimal' },
@@ -192,7 +229,7 @@ describe('Simple Settings UI (f-simple-settings-ui)', () => {
       applySpy.mockResolvedValueOnce({
         scope: 'global',
         preset: 'safe',
-        dryRun: false,
+        applied: true,
         diff: { before: {}, after: {} },
       });
       fireEvent.click(confirmBtn);
@@ -224,13 +261,13 @@ describe('Simple Settings UI (f-simple-settings-ui)', () => {
     it('renders automerge checklist and allows quick fixes', async () => {
       vi.spyOn(client, 'getEffectiveConfig').mockResolvedValue({
         ...mockEffectiveConfig,
-        effective: {
-          ...mockEffectiveConfig.effective,
+        review: {
+          ...mockEffectiveConfig.review,
           autoMerge: { value: false, source: 'project' },
-          autoMergeReadiness: {
-            ready: false,
-            missing: ['reviewChain', 'checks', 'autoMerge'],
-          },
+        },
+        autoMergeReadiness: {
+          ready: false,
+          missing: ['reviewChain', 'checks', 'autoMerge'],
         },
       });
 
@@ -239,10 +276,17 @@ describe('Simple Settings UI (f-simple-settings-ui)', () => {
           project={{
             ...mockProject,
             checks: [],
+            review: JSON.stringify({ chain: [] }),
             settings: {
               ...mockProject.settings,
+              brain: { mode: 'inherit', permissions: 'standard' },
+              worktree: { install: 'auto', gitHooks: 'run' },
               integration: { enabled: false },
-              review: { chain: [] },
+              ci: {},
+              references: [],
+              reviewChecklist: [],
+              notifications: { telegramContent: 'full' },
+              review: { autoMerge: false },
             },
           }}
           isOpen={true}

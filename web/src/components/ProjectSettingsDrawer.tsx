@@ -240,13 +240,11 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   });
   const allDepartments = (departments && departments.length > 0) ? departments : remoteDepartments;
 
-  const { data: effectiveData } = useQuery({
+  const { data: effectiveConfig } = useQuery({
     queryKey: ['effective-config', project?.id],
     queryFn: () => getEffectiveConfig(project!.id),
     enabled: Boolean(isOpen && project?.id),
   });
-  const effectiveConfig = effectiveData?.effective;
-  const effectivePreset = effectiveData?.preset;
 
   const { data: presets = [] } = useQuery({
     queryKey: ['presets'],
@@ -1134,7 +1132,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 <p className="text-xs text-[var(--t-text-3)]">{t('projects.presetSubtitle')}</p>
               </div>
               <span className="text-xs px-2 py-0.5 rounded bg-[var(--t-surface-2)] border border-[var(--t-border)] font-mono text-[var(--t-text-2)]">
-                {t('projects.presetTitle')}: {draftSettings.preset || effectivePreset || 'custom'}
+                {t('projects.presetTitle')}: {draftSettings.preset || effectiveConfig?.preset || 'custom'}
               </span>
             </div>
 
@@ -1144,7 +1142,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 const pDef = presets.find((p) => p.id === level);
                 const title = pDef?.name?.[locale as 'vi' | 'en'] || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}`);
                 const desc = pDef?.description?.[locale as 'vi' | 'en'] || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}Desc`);
-                const isCurrent = (draftSettings.preset || effectivePreset) === level;
+                const isCurrent = (draftSettings.preset || effectiveConfig?.preset) === level;
                 return (
                   <div
                     key={level}
@@ -1215,7 +1213,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 </p>
               </div>
               <span className="text-xs px-2 py-0.5 rounded bg-[var(--t-surface-2)] text-[var(--t-text-2)] font-mono">
-                {effectivePreset || 'custom'}
+                {effectiveConfig?.preset || 'custom'}
               </span>
             </div>
 
@@ -1432,7 +1430,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
 
               {effectiveConfig?.autoMergeReadiness?.missing && effectiveConfig.autoMergeReadiness.missing.length > 0 && (
                 <div className="p-2 rounded bg-[color-mix(in_srgb,var(--t-crit)_8%,transparent)] text-[11px] text-[var(--t-crit)] space-y-0.5">
-                  {effectiveConfig.autoMergeReadiness.missing.map((msg, i) => (
+                  {effectiveConfig.autoMergeReadiness.missing.map((msg: string, i: number) => (
                     <div key={i}>• {msg}</div>
                   ))}
                 </div>

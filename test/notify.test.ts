@@ -7,6 +7,7 @@ import { openDatabase, TaskRepo, QuotaMarkRepo, EventRepo, ProjectRepo, ProfileR
 import { EventBus } from '../src/scheduler/index.js';
 import { NotificationService } from '../src/notify.js';
 import { areAllProfilesQuotaExhaustedForFamily } from '../src/brain/digest.js';
+import { QuotaService, formatRunnableCapacity } from '../src/quota/index.js';
 
 describe('NotificationService (Desktop Notifications)', () => {
   let tmpDir: string;
@@ -332,6 +333,27 @@ describe('NotificationService (Desktop Notifications)', () => {
     eventBus.emit('quota.exhausted', undefined, { profile: 'chinh', family: 'gemini', engine: 'agy' });
     expect(execCalls).toHaveLength(1);
     expect(execCalls[0].args.at(-1)).toContain('🚨 Hết sạch quota ở mọi tài khoản và model');
+    notifier.stop();
+  });
+
+  it('uses runnable capacity for the shared info notification and batches families', async () => {
+    profileRepo.upsert({ name: 'g2', engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
+    profileRepo.upsert({ name: 'codeX1', engine: 'codex', kind: 'codex', home: tmpDir, email: null, enabled: 1 });
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    for (const profile of ['g1', 'chinh', 'g2']) {
+      quotaMarkRepo.mark(profile, 'claude', future);
+      quotaMarkRepo.mark(profile, 'gpt', future);
+    }
+    const quota = new QuotaService(quotaMarkRepo, profileRepo);
+    expect(formatRunnableCapacity(quota.capacitySnapshot())).toBe('Gemini (3 tài khoản), Codex (codeX1)');
+    const notifier = new NotificationService({ eventBus, config, profileRepo, quotaMarkRepo, exec: fakeExec });
+    notifier.start();
+    eventBus.emit('quota.exhausted', undefined, { profile: 'g2', family: 'gpt', engine: 'agy' });
+    eventBus.emit('quota.exhausted', undefined, { profile: 'g2', family: 'claude', engine: 'agy' });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('Hết quota Claude/GPT trên mọi tài khoản Antigravity');
+    expect(execCalls[0].args.at(-1)).toContain('Vẫn chạy bằng: Gemini (3 tài khoản), Codex (codeX1)');
     notifier.stop();
   });
 

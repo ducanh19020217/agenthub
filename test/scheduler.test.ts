@@ -1153,6 +1153,29 @@ describe('Quota → profile marked → task runs on another profile', () => {
     scheduler.stop();
   });
 
+  it('falls through the task model chain when the first model family is exhausted', () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'agy-1', engine: 'agy', kind: 'isolated', home: '/tmp/agy-1', email: null, enabled: 1 });
+    profileRepo.upsert({ name: 'codeX1', engine: 'codex', kind: 'codex', home: '/tmp/codex', email: null, enabled: 1 });
+    new QuotaService(quotaMarkRepo, profileRepo).mark('agy-1', 'gemini', 3600, 'quota hit');
+    taskRepo.insert({
+      id: 'test-project/fallback', projectId: 'test-project', slug: 'fallback', title: 'Fallback',
+      status: 'queued', level: 'easy', modelChain: JSON.stringify(['gemini-3.8-flash-medium', 'codex:gpt-5.6-luna']),
+    });
+
+    const fakeAgent = path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs');
+    const scheduler = new Scheduler(
+      config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['agy', new FakeEngine(fakeAgent)], ['codex', new FakeEngine(fakeAgent)]]),
+    );
+    scheduler.tick();
+
+    expect(runRepo.getByTask('test-project/fallback')[0]).toMatchObject({ model: 'codex:gpt-5.6-luna', profileName: 'codeX1' });
+    expect(taskRepo.get('test-project/fallback')?.status).toBe('running');
+    scheduler.stop();
+  });
+
   it('marks auth as not logged in, propagates by email, and requeues on another profile', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);

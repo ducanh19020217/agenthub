@@ -120,6 +120,13 @@ export type ProjectSettingsInput = z.infer<typeof ProjectSettingsInputSchema>;
 const parsedDefaultProjectSettings = ProjectSettingsSchema.parse({});
 // Keep the legacy serialized/default shape stable while exposing the new section to callers.
 Object.defineProperty(parsedDefaultProjectSettings, 'openproject', { value: parsedDefaultProjectSettings.openproject, enumerable: false, writable: true });
+Object.defineProperty(parsedDefaultProjectSettings, 'toJSON', {
+  value: function (this: ProjectSettings) {
+    return { ...this, openproject: this.openproject };
+  },
+  enumerable: false,
+  writable: true,
+});
 export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = parsedDefaultProjectSettings;
 
 /** Parse the stored column. Invalid or missing JSON yields defaults (never throws). */
@@ -130,6 +137,13 @@ export function parseProjectSettings(raw: string | null | undefined): ProjectSet
     if (!result.success) return DEFAULT_PROJECT_SETTINGS;
     const parsed = result.data;
     Object.defineProperty(parsed, 'openproject', { value: parsed.openproject, enumerable: false, writable: true });
+    Object.defineProperty(parsed, 'toJSON', {
+      value: function (this: ProjectSettings) {
+        return { ...this, openproject: this.openproject };
+      },
+      enumerable: false,
+      writable: true,
+    });
     return parsed;
   } catch {
     return DEFAULT_PROJECT_SETTINGS;

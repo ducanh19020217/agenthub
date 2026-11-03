@@ -1,6 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import { z } from 'zod';
 import { DEFAULT_LOAD_CONFIG, LoadConfig } from './load.js';
 import type { ExtraDiskPath } from './disk.js';
 import { normalizeFallbackSteps, ClaudeFallbackStep } from './chat/failover.js';
@@ -257,6 +258,61 @@ export const DEFAULT_WORKERS_CONFIG: WorkersConfig = {
   codexSandbox: 'off',
 };
 
+// --- OpenProject source configuration ---
+
+export const DailyReportConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  time: z.string().default('08:00'),
+  weekdaysOnly: z.boolean().default(true),
+  dir: z.string().min(1).optional(),
+  maxItems: z.number().int().positive().default(10),
+  telegram: z.boolean().default(false),
+});
+
+export type DailyReportConfig = z.infer<typeof DailyReportConfigSchema>;
+
+export const OpenProjectSourceSchema = z.object({
+  id: z.string().regex(/^[a-z0-9-]+$/, 'id must be lowercase alphanumeric with hyphens'),
+  url: z.string().url(),
+  project: z.string().min(1),
+  pollIntervalSec: z.number().int().positive().default(120),
+  watchStatusIds: z.array(z.number().int()).default([]),
+  reopenedStatusIds: z.array(z.number().int()).default([]),
+  resolvedStatusId: z.number().int().nullable().default(null),
+  reviewStatusId: z.number().int().nullable().default(null),
+  openStatusIds: z.array(z.number().int()).default([]),
+  minTicketNumber: z.number().int().min(0).default(0),
+  autoStart: z.boolean().default(true),
+  autoResolve: z.boolean().default(true),
+  language: z.string().default('vi'),
+  dailyReport: DailyReportConfigSchema.optional(),
+});
+
+export type OpenProjectSource = z.infer<typeof OpenProjectSourceSchema>;
+
+export const OpenProjectIntegrationSchema = z.object({
+  sources: z.array(OpenProjectSourceSchema).default([]),
+});
+
+export interface IntegrationsConfig {
+  openproject: {
+    sources: OpenProjectSource[];
+  };
+}
+
+export const DEFAULT_INTEGRATIONS_CONFIG: IntegrationsConfig = {
+  openproject: { sources: [] },
+};
+
+export function parseOpenProjectSources(raw: unknown): OpenProjectSource[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const obj = raw as Record<string, unknown>;
+  const opRaw = obj.openproject;
+  if (!opRaw || typeof opRaw !== 'object') return [];
+  const result = OpenProjectIntegrationSchema.safeParse(opRaw);
+  return result.success ? result.data.sources : [];
+}
+
 export interface AgentHubConfig {
   hubHome: string;
   agyHomesDir: string;
@@ -334,6 +390,7 @@ export interface AgentHubConfig {
   checks: ChecksConfig;
   branding: BrandingConfig;
   deploy: Record<string, DeployProjectConfig>;
+  integrations: IntegrationsConfig;
 }
 
 type ReviewerConfigPatch = Partial<Omit<AgentHubConfig['reviewer'], 'fallback' | 'arbiter'>> & {
@@ -396,6 +453,7 @@ export function saveConfig(
     workers?: Partial<WorkersConfig>;
     ui?: Partial<UiConfig>;
     branding?: Partial<BrandingConfig>;
+    integrations?: Partial<{ openproject: { sources: unknown[] } }>;
   }>,
 ): void {
   const configFilePath = path.join(hubHome, 'config.json');
@@ -532,6 +590,14 @@ export function saveConfig(
           },
         }
       : {}),
+    ...(patch.integrations && typeof patch.integrations === 'object'
+      ? {
+          integrations: {
+            ...((current.integrations as Record<string, unknown>) || {}),
+            ...patch.integrations,
+          },
+        }
+      : {}),
   };
   fs.writeFileSync(configFilePath, JSON.stringify(updated, null, 2), 'utf-8');
 }
@@ -585,6 +651,7 @@ export function updateConfigInMemory(
     workers?: Partial<WorkersConfig>;
     ui?: Partial<UiConfig>;
     branding?: Partial<BrandingConfig>;
+    integrations?: Partial<{ openproject: { sources: unknown[] } }>;
   }>,
 ): void {
   if (patch.modelChainHard) {
@@ -787,6 +854,14 @@ export function updateConfigInMemory(
         ...(value.docsUrl !== undefined ? { docsUrl: value.docsUrl } : {}),
       };
     }
+  }
+  if (patch.integrations?.openproject) {
+    config.integrations = {
+      ...config.integrations,
+      openproject: {
+        sources: parseOpenProjectSources(patch.integrations),
+      },
+    };
   }
 }
 
@@ -1004,6 +1079,12 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
       : 2,
   };
   const rawTools = (userConfig.tools as Record<string, unknown>) || {};
+  const integrationsRaw = userConfig.integrations && typeof userConfig.integrations === 'object'
+    ? userConfig.integrations : {};
+  const integrationsResult = z.object({ openproject: OpenProjectIntegrationSchema.default({}) }).safeParse(integrationsRaw);
+  const integrations: IntegrationsConfig = integrationsResult.success
+    ? integrationsResult.data
+    : DEFAULT_INTEGRATIONS_CONFIG;
   const rawDeploy = (userConfig.deploy as Record<string, unknown>) || {};
   const rawProjectsConfig = (userConfig.projects as Record<string, unknown>) || {};
   for (const [projectId, rawProject] of Object.entries(rawProjectsConfig)) {
@@ -1263,5 +1344,6 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
     checks,
     branding,
     deploy,
+    integrations,
   };
 }

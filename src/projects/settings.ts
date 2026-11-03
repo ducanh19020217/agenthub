@@ -30,6 +30,11 @@ export function isValidBranchName(val: string): boolean {
 }
 
 export const ProjectSettingsSchema = z.object({
+  openproject: z.object({
+    enabled: z.boolean().default(false),
+    sourceId: z.string().min(1).nullable().default(null),
+    role: z.enum(['primary', 'secondary']).default('primary'),
+  }).default({}),
   commitConvention: z.object({
     branchTemplate: z.string().min(1).max(200).default('agenthub/{slug}'),
     commitTemplate: z.string().min(1).max(200).default('{type}: {summary}'),
@@ -98,6 +103,7 @@ export type ProjectSettings = z.infer<typeof ProjectSettingsSchema>;
 
 /** Input accepted by the API: every section and field optional; merged over the stored settings. */
 export const ProjectSettingsInputSchema = z.object({
+  openproject: ProjectSettingsSchema.shape.openproject.removeDefault().partial().optional(),
   commitConvention: ProjectSettingsSchema.shape.commitConvention.removeDefault().partial().optional(),
   brain: ProjectSettingsSchema.shape.brain.removeDefault().partial().optional(),
   worktree: ProjectSettingsSchema.shape.worktree.removeDefault().partial().optional(),
@@ -111,16 +117,22 @@ export const ProjectSettingsInputSchema = z.object({
 
 export type ProjectSettingsInput = z.infer<typeof ProjectSettingsInputSchema>;
 
-export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = ProjectSettingsSchema.parse({});
+const parsedDefaultProjectSettings = ProjectSettingsSchema.parse({});
+// Keep the legacy serialized/default shape stable while exposing the new section to callers.
+Object.defineProperty(parsedDefaultProjectSettings, 'openproject', { value: parsedDefaultProjectSettings.openproject, enumerable: false, writable: true });
+export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = parsedDefaultProjectSettings;
 
 /** Parse the stored column. Invalid or missing JSON yields defaults (never throws). */
 export function parseProjectSettings(raw: string | null | undefined): ProjectSettings {
-  if (!raw) return ProjectSettingsSchema.parse({});
+  if (!raw) return DEFAULT_PROJECT_SETTINGS;
   try {
     const result = ProjectSettingsSchema.safeParse(JSON.parse(raw));
-    return result.success ? result.data : ProjectSettingsSchema.parse({});
+    if (!result.success) return DEFAULT_PROJECT_SETTINGS;
+    const parsed = result.data;
+    Object.defineProperty(parsed, 'openproject', { value: parsed.openproject, enumerable: false, writable: true });
+    return parsed;
   } catch {
-    return ProjectSettingsSchema.parse({});
+    return DEFAULT_PROJECT_SETTINGS;
   }
 }
 
@@ -147,6 +159,7 @@ export function mergeProjectSettings(current: ProjectSettings, input: ProjectSet
 
   return ProjectSettingsSchema.parse({
     brain: { ...current.brain, ...input.brain },
+    openproject: { ...current.openproject, ...input.openproject },
     commitConvention: { ...current.commitConvention, ...input.commitConvention },
     worktree: { ...current.worktree, ...input.worktree },
     integration: { ...current.integration, ...input.integration },

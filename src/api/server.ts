@@ -16,6 +16,7 @@ import { registerBrainRoutes } from '../brain.js';
 import { registerChatRoutes } from '../chat/service.js';
 import { brandingLogoPath, saveBrandingLogo } from '../branding.js';
 import { decodeCursor } from '../pagination.js';
+import { registerOpenProjectRoutes } from '../integrations/openproject/routes.js';
 
 export function resolveWebDistDir(customDir?: string): string {
   return path.resolve(customDir || resolveWebDir(import.meta.url, process.env));
@@ -125,6 +126,7 @@ export async function createServer(
   fastify.get('/api/status', async () => {
     return service.getStatus();
   });
+  registerOpenProjectRoutes(fastify, config);
 
   fastify.post('/api/hub/shutdown', async (req) => {
     const body = (req.body || {}) as { disable?: unknown };

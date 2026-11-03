@@ -940,6 +940,15 @@ export class AppService {
     public departmentRepo?: DepartmentRepo,
   ) {}
 
+  private validateOpenProjectBinding(projectId: string, settings: ReturnType<typeof projectSettings>): void {
+    if (!settings.openproject.enabled || !settings.openproject.sourceId || settings.openproject.role !== 'primary') return;
+    if (!this.config.integrations.openproject.sources.some((source) => source.id === settings.openproject.sourceId)) {
+      throw new HttpError(400, 'bad_request', `Nguồn OpenProject "${settings.openproject.sourceId}" không tồn tại`);
+    }
+    const duplicate = this.projectRepo.getAll().find((project) => project.id !== projectId && (() => { const value = projectSettings(project).openproject; return value.enabled && value.role === 'primary' && value.sourceId === settings.openproject.sourceId; })());
+    if (duplicate) throw new HttpError(400, 'bad_request', `Nguồn OpenProject "${settings.openproject.sourceId}" đã có project primary đang bật: ${duplicate.id}`);
+  }
+
   // --- Departments ---
   listDepartments() {
     if (!this.departmentRepo) throw new HttpError(503, 'unavailable', 'Department service chưa sẵn sàng');
@@ -1638,6 +1647,7 @@ export class AppService {
     }
 
     const effectiveSettings = parsed.settings ? mergeProjectSettings(DEFAULT_PROJECT_SETTINGS, parsed.settings) : DEFAULT_PROJECT_SETTINGS;
+    this.validateOpenProjectBinding(id, effectiveSettings);
     if (effectiveSettings.worktree.root) {
       const worktreeRoot = path.resolve(effectiveSettings.worktree.root);
       const projectStorageRoot = path.join(path.dirname(resolvedPath), '.agenthub-worktrees');
@@ -1768,6 +1778,7 @@ export class AppService {
     const mergedSettings = parsed.settings === undefined
       ? projectSettings(current)
       : mergeProjectSettings(projectSettings(current), parsed.settings);
+    this.validateOpenProjectBinding(id, mergedSettings);
 
     if (mergedSettings.worktree.root) {
       try { validateProjectWorktreeRoot(mergedSettings.worktree.root, current.path, this.config.hubHome); }

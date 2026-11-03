@@ -1123,6 +1123,20 @@ export class AppService {
     if (!session) throw new HttpError(404, 'not_found', `Claude session "${id}" không tồn tại`);
     return this.claudeSessionRepo.setAutoResume(id, enabled);
   }
+  dismissClaudeSessionLimit(id: string) {
+    if (!this.claudeSessionRepo) throw new HttpError(500, 'internal_error', 'Claude session service chưa sẵn sàng');
+    const session = this.claudeSessionRepo.get(id);
+    if (!session) throw new HttpError(404, 'not_found', `Claude session "${id}" không tồn tại`);
+    this.claudeSessionRepo.setLimit(id, null, null);
+    return { ok: true, sessionId: id };
+  }
+  cleanResetClaudeSessions() {
+    const db = this.scheduler.getDatabase();
+    if (!db) throw new HttpError(500, 'internal_error', 'Database chưa sẵn sàng');
+    const nowSec = Math.floor(Date.now() / 1000);
+    const result = db.prepare('UPDATE claude_sessions SET limitResetAt = NULL, limitHitAt = NULL WHERE limitResetAt IS NOT NULL AND limitResetAt <= ?').run(nowSec);
+    return { ok: true, cleared: result.changes };
+  }
   async rescanClaudeSessions() { await this.claudeScanner?.scan(); return { ok: true }; }
   getClaudeQuota() {
     const quota = this.claudeSessionRepo?.quota() || { status: null, resetsAt: null, rateLimitType: null, observedAt: null };

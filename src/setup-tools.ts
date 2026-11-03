@@ -167,7 +167,7 @@ export class SetupTools {
     while (Date.now() < expiresAt) {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       const current = this.getSecretRequest(id);
-      if (current?.status === 'configured') return { configured: true, requestId: id };
+      if (current?.status === 'configured') return { configured: true };
       if (current?.status === 'expired') return { configured: false, reason: 'expired', url };
     }
     this.expireSecret(id);

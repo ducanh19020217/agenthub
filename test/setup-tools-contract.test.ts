@@ -54,7 +54,7 @@ describe('setup MCP tool contracts', () => {
     expect(events[0].payload).not.toHaveProperty('value');
     const result = tools.saveSecret(request.id, 'super-secret');
     expect(result).toEqual({ configured: true });
-    await expect(pending).resolves.toMatchObject({ configured: true });
+    await expect(pending).resolves.toEqual({ configured: true });
     expect(JSON.stringify(events)).not.toContain('super-secret');
   });
 

@@ -534,16 +534,16 @@ export const TaskDetailPage: React.FC = () => {
                 <span
                   data-testid="task-paused-badge"
                   className={`inline-flex items-center rounded px-2 py-0.5 text-xs font-semibold border ${
-                    (task.pauseReason === 'load' || task.currentRun?.pauseReason === 'load')
+                    (task.pauseReason === 'load' || task.pauseReason === 'brain_load' || task.currentRun?.pauseReason === 'load' || task.currentRun?.pauseReason === 'brain_load')
                       ? 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)] border-[color-mix(in_srgb,var(--t-warn)_30%,transparent)]'
                       : 'bg-[var(--t-surface-2)] text-[var(--t-text-2)] border-[var(--t-border)]'
                   }`}
                 >
-                  {(task.pauseReason === 'load' || task.currentRun?.pauseReason === 'load')
+                  {(task.pauseReason === 'load' || task.pauseReason === 'brain_load' || task.currentRun?.pauseReason === 'load' || task.currentRun?.pauseReason === 'brain_load')
                     ? t('status.pausedOverload')
                     : (task.pauseReason === 'focus' || task.currentRun?.pauseReason === 'focus')
                       ? t('status.pausedFocus')
-                    : t('status.paused')}
+                    : t('status.pausedManual')}
                 </span>
               )}
               {task.status === 'running' && !task.paused && !task.currentRun?.paused && (

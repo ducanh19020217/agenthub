@@ -7,6 +7,7 @@ import { isQuietHours, isQuotaEventEngineWide, isSystemIncident, getMinutesSince
 import { effectiveBrainMode } from './brain/mode.js';
 import { formatReset } from './time-format.js';
 import { NotificationDeduper } from './notification-dedupe.js';
+import { QuotaService, QuotaCapacitySnapshot, formatRunnableCapacity } from './quota/index.js';
 
 const WAITING_QUOTA_BATCH_DELAY_MS = 100;
 
@@ -22,6 +23,7 @@ export interface NotificationServiceOptions {
   taskRepo?: TaskRepo;
   profileRepo?: ProfileRepo;
   quotaMarkRepo?: QuotaMarkRepo;
+  quotaService?: QuotaService;
   projectRepo?: { get(id: string): { settings?: string | null } | undefined };
   ciRepo?: CiRepo;
   exec?: NotifyExecFn;
@@ -34,12 +36,17 @@ export class NotificationService {
   private taskRepo?: TaskRepo;
   private profileRepo?: ProfileRepo;
   private quotaMarkRepo?: QuotaMarkRepo;
+  private quotaService?: QuotaService;
   private projectRepo?: NotificationServiceOptions['projectRepo'];
   private execFn?: NotifyExecFn;
   private now: () => number;
   private lastSent = new Map<string, number>();
   private lastSentCi = new Map<string, number>();
   private allQuotaNotified = new Set<string>();
+  private quotaInfoNotified = new Set<string>();
+  private quotaIncidentActive = false;
+  private pendingQuotaInfo = new Map<string, string>();
+  private quotaInfoTimer: ReturnType<typeof setTimeout> | undefined;
   private waitingQuotaNotified = false;
   private waitingQuotaCheckTimer: ReturnType<typeof setTimeout> | undefined;
   private lastSentSummary = new Map<string, number>();
@@ -58,10 +65,27 @@ export class NotificationService {
     this.taskRepo = opts.taskRepo;
     this.profileRepo = opts.profileRepo;
     this.quotaMarkRepo = opts.quotaMarkRepo;
+    this.quotaService = opts.quotaService || (opts.profileRepo && opts.quotaMarkRepo ? new QuotaService(opts.quotaMarkRepo, opts.profileRepo) : undefined);
     this.projectRepo = opts.projectRepo;
     this.execFn = opts.exec;
     this.now = opts.now || (() => Date.now());
     this.eventDeduper = new NotificationDeduper({ now: this.now });
+  }
+
+  private quotaCapacity(): QuotaCapacitySnapshot | null {
+    if (!this.quotaService || !this.profileRepo || this.profileRepo.getAll().length === 0) return null;
+    return this.quotaService.capacitySnapshot(undefined, Math.floor(this.now() / 1000));
+  }
+
+  private quotaRecoveryMessage(snapshot: QuotaCapacitySnapshot): string {
+    const first = snapshot.runnable[0];
+    return first ? `✅ Có quota trở lại: ${first.profileName}/${first.model}` : '✅ Có quota trở lại';
+  }
+
+  private quotaIncidentMessage(snapshot: QuotaCapacitySnapshot | null): string {
+    const next = snapshot?.nextReset;
+    const reset = next ? ` Sớm nhất có lại: ${next.profileName}/${next.model} lúc ${formatReset(next.at, this.now())}.` : '';
+    return `🚨 Hết sạch quota ở mọi tài khoản và model — các task đang chờ quota.${reset}`;
   }
 
   getQuietHoursQueue(): Array<{ type: string; taskId?: string; payload?: unknown; timestamp: number }> {
@@ -118,6 +142,10 @@ export class NotificationService {
       clearInterval(this.checkTimer);
       this.checkTimer = undefined;
     }
+    if (this.quotaInfoTimer) {
+      clearTimeout(this.quotaInfoTimer);
+      this.quotaInfoTimer = undefined;
+    }
     if (this.waitingQuotaCheckTimer) {
       clearTimeout(this.waitingQuotaCheckTimer);
       this.waitingQuotaCheckTimer = undefined;
@@ -146,6 +174,7 @@ export class NotificationService {
     if (level === 'important' && !new Set([
       'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
       'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.waiting_quota',
+      'quota.cleared', 'remote_deploy.failed', 'remote_deploy.health_timeout',
     ]).has(type)) return;
 
     const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
@@ -157,7 +186,17 @@ export class NotificationService {
     if (type === 'quota.cleared') {
       this.allQuotaNotified.delete('all');
       if (typeof p.family === 'string') this.allQuotaNotified.delete(p.family);
-      this.lastSent.delete('critical:AgentHub: Mọi tài khoản đều đã hết quota');
+      for (const key of this.lastSent.keys()) {
+        if (key.includes('Mọi tài khoản đều đã hết quota') || key.includes('Hết sạch quota')) {
+          this.lastSent.delete(key);
+        }
+      }
+      this.quotaInfoNotified.clear();
+      const snapshot = this.quotaCapacity();
+      if (this.quotaIncidentActive) {
+        this.quotaIncidentActive = false;
+        if (snapshot && snapshot.runnable.length > 0) this.notify(this.quotaRecoveryMessage(snapshot), 'normal');
+      }
     }
     if (type === 'task.waiting_quota' && p.reason === 'quota' && this.taskRepo) {
       this.queueWaitingQuotaCheck(notifyAllExhausted);
@@ -185,9 +224,13 @@ export class NotificationService {
         type === 'disk.docker_low' ||
         type === 'claude.quota_exhausted' ||
         type === 'hub.restart_failed' ||
+        type.startsWith('deploy.') ||
+        type.startsWith('gitea.sync.') ||
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||
+        type.startsWith('remote_deploy.') ||
+        type.startsWith('tracker.') ||
         allExhausted ||
         (type === 'task.waiting_quota' && p.reason === 'no_department_profile');
 
@@ -258,13 +301,87 @@ export class NotificationService {
 
       case 'task.blocked': {
         const title = this.resolveTaskTitle(taskId, p);
-        this.notify(`${this.appName}: ${title} bị chặn`, 'normal');
+        const reason = typeof p.message === 'string' ? `: ${p.message}` : typeof p.reason === 'string' ? ` (${p.reason})` : '';
+        this.notify(`${this.appName}: ${title} bị chặn${reason}`, 'normal');
+        break;
+      }
+
+      case 'tracker.ticket_imported': {
+        const ref = typeof p.displayId === 'string' ? p.displayId : 'ticket';
+        this.notify(`${this.appName}: đã nhập ticket ${ref} thành task`, 'normal');
+        break;
+      }
+
+      case 'tracker.comment': {
+        const ref = typeof p.displayId === 'string' ? p.displayId : 'ticket';
+        this.notify(`${this.appName}: ticket ${ref} có comment mới`, 'normal');
+        break;
+      }
+
+      case 'tracker.poll_failed': {
+        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        this.notify(`${this.appName}: đồng bộ ${source} thất bại`, 'critical');
+        break;
+      }
+
+      case 'tracker.resolved': {
+        this.notify(`${this.appName}: OpenProject ticket đã được resolve`, 'normal');
+        break;
+      }
+
+      case 'tracker.review_requested': {
+        this.notify(`${this.appName}: OpenProject ticket cần quyết định`, 'normal');
+        break;
+      }
+
+      case 'tracker.writeback_failed': {
+        const error = typeof p.error === 'string' ? `: ${p.error}` : '';
+        this.notify(`${this.appName}: ghi ngược OpenProject thất bại${error}`, 'critical');
+        break;
+      }
+
+      case 'gitea.sync.started': {
+        const source = typeof p.sourceBranch === 'string' ? p.sourceBranch : '';
+        const target = typeof p.targetBranch === 'string' ? p.targetBranch : '';
+        this.notify(`${this.appName}: bắt đầu đồng bộ Gitea ${source} → ${target}`, 'normal');
+        break;
+      }
+
+      case 'gitea.sync.skipped': {
+        const reason = typeof p.reason === 'string' ? p.reason : 'Không có commit mới';
+        this.notify(`${this.appName}: bỏ qua đồng bộ Gitea: ${reason}`, 'normal');
+        break;
+      }
+
+      case 'gitea.sync.succeeded': {
+        const prNum = typeof p.prNumber === 'number' ? `PR #${p.prNumber}` : 'PR';
+        const commit = typeof p.commit === 'string' ? ` (${p.commit.slice(0, 7)})` : '';
+        this.notify(`${this.appName}: đồng bộ Gitea thành công: ${prNum}${commit}`, 'normal');
+        break;
+      }
+
+      case 'gitea.sync.failed': {
+        const err = typeof p.error === 'string' ? `: ${p.error}` : '';
+        this.notify(`${this.appName}: đồng bộ Gitea thất bại${err}`, 'critical');
+        break;
+      }
+
+      case 'gitea.sync.conflict': {
+        const count = Array.isArray(p.conflictingFiles) ? ` (${p.conflictingFiles.length} file)` : '';
+        this.notify(`${this.appName}: xung đột đồng bộ Gitea${count}: đã tạo task gỡ xung đột`, 'critical');
         break;
       }
 
       case 'task.paused':
       case 'load.task_paused': {
         this.notifyLoadSummary(now, p.reason === 'load' ? 'quá tải hệ thống' : 'yêu cầu tạm dừng');
+        break;
+      }
+
+      case 'task.pause_reminder': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const minutes = typeof p.pausedMinutes === 'number' ? p.pausedMinutes : 30;
+        this.notify(`Nhắc nhở: Task ${title} đã tạm dừng hơn ${minutes} phút (máy không quá tải)`, 'normal');
         break;
       }
 
@@ -314,19 +431,32 @@ export class NotificationService {
       case 'quota.exhausted': {
         const family = typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '';
         const quotaKey = family || 'all';
-        const isAllExhausted = isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, this.now());
+        const snapshot = this.quotaCapacity();
+        const isAllExhausted = snapshot ? snapshot.runnable.length === 0 : isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, this.now());
+        const engineWide = isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, this.now());
         if (!isAllExhausted) this.allQuotaNotified.delete(quotaKey);
+        if (!isAllExhausted && this.quotaIncidentActive) {
+          this.quotaIncidentActive = false;
+          this.notify(this.quotaRecoveryMessage(snapshot!), 'normal');
+        }
         if (effectiveMode === 'auto') {
-          if (isAllExhausted && notifyAllExhausted && !this.allQuotaNotified.has(quotaKey)) {
+          if (isAllExhausted && notifyAllExhausted && !this.quotaIncidentActive) {
             this.allQuotaNotified.add(quotaKey);
-            this.notify('AgentHub: Mọi tài khoản đều đã hết quota', 'critical');
+            this.quotaIncidentActive = true;
+            this.notify(this.quotaIncidentMessage(snapshot), 'critical');
           }
           break;
         }
         if (isAllExhausted) {
-          if (!notifyAllExhausted || this.allQuotaNotified.has(quotaKey)) break;
+          if (!notifyAllExhausted || this.quotaIncidentActive) break;
           this.allQuotaNotified.add(quotaKey);
-          this.notify('AgentHub: Mọi tài khoản đều đã hết quota', 'critical');
+          this.quotaIncidentActive = true;
+          this.notify(this.quotaIncidentMessage(snapshot), 'critical');
+          break;
+        }
+        if (engineWide && !this.quotaInfoNotified.has(`${p.engine || 'agy'}:${family}`)) {
+          this.quotaInfoNotified.add(`${p.engine || 'agy'}:${family}`);
+          this.queueQuotaInfo(p.engine === 'agy' ? 'Antigravity' : String(p.engine || ''), family);
           break;
         }
         if (!notifyPerModel) break;
@@ -407,6 +537,31 @@ export class NotificationService {
         this.notify(msg, 'normal');
         break;
       }
+
+      case 'remote_deploy.started': {
+        const proj = typeof p.projectId === 'string' ? p.projectId : 'dự án';
+        this.notify(`${this.appName}: Bắt đầu remote deploy cho ${proj}`, 'normal');
+        break;
+      }
+
+      case 'remote_deploy.succeeded': {
+        const proj = typeof p.projectId === 'string' ? p.projectId : 'dự án';
+        this.notify(`${this.appName}: Remote deploy thành công cho ${proj}`, 'normal');
+        break;
+      }
+
+      case 'remote_deploy.failed': {
+        const proj = typeof p.projectId === 'string' ? p.projectId : 'dự án';
+        const err = typeof p.error === 'string' ? `: ${p.error}` : '';
+        this.notify(`${this.appName}: Remote deploy thất bại cho ${proj}${err}`, 'critical');
+        break;
+      }
+
+      case 'remote_deploy.health_timeout': {
+        const proj = typeof p.projectId === 'string' ? p.projectId : 'dự án';
+        this.notify(`${this.appName}: Remote deploy hết thời gian chờ health check cho ${proj}`, 'critical');
+        break;
+      }
     }
   }
 
@@ -436,6 +591,25 @@ export class NotificationService {
       const until = active.length > 0 ? Math.min(...active.map((mark) => mark.until)) : 0;
       const time = until ? new Date(until * 1000).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : 'sớm';
       this.notify(`${waiting.length} task đang chờ quota, sớm nhất mở lại lúc ${time}`, 'warning');
+    }, WAITING_QUOTA_BATCH_DELAY_MS);
+  }
+
+  private queueQuotaInfo(engine: string, family: string): void {
+    this.pendingQuotaInfo.set(`${engine}:${family}`, family);
+    if (this.quotaInfoTimer) return;
+    this.quotaInfoTimer = setTimeout(() => {
+      this.quotaInfoTimer = undefined;
+      const snapshot = this.quotaCapacity();
+      const families = [...this.pendingQuotaInfo.values()]
+        .map((value) => value === 'gpt' ? 'GPT' : value.charAt(0).toUpperCase() + value.slice(1))
+        .sort()
+        .join('/');
+      this.pendingQuotaInfo.clear();
+      const reset = snapshot?.nextReset
+        ? ` (reset sớm nhất ${formatReset(snapshot.nextReset.at, this.now())})`
+        : '';
+      const runnable = snapshot ? formatRunnableCapacity(snapshot) : 'model khác';
+      this.notify(`ℹ️ Hết quota ${families} trên mọi tài khoản Antigravity${reset}. Vẫn chạy bằng: ${runnable}`, 'normal');
     }, WAITING_QUOTA_BATCH_DELAY_MS);
   }
 

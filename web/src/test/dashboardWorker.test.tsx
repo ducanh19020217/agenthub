@@ -85,7 +85,7 @@ describe('DashboardPage - Worker display fallback', () => {
     expect(screen.getByText('Lặp lệnh')).toBeInTheDocument();
   });
 
-  it('hiển thị nút Tạm dừng và Tiếp tục cho worker, nhãn "Tạm dừng do quá tải", và thông tin tài nguyên RSS/CPU', async () => {
+  it('hiển thị nút Tạm dừng và Tiếp tục cho worker, nhãn "Tạm dừng (quá tải)", và thông tin tài nguyên RSS/CPU', async () => {
     const pauseSpy = vi.spyOn(client, 'pauseTask').mockResolvedValue({ ok: true, paused: true });
     const resumeSpy = vi.spyOn(client, 'resumeTask').mockResolvedValue({ ok: true, paused: false });
 
@@ -131,7 +131,7 @@ describe('DashboardPage - Worker display fallback', () => {
     expect(screen.getByText('25.4% CPU')).toBeInTheDocument();
 
     expect(screen.getByText('Worker Overloaded')).toBeInTheDocument();
-    expect(screen.getByText('Tạm dừng do quá tải')).toBeInTheDocument();
+    expect(screen.getByText('Tạm dừng (quá tải)')).toBeInTheDocument();
 
     const pauseBtns = screen.getAllByRole('button', { name: /^Tạm dừng$/i });
     fireEvent.click(pauseBtns[0]);

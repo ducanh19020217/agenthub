@@ -6,6 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { getTokenPath, readExistingToken } from '../auth.js';
 import { toRouteId, toTaskId } from '../services/index.js';
+import { formatRunnableCapacity, QuotaCapacitySnapshot } from '../quota/index.js';
 
 export class DaemonDownError extends Error {
   constructor(message = 'AgentHub daemon chưa chạy: `agenthub install-service` hoặc `agenthub daemon`') {
@@ -154,9 +155,12 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   const scopedProject = (): string | undefined => options?.projectId || process.env.AGENTHUB_MCP_PROJECT || undefined;
   const assistantSession = (): boolean => (process.env.AGENTHUB_CHAT_KIND || '') === 'assistant';
   const assertAssistantAllowed = (toolName: string): void => {
-    if (assistantSession() && ['hub_review', 'hub_dispatch_batch'].includes(toolName)) {
+    if (assistantSession() && ['hub_review', 'hub_dispatch_batch', 'hub_request_secret'].includes(toolName)) {
       throw new Error(`Trợ lý không được gọi ${toolName}; việc này thuộc về bộ não`);
     }
+  };
+  const assertSetupWriteAllowed = (toolName: string, dryRun: boolean | undefined): void => {
+    if (assistantSession() && dryRun === false) throw new Error(`Trợ lý guarded chỉ được dryRun với ${toolName}`);
   };
   const assertProject = (projectId: string | undefined, action: string): void => {
     const scope = scopedProject();
@@ -270,6 +274,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             slotsUsed?: number;
             slotsTotal?: number;
           }>;
+          quotaCapacity?: QuotaCapacitySnapshot;
         }>('GET', '/api/status');
 
         const lines: string[] = [];
@@ -277,6 +282,19 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         lines.push(
           `Đang chạy ${tasks.running || 0}${tasks.checking ? ` · đang kiểm tra ${tasks.checking}` : ''} · chờ review ${tasks.review || 0} · chờ quota ${tasks.waiting_quota || 0} · lỗi ${tasks.failed || 0}`,
         );
+
+        if (data.quotaCapacity) {
+          if (data.quotaCapacity.runnable.length === 0) {
+            const next = data.quotaCapacity.nextReset;
+            const resetStr = next ? ` (sớm nhất: ${next.profileName}/${next.model})` : '';
+            lines.push(`🚨 Hết sạch quota ở mọi tài khoản và model — Hệ thống tạm dừng thực thi task${resetStr}`);
+          } else {
+            const hasMarks = (data.profiles || []).some((p) => (p.quotaMarks || []).length > 0);
+            if (hasMarks) {
+              lines.push(`Quota: Vẫn chạy bằng ${formatRunnableCapacity(data.quotaCapacity)}`);
+            }
+          }
+        }
 
         lines.unshift(formatBestQuotaLine(data.profiles || [], 'claude'));
         lines.unshift(formatBestQuotaLine(data.profiles || [], 'gemini'));
@@ -532,6 +550,20 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   );
 
   // 5. hub_create_task
+  server.tool(
+    'hub_tracker_sync',
+    'Chạy ngay một lượt đồng bộ ticket OpenProject cho một nguồn',
+    { sourceId: z.string().min(1) },
+    async (args) => {
+      try {
+        const result = await callApi<{ imported: number; comments: number }>('POST', `/api/integrations/openproject/sources/${encodeURIComponent(args.sourceId)}/sync`);
+        return { content: [{ type: 'text', text: `✓ Đã đồng bộ nguồn ${args.sourceId}: ${result.imported} task mới, ${result.comments} comment.` }] };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
   server.tool(
     'hub_create_task',
     'Tạo task mới trong AgentHub. Nếu start=true thì đưa thẳng vào hàng đợi (queued)',
@@ -1425,9 +1457,16 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   server.tool(
     'hub_pause',
     'Tạm dừng một task',
-    { id: z.string() },
-    async ({ id }) => {
-      try { assertTaskId(id, 'Tạm dừng task'); await callApi('POST', `/api/tasks/${toRouteId(id)}/pause`); return { content: [{ type: 'text', text: `✓ Đã tạm dừng ${id}` }] }; }
+    {
+      id: z.string().describe('ID của task cần tạm dừng'),
+      reason: z.enum(['manual', 'load', 'brain_load']).optional().describe('Lý do tạm dừng: load (khi máy quá tải để tự tiếp tục khi hạ tải) hoặc manual (tạm dừng thủ công)'),
+    },
+    async ({ id, reason }) => {
+      try {
+        assertTaskId(id, 'Tạm dừng task');
+        await callApi('POST', `/api/tasks/${toRouteId(id)}/pause`, { reason });
+        return { content: [{ type: 'text', text: `✓ Đã tạm dừng ${id}` }] };
+      }
       catch (err: unknown) { return handleError(err); }
     },
   );
@@ -1441,6 +1480,74 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
       catch (err: unknown) { return handleError(err); }
     },
   );
+
+  server.tool(
+    'hub_gitea_sync',
+    'Đồng bộ mã nguồn với Gitea theo cấu hình project (tạo PR, merge)',
+    { projectId: z.string().optional() },
+    async (args) => {
+      try {
+        const targetProject = args.projectId ?? scopedProject();
+        if (!targetProject) throw new Error('projectId là bắt buộc');
+        assertProject(targetProject, 'Đồng bộ Gitea');
+        const result = await callApi<Record<string, unknown>>('POST', `/api/projects/${encodeURIComponent(targetProject)}/gitea/sync`);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err: unknown) { return handleError(err); }
+    },
+  );
+
+  server.tool(
+    'hub_remote_deploy',
+    'Kích hoạt remote deploy cho một project',
+    { projectId: z.string().describe('ID của project') },
+    async ({ projectId }) => {
+      try {
+        const targetProject = projectId || scopedProject();
+        if (!targetProject) throw new Error('Cần cung cấp projectId');
+        const result = await callApi('POST', `/api/projects/${encodeURIComponent(targetProject)}/remote-deploy`);
+        return { content: [{ type: 'text', text: `✓ Đã kích hoạt remote deploy cho project "${targetProject}": ${JSON.stringify(result)}` }] };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
+  server.tool('hub_effective_config', 'Đọc cấu hình hiệu lực của project', { project: z.string() }, async ({ project }) => {
+    try { assertProject(project, 'Đọc cấu hình'); return { content: [{ type: 'text', text: JSON.stringify(await callApi('GET', `/api/setup/effective-config/${encodeURIComponent(project)}`)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_presets', 'Liệt kê các preset cấu hình', {}, async () => {
+    try { return { content: [{ type: 'text', text: JSON.stringify(await callApi('GET', '/api/setup/presets')) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_departments', 'Liệt kê phòng ban', {}, async () => {
+    try { return { content: [{ type: 'text', text: JSON.stringify(await callApi('GET', '/api/setup/departments')) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_preset_apply', 'Xem hoặc áp dụng preset cấu hình', { scope: z.string(), preset: z.string(), dryRun: z.boolean().default(true) }, async (args) => {
+    try { assertSetupWriteAllowed('hub_preset_apply', args.dryRun); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/preset-apply', args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_project_settings', 'Xem hoặc cập nhật settings project', { project: z.string(), patch: z.record(z.unknown()), dryRun: z.boolean().default(true) }, async (args) => {
+    try { assertProject(args.project, 'Cấu hình project'); assertSetupWriteAllowed('hub_project_settings', args.dryRun); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', `/api/setup/project-settings/${encodeURIComponent(args.project)}`, args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_department', 'Xem hoặc cập nhật phòng ban và gán project', { id: z.string().optional(), patch: z.record(z.unknown()), assignProjects: z.array(z.string()).optional(), dryRun: z.boolean().default(true) }, async (args) => {
+    try { assertSetupWriteAllowed('hub_department', args.dryRun); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/department', args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_config_set', 'Xem hoặc cập nhật một key config an toàn', { path: z.string(), value: z.unknown(), dryRun: z.boolean().default(true) }, async (args) => {
+    try { assertSetupWriteAllowed('hub_config_set', args.dryRun); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/config-set', args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_integration_discover', 'Dò thông tin tích hợp chỉ đọc', { kind: z.enum(['openproject', 'gitea', 'checks']), sourceId: z.string().optional(), url: z.string().optional(), project: z.string().optional() }, async (args) => {
+    try { if (args.project) assertProject(args.project, 'Dò tích hợp'); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/integration-discover', args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_request_secret', 'Yêu cầu người dùng nhập bí mật qua giao diện an toàn', { kind: z.enum(['openproject-key', 'gitea-token', 'deploy-env', 'telegram-token']), target: z.string(), label: z.string() }, async (args) => {
+    try { const result = await callApi<{ configured: boolean; reason?: string; url?: string }>('POST', '/api/secrets/requests', args, 10 * 60 * 1000 + 30_000); return { content: [{ type: 'text', text: JSON.stringify(result) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
 
   return server;
 }

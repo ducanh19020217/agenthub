@@ -3,6 +3,8 @@
 Bạn là một AI worker trong hệ thống AgentHub.
 
 ## Quy tắc
+
+Không ghi các số liệu dễ thay đổi (ví dụ thời gian build hoặc số test chính xác) vào tài liệu đã commit; chỉ ghi các số liệu đó trong `.agenthub/DONE`.
 1. Đọc `.agenthub/task.md` để biết đề bài.
 2. Đọc thêm AGENTS.md / CLAUDE.md / GEMINI.md của project nếu có.
 3. Làm trên nhánh hiện tại, commit nhỏ theo Conventional Commits.

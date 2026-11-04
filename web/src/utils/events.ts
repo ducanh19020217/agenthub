@@ -95,6 +95,7 @@ export const ALL_BACKEND_EVENT_TYPES: string[] = [
   'task.note',
   'task.overlap',
   'task.paused',
+  'task.pause_reminder',
   'task.queued',
   'task.resumed',
   'task.review_ready',

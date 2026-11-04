@@ -34,6 +34,9 @@ import {
   CiRepo,
 } from '../db/index.js';
 import type { CiWatchService } from '../ci.js';
+import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
+import type { GiteaSyncService } from '../integrations/gitea/service.js';
+import { isGiteaTokenConfigured, saveGiteaToken } from '../integrations/gitea/secrets.js';
 import { BulletinService } from '../bulletin.js';
 import { ProfileService as CoreProfileService, accountKey, isProfileLoggedIn, exchangeAgyRefreshToken, writeAgyIsolatedToken, fetchAgyGoogleUserInfo, fetchAgyGoogleUserInfoDetailed, inspectAgyAccessToken } from '../profiles/index.js';
 import { Scheduler } from '../scheduler/index.js';
@@ -67,8 +70,10 @@ import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, Re
 import { SetupManager } from '../tools/setup.js';
 import { createNewGitProject, inspectProject, readClaudeSessionExcerpt } from '../projects/inspect.js';
 import type { DeployService } from '../deploy.js';
+import type { RemoteDeployService, RemoteDeployStatus } from '../remote-deploy.js';
 import type { PerfCollector } from '../perf.js';
 import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../presets.js';
+import type { SetupTools } from '../setup-tools.js';
 import { computeEffectiveConfig } from '../effective-config.js';
 
 const execFileAsync = promisify(execFile);
@@ -753,6 +758,9 @@ export function formatEventSummary(
         ? `${taskLabel} tạm dừng do quá tải`
         : `${taskLabel} đã tạm dừng`;
 
+    case 'task.pause_reminder':
+      return `${taskLabel} đã tạm dừng hơn ${(p && p.pausedMinutes) || 30} phút`;
+
     case 'task.resumed':
       return `${taskLabel} tiếp tục chạy`;
 
@@ -899,8 +907,11 @@ export function formatEventSummary(
 
 export class AppService {
   public deployService?: DeployService;
+  public remoteDeployService?: RemoteDeployService;
   public ciRepo?: CiRepo;
   public ciService?: CiWatchService;
+  public intakeService?: OpenProjectIntakeService;
+  public giteaSyncService?: GiteaSyncService;
   private perfCollector?: PerfCollector;
   private profileChecks = new Set<string>();
   private reviewingTasks = new Set<string>();
@@ -936,7 +947,20 @@ export class AppService {
     public brainRunner?: BrainRunner,
     public directiveRepo?: BrainDirectiveRepo,
     public departmentRepo?: DepartmentRepo,
+    public setupTools?: SetupTools,
   ) {}
+
+  setSetupTools(tools: SetupTools): void { this.setupTools = tools; }
+  getSetupTools(): SetupTools { if (!this.setupTools) throw new HttpError(503, 'unavailable', 'Setup tools chưa sẵn sàng'); return this.setupTools; }
+
+  private validateOpenProjectBinding(projectId: string, settings: ReturnType<typeof projectSettings>): void {
+    if (!settings.openproject.enabled || !settings.openproject.sourceId || settings.openproject.role !== 'primary') return;
+    if (!this.config.integrations.openproject.sources.some((source) => source.id === settings.openproject.sourceId)) {
+      throw new HttpError(400, 'bad_request', `Nguồn OpenProject "${settings.openproject.sourceId}" không tồn tại`);
+    }
+    const duplicate = this.projectRepo.getAll().find((project) => project.id !== projectId && (() => { const value = projectSettings(project).openproject; return value.enabled && value.role === 'primary' && value.sourceId === settings.openproject.sourceId; })());
+    if (duplicate) throw new HttpError(400, 'bad_request', `Nguồn OpenProject "${settings.openproject.sourceId}" đã có project primary đang bật: ${duplicate.id}`);
+  }
 
   // --- Departments ---
   listDepartments() {
@@ -1011,6 +1035,7 @@ export class AppService {
     const chatPids = this.chatService?.getRunningPids?.() || [];
     this.chatService?.stop();
     this.deployService?.stop();
+    this.remoteDeployService?.stop();
     this.ciService?.stop();
     void this.telegramBotService?.stop();
     return {
@@ -1231,6 +1256,7 @@ export class AppService {
     const tasks = this.taskRepo.getAll();
     const profiles = this.profileRepo.getAll();
     const quotaMarks = this.quotaMarkRepo.getActive();
+    const quotaCapacity = new QuotaService(this.quotaMarkRepo, this.profileRepo).capacitySnapshot(undefined, Math.floor(Date.now() / 1000));
     const dupes = this.coreProfileService.getDuplicateEmails();
     const runningMap = this.scheduler.getRunning();
     const projects = this.projectRepo.getAll();
@@ -1341,12 +1367,15 @@ export class AppService {
       const marks = quotaMarks.filter((m) => m.profileName === p.name);
       const isBusy = Array.from(runningMap.values()).some((r) => r.profileName === p.name);
       const slots = this.lockService.getSlotsSync(p);
+      const coolingUntil = p.coolingUntil && p.coolingUntil > Math.floor(now / 1000) ? p.coolingUntil : null;
       return {
         ...apiProfile(p),
         quotaMarks: marks,
         slotsUsed: Math.max(slots.slotsUsed, isBusy ? 1 : 0),
         slotsTotal: slots.slotsTotal,
         busy: slots.busy || isBusy,
+        crashCount: p.consecutiveCrashes || 0,
+        coolingUntil,
         usage: this.usageService.getForProfile(p.name),
         ...(p.engine === 'claude' ? {
           claudeTokens: this.getClaudeTokenTotals(),
@@ -1389,6 +1418,7 @@ export class AppService {
       tasks: byStatus,
       tasksByProject,
       profiles: profilesStatus,
+      quotaCapacity,
       running: runningTasks,
       overlaps,
       claudeFailover: this.chatService?.getClaudeFailover(),
@@ -1628,6 +1658,60 @@ export class AppService {
     return this.deployService.pushNow(id);
   }
 
+  getGiteaStatus(id: string) {
+    this.getProject(id);
+    return this.giteaSyncService?.getStatus(id) || {
+      tokenConfigured: isGiteaTokenConfigured(this.config.hubHome, id),
+    };
+  }
+
+  saveGiteaToken(id: string, token: string) {
+    this.getProject(id);
+    if (!token || typeof token !== 'string' || !token.trim()) {
+      throw new HttpError(400, 'bad_request', 'Token không được để trống');
+    }
+    if (this.giteaSyncService) {
+      return this.giteaSyncService.saveToken(id, token);
+    }
+    saveGiteaToken(this.config.hubHome, id, token.trim());
+    return { configured: true };
+  }
+
+  async triggerGiteaSync(id: string) {
+    this.getProject(id);
+    if (!this.giteaSyncService) {
+      throw new HttpError(503, 'unavailable', 'Gitea sync service chưa sẵn sàng');
+    }
+    return this.giteaSyncService.syncProject(id);
+  }
+
+  getRemoteDeployStatus(id: string): RemoteDeployStatus | null {
+    this.getProject(id);
+    return this.remoteDeployService?.getStatus(id) || null;
+  }
+
+  triggerRemoteDeploy(id: string, options?: { trigger?: 'manual' | 'after-gitea-sync'; commit?: string }): RemoteDeployStatus {
+    this.getProject(id);
+    if (!this.remoteDeployService) throw new HttpError(503, 'unavailable', 'Remote deploy service chưa sẵn sàng');
+    return this.remoteDeployService.trigger(id, options);
+  }
+
+  saveRemoteDeployEnv(id: string, raw: unknown): string[] {
+    this.getProject(id);
+    if (!this.remoteDeployService) throw new HttpError(503, 'unavailable', 'Remote deploy service chưa sẵn sàng');
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new HttpError(400, 'bad_request', 'Body phải là map env dạng key-value');
+    }
+    const envMap: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof v !== 'string') {
+        throw new HttpError(400, 'bad_request', `Giá trị của key "${k}" phải là chuỗi`);
+      }
+      envMap[k] = v;
+    }
+    return this.remoteDeployService.saveSecrets(id, envMap);
+  }
+
   createProject(raw: unknown): ProjectRow {
     const parseResult = CreateProjectSchema.safeParse(raw);
     if (!parseResult.success) {
@@ -1653,6 +1737,7 @@ export class AppService {
     }
 
     const effectiveSettings = parsed.settings ? mergeProjectSettings(DEFAULT_PROJECT_SETTINGS, parsed.settings) : DEFAULT_PROJECT_SETTINGS;
+    this.validateOpenProjectBinding(id, effectiveSettings);
     if (effectiveSettings.worktree.root) {
       const worktreeRoot = path.resolve(effectiveSettings.worktree.root);
       const projectStorageRoot = path.join(path.dirname(resolvedPath), '.agenthub-worktrees');
@@ -1783,6 +1868,7 @@ export class AppService {
     const mergedSettings = parsed.settings === undefined
       ? projectSettings(current)
       : mergeProjectSettings(projectSettings(current), parsed.settings);
+    this.validateOpenProjectBinding(id, mergedSettings);
 
     if (mergedSettings.worktree.root) {
       try { validateProjectWorktreeRoot(mergedSettings.worktree.root, current.path, this.config.hubHome); }
@@ -2802,6 +2888,9 @@ export class AppService {
 
     if (task.doneReport !== null && task.doneReport !== undefined) {
       doneContent = task.doneReport;
+    }
+    if (task.blockedReport !== null && task.blockedReport !== undefined) {
+      blockedContent = task.blockedReport;
     } else if (task.worktreePath && fs.existsSync(task.worktreePath)) {
       const donePath = path.join(task.worktreePath, '.agenthub', 'DONE');
       const blockedPath = path.join(task.worktreePath, '.agenthub', 'BLOCKED');
@@ -3517,7 +3606,7 @@ export class AppService {
     return this.taskRepo.get(taskId)!;
   }
 
-  pauseTask(idParam: string): { ok: boolean; paused: boolean } {
+  pauseTask(idParam: string, reason: 'manual' | 'load' | 'brain_load' = 'manual'): { ok: boolean; paused: boolean } {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) {
@@ -3527,7 +3616,7 @@ export class AppService {
     if (!rt) {
       throw new HttpError(400, 'bad_request', `Task "${taskId}" không ở trạng thái running`);
     }
-    this.scheduler.pauseTask(taskId, 'manual');
+    this.scheduler.pauseTask(taskId, reason);
     return { ok: true, paused: true };
   }
 
@@ -3822,6 +3911,11 @@ export class AppService {
       reviewerEscalated: 0,
       reviewerEscalatedAt: null,
       reviewerEscalationReason: null,
+      runCount: 0,
+      consecutiveCrashes: 0,
+    });
+    this.runRepo.getByTask(taskId).forEach((run) => {
+      if (run.profileName) this.profileRepo.resetCrashes(run.profileName);
     });
 
     // Retry reuses the existing worktree. Old worker markers must not be

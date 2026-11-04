@@ -1,11 +1,11 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { getProjects, getStatus, getTaskGraph, getTasks, getTasksPage } from '../api/client';
+import { getProjects, getStatus, getTaskGraph, getTasks, getTasksPage, resumeTask } from '../api/client';
 import { StatusBadge } from '../components/StatusBadge';
 import { KANBAN_STATUSES } from '../utils/tasks';
 import { Task } from '../types/api';
-import { Plus, Filter, ArrowUpRight, Zap, Flame, LayoutGrid, Network, List, FolderKanban } from 'lucide-react';
+import { Plus, Filter, ArrowUpRight, Zap, Flame, LayoutGrid, Network, List, FolderKanban, Play } from 'lucide-react';
 import { SilentRunIndicator } from '../components/SilentRunIndicator';
 import { useLocale } from '../context/LocaleContext';
 import { TaskDag } from '../components/dag';
@@ -21,6 +21,15 @@ export interface KanbanColumnProps {
 
 const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project, search }) => {
   const { t } = useLocale();
+  const queryClient = useQueryClient();
+  const resumeMutation = useMutation({
+    mutationFn: (id: string) => resumeTask(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
+      queryClient.invalidateQueries({ queryKey: ['status'] });
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+  });
   // Dùng chung cache ['status'] giữa các cột, chỉ để hiện dung lượng đĩa trong nhãn "Chờ ổ đĩa".
   const { data: hubStatus } = useQuery({
     queryKey: ['status'],
@@ -146,7 +155,41 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
 
               {task.status === 'running' && (
                 <div className="flex items-center gap-1.5 flex-wrap mb-2">
-                  <SilentRunIndicator lastActivityAt={task.currentRun?.lastActivityAt} />
+                  {(task.paused || task.currentRun?.paused) ? (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span
+                        data-testid={`task-paused-badge-${task.id}`}
+                        className={`inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-semibold border ${
+                          (task.pauseReason === 'load' || task.pauseReason === 'brain_load' || task.currentRun?.pauseReason === 'load' || task.currentRun?.pauseReason === 'brain_load')
+                            ? 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)] border-[color-mix(in_srgb,var(--t-warn)_30%,transparent)]'
+                            : 'bg-[var(--t-surface-2)] text-[var(--t-text-2)] border-[var(--t-border)]'
+                        }`}
+                      >
+                        {(task.pauseReason === 'load' || task.pauseReason === 'brain_load' || task.currentRun?.pauseReason === 'load' || task.currentRun?.pauseReason === 'brain_load')
+                          ? t('status.pausedOverload')
+                          : (task.pauseReason === 'focus' || task.currentRun?.pauseReason === 'focus')
+                            ? t('status.pausedFocus')
+                            : t('status.pausedManual')}
+                      </span>
+                      <button
+                        type="button"
+                        data-testid={`task-resume-btn-${task.id}`}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          resumeMutation.mutate(task.id);
+                        }}
+                        disabled={resumeMutation.isPending}
+                        title={t('common.resume')}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)] hover:bg-[color-mix(in_srgb,var(--t-ok)_25%,transparent)] text-[var(--t-on-accent)] border border-[color-mix(in_srgb,var(--t-ok)_30%,transparent)] shadow-2xs cursor-pointer transition-colors"
+                      >
+                        <Play className="w-3 h-3 fill-current" />
+                        <span>{t('common.resume')}</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <SilentRunIndicator lastActivityAt={task.currentRun?.lastActivityAt} paused={Boolean(task.paused || task.currentRun?.paused)} />
+                  )}
                   {task.currentRun?.noCommitMinutes != null && task.currentRun.noCommitMinutes > 0 && (
                     <span className="inline-flex items-center rounded bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--t-warn)] border border-[color-mix(in_srgb,var(--t-warn)_30%,transparent)]">
                       {t('extra.noCommit', { minutes: task.currentRun.noCommitMinutes })}

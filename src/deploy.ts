@@ -319,7 +319,7 @@ export class DeployService {
       logPath: prev.logPath || logPath,
     };
     this.latest.set(projectId, status);
-    this.eventBus.emit('deploy.succeeded', undefined, { projectId, logPath, pushStatus: pushMsg });
+    this.eventBus.emit('deploy.succeeded', undefined, { projectId, logPath, commit: status.commit, pushStatus: pushMsg, pushRemote: definition.push.remote, pushRef: definition.push.to });
     return status;
   }
 
@@ -480,7 +480,12 @@ export class DeployService {
         this.eventBus.emit('deploy.restarting', undefined, { projectId, commit, logPath });
         await this.restartHub(status);
       } else {
-        this.eventBus.emit('deploy.succeeded', undefined, { projectId, commit, logPath });
+        this.eventBus.emit('deploy.succeeded', undefined, {
+          projectId,
+          commit,
+          logPath,
+          ...(definition.push ? { pushRemote: definition.push.remote, pushRef: definition.push.to } : {}),
+        });
       }
     } catch (error) {
       status.status = 'failed';

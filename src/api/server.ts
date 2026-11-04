@@ -16,6 +16,8 @@ import { registerBrainRoutes } from '../brain.js';
 import { registerChatRoutes } from '../chat/service.js';
 import { brandingLogoPath, saveBrandingLogo } from '../branding.js';
 import { decodeCursor } from '../pagination.js';
+import { registerOpenProjectRoutes } from '../integrations/openproject/routes.js';
+import { SetupSecretRequestSchema } from '../setup-tools.js';
 
 export function resolveWebDistDir(customDir?: string): string {
   return path.resolve(customDir || resolveWebDir(import.meta.url, process.env));
@@ -31,7 +33,7 @@ export function resolveWebDir(moduleUrl: string, env: NodeJS.ProcessEnv = {}): s
 export async function createServer(
   service: AppService,
   config: AgentHubConfig,
-  options?: { webDir?: string; onShutdown?: (disable: boolean) => void },
+  options?: { webDir?: string; onShutdown?: (disable: boolean) => void; openProjectSync?: (sourceId: string) => Promise<{ imported: number; comments: number }> },
 ): Promise<FastifyInstance> {
   const fastify = Fastify({ logger: false, forceCloseConnections: true });
 
@@ -125,6 +127,40 @@ export async function createServer(
   fastify.get('/api/status', async () => {
     return service.getStatus();
   });
+  // --- Setup wizard / MCP configuration API ---
+  fastify.get('/api/setup/effective-config/:id', async (req) => service.getSetupTools().effectiveConfig((req.params as { id: string }).id));
+  fastify.get('/api/setup/presets', async () => service.getSetupTools().presets());
+  fastify.get('/api/setup/departments', async () => service.getSetupTools().departments());
+  fastify.post('/api/setup/preset-apply', async (req) => {
+    const body = (req.body || {}) as { scope: string; preset: string; dryRun?: boolean };
+    return service.getSetupTools().applyPreset(body);
+  });
+  fastify.post('/api/setup/project-settings/:id', async (req) => {
+    const body = (req.body || {}) as { patch: unknown; dryRun?: boolean };
+    return service.getSetupTools().projectSettings((req.params as { id: string }).id, body.patch, body.dryRun !== false);
+  });
+  fastify.post('/api/setup/department', async (req) => {
+    const body = (req.body || {}) as { id?: string; patch: unknown; assignProjects?: string[]; dryRun?: boolean };
+    return service.getSetupTools().department(body.id, body.patch, body.assignProjects, body.dryRun !== false);
+  });
+  fastify.post('/api/setup/config-set', async (req) => {
+    const body = (req.body || {}) as { path: string; value: unknown; dryRun?: boolean };
+    return service.getSetupTools().configSet(body.path, body.value, body.dryRun !== false);
+  });
+  fastify.post('/api/setup/integration-discover', async (req) => {
+    const body = (req.body || {}) as { kind: 'openproject' | 'gitea' | 'checks'; sourceId?: string; url?: string; project?: string };
+    return service.getSetupTools().discover(body.kind, body);
+  });
+  fastify.post('/api/secrets/requests', async (req) => service.getSetupTools().requestSecret(SetupSecretRequestSchema.parse(req.body)));
+  fastify.get('/api/secrets/requests/:id', async (req) => service.getSetupTools().getSecretRequest((req.params as { id: string }).id) || { configured: false, reason: 'not_found' });
+  fastify.post('/api/secrets/requests/:id/value', async (req) => service.getSetupTools().saveSecret((req.params as { id: string }).id, String((req.body as { value?: unknown })?.value || '')));
+  fastify.get('/secrets/:id', async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const request = service.getSetupTools().getSecretRequest(id);
+    if (!request) return reply.status(404).type('text/plain').send('Không tìm thấy yêu cầu');
+    return reply.type('text/html; charset=utf-8').send(`<!doctype html><meta charset="utf-8"><title>Nhập bí mật AgentHub</title><h1>${String(request.label)}</h1><form id="secret"><input id="value" type="password" autofocus required><button>Lưu</button></form><p id="status"></p><script>document.getElementById('secret').onsubmit=async(e)=>{e.preventDefault();const value=document.getElementById('value').value;const r=await fetch('/api/secrets/requests/${encodeURIComponent(id)}/value',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value})});document.getElementById('status').textContent=r.ok?'Đã lưu an toàn. Bạn có thể đóng trang này.':'Không thể lưu yêu cầu.';document.getElementById('value').value='';};</script>`);
+  });
+  registerOpenProjectRoutes(fastify, config, { sync: options?.openProjectSync });
 
   fastify.post('/api/hub/shutdown', async (req) => {
     const body = (req.body || {}) as { disable?: unknown };
@@ -304,6 +340,47 @@ export async function createServer(
       return reply.status(result.status === 'failed' ? 500 : 200).send(result);
     }
     return reply.status(202).send(service.rerunDeploy(id));
+  });
+
+  fastify.put('/api/projects/:id/gitea/token', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as { token?: string };
+    if (!body.token || typeof body.token !== 'string' || !body.token.trim()) {
+      throw new HttpError(400, 'bad_request', 'Token không được để trống');
+    }
+    return service.saveGiteaToken(id, body.token);
+  });
+
+  fastify.get('/api/projects/:id/gitea/status', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getGiteaStatus(id);
+  });
+
+  fastify.post('/api/projects/:id/gitea/sync', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.triggerGiteaSync(id);
+  });
+
+  fastify.put('/api/projects/:id/remote-deploy/env', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.saveRemoteDeployEnv(id, req.body);
+  });
+
+  fastify.post('/api/projects/:id/remote-deploy', async (req: FastifyRequest, reply: FastifyReply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as { commit?: string };
+    const status = service.triggerRemoteDeploy(id, { trigger: 'manual', commit: body.commit });
+    return reply.status(202).send(status);
+  });
+
+  fastify.get('/api/projects/:id/remote-deploy/status', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getRemoteDeployStatus(id) ?? { projectId: id, status: 'idle' };
+  });
+
+  fastify.get('/api/projects/:id/remote-deploy', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getRemoteDeployStatus(id) ?? { projectId: id, status: 'idle' };
   });
 
   fastify.post('/api/projects', async (req: FastifyRequest, reply: FastifyReply) => {
@@ -501,7 +578,8 @@ export async function createServer(
 
   fastify.post('/api/tasks/:id/pause', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
-    return service.pauseTask(id);
+    const body = (req.body || {}) as { reason?: 'manual' | 'load' | 'brain_load' };
+    return service.pauseTask(id, body.reason);
   });
 
   fastify.post('/api/tasks/:id/resume', async (req: FastifyRequest) => {

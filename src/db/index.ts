@@ -847,6 +847,38 @@ export const MIGRATIONS: string[] = [
   UPDATE departments SET brainPermissions = 'inherit' WHERE brainPermissions = 'full';
   UPDATE departments SET brainMaxTurnsPerHour = 0 WHERE brainMaxTurnsPerHour = 20;
   `,
+  // Migration 59: OpenProject tracker synchronization state.
+  `
+  CREATE TABLE IF NOT EXISTS tracker_items (
+    source_id TEXT NOT NULL,
+    wp_id INTEGER NOT NULL,
+    display_id TEXT NOT NULL,
+    status_id INTEGER,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_comment_id INTEGER,
+    task_ids TEXT NOT NULL DEFAULT '[]',
+    writeback TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source_id, wp_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_tracker_items_source_updated ON tracker_items(source_id, updated_at);
+  `,
+  // Migration 60: persist BLOCKED reports after the worktree is cleaned up.
+  `ALTER TABLE tasks ADD COLUMN blockedReport TEXT;`,
+  // Migration 61: pending secret entry requests never store secret values in SQLite.
+  `
+  CREATE TABLE IF NOT EXISTS secret_requests (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,
+    label TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','configured','expired')),
+    createdAt INTEGER NOT NULL,
+    expiresAt INTEGER NOT NULL,
+    configuredAt INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_secret_requests_status_expiry ON secret_requests(status, expiresAt);
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -876,6 +908,7 @@ export function openDatabase(dbPath: string): Database.Database {
     );
   }
   ensureProfileAvatarColumn(db);
+  ensureSchedulerLimitColumns(db);
 
   return db;
 }
@@ -901,6 +934,21 @@ function repairForkAvatarMigration(db: Database.Database, currentVersion: number
 /** Cột avatarUrl nằm ngoài danh sách MIGRATIONS để không giành số migration với upstream. */
 function ensureProfileAvatarColumn(db: Database.Database): void {
   if (!hasColumn(db, 'profiles', 'avatarUrl')) db.exec('ALTER TABLE profiles ADD COLUMN avatarUrl TEXT');
+}
+
+/** Scheduler safety state is appended outside numbered migrations to preserve the public schema sequence. */
+function ensureSchedulerLimitColumns(db: Database.Database): void {
+  const add = (table: string, column: string, definition: string) => {
+    if (hasColumn(db, table, column)) return;
+    try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`); } catch (error) {
+      if (!String(error).includes('duplicate column name')) throw error;
+    }
+  };
+  add('tasks', 'runCount', 'INTEGER NOT NULL DEFAULT 0');
+  add('tasks', 'consecutiveCrashes', 'INTEGER NOT NULL DEFAULT 0');
+  add('profiles', 'consecutiveCrashes', 'INTEGER NOT NULL DEFAULT 0');
+  add('profiles', 'lastCrashAt', 'INTEGER');
+  add('profiles', 'coolingUntil', 'INTEGER');
 }
 
 // Repository helpers
@@ -997,6 +1045,9 @@ export interface ProfileRow {
   accountType?: 'personal' | 'team' | 'api';
   avatarUrl?: string | null;
   deletedAt?: string | null;
+  consecutiveCrashes?: number;
+  lastCrashAt?: number | null;
+  coolingUntil?: number | null;
 }
 
 export interface QuotaMarkRow {
@@ -1037,6 +1088,8 @@ export interface TaskRow {
   resume: number;
   notBefore: number | null;
   transientRetries: number;
+  runCount: number;
+  consecutiveCrashes: number;
   checkFixAttempts: number;
   reviewerChangesRequested?: number;
   reviewerEscalated?: number;
@@ -1044,6 +1097,7 @@ export interface TaskRow {
   reviewerEscalationReason?: string | null;
   reviewStep?: number;
   doneReport?: string | null;
+  blockedReport?: string | null;
   diffStat?: string | null;
   slot: number | null;
   batchId?: string | null;
@@ -1461,6 +1515,15 @@ export class ProfileRepo {
     this.db.prepare('UPDATE profiles SET enabled = ? WHERE name = ?').run(enabled, name);
   }
 
+  recordCrash(name: string, now: number, coolingUntil: number | null): number {
+    this.db.prepare('UPDATE profiles SET consecutiveCrashes = consecutiveCrashes + 1, lastCrashAt = ?, coolingUntil = ? WHERE name = ?').run(now, coolingUntil, name);
+    return (this.db.prepare('SELECT consecutiveCrashes FROM profiles WHERE name = ?').get(name) as { consecutiveCrashes: number } | undefined)?.consecutiveCrashes || 0;
+  }
+
+  resetCrashes(name: string): void {
+    this.db.prepare('UPDATE profiles SET consecutiveCrashes = 0, lastCrashAt = NULL, coolingUntil = NULL WHERE name = ?').run(name);
+  }
+
   getEnabled(): ProfileRow[] {
     return this.db
       .prepare('SELECT * FROM profiles WHERE enabled = 1 AND deletedAt IS NULL ORDER BY name')
@@ -1628,6 +1691,10 @@ export class TaskRepo {
     return this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRow | undefined;
   }
 
+  resetRunLimits(id: string): void {
+    this.db.prepare('UPDATE tasks SET runCount = 0, consecutiveCrashes = 0 WHERE id = ?').run(id);
+  }
+
   getDerivedFrom(sourceTaskId: string): TaskRow[] {
     return this.db.prepare("SELECT * FROM tasks WHERE json_extract(sourceRef, '$.taskId') = ? ORDER BY createdAt").all(sourceTaskId) as TaskRow[];
   }
@@ -1648,6 +1715,7 @@ export class TaskRepo {
     waitReason?: WaitReason;
     worktreePath?: string | null;
     doneReport?: string | null;
+    blockedReport?: string | null;
     diffStat?: string | null;
     sourceRef?: string | null;
     batchId?: string | null;
@@ -1658,8 +1726,8 @@ export class TaskRepo {
     const deps = JSON.stringify(row.dependsOn || []);
     this.db
       .prepare(
-        `INSERT INTO tasks (id, projectId, slug, title, externalRef, body, level, modelChain, baseRef, branch, dependsOn, status, waitReason, worktreePath, doneReport, diffStat, sourceRef, batchId, creationSessionId, creationGoal)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, projectId, slug, title, externalRef, body, level, modelChain, baseRef, branch, dependsOn, status, waitReason, worktreePath, doneReport, blockedReport, diffStat, sourceRef, batchId, creationSessionId, creationGoal)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -1677,6 +1745,7 @@ export class TaskRepo {
         row.waitReason || null,
         row.worktreePath || null,
         row.doneReport || null,
+        row.blockedReport || null,
         row.diffStat || null,
         row.sourceRef || null,
         row.batchId || null,
@@ -1724,7 +1793,7 @@ export class TaskRepo {
 
   update(
     id: string,
-    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'diffStat' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
+    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'blockedReport' | 'diffStat' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
   ): void {
     const sets: string[] = ["updatedAt = datetime('now')"];
     const values: unknown[] = [];
@@ -3015,5 +3084,21 @@ export class CiRepo {
     }
     return map;
   }
+}
+
+export interface TrackerItemRow {
+  source_id: string; wp_id: number; display_id: string; status_id: number | null; updated_at: string;
+  last_comment_id: number | null; task_ids: string; writeback: string; created_at: string;
+}
+
+export class TrackerItemRepo {
+  constructor(private db: Database.Database) {}
+  get(sourceId: string, wpId: number): TrackerItemRow | undefined { return this.db.prepare('SELECT * FROM tracker_items WHERE source_id = ? AND wp_id = ?').get(sourceId, wpId) as TrackerItemRow | undefined; }
+  upsert(row: Omit<TrackerItemRow, 'created_at'>): TrackerItemRow {
+    this.db.prepare(`INSERT INTO tracker_items (source_id,wp_id,display_id,status_id,updated_at,last_comment_id,task_ids,writeback) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(source_id,wp_id) DO UPDATE SET display_id=excluded.display_id,status_id=excluded.status_id,updated_at=excluded.updated_at,last_comment_id=excluded.last_comment_id,task_ids=excluded.task_ids,writeback=excluded.writeback`).run(row.source_id,row.wp_id,row.display_id,row.status_id,row.updated_at,row.last_comment_id,row.task_ids,row.writeback);
+    return this.get(row.source_id, row.wp_id)!;
+  }
+  list(sourceId: string): TrackerItemRow[] { return this.db.prepare('SELECT * FROM tracker_items WHERE source_id = ? ORDER BY wp_id').all(sourceId) as TrackerItemRow[]; }
+  listAll(): TrackerItemRow[] { return this.db.prepare('SELECT * FROM tracker_items ORDER BY source_id, wp_id').all() as TrackerItemRow[]; }
 }
 

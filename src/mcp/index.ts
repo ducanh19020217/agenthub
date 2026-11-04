@@ -635,6 +635,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
       modelChain: z.array(z.string()).optional().describe('Chuỗi model chỉ định'),
       start: z.boolean().optional().describe('Đưa thẳng vào hàng đợi để chạy ngay'),
       goal: z.string().optional().describe('Mục tiêu người dùng của nhóm task'),
+      createTicket: z.object({ sourceId: z.string().min(1).optional() }).optional().describe('Tạo ticket OpenProject cùng task'),
     },
     async (args) => {
       try {

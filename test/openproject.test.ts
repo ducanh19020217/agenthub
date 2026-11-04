@@ -296,6 +296,57 @@ describe('OpenProject Integration', () => {
       expect(res._embedded?.elements).toHaveLength(2);
       expect(res._embedded?.elements?.[0].name).toBe('Closed');
     });
+
+    it('createWorkPackage sends markdown, type, assignee, parent and status links', async () => {
+      const calls: Array<{ url: string; init?: RequestInit }> = [];
+      const fakeFetch = vi.fn().mockImplementation(async (url: string | URL, init?: RequestInit) => {
+        calls.push({ url: url.toString(), init });
+        if (url.toString().endsWith('/users/me')) {
+          return new Response(JSON.stringify({ id: 7, name: 'Me' }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ id: 88, displayId: 'OP-88' }), { status: 201 });
+      });
+      const client = new OpenProjectClient({
+        baseUrl: 'https://op.example.com/', project: 'my project', apiKey: 'key',
+        fetch: fakeFetch as unknown as typeof globalThis.fetch,
+      });
+
+      await expect(client.createWorkPackage({
+        subject: 'New task', descriptionMarkdown: '# Body', typeId: 3, parentId: 12, assigneeMe: true, statusId: 4,
+      })).resolves.toEqual({ id: 88, displayId: 'OP-88', url: 'https://op.example.com/work_packages/88' });
+      const post = calls.find((call) => call.init?.method === 'POST');
+      expect(post?.url).toBe('https://op.example.com/api/v3/projects/my%20project/work_packages');
+      expect(JSON.parse(String(post?.init?.body))).toEqual({
+        subject: 'New task', description: { format: 'markdown', raw: '# Body' },
+        _links: {
+          type: { href: '/api/v3/types/3' }, assignee: { href: '/api/v3/users/7' },
+          parent: { href: '/api/v3/work_packages/12' }, status: { href: '/api/v3/statuses/4' },
+        },
+      });
+    });
+
+    it('createWorkPackage exposes useful OpenProject 422 messages', async () => {
+      const fakeFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        _embedded: { errors: [{ message: 'Type is required' }, { message: 'Status is invalid' }] },
+      }), { status: 422, headers: { 'Content-Type': 'application/json' } }));
+      const client = new OpenProjectClient({
+        baseUrl: 'https://op.example.com', project: 'p', apiKey: 'key',
+        fetch: fakeFetch as unknown as typeof globalThis.fetch,
+      });
+      await expect(client.createWorkPackage({ subject: 'Task', descriptionMarkdown: '' }))
+        .rejects.toThrow('Type is required; Status is invalid');
+    });
+
+    it('listTypes calls the project types endpoint', async () => {
+      let url = '';
+      const fakeFetch = vi.fn().mockImplementation(async (target: string | URL) => {
+        url = target.toString();
+        return new Response(JSON.stringify({ _embedded: { elements: [{ id: 3, name: 'Task', position: 1 }] } }), { status: 200 });
+      });
+      const client = new OpenProjectClient({ baseUrl: 'https://op.example.com', project: 'p', apiKey: 'key', fetch: fakeFetch as unknown as typeof globalThis.fetch });
+      await expect(client.listTypes()).resolves.toMatchObject({ _embedded: { elements: [{ id: 3, name: 'Task' }] } });
+      expect(url).toBe('https://op.example.com/api/v3/projects/p/types');
+    });
   });
 
   describe('Ticket rendering and directory writing', () => {
@@ -867,6 +918,19 @@ describe('OpenProject Integration', () => {
       expect(failRes.statusCode).toBe(502);
       expect(failRes.body).not.toContain('status-api-key');
     });
+
+    it('GET /api/integrations/openproject/sources/:id/types returns sorted types', async () => {
+      config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'src-types', url: 'https://op.example.com', project: '123' })];
+      saveOpenProjectKey(tmpDir, 'src-types', 'types-api-key');
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+        _embedded: { elements: [{ id: 9, name: 'Bug', position: 2 }, { id: 3, name: 'Task', position: 1 }] },
+      }), { status: 200, headers: { 'Content-Type': 'application/hal+json' } }));
+      const response = await app.inject({ method: 'GET', url: '/api/integrations/openproject/sources/src-types/types' });
+      expect(response.statusCode).toBe(200);
+      expect(JSON.parse(response.body)).toEqual([
+        { id: 3, name: 'Task', position: 1 }, { id: 9, name: 'Bug', position: 2 },
+      ]);
+    });
   });
 
   describe('Database migration & TrackerItemRepo', () => {
@@ -927,6 +991,9 @@ describe('OpenProject Integration', () => {
       expect(updated?.status_id).toBe(95);
       expect(updated?.last_comment_id).toBe(42);
       expect(updated?.writeback).toBe(JSON.stringify({ resolved: true }));
+
+      expect(repo.listForTask('task-2').map((row) => row.wp_id)).toEqual([100]);
+      expect(repo.listForTask('missing')).toEqual([]);
 
       // List
       repo.upsert({

@@ -78,6 +78,17 @@ describe('NotificationService (Desktop Notifications)', () => {
     notifier.stop();
   });
 
+  it('notifies triage-ready at normal urgency, including auto-dispatch state', () => {
+    const notifier = new NotificationService({ eventBus, config, exec: fakeExec });
+    notifier.start();
+    eventBus.emit('tracker.triage_ready', 'proj/op-op-1-triage', { displayId: 'OP-1', autoDispatch: false });
+    eventBus.emit('tracker.triage_ready', 'proj/op-op-2-triage', { displayId: 'OP-2', autoDispatch: true });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[0].args).toEqual(['-t', '10000', '-a', 'AgentHub', 'AgentHub: OpenProject ticket OP-1 đã phân tích, chờ quyết định']);
+    expect(execCalls[1].args).toEqual(['-t', '10000', '-a', 'AgentHub', 'AgentHub: OpenProject ticket OP-2 đã phân tích, chờ quyết định (đã tự giao)']);
+    notifier.stop();
+  });
+
   it('suppresses account-specific quota notifications even at all level', () => {
     const notifier = new NotificationService({ eventBus, config, profileRepo, quotaMarkRepo, exec: fakeExec });
     notifier.start();

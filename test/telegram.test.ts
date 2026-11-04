@@ -1107,6 +1107,39 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       const calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
       expect(calls[0].body?.text).toContain('Đã tiếp tục task');
     });
+
+    it('triage callback validates ids, enforces the allowed sender, and preserves colons in sourceId', async () => {
+      const decideSpy = vi.spyOn(ctx.service, 'decideOpenProjectTicket').mockResolvedValue({ action: 'do', taskIds: ['p1/fix'] });
+      await bot.handleUpdate({
+        update_id: 36,
+        callback_query: {
+          id: 'cb-triage-valid', from: { id: CHAT_ID },
+          message: { message_id: 36, chat: { id: CHAT_ID } },
+          data: 'triage:do:customer:prod:42',
+        },
+      });
+      expect(decideSpy).toHaveBeenCalledWith('customer:prod', 42, 'do');
+
+      await bot.handleUpdate({
+        update_id: 37,
+        callback_query: {
+          id: 'cb-triage-invalid', from: { id: CHAT_ID },
+          message: { message_id: 37, chat: { id: CHAT_ID } },
+          data: 'triage:do:customer:prod:not-a-number',
+        },
+      });
+      expect(decideSpy).toHaveBeenCalledTimes(1);
+
+      await bot.handleUpdate({
+        update_id: 38,
+        callback_query: {
+          id: 'cb-triage-unauthorized', from: { id: 99999 },
+          message: { message_id: 38, chat: { id: CHAT_ID } },
+          data: 'triage:do:customer:prod:42',
+        },
+      });
+      expect(decideSpy).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('5. EventBus notifications and deduplication', () => {
@@ -1141,6 +1174,31 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(markup.inline_keyboard[0][0].callback_data).toBe('review:approve:p1/task-test');
       expect(markup.inline_keyboard[0][1].callback_data).toBe('review:reject_prompt:p1/task-test');
       expect(markup.inline_keyboard[1][0].callback_data).toBe('task:diff:p1/task-test');
+    });
+
+    it('broadcasts triage decisions with safe action buttons and hides buttons after auto-dispatch', async () => {
+      ctx.scheduler.getEventBus().emit('tracker.triage_ready', undefined, {
+        sourceId: 'customer:prod', wpId: 42, displayId: 'OP-42', taskId: 'p1/op-op-42-triage',
+        ticketUrl: 'https://op.test/work_packages/42',
+        analysis: { conclusion: 'lỗi', size: 'lớn', summary: 'Cần chia việc' }, autoDispatch: false,
+      });
+      await bot.flushQueue(CHAT_ID);
+      let call = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1)!;
+      const markup = call.body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data?: string }>> };
+      const callbacks = markup.inline_keyboard.flat().map((button) => button.callback_data).filter(Boolean);
+      expect(callbacks).toContain('triage:split:customer:prod:42');
+      expect(String(call.body?.text)).toContain('Mở ticket');
+      expect(String(call.body?.text)).toContain('Mở trên hub');
+
+      currentTime += 15_000;
+      ctx.scheduler.getEventBus().emit('tracker.triage_ready', undefined, {
+        sourceId: 'customer:prod', wpId: 43, displayId: 'OP-43',
+        analysis: { conclusion: 'lỗi', size: 'nhỏ', summary: 'Đã giao' }, autoDispatch: true,
+      });
+      await bot.flushQueue(CHAT_ID);
+      call = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1)!;
+      expect(String(call.body?.text)).toContain('Đã tự giao');
+      expect(call.body?.reply_markup).toBeUndefined();
     });
 
     it('broadcasts task.failed and task.blocked with retry/log buttons', async () => {

@@ -145,6 +145,7 @@ export interface TelegramServiceOptions {
 
 export type PendingChatState =
   | { action: 'reject_feedback'; taskId: string }
+  | { action: 'triage_note'; sourceId: string; wpId: number; decision: 'ask' | 'skip' }
   | { action: 'newtask_description'; projectId?: string }
   | { action: 'newtask_project_description'; description: string; externalRef?: string }
   | { action: 'newtask_project' }
@@ -1160,6 +1161,21 @@ export class TelegramBotService {
         } catch (err: unknown) {
           const errMsg = err instanceof Error ? err.message : String(err);
           await this.sendMessage(chatId, `❌ Lỗi khi trả về task ${taskId}: ${errMsg}`);
+        }
+        return;
+      }
+
+      if (pendingState.action === 'triage_note') {
+        this.chatStates.delete(chatId);
+        if (!rawText) {
+          await this.sendMessage(chatId, 'Vui lòng nhập lý do hoặc /cancel.');
+          return;
+        }
+        try {
+          const result = await this.service.decideOpenProjectTicket(pendingState.sourceId, pendingState.wpId, pendingState.decision, rawText);
+          await this.sendMessage(chatId, `✅ Đã chọn <b>${pendingState.decision}</b>${result.taskIds.length ? `\nTask: <code>${this.escapeHtml(result.taskIds.join(', '))}</code>` : ''}`);
+        } catch (error) {
+          await this.sendMessage(chatId, `❌ Không thể quyết định triage: ${this.escapeHtml(error instanceof Error ? error.message : String(error))}`);
         }
         return;
       }
@@ -2355,7 +2371,7 @@ export class TelegramBotService {
         break;
       }
       case 'triage': {
-        if (!['do', 'split', 'ask', 'skip', 'manual'].includes(action)) {
+        if (!['do', 'split', 'ask', 'skip', 'skip-note', 'manual'].includes(action)) {
           await this.answerCallbackQuery(query.id, 'Lựa chọn không hợp lệ.');
           return;
         }
@@ -2367,10 +2383,17 @@ export class TelegramBotService {
           await this.answerCallbackQuery(query.id, 'Mã ticket không hợp lệ.');
           return;
         }
+        if (action === 'ask' || action === 'skip-note') {
+          this.chatStates.set(chatId, { action: 'triage_note', sourceId, wpId, decision: action === 'ask' ? 'ask' : 'skip' });
+          await this.answerCallbackQuery(query.id, 'Hãy nhập ghi chú hoặc lý do.');
+          await this.sendMessage(chatId, action === 'ask' ? 'Nhập ghi chú bổ sung cho tester, hoặc /cancel:' : 'Nhập lý do không xử lý (hoặc /cancel):');
+          return;
+        }
+        const resolvedAction = action as 'do' | 'split' | 'skip' | 'manual';
         try {
-          const result = await this.service.decideOpenProjectTicket(sourceId, wpId, action as 'do' | 'split' | 'ask' | 'skip' | 'manual');
-          await this.answerCallbackQuery(query.id, `Đã chọn: ${action}`);
-          await this.sendMessage(chatId, `🔗 ${this.escapeHtml(sourceId)}/${wpId}: đã chọn <b>${this.escapeHtml(action)}</b>${result.taskIds.length ? `\nTask: <code>${this.escapeHtml(result.taskIds.join(', '))}</code>` : ''}`);
+          const result = await this.service.decideOpenProjectTicket(sourceId, wpId, resolvedAction);
+          await this.answerCallbackQuery(query.id, `Đã chọn: ${resolvedAction}`);
+          await this.sendMessage(chatId, `🔗 ${this.escapeHtml(sourceId)}/${wpId}: đã chọn <b>${this.escapeHtml(resolvedAction)}</b>${result.taskIds.length ? `\nTask: <code>${this.escapeHtml(result.taskIds.join(', '))}</code>` : ''}`);
         } catch (error) {
           await this.answerCallbackQuery(query.id, 'Không thể thực hiện quyết định.');
           await this.sendMessage(chatId, `❌ Không thể quyết định triage: ${this.escapeHtml(error instanceof Error ? error.message : String(error))}`);
@@ -4063,6 +4086,7 @@ export class TelegramBotService {
         ], [
           { text: '❓ Hỏi tester', callback_data: `triage:ask:${sourceId}:${wpId}` },
           { text: '🚫 Không làm', callback_data: `triage:skip:${sourceId}:${wpId}` },
+          { text: '🚫 Không làm + lý do', callback_data: `triage:skip-note:${sourceId}:${wpId}` },
         ]];
         const summary = String(analysis.summary || '').slice(0, 900);
         const ticketUrl = typeof p.ticketUrl === 'string' ? `\n<a href="${this.escapeHtml(p.ticketUrl)}">Mở ticket</a>` : '';

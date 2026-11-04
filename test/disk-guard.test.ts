@@ -114,6 +114,8 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     const diskLowEvent = emittedEvents.find((e) => e.type === 'disk.low');
     expect(diskLowEvent).toBeDefined();
     expect(diskLowEvent?.payload?.minFreeGB).toBe(3);
+    expect(diskLowEvent?.payload?.isBlocking).toBe(true);
+    expect(diskLowEvent?.payload?.tasks).toEqual(['t1']);
 
     const waitingEvent = emittedEvents.find((e) => e.type === 'task.waiting_quota' && e.taskId === 'proj/t1');
     expect(waitingEvent).toBeDefined();
@@ -486,5 +488,193 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     expect(detail1.blockingDisk?.path).toBe(drive1);
     expect(detail2.blockingDisk?.freeGB).toBe(1.2);
     expect(detail2.blockingDisk?.path).toBe(drive2);
+  });
+
+  it('emits disk.low with isBlocking=true and task list when task is blocked by low project disk', () => {
+    fakeDiskReader = (_p: string) => ({ freeGB: 1, totalGB: 100 });
+
+    const emittedEvents: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+    ctx.scheduler.getEventBus().on('*', (type, _taskId, payload) => {
+      emittedEvents.push({ type, payload: payload as Record<string, unknown> });
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj/t-blocking-1',
+      projectId: 'proj',
+      slug: 't-blocking-1',
+      title: 'Task Blocking 1',
+      status: 'queued',
+      level: 'easy',
+    });
+    ctx.taskRepo.insert({
+      id: 'proj/t-blocking-2',
+      projectId: 'proj',
+      slug: 't-blocking-2',
+      title: 'Task Blocking 2',
+      status: 'queued',
+      level: 'easy',
+    });
+
+    ctx.scheduler.tick();
+
+    expect(ctx.taskRepo.get('proj/t-blocking-1')?.status).toBe('waiting_quota');
+    expect(ctx.taskRepo.get('proj/t-blocking-2')?.status).toBe('waiting_quota');
+
+    const diskLowEvents = emittedEvents.filter((e) => e.type === 'disk.low');
+    expect(diskLowEvents).toHaveLength(1);
+    expect(diskLowEvents[0].payload?.isBlocking).toBe(true);
+    expect(diskLowEvents[0].payload?.tasks).toEqual(['t-blocking-1', 't-blocking-2']);
+  });
+
+  it('filters waiting tasks in disk.low alerts per specific blocking disk when multiple drives are low', () => {
+    const driveA = path.join(tmpDir, 'drive-a');
+    const driveB = path.join(tmpDir, 'drive-b');
+    fs.mkdirSync(driveA, { recursive: true });
+    fs.mkdirSync(driveB, { recursive: true });
+
+    ctx.projectRepo.insert({
+      id: 'proj-a',
+      name: 'Project A',
+      path: path.join(tmpDir, 'repo'),
+      defaultBranch: 'main',
+      maxParallel: 2,
+      settings: JSON.stringify({ worktree: { root: driveA } }),
+    });
+
+    ctx.projectRepo.insert({
+      id: 'proj-b',
+      name: 'Project B',
+      path: path.join(tmpDir, 'repo'),
+      defaultBranch: 'main',
+      maxParallel: 2,
+      settings: JSON.stringify({ worktree: { root: driveB } }),
+    });
+
+    fakeDiskReader = (p: string) => {
+      const normalized = path.resolve(p);
+      if (normalized.startsWith(path.resolve(driveA))) {
+        return { freeGB: 0.5, totalGB: 100 };
+      }
+      if (normalized.startsWith(path.resolve(driveB))) {
+        return { freeGB: 0.8, totalGB: 100 };
+      }
+      return { freeGB: 20, totalGB: 100 };
+    };
+
+    const emittedEvents: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+    ctx.scheduler.getEventBus().on('*', (type, _taskId, payload) => {
+      emittedEvents.push({ type, payload: payload as Record<string, unknown> });
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj-a/t-a',
+      projectId: 'proj-a',
+      slug: 't-a',
+      title: 'Task A on drive A',
+      status: 'queued',
+      level: 'easy',
+    });
+    ctx.taskRepo.insert({
+      id: 'proj-b/t-b',
+      projectId: 'proj-b',
+      slug: 't-b',
+      title: 'Task B on drive B',
+      status: 'queued',
+      level: 'easy',
+    });
+
+    ctx.scheduler.tick();
+
+    expect(ctx.taskRepo.get('proj-a/t-a')?.status).toBe('waiting_quota');
+    expect(ctx.taskRepo.get('proj-b/t-b')?.status).toBe('waiting_quota');
+
+    const lowEvents = emittedEvents.filter((e) => e.type === 'disk.low');
+    const driveAEvent = lowEvents.find((e) => e.payload?.path === driveA);
+    const driveBEvent = lowEvents.find((e) => e.payload?.path === driveB);
+
+    expect(driveAEvent).toBeDefined();
+    expect(driveAEvent?.payload?.tasks).toEqual(['t-a']);
+
+    expect(driveBEvent).toBeDefined();
+    expect(driveBEvent?.payload?.tasks).toEqual(['t-b']);
+  });
+
+  it('emits disk.ok with resumed tasks when one project disk recovers while another project disk remains low', () => {
+    const driveA = path.join(tmpDir, 'recovery-drive-a');
+    const driveB = path.join(tmpDir, 'recovery-drive-b');
+    fs.mkdirSync(driveA, { recursive: true });
+    fs.mkdirSync(driveB, { recursive: true });
+
+    ctx.projectRepo.insert({
+      id: 'p-rec-a',
+      name: 'Project Rec A',
+      path: path.join(tmpDir, 'repo'),
+      defaultBranch: 'main',
+      maxParallel: 2,
+      settings: JSON.stringify({ worktree: { root: driveA } }),
+    });
+
+    ctx.projectRepo.insert({
+      id: 'p-rec-b',
+      name: 'Project Rec B',
+      path: path.join(tmpDir, 'repo'),
+      defaultBranch: 'main',
+      maxParallel: 2,
+      settings: JSON.stringify({ worktree: { root: driveB } }),
+    });
+
+    let driveAFree = 0.5;
+    const driveBFree = 0.5;
+    fakeDiskReader = (p: string) => {
+      const normalized = path.resolve(p);
+      if (normalized.startsWith(path.resolve(driveA))) {
+        return { freeGB: driveAFree, totalGB: 100 };
+      }
+      if (normalized.startsWith(path.resolve(driveB))) {
+        return { freeGB: driveBFree, totalGB: 100 };
+      }
+      return { freeGB: 20, totalGB: 100 };
+    };
+
+    const emittedEvents: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+    ctx.scheduler.getEventBus().on('*', (type, _taskId, payload) => {
+      emittedEvents.push({ type, payload: payload as Record<string, unknown> });
+    });
+
+    ctx.taskRepo.insert({ id: 'p-rec-a/t1', projectId: 'p-rec-a', slug: 't1', title: 'Task 1', status: 'queued', level: 'easy' });
+    ctx.taskRepo.insert({ id: 'p-rec-b/t2', projectId: 'p-rec-b', slug: 't2', title: 'Task 2', status: 'queued', level: 'easy' });
+
+    ctx.scheduler.tick();
+    expect(ctx.taskRepo.get('p-rec-a/t1')?.status).toBe('waiting_quota');
+    expect(ctx.taskRepo.get('p-rec-b/t2')?.status).toBe('waiting_quota');
+
+    // Drive A recovers to 15 GB, Drive B remains low at 0.5 GB
+    driveAFree = 15;
+    emittedEvents.length = 0;
+    ctx.scheduler.tick();
+
+    expect(['queued', 'running']).toContain(ctx.taskRepo.get('p-rec-a/t1')?.status);
+    expect(ctx.scheduler.getRunning().has('p-rec-a/t1')).toBe(true);
+    expect(ctx.taskRepo.get('p-rec-b/t2')?.status).toBe('waiting_quota');
+
+    const okEvents = emittedEvents.filter((e) => e.type === 'disk.ok');
+    expect(okEvents).toHaveLength(1);
+    expect(okEvents[0].payload?.path).toBe(driveA);
+    expect(okEvents[0].payload?.resumedCount).toBe(1);
+    expect(okEvents[0].payload?.tasks).toEqual(['t1']);
+    expect(okEvents[0].payload?.remainingCount).toBe(1);
+
+    // Drive A becomes low again within 60 minutes: emits new blocking incident without throttling
+    driveAFree = 0.5;
+    emittedEvents.length = 0;
+    ctx.taskRepo.insert({ id: 'p-rec-a/t3', projectId: 'p-rec-a', slug: 't3', title: 'Task 3', status: 'queued', level: 'easy' });
+    ctx.scheduler.tick();
+
+    expect(ctx.taskRepo.get('p-rec-a/t3')?.status).toBe('waiting_quota');
+    const lowEvents = emittedEvents.filter((e) => e.type === 'disk.low');
+    const driveAIncident = lowEvents.find((e) => e.payload?.path === driveA);
+    expect(driveAIncident).toBeDefined();
+    expect(driveAIncident?.payload?.isBlocking).toBe(true);
+    expect(driveAIncident?.payload?.tasks).toEqual(['t3']);
   });
 });

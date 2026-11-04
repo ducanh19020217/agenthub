@@ -640,6 +640,7 @@ export const UpdateConfigSchema = z.object({
       quotaAllExhausted: z.boolean().optional(),
       fallback: z.boolean().optional(),
       brainWaiting: z.boolean().optional(),
+      disk: z.boolean().optional(),
     }).optional(),
   }).optional(),
   updates: z.object({

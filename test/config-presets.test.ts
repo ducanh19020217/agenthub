@@ -546,6 +546,11 @@ describe('Config Presets, Priority, and Effective Config', () => {
               end: '07:00',
             },
           },
+          telegram: {
+            notify: {
+              disk: false,
+            },
+          },
         },
       });
       expect(putRes.statusCode).toBe(200);
@@ -573,6 +578,7 @@ describe('Config Presets, Priority, and Effective Config', () => {
         start: '22:00',
         end: '07:00',
       });
+      expect(cfg.telegram?.notify?.disk).toBe(false);
     });
   });
 

@@ -2997,6 +2997,66 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     expect(summary.keyboard[1][1].text).toBe('❌ Chạy lệnh di chuy...');
     expect(summary.keyboard[1][1].callback_data).toBe('decision:reject:dec-2');
   });
+
+  it('15. merge conflict and failure quiet notifications (h-merge-conflict-notify-quiet)', async () => {
+    ctx.projectRepo.insert({ id: 'p', name: 'Project P', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    const bot = createBot('suggest');
+
+    // 1. Conflict 1 to 3, hub auto-reassigned: no notifications
+    bot.handleEvent('merge.conflict', 'p/task-1', { conflictCount: 1, autoRetried: true, message: 'Xung đột merge ở: file1.ts' });
+    bot.handleEvent('merge.conflict', 'p/task-1', { conflictCount: 2, autoRetried: true, message: 'Xung đột merge ở: file1.ts' });
+    bot.handleEvent('merge.conflict', 'p/task-1', { conflictCount: 3, autoRetried: true, message: 'Xung đột merge ở: file1.ts' });
+    await bot.flushQueue(CHAT_ID);
+    let sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(0);
+
+    // 2. Conflict 4: sends exactly one notification
+    bot.handleEvent('merge.conflict', 'p/task-1', { conflictCount: 4, autoRetried: false, files: 'file1.ts, file2.ts' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].body?.text).toContain('⚠️ p/task-1 xung đột merge lần thứ 4, cần xem: file1.ts, file2.ts');
+
+    // Duplicate conflict 4 or 5 on same task: no duplicate notification ("Mỗi task chỉ gửi một lần")
+    bot.handleEvent('merge.conflict', 'p/task-1', { conflictCount: 5, autoRetried: false, files: 'file1.ts, file2.ts' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(1);
+
+    // 3. Cannot auto-reassign (e.g. task cancelled or missing base branch): sends notification
+    bot.handleEvent('merge.conflict', 'p/task-cancelled', { conflictCount: 1, autoRetried: false, message: 'Xung đột merge ở: bad.ts' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(2);
+    expect(sendCalls[1].body?.text).toContain('⚠️ p/task-cancelled xung đột merge lần thứ 1, cần xem: bad.ts');
+
+    // 4. merge.failed when hub already created fix task: no notification
+    bot.handleEvent('merge.failed', 'p/task-postcheck', { autoFixCreated: true, message: 'Checks sau merge thất bại' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(2);
+
+    // 5. merge.failed due to environment error (no fix task created): sends notification
+    bot.handleEvent('merge.failed', 'p/task-env', { environment: true, message: 'Thiếu dependency' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(3);
+    expect(sendCalls[2].body?.text).toContain('Lỗi môi trường khi tự động gộp: p/task-env');
+
+    // 6. Automatically created draft task with -fix-merge: no notification
+    ctx.taskRepo.insert({
+      id: 'p/task-postcheck-fix-merge',
+      projectId: 'p',
+      slug: 'task-postcheck-fix-merge',
+      title: 'Fix merge',
+      status: 'draft',
+      sourceRef: JSON.stringify({ checkName: 'merge' }),
+    });
+    bot.handleEvent('batch.created', 'p/task-postcheck-fix-merge', { title: 'Fix merge' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(3);
+  });
 });
 
 describe('Menu lệnh Telegram', () => {

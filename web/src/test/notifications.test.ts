@@ -99,4 +99,30 @@ describe('browser notification policy', () => {
       { brainMode: 'auto' },
     )).toBe(true);
   });
+
+  it('suppresses routine merge conflict and auto-fix browser notifications', () => {
+    // Routine conflicts 1 to 3 auto-reassigned: false
+    expect(shouldNotifyBrowserEvent(event('merge.conflict', { conflictCount: 1, autoRetried: true }))).toBe(false);
+    expect(shouldNotifyBrowserEvent(event('merge.conflict', { conflictCount: 2, autoRetried: true }))).toBe(false);
+    expect(shouldNotifyBrowserEvent(event('merge.conflict', { conflictCount: 3, autoRetried: true }))).toBe(false);
+
+    // Conflict 4: true
+    const ev4 = { ...event('merge.conflict', { conflictCount: 4, autoRetried: false, files: 'file1.ts, file2.ts' }), taskId: 'p/task-1' };
+    expect(shouldNotifyBrowserEvent(ev4)).toBe(true);
+    expect(browserNotificationBody(ev4)).toBe('⚠️ p/task-1 xung đột merge lần thứ 4, cần xem: file1.ts, file2.ts');
+
+    // Cannot auto-reassign: true
+    const evCannot = { ...event('merge.conflict', { conflictCount: 1, autoRetried: false, message: 'bad.ts' }), taskId: 'p/task-cancel' };
+    expect(shouldNotifyBrowserEvent(evCannot)).toBe(true);
+    expect(browserNotificationBody(evCannot)).toBe('⚠️ p/task-cancel xung đột merge lần thứ 1, cần xem: bad.ts');
+
+    // merge.failed with autoFixCreated: false
+    expect(shouldNotifyBrowserEvent(event('merge.failed', { autoFixCreated: true }))).toBe(false);
+
+    // merge.failed without autoFixCreated: true
+    expect(shouldNotifyBrowserEvent(event('merge.failed', { autoFixCreated: false, environment: true }))).toBe(true);
+
+    // -fix-merge task: false
+    expect(shouldNotifyBrowserEvent({ ...event('task.queued'), taskId: 'p/task-fix-merge' })).toBe(false);
+  });
 });

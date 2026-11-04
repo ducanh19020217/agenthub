@@ -167,7 +167,6 @@ export interface TelegramNotifyConfig {
   reviewReady: boolean;
   failed: boolean;
   blocked: boolean;
-  quotaPerModel: boolean;
   quotaAllExhausted: boolean;
   fallback: boolean;
   brainWaiting?: boolean;
@@ -224,7 +223,6 @@ export const DEFAULT_TELEGRAM_NOTIFY: TelegramNotifyConfig = {
   reviewReady: true,
   failed: true,
   blocked: true,
-  quotaPerModel: false,
   quotaAllExhausted: true,
   fallback: true,
   brainWaiting: true,
@@ -408,6 +406,7 @@ export interface AgentHubConfig {
   notifications: NotificationsConfig;
   disk: {
     minFreeGB: number;
+    hubHomeMinFreeGB: number;
     extraPaths: ExtraDiskPath[];
   };
   cleanup: {
@@ -471,7 +470,7 @@ export function saveConfig(
       desktopLevel: NotificationsConfig['desktopLevel'];
       quietHours?: Partial<QuietHoursConfig>;
     }>;
-    disk?: { minFreeGB?: number; extraPaths?: ExtraDiskPath[] };
+    disk?: { minFreeGB?: number; hubHomeMinFreeGB?: number; extraPaths?: ExtraDiskPath[] };
     cleanup?: { nodeModulesOnDone?: boolean; worktreeOnDoneAfterHours?: number };
     cacheDir?: string;
     cacheMaxEntries?: number;
@@ -671,7 +670,7 @@ export function updateConfigInMemory(
       desktopLevel: NotificationsConfig['desktopLevel'];
       quietHours?: Partial<QuietHoursConfig>;
     }>;
-    disk?: { minFreeGB?: number; extraPaths?: ExtraDiskPath[] };
+    disk?: { minFreeGB?: number; hubHomeMinFreeGB?: number; extraPaths?: ExtraDiskPath[] };
     cleanup?: { nodeModulesOnDone?: boolean; worktreeOnDoneAfterHours?: number };
     cacheDir?: string;
     cacheMaxEntries?: number;
@@ -813,6 +812,9 @@ export function updateConfigInMemory(
   }
   if (patch.disk?.minFreeGB !== undefined) {
     config.disk.minFreeGB = patch.disk.minFreeGB;
+  }
+  if (patch.disk?.hubHomeMinFreeGB !== undefined) {
+    config.disk.hubHomeMinFreeGB = patch.disk.hubHomeMinFreeGB;
   }
   if (patch.disk?.extraPaths !== undefined) {
     config.disk.extraPaths = [...patch.disk.extraPaths];
@@ -1001,11 +1003,12 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
   const brainRaw = (userConfig.brain as Record<string, unknown>) || {};
   const assistantRaw = (userConfig.assistant as Record<string, unknown>) || {};
 
-  const userDisk = (userConfig.disk as { minFreeGB?: number; extraPaths?: unknown } | undefined);
+  const userDisk = (userConfig.disk as { minFreeGB?: number; hubHomeMinFreeGB?: number; extraPaths?: unknown } | undefined);
   const userCleanup = (userConfig.cleanup as { nodeModulesOnDone?: boolean; worktreeOnDoneAfterHours?: number } | undefined);
 
   const disk = {
     minFreeGB: typeof userDisk?.minFreeGB === 'number' ? userDisk.minFreeGB : 3,
+    hubHomeMinFreeGB: typeof userDisk?.hubHomeMinFreeGB === 'number' ? userDisk.hubHomeMinFreeGB : 1,
     extraPaths: Array.isArray(userDisk?.extraPaths)
       ? userDisk.extraPaths.filter((entry): entry is ExtraDiskPath => {
           if (!entry || typeof entry !== 'object') return false;
@@ -1105,10 +1108,6 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
       reviewReady: rawTelegramNotify.reviewReady !== false,
       failed: rawTelegramNotify.failed !== false,
       blocked: rawTelegramNotify.blocked !== false,
-      // `quota` was the old switch for per-model notifications.
-      quotaPerModel: typeof rawTelegramNotify.quotaPerModel === 'boolean'
-        ? rawTelegramNotify.quotaPerModel
-        : rawTelegramNotify.quota === true,
       quotaAllExhausted: rawTelegramNotify.quotaAllExhausted !== false,
       fallback: rawTelegramNotify.fallback !== false,
       brainWaiting: rawTelegramNotify.brainWaiting !== false,

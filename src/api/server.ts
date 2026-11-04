@@ -157,6 +157,20 @@ export async function createServer(
     const body = (req.body || {}) as { kind: 'openproject' | 'gitea' | 'checks'; sourceId?: string; url?: string; project?: string };
     return service.getSetupTools().discover(body.kind, body);
   });
+  fastify.get('/api/setup/export', async () => service.getSetupTools().exportSetup());
+  fastify.post('/api/setup/import', async (req) => {
+    const body = (req.body || {}) as { file?: unknown; dryRun?: unknown };
+    if (typeof body.file !== 'string' || !body.file.trim()) throw new HttpError(400, 'bad_request', 'File setup là bắt buộc');
+    try {
+      const filePath = path.resolve(body.file);
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile() || stat.size > 2 * 1024 * 1024) throw new Error('File setup không hợp lệ hoặc quá lớn');
+      const imported = JSON.parse(fs.readFileSync(filePath, 'utf8')) as unknown;
+      return service.getSetupTools().importSetup(imported, body.dryRun !== false);
+    } catch (error) {
+      throw new HttpError(400, 'bad_request', `Không thể đọc file setup: ${error instanceof Error ? error.message : 'dữ liệu không hợp lệ'}`);
+    }
+  });
   fastify.post('/api/secrets/requests', async (req) => service.getSetupTools().requestSecret(SetupSecretRequestSchema.parse(req.body)));
   fastify.get('/api/secrets/requests/:id', async (req) => service.getSetupTools().getSecretRequest((req.params as { id: string }).id) || { configured: false, reason: 'not_found' });
   fastify.post('/api/secrets/requests/:id/value', async (req) => service.getSetupTools().saveSecret((req.params as { id: string }).id, String((req.body as { value?: unknown })?.value || '')));
@@ -770,6 +784,15 @@ export async function createServer(
     const body = req.body as { enabled?: unknown };
     if (typeof body?.enabled !== 'boolean') throw new HttpError(400, 'bad_request', 'enabled phải là boolean');
     return service.setClaudeAutoResume((req.params as { id: string }).id, body.enabled);
+  });
+  fastify.post('/api/claude/sessions/:id/dismiss-limit', async (req: FastifyRequest) => {
+    return service.dismissClaudeSessionLimit((req.params as { id: string }).id);
+  });
+  fastify.delete('/api/claude/sessions/:id/limit', async (req: FastifyRequest) => {
+    return service.dismissClaudeSessionLimit((req.params as { id: string }).id);
+  });
+  fastify.post('/api/claude/sessions/clean-reset', async () => {
+    return service.cleanResetClaudeSessions();
   });
   fastify.post('/api/claude/sessions/rescan', async () => service.rescanClaudeSessions());
   fastify.get('/api/claude/quota', async () => service.getClaudeQuota());

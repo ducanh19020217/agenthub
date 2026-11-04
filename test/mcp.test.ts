@@ -142,6 +142,30 @@ describe('AgentHub MCP Server Tools', () => {
     expect(exhausted.content[0].text).toContain('Hệ thống tạm dừng thực thi task');
   });
 
+  it('hub_status reports actual wait reason when tasks are waiting for disk', async () => {
+    ctx.projectRepo.insert({
+      id: 'proj-disk',
+      name: 'Project Disk',
+      path: tmpDir,
+      defaultBranch: 'main',
+      envTemplate: null,
+      maxParallel: 2,
+    });
+    ctx.taskRepo.insert({
+      id: 'proj-disk/task-disk-wait',
+      projectId: 'proj-disk',
+      slug: 'task-disk-wait',
+      title: 'Task waiting for disk',
+      status: 'waiting_quota',
+      waitReason: 'disk',
+    });
+
+    const res = (await client.callTool({ name: 'hub_status', arguments: {} })) as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(res.content[0].text).toContain('chờ đĩa 1');
+  });
+
   it('hub_status displays task title on the running worker line', async () => {
     ctx.projectRepo.insert({
       id: 'proj',
@@ -511,6 +535,53 @@ describe('AgentHub MCP Server Tools', () => {
     })) as { content: Array<{ type: string; text: string }> };
     expect(retryRes.content[0].text).toContain('✓ Đã retry task "proj/t-fail"');
     expect(['queued', 'waiting_quota']).toContain(ctx.taskRepo.get('proj/t-fail')?.status);
+  });
+
+  it('hub_review supports source: operational without incrementing reviewerChangesRequested', async () => {
+    ctx.projectRepo.insert({
+      id: 'proj-op',
+      name: 'proj-op',
+      path: tmpDir,
+      defaultBranch: 'main',
+      envTemplate: null,
+      maxParallel: 1,
+    });
+    ctx.taskRepo.insert({
+      id: 'proj-op/t-conflict',
+      projectId: 'proj-op',
+      slug: 't-conflict',
+      title: 'Conflict task',
+      status: 'review',
+    });
+
+    const opRes = (await client.callTool({
+      name: 'hub_review',
+      arguments: {
+        id: 'proj-op/t-conflict',
+        verdict: 'changes_requested',
+        feedback: 'Gỡ xung đột merge conflict trên nhánh main',
+        source: 'operational',
+      },
+    })) as { content: Array<{ type: string; text: string }> };
+
+    expect(opRes.content[0].text).toContain('changes_requested');
+    expect(ctx.taskRepo.get('proj-op/t-conflict')?.reviewerChangesRequested).toBe(0);
+    expect(ctx.reviewRepo.getByTask('proj-op/t-conflict')).toHaveLength(1);
+
+    // Default source is content and increments counter
+    ctx.taskRepo.update('proj-op/t-conflict', { status: 'review' });
+    const contentRes = (await client.callTool({
+      name: 'hub_review',
+      arguments: {
+        id: 'proj-op/t-conflict',
+        verdict: 'changes_requested',
+        feedback: 'Sửa lỗi logic code',
+      },
+    })) as { content: Array<{ type: string; text: string }> };
+
+    expect(contentRes.content[0].text).toContain('changes_requested');
+    expect(ctx.taskRepo.get('proj-op/t-conflict')?.reviewerChangesRequested).toBe(1);
+    expect(ctx.reviewRepo.getByTask('proj-op/t-conflict')).toHaveLength(2);
   });
 
   it('hub_cancel cancels a task', async () => {

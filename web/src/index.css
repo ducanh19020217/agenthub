@@ -288,6 +288,24 @@
   --wait-project_unavailable-border: color-mix(in srgb, #ea580c 30%, transparent);
   --wait-project_unavailable-dot: #ea580c;
 
+  --wait-slot-color: var(--t-accent);
+  --wait-slot-bg: color-mix(in srgb, var(--t-accent) 12%, transparent);
+  --wait-slot-text: var(--t-accent);
+  --wait-slot-border: color-mix(in srgb, var(--t-accent) 30%, transparent);
+  --wait-slot-dot: var(--t-accent);
+
+  --wait-load-color: #d97706;
+  --wait-load-bg: color-mix(in srgb, #d97706 12%, transparent);
+  --wait-load-text: #b45309;
+  --wait-load-border: color-mix(in srgb, #d97706 30%, transparent);
+  --wait-load-dot: #d97706;
+
+  --wait-dependency-color: #6366f1;
+  --wait-dependency-bg: color-mix(in srgb, #6366f1 12%, transparent);
+  --wait-dependency-text: #4f46e5;
+  --wait-dependency-border: color-mix(in srgb, #6366f1 30%, transparent);
+  --wait-dependency-dot: #6366f1;
+
   --status-draft-color: var(--t-text-3);
   --status-draft-bg: color-mix(in srgb, var(--t-text-3) 12%, transparent);
   --status-draft-text: var(--t-text-3);
@@ -463,6 +481,24 @@
   --wait-project_unavailable-text: #fb923c;
   --wait-project_unavailable-border: color-mix(in srgb, #f97316 35%, transparent);
   --wait-project_unavailable-dot: #f97316;
+
+  --wait-slot-color: var(--t-accent);
+  --wait-slot-bg: color-mix(in srgb, var(--t-accent) 15%, transparent);
+  --wait-slot-text: #60a5fa;
+  --wait-slot-border: color-mix(in srgb, var(--t-accent) 35%, transparent);
+  --wait-slot-dot: var(--t-accent);
+
+  --wait-load-color: #f59e0b;
+  --wait-load-bg: color-mix(in srgb, #f59e0b 15%, transparent);
+  --wait-load-text: #fbbf24;
+  --wait-load-border: color-mix(in srgb, #f59e0b 35%, transparent);
+  --wait-load-dot: #f59e0b;
+
+  --wait-dependency-color: #818cf8;
+  --wait-dependency-bg: color-mix(in srgb, #818cf8 15%, transparent);
+  --wait-dependency-text: #a5b4fc;
+  --wait-dependency-border: color-mix(in srgb, #818cf8 35%, transparent);
+  --wait-dependency-dot: #818cf8;
 
   --status-draft-color: var(--t-text-3);
   --status-draft-bg: color-mix(in srgb, var(--t-text-3) 12%, transparent);

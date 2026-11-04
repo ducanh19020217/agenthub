@@ -252,6 +252,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
       try {
         const data = await callApi<{
           tasks: Record<string, number>;
+          waitingReasons?: Record<string, number>;
           running: Array<{
             taskId: string;
             runId: string;
@@ -279,8 +280,35 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
 
         const lines: string[] = [];
         const tasks = data.tasks || {};
+        const waitingCount = tasks.waiting_quota || 0;
+        let waitingSummary = `chờ quota ${waitingCount}`;
+        if (waitingCount > 0 && data.waitingReasons) {
+          const reasonLabels: Record<string, string> = {
+            disk: 'đĩa',
+            quota: 'quota',
+            slot: 'slot',
+            parallel: 'slot',
+            department_parallel: 'slot phòng ban',
+            load: 'tải máy',
+            dependency: 'phụ thuộc',
+            profile_busy: 'tài khoản bận',
+            no_department_profile: 'thiếu tài khoản phòng ban',
+            no_matching_profile: 'thiếu tài khoản phù hợp',
+            project_unavailable: 'dự án không truy cập được',
+            focus: 'tập trung dự án khác',
+          };
+          const entries = Object.entries(data.waitingReasons).filter(([, count]) => count > 0);
+          if (entries.length === 1) {
+            const [reason, count] = entries[0];
+            const label = reasonLabels[reason] || reason;
+            waitingSummary = `chờ ${label} ${count}`;
+          } else if (entries.length > 1) {
+            const parts = entries.map(([reason, count]) => `${count} ${reasonLabels[reason] || reason}`);
+            waitingSummary = `đang chờ ${waitingCount} (${parts.join(', ')})`;
+          }
+        }
         lines.push(
-          `Đang chạy ${tasks.running || 0}${tasks.checking ? ` · đang kiểm tra ${tasks.checking}` : ''} · chờ review ${tasks.review || 0} · chờ quota ${tasks.waiting_quota || 0} · lỗi ${tasks.failed || 0}`,
+          `Đang chạy ${tasks.running || 0}${tasks.checking ? ` · đang kiểm tra ${tasks.checking}` : ''} · chờ review ${tasks.review || 0} · ${waitingSummary} · lỗi ${tasks.failed || 0}`,
         );
 
         if (data.quotaCapacity) {
@@ -828,6 +856,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             level: string;
             attempt: number;
             reviewerEscalated?: number;
+            reviewRound?: number;
+            reviewMaxRounds?: number;
           }>
         >('GET', `/api/tasks${query}`);
 
@@ -838,7 +868,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         }
         const lines = [`Tasks (${tasks.length}):`];
         for (const t of tasks) {
-          lines.push(`- [${t.status}] ${t.id} - ${t.title} (level: ${t.level}, attempt: ${t.attempt})`);
+          const round = t.reviewRound && t.reviewMaxRounds ? `, Vòng duyệt ${t.reviewRound}/${t.reviewMaxRounds}` : '';
+          lines.push(`- [${t.status}] ${t.id} - ${t.title} (level: ${t.level}, attempt: ${t.attempt}${round})`);
         }
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       } catch (err: unknown) {
@@ -869,6 +900,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             worktreePath?: string | null;
             baseRef?: string | null;
             dependsOn?: string[];
+            reviewRound?: number;
+            reviewMaxRounds?: number;
           };
           runs: Array<{
             id: string;
@@ -901,6 +934,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           `Task: ${t.id} [${t.status}]`,
           `Tiêu đề: ${t.title}`,
           `Level: ${t.level} | Lượt chạy: ${t.attempt}`,
+          ...(typeof t.reviewRound === 'number' && typeof t.reviewMaxRounds === 'number' ? [`Vòng duyệt: ${t.reviewRound}/${t.reviewMaxRounds}`] : []),
           `Branch: ${t.branch || '(chưa tạo)'}`,
           `Worktree: ${t.worktreePath || '(chưa tạo)'}`,
           `Base ref: ${t.baseRef || '(mặc định)'}`,
@@ -987,6 +1021,10 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
       verdict: z.enum(['approved', 'changes_requested']).describe('Kết quả review'),
       feedback: z.string().optional().describe('Góp ý hoặc yêu cầu sửa (bắt buộc khi verdict là changes_requested)'),
       merge: z.boolean().optional().describe('Khi approved, merge vào worktree tích hợp đã cấu hình'),
+      source: z
+        .enum(['content', 'operational'])
+        .optional()
+        .describe('Phân loại review: "content" (mặc định) cho đánh giá chất lượng mã nguồn; "operational" cho yêu cầu gỡ xung đột merge conflict hoặc các vấn đề vận hành/hạ tầng (không tính vào giới hạn vòng review)'),
     },
     async (args) => {
       try {
@@ -997,6 +1035,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           verdict: args.verdict,
           feedback: args.feedback,
           merge: args.merge,
+          source: args.source,
           by: 'claude-review',
         });
         try {
@@ -1575,6 +1614,13 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   server.tool('hub_request_secret', 'Yêu cầu người dùng nhập bí mật qua giao diện an toàn', { kind: z.enum(['openproject-key', 'gitea-token', 'deploy-env', 'telegram-token']), target: z.string(), label: z.string() }, async (args) => {
     try { const result = await callApi<{ configured: boolean; reason?: string; url?: string }>('POST', '/api/secrets/requests', args, 10 * 60 * 1000 + 30_000); return { content: [{ type: 'text', text: JSON.stringify(result) }] }; }
     catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_setup_import', 'Đối chiếu hoặc nhập file agenthub-setup.json; mặc định chỉ dry-run', { file: z.string(), dryRun: z.boolean().default(true) }, async (args) => {
+    try {
+      assertSetupWriteAllowed('hub_setup_import', args.dryRun);
+      const result = await callApi('POST', '/api/setup/import', args);
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    } catch (err: unknown) { return handleError(err); }
   });
 
   return server;

@@ -140,14 +140,22 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
                   {t('extra.waitingApprover')}
                 </span>
               ) : null}
+              {task.status === 'review' ? (
+                <span data-testid={`task-review-round-${task.id}`} className="inline-flex mb-2 text-[11px] font-medium text-[var(--t-text-2)]">
+                  {t('extra.reviewRound', { current: task.reviewRound ?? 1, max: task.reviewMaxRounds ?? 2 })}
+                </span>
+              ) : null}
 
               {task.waitReason && (
                 <div className="mb-2">
                   <StatusBadge
                     status={task.status}
                     waitReason={task.waitReason}
-                    diskFreeGB={hubStatus?.disk?.freeGB}
-                    diskMinFreeGB={hubStatus?.disk?.minFreeGB}
+                    blockingDisk={task.blockingDisk}
+                    diskFreeGB={task.blockingDisk?.freeGB ?? hubStatus?.disk?.freeGB}
+                    diskMinFreeGB={task.blockingDisk?.minFreeGB ?? hubStatus?.disk?.minFreeGB}
+                    diskLabel={task.blockingDisk?.label}
+                    projectId={task.projectId}
                     size="sm"
                   />
                 </div>
@@ -253,11 +261,29 @@ const ProjectTaskGroup: React.FC<{ project: { id: string; name: string }; tasks:
       </div>
       <div className="border-t border-[var(--t-border)] p-3 sm:p-4">
         {visible.visibleItems.length > 0 ? <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">{visible.visibleItems.map((task) => (
-          <Link key={task.id} to={`/tasks/${encodeURIComponent(task.id.replace('/', '~'))}`} className="block rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] p-3 hover:border-[var(--t-accent)] transition-colors">
-            <div className="text-xs font-mono text-[var(--t-text-2)] truncate">{task.slug}</div>
-            <div className="mt-1 text-sm font-semibold text-[var(--t-text)] line-clamp-2">{task.title}</div>
-            <StatusBadge status={task.status} size="sm" />
-          </Link>
+          <div key={task.id} className="rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] p-3 hover:border-[var(--t-accent)] transition-colors flex flex-col justify-between">
+            <Link to={`/tasks/${encodeURIComponent(task.id.replace('/', '~'))}`} className="block">
+              <div className="text-xs font-mono text-[var(--t-text-2)] truncate">{task.slug}</div>
+              <div className="mt-1 text-sm font-semibold text-[var(--t-text)] line-clamp-2">{task.title}</div>
+            </Link>
+            {task.externalRef && (
+              <a href={task.externalRef} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-xs text-[var(--t-accent)] hover:underline" data-testid="openproject-ticket-link">
+                {task.externalRef}
+              </a>
+            )}
+            <div className="mt-2">
+              <StatusBadge
+                status={task.status}
+                waitReason={task.waitReason}
+                blockingDisk={task.blockingDisk}
+                diskFreeGB={task.blockingDisk?.freeGB}
+                diskMinFreeGB={task.blockingDisk?.minFreeGB}
+                diskLabel={task.blockingDisk?.label}
+                projectId={task.projectId}
+                size="sm"
+              />
+            </div>
+          </div>
         ))}</div> : <div className="rounded-lg border border-dashed border-[var(--t-border)] p-5 text-center text-xs italic text-[var(--t-text-3)]">{t('common.empty')}</div>}
         {visible.hasMore && <button type="button" onClick={visible.showMore} className="mt-3 text-xs font-medium text-[var(--t-accent)] hover:underline">{t('tasks.showMore')}</button>}
       </div>
@@ -527,8 +553,32 @@ export const TasksPage: React.FC = () => {
           loading={isPageLoading}
           columns={[
             { key: 'slug', title: t('tasks.slug'), sortable: true, sortValue: (task) => task.slug, render: (task) => <Link className="font-mono text-[var(--t-accent)] hover:underline" to={`/tasks/${encodeURIComponent(task.id.replace('/', '~'))}`}>{task.slug}</Link> },
-            { key: 'title', title: t('tasks.title'), sortable: true, sortValue: (task) => task.title, render: (task) => <span className="truncate" title={task.title}>{task.title}</span> },
-            { key: 'status', title: t('tasks.status'), render: (task) => <StatusBadge status={task.status} size="sm" /> },
+            { key: 'title', title: t('tasks.title'), sortable: true, sortValue: (task) => task.title, render: (task) => (
+              <div>
+                <span className="truncate block" title={task.title}>{task.title}</span>
+                {task.externalRef && (
+                  <a href={task.externalRef} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-[var(--t-accent)] hover:underline" data-testid="openproject-ticket-link">
+                    {task.externalRef}
+                  </a>
+                )}
+              </div>
+            ) },
+            {
+              key: 'status',
+              title: t('tasks.status'),
+              render: (task) => (
+                <StatusBadge
+                  status={task.status}
+                  waitReason={task.waitReason}
+                  blockingDisk={task.blockingDisk}
+                  diskFreeGB={task.blockingDisk?.freeGB}
+                  diskMinFreeGB={task.blockingDisk?.minFreeGB}
+                  diskLabel={task.blockingDisk?.label}
+                  projectId={task.projectId}
+                  size="sm"
+                />
+              ),
+            },
             { key: 'project', title: t('tasks.project'), render: (task) => <span>{task.projectId}</span> },
           ]}
           page={page}

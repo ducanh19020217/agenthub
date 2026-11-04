@@ -4,7 +4,7 @@ import { formatEventType } from './utils/events';
 
 const IMPORTANT = new Set([
   'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
-  'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.pause_reminder',
+  'disk.low', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed', 'task.pause_reminder',
   'merge.conflict', 'merge.failed',
 ]);
 const DESKTOP_EVENTS = new Set([
@@ -27,44 +27,89 @@ export interface BrowserQuotaProfile {
   name?: string;
   engine?: string;
   enabled?: boolean | number;
+  authState?: string | null;
   quotaMarks?: Array<{ family?: string; until?: number }>;
 }
+
+export interface RunnableCapacityEntry {
+  profileName: string;
+  engine: string;
+  family: string;
+  model: string;
+}
+
+export const KNOWN_RUNNABLE_MODELS = [
+  'gemini-3.8-flash-high',
+  'gemini-3.8-flash-medium',
+  'gemini-3.8-flash-low',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6-thinking',
+  'gpt-oss-120b-medium',
+  'codex:gpt-5.6-luna',
+];
+
+export function getModelFamily(model: string): string {
+  if (model.startsWith('codex:')) return 'codex';
+  const idx = model.indexOf('-');
+  return idx > 0 ? model.substring(0, idx) : model;
+}
+
+export function getModelEngine(model: string): 'agy' | 'codex' {
+  return model.startsWith('codex:') ? 'codex' : 'agy';
+}
+
 function normalizeQuotaFamily(family: unknown): string | undefined {
   if (typeof family !== 'string' || !family) return undefined;
   if (family.startsWith('codex')) return 'codex';
   if (family.startsWith('gemini')) return 'gemini';
   if (family.startsWith('claude')) return 'claude';
+  if (family.startsWith('gpt')) return 'gpt';
   return family;
 }
+
+export function runnableCapacity(
+  profiles: BrowserQuotaProfile[] = [],
+  models: string[] = KNOWN_RUNNABLE_MODELS,
+  now = Math.floor(Date.now() / 1000),
+): RunnableCapacityEntry[] {
+  const eligible = profiles.filter(
+    (profile) => profile.enabled !== false && profile.enabled !== 0 && (!profile.authState || profile.authState === 'ok'),
+  );
+  return models.flatMap((model) => {
+    const rawFamily = getModelFamily(model);
+    const family = normalizeQuotaFamily(rawFamily) || rawFamily;
+    const engine = getModelEngine(model);
+    return eligible
+      .filter((profile) => (profile.engine || 'agy') === engine && !profile.quotaMarks?.some((mark) => {
+        const markFamily = normalizeQuotaFamily(mark.family);
+        return markFamily === family && typeof mark.until === 'number' && mark.until > now;
+      }))
+      .map((profile) => ({
+        profileName: profile.name || '',
+        engine,
+        family,
+        model,
+      }));
+  });
+}
+
+export function isQuotaExhausted(
+  event: EventItem,
+  profiles: BrowserQuotaProfile[] = [],
+  now = Math.floor(Date.now() / 1000),
+): boolean {
+  if (profiles.length > 0) {
+    return runnableCapacity(profiles, undefined, now).length === 0;
+  }
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
+  return Boolean(payload.allExhausted === true);
+}
+
 export function isEngineWideQuotaExhausted(
   event: EventItem,
   profiles: BrowserQuotaProfile[] = [],
 ): boolean {
-  const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
-  let engine = typeof payload.engine === 'string' ? payload.engine : undefined;
-  const family = normalizeQuotaFamily(payload.family ?? payload.model);
-  if (!engine) {
-    const profileName = typeof payload.profile === 'string' ? payload.profile
-      : typeof payload.profileName === 'string' ? payload.profileName
-      : typeof payload.worker === 'string' ? payload.worker : undefined;
-    if (profileName) {
-      const match = profiles.find((p) => p.name === profileName);
-      engine = match?.engine;
-    }
-  }
-  if (!engine && family) {
-    if (family === 'gemini' || family === 'claude') engine = 'agy';
-    else if (family === 'codex') engine = 'codex';
-  }
-  const active = profiles.filter((profile) => profile.enabled !== false && profile.enabled !== 0 && (!engine || profile.engine === engine));
-  if (active.length === 0) {
-    return Boolean(payload.allExhausted === true && engine && family);
-  }
-  const now = Date.now() / 1000;
-  if (family) {
-    return active.every((profile) => profile.quotaMarks?.some((mark) => normalizeQuotaFamily(mark.family) === family && typeof mark.until === 'number' && mark.until > now));
-  }
-  return active.every((profile) => profile.quotaMarks?.some((mark) => typeof mark.until === 'number' && mark.until > now));
+  return isQuotaExhausted(event, profiles);
 }
 
 export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 'vi'): string {
@@ -111,7 +156,7 @@ export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 
       ? `Docker disk space low: ${freeGB} GB (< ${minFreeGB} GB): skipping docker build/pull/compose up`
       : `Ổ đĩa Docker còn ${freeGB} GB (< ${minFreeGB} GB): không chạy docker build/pull/compose up`;
   }
-  if (event.type === 'quota.exhausted') {
+  if (event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted') {
     return isEn
       ? `${appName}: All accounts have exhausted quota`
       : `${appName}: Mọi tài khoản đều đã hết quota`;
@@ -241,11 +286,15 @@ export function shouldNotifyBrowserEvent(
     return false;
   }
   if (options.brainMode === 'auto' && !new Set([
-    'brain.notify', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed',
+    'brain.notify', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed',
     'merge.conflict', 'merge.failed',
   ]).has(event.type)) return false;
-  if (isBrowserQuietHours(options.quietHours, event.ts) && event.type !== 'disk.low' && event.type !== 'disk.docker_low' && event.type !== 'quota.exhausted') return false;
-  if (event.type === 'quota.exhausted') {
+  if (isBrowserQuietHours(options.quietHours, event.ts) && event.type !== 'disk.low' && event.type !== 'disk.docker_low' && event.type !== 'quota.exhausted' && event.type !== 'claude.quota_exhausted' && event.type !== 'claude.fallback_changed') return false;
+  if (event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted' || event.type === 'claude.fallback_changed') {
+    if (event.type === 'claude.fallback_changed') {
+      const step = payload.step && typeof payload.step === 'object' ? payload.step as Record<string, unknown> : null;
+      if (payload.fallbackAvailable === true || (step && step.type !== 'wait')) return false;
+    }
     return isEngineWideQuotaExhausted(event, profiles);
   }
   // The scheduler emits disk.ok only after the hysteresis margin is crossed.
@@ -258,7 +307,7 @@ export function shouldNotifyBrowserEvent(
     if (!Number.isFinite(freeGB) || !Number.isFinite(minFreeGB) || !valid) return false;
   }
   if (level !== 'critical') return true;
-  return event.type === 'task.failed' || event.type === 'disk.docker_low' || (event.type === 'quota.exhausted' && isEngineWideQuotaExhausted(event, profiles));
+  return event.type === 'task.failed' || event.type === 'disk.docker_low' || ((event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted' || event.type === 'claude.fallback_changed') && isEngineWideQuotaExhausted(event, profiles));
 }
 
 export function notifyBrowserEvent(
@@ -269,7 +318,7 @@ export function notifyBrowserEvent(
 ): void {
   if (typeof window === 'undefined' || !shouldNotifyBrowserEvent(event, level, profiles, options) || !('Notification' in window) || Notification.permission !== 'granted') return;
   const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
-  if (event.type === 'quota.exhausted' && !shouldNotifyBrowserEvent(event, level, profiles)) return;
+  if ((event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted' || event.type === 'claude.fallback_changed') && !shouldNotifyBrowserEvent(event, level, profiles, options)) return;
 
   // State transition guard for disk.ok: only allowed if disk was previously in 'low' state.
   if (event.type === 'disk.ok') {
@@ -284,17 +333,10 @@ export function notifyBrowserEvent(
     ? LOAD_WINDOW_MS
     : WINDOW_MS;
 
-  let engine = typeof payload.engine === 'string' ? payload.engine : undefined;
-  const family = normalizeQuotaFamily(payload.family ?? payload.model);
-  if (!engine && typeof (payload.profile || payload.worker || payload.profileName) === 'string') {
-    const pName = (payload.profile || payload.worker || payload.profileName) as string;
-    engine = profiles.find((p) => p.name === pName)?.engine;
-  }
-
   const identity = event.type === 'disk.low' || event.type === 'disk.ok'
     ? event.type
-    : event.type === 'quota.exhausted'
-    ? `quota:${engine || 'unknown'}:${family || 'unknown'}`
+    : (event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted' || event.type === 'claude.fallback_changed')
+    ? 'quota:all'
     : event.type === 'task.paused' || event.type === 'load.task_paused' || event.type === 'load.high'
     ? 'load:summary'
     : event.type === 'merge.conflict'

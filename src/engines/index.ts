@@ -464,9 +464,9 @@ export class CodexEngine implements Engine {
         const mcp = JSON.parse(fs.readFileSync(opts.mcpConfigPath, 'utf8')) as { mcpServers?: { agenthub?: { command?: string; args?: string[]; env?: Record<string, string> } } };
         const server = mcp.mcpServers?.agenthub;
         if (server?.command) {
-          args.splice(-1, 0, '-c', `mcp_servers.agenthub.command=${server.command}`);
-          if (server.args?.length) args.splice(-1, 0, '-c', `mcp_servers.agenthub.args=${JSON.stringify(server.args)}`);
-          if (server.env) args.splice(-1, 0, '-c', `mcp_servers.agenthub.env=${JSON.stringify(server.env)}`);
+          args.splice(-1, 0, '-c', toTomlConfigArg('mcp_servers.agenthub.command', server.command));
+          if (server.args?.length) args.splice(-1, 0, '-c', toTomlConfigArg('mcp_servers.agenthub.args', server.args));
+          if (server.env) args.splice(-1, 0, '-c', toTomlConfigArg('mcp_servers.agenthub.env', server.env));
         }
       } catch { /* malformed optional MCP config is handled by Codex */ }
     }
@@ -695,4 +695,84 @@ export class FakeEngine implements Engine {
     const tail = lastNLines(logTail, 8);
     return TRANSIENT_ERROR_RE.test(tail);
   }
+}
+
+/**
+ * Escapes a string for use in TOML basic strings (double quoted).
+ * Escapes quotation mark, backslash, control characters (\b, \t, \n, \f, \r, \u00xx), and \u007f-\u009f (DEL and C1 controls).
+ */
+export function escapeTomlString(str: string): string {
+  // eslint-disable-next-line no-control-regex -- control characters (C0, DEL, C1) must be escaped in TOML basic strings
+  return str.replace(/[\x00-\x1f\x7f-\x9f"\\]/g, (c) => {
+    switch (c) {
+      case '"': return '\\"';
+      case '\\': return '\\\\';
+      case '\b': return '\\b';
+      case '\t': return '\\t';
+      case '\n': return '\\n';
+      case '\f': return '\\f';
+      case '\r': return '\\r';
+      default: {
+        const code = c.charCodeAt(0);
+        return `\\u${code.toString(16).padStart(4, '0')}`;
+      }
+    }
+  });
+}
+
+/**
+ * Formats a key for TOML. Bare keys (letters, numbers, underscores, hyphens) are unquoted;
+ * other keys are wrapped in double quotes and escaped.
+ */
+export function toTomlKey(key: string): string {
+  if (/^[A-Za-z0-9_-]+$/.test(key)) {
+    return key;
+  }
+  return `"${escapeTomlString(key)}"`;
+}
+
+/**
+ * Formats a value for TOML. Strings are escaped and quoted, numbers and booleans are formatted as-is,
+ * arrays are bracketed, and objects become inline tables.
+ */
+export function toTomlValue(val: unknown): string {
+  if (typeof val === 'string') {
+    return `"${escapeTomlString(val)}"`;
+  }
+  if (typeof val === 'number' || typeof val === 'boolean') {
+    return String(val);
+  }
+  if (Array.isArray(val)) {
+    return `[${val.map(toTomlValue).join(', ')}]`;
+  }
+  if (val && typeof val === 'object') {
+    return toTomlInlineTable(val as Record<string, unknown>);
+  }
+  return `"${escapeTomlString(String(val ?? ''))}"`;
+}
+
+/**
+ * Formats an object as a TOML inline table: {KEY="VAL", KEY2="VAL2"}.
+ */
+export function toTomlInlineTable(obj: Record<string, unknown>): string {
+  const entries = Object.entries(obj).map(([key, value]) => {
+    return `${toTomlKey(key)}=${toTomlValue(value)}`;
+  });
+  return `{${entries.join(', ')}}`;
+}
+
+/**
+ * Formats a config key-value pair for Codex -c flags.
+ */
+export function toTomlConfigArg(key: string, val: unknown): string {
+  if (typeof val === 'string') {
+    return `${key}=${toTomlValue(val)}`;
+  }
+  if (Array.isArray(val)) {
+    return `${key}=${toTomlValue(val)}`;
+  }
+  if (val && typeof val === 'object') {
+    return `${key}=${toTomlInlineTable(val as Record<string, unknown>)}`;
+  }
+  return `${key}=${toTomlValue(val)}`;
 }

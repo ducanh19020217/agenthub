@@ -106,6 +106,8 @@ describe('ReviewQueue Component', () => {
       resume: 0,
       createdAt: '2026-10-15',
       updatedAt: '2026-10-15',
+      reviewRound: 2,
+      reviewMaxRounds: 3,
     },
     {
       id: 'proj/task-2',
@@ -151,6 +153,7 @@ describe('ReviewQueue Component', () => {
     // Task 1 is waiting
     expect(screen.getByText('Task số 1')).toBeInTheDocument();
     expect(screen.getByTestId('review-waiting-note')).toHaveTextContent('chờ Claude review');
+    expect(screen.getAllByTestId('review-round')[0]).toHaveTextContent('Vòng duyệt 2/3');
 
     // Task 2 is being reviewed by Claude
     expect(screen.getByText('Task số 2')).toBeInTheDocument();

@@ -185,11 +185,14 @@ describe('TaskDetailPage', () => {
     vi.spyOn(client, 'getTask').mockResolvedValue({
       ...baseTask,
       status: 'review',
+      reviewRound: 2,
+      reviewMaxRounds: 3,
     });
 
     renderPage();
 
     expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    expect(screen.getByTestId('task-review-round')).toHaveTextContent('Vòng duyệt 2/3');
 
     const approveBtn = screen.getByRole('button', { name: /^Duyệt$/i });
     await act(async () => {

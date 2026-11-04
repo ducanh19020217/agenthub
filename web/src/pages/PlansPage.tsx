@@ -799,7 +799,16 @@ export const PlansPage: React.FC = () => {
                                 : '-'}
                             </td>
                             <td className="py-3 px-3">
-                              <StatusBadge status={task.status} size="sm" />
+                              <StatusBadge
+                                status={task.status}
+                                waitReason={task.waitReason}
+                                blockingDisk={task.blockingDisk}
+                                diskFreeGB={task.blockingDisk?.freeGB}
+                                diskMinFreeGB={task.blockingDisk?.minFreeGB}
+                                diskLabel={task.blockingDisk?.label}
+                                projectId={task.projectId}
+                                size="sm"
+                              />
                             </td>
                             {isDraft && (
                               <td className="py-3 px-3 text-right">

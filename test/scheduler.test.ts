@@ -1066,6 +1066,143 @@ describe('Codex reviewer failover lifecycle', () => {
     recovery.stop();
   });
 
+  it('counts content feedback across reviewers and steps, but not operational returns', () => {
+    const { scheduler } = makeReviewer('reviewer-changes');
+    projectRepo.update('test-project', {
+      review: JSON.stringify({ maxRounds: 2, chain: [
+        { reviewer: 'codex:gpt-5.6-luna', mode: 'gate' },
+        { reviewer: 'claude:sonnet', mode: 'gate' },
+      ] }),
+    });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'merge failed is mentioned, but this is a real code defect', 'claude-review');
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(1);
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'Xung đột is mentioned in a code comment, still a content defect', 'claude-review');
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(2);
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'merge conflict: operational failure', 'claude-review', 'operational');
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(2);
+    expect(taskRepo.get('test-project/review')?.reviewerEscalated).toBe(0);
+    scheduler.stop();
+  });
+
+  it('escalation includes all open findings and the reviewer actor', () => {
+    const { scheduler } = makeReviewer('reviewer-changes');
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'first missing case', 'codex-reviewer');
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'second missing case', 'claude-reviewer');
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'third missing case', 'claude-reviewer');
+    const event = eventRepo.getRecent(30).find((entry) => entry.type === 'review.escalated');
+    expect(event?.payload).toContain('first missing case');
+    expect(event?.payload).toContain('second missing case');
+    expect(event?.payload).toContain('third missing case');
+    expect(event?.payload).toContain('claude-reviewer');
+    expect(event?.payload).toContain('Lịch sử các vòng review:');
+    scheduler.stop();
+  });
+
+  it('retains reviewerChangesRequested counter without reset or increase on reviewer crash', async () => {
+    const errorSetup = makeReviewer('reviewer-error');
+    taskRepo.update('test-project/review', { reviewerChangesRequested: 1 });
+    errorSetup.scheduler.tick();
+    await vi.waitFor(() => {
+      expect(errorSetup.scheduler.getReviewerStatus().running).toEqual([]);
+      expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).toBe('crashed');
+    });
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(1);
+    errorSetup.scheduler.stop();
+  });
+
+  it('retains reviewerChangesRequested counter without reset or increase on reviewer quota', async () => {
+    const quotaSetup = makeReviewer('reviewer-quota');
+    taskRepo.update('test-project/review', { reviewerChangesRequested: 1 });
+    quotaSetup.scheduler.tick();
+    await vi.waitFor(() => {
+      expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).toBe('quota');
+    });
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(1);
+    quotaSetup.scheduler.stop();
+  });
+
+  it('accumulates reviewerChangesRequested across advanceReviewStep chain steps', () => {
+    const { scheduler } = makeReviewer('reviewer-changes');
+    projectRepo.update('test-project', {
+      review: JSON.stringify({
+        maxRounds: 3,
+        chain: [
+          { reviewer: 'codex:gpt-5.6-luna', mode: 'gate' },
+          { reviewer: 'claude', mode: 'gate' },
+        ],
+      }),
+    });
+    expect(taskRepo.get('test-project/review')?.reviewStep).toBe(0);
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(0);
+
+    // Step 0 passes gate -> reviewStep advances to 1
+    scheduler.reviewTask('test-project/review', 'approved', 'step 0 ok', 'codex-reviewer');
+    expect(taskRepo.get('test-project/review')?.reviewStep).toBe(1);
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(0);
+
+    // Step 1 returns changes_requested -> counter increments to 1, reviewStep resets to 0
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'step 1 found defect', 'claude-reviewer');
+    expect(taskRepo.get('test-project/review')?.reviewStep).toBe(0);
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(1);
+    expect(taskRepo.get('test-project/review')?.status).toBe('queued');
+
+    // Simulate task re-entering review after worker fix
+    taskRepo.update('test-project/review', { status: 'review' });
+
+    // Step 0 passes gate again -> advances to step 1, counter stays 1
+    scheduler.reviewTask('test-project/review', 'approved', 'step 0 ok again', 'codex-reviewer');
+    expect(taskRepo.get('test-project/review')?.reviewStep).toBe(1);
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(1);
+
+    // Step 1 returns changes_requested again -> counter increments to 2
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'step 1 found another defect', 'claude-reviewer');
+    expect(taskRepo.get('test-project/review')?.reviewStep).toBe(0);
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(2);
+    scheduler.stop();
+  });
+
+  it('emits review.escalated only once when exceeding maxRounds and ignores subsequent calls', () => {
+    const { scheduler } = makeReviewer('reviewer-changes');
+    projectRepo.update('test-project', {
+      review: JSON.stringify({ maxRounds: 1 }),
+    });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'round 1 defect', 'codex-reviewer');
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(1);
+    expect(taskRepo.get('test-project/review')?.reviewerEscalated).toBe(0);
+
+    // Second changes_requested exceeds maxRounds 1
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'round 2 defect exceeds limit', 'codex-reviewer');
+    expect(taskRepo.get('test-project/review')?.reviewerEscalated).toBe(1);
+    const escalatedEvents = eventRepo.getRecent(30).filter((e) => e.type === 'review.escalated');
+    expect(escalatedEvents).toHaveLength(1);
+
+    // Calling again while reviewerEscalated is active does not emit another escalation event
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'round 3 after escalation', 'codex-reviewer');
+    const escalatedEventsAfter = eventRepo.getRecent(30).filter((e) => e.type === 'review.escalated');
+    expect(escalatedEventsAfter).toHaveLength(1);
+    scheduler.stop();
+  });
+
+  it('highlights missed-earlier findings distinctly in review.escalated open feedback', () => {
+    const { scheduler } = makeReviewer('reviewer-changes');
+    projectRepo.update('test-project', {
+      review: JSON.stringify({ maxRounds: 1 }),
+    });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'P1: missed-earlier - src/notify.ts:433 còn sót', 'codex-reviewer');
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'P2: lỗi mới vòng 2', 'claude-reviewer');
+    const event = eventRepo.getRecent(30).find((e) => e.type === 'review.escalated');
+    expect(event?.payload).toContain('[Lỗi vòng hiện tại] P2: lỗi mới vòng 2');
+    expect(event?.payload).toContain('[Lỗi bỏ sót ghi nhận từ vòng trước (missed-earlier - codex-reviewer)] P1: missed-earlier - src/notify.ts:433 còn sót');
+    expect(event?.payload).toContain('Lịch sử các vòng review:');
+    scheduler.stop();
+  });
+
   it('recovers a durable reviewer run without putting it in the worker map', () => {
     const { scheduler, failover } = makeReviewer('reviewer-approved');
     runRepo.insert({ id: 'old-review', taskId: 'test-project/review', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-1', kind: 'reviewer' });
@@ -1455,7 +1592,7 @@ describe('Review: DONE → review, changes_requested → re-queue', () => {
     expect(task.resume).toBe(1);
     expect(task.body).toContain('Feedback review');
     expect(task.body).toContain('Fix the linting errors');
-    expect(task.reviewerChangesRequested).toBe(0);
+    expect(task.reviewerChangesRequested).toBe(2);
     expect(task.reviewerEscalated).toBe(0);
     expect(task.reviewerEscalatedAt).toBeNull();
     expect(task.reviewerEscalationReason).toBeNull();

@@ -54,9 +54,14 @@ export class ClaudeSessionScanner {
   }
   setEventBus(eventBus: EventBus) { this.options.eventBus = eventBus; }
   start() {
+    this.cleanExpiredLimits();
     void this.scan().catch(() => undefined);
     this.timer = setInterval(() => void this.scan().catch(() => undefined), 60_000);
     this.timer.unref?.();
+  }
+  cleanExpiredLimits(maxAgeSeconds = 24 * 3600) {
+    const threshold = Math.floor(Date.now() / 1000) - maxAgeSeconds;
+    this.db.prepare('UPDATE claude_sessions SET limitResetAt = NULL, limitHitAt = NULL WHERE limitResetAt IS NOT NULL AND limitResetAt <= ?').run(threshold);
   }
   stop() {
     if (this.timer) {
@@ -65,6 +70,7 @@ export class ClaudeSessionScanner {
     }
   }
   async scan() {
+    this.cleanExpiredLimits();
     const repo = new ClaudeSessionRepo(this.db);
     const tasks = this.db.prepare('SELECT id,slug FROM tasks').all() as Array<{ id: string; slug: string }>;
     // Only open transcripts of projects the hub manages (or hub chats). Other Claude Code projects on
@@ -195,8 +201,11 @@ export class ClaudeSessionScanner {
     }
     if (eligible && latestLimit) {
       const stillLimited = !latestActivity || Date.parse(latestActivity) <= Date.parse(latestLimit.observedAt);
-      repo.upsert({ sessionId, cwd: '', limitResetAt: stillLimited ? latestLimit.resetAt : null, limitHitAt: stillLimited ? latestLimit.observedAt : null });
-      repo.setLimit(sessionId, stillLimited ? latestLimit.resetAt : null, stillLimited ? latestLimit.observedAt : null);
+      const isExpired = latestLimit.resetAt * 1000 + 24 * 3600_000 <= Date.now();
+      const resetToSet = stillLimited && !isExpired ? latestLimit.resetAt : null;
+      const hitToSet = stillLimited && !isExpired ? latestLimit.observedAt : null;
+      repo.upsert({ sessionId, cwd: '', limitResetAt: resetToSet, limitHitAt: hitToSet });
+      repo.setLimit(sessionId, resetToSet, hitToSet);
     }
     await this.maybeAutoResume(file, sessionId, repo, existing, stat);
     this.db.prepare('INSERT OR REPLACE INTO claude_scan_state (path,inode,size,offset,mtime,turnId,turnTasks,eligible) VALUES (?,?,?,?,?,?,?,?)').run(file, stat.ino, stat.size, offset, stat.mtimeMs, turnId, JSON.stringify([...turnTasks]), eligible ? 1 : 0);

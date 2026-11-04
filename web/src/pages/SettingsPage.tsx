@@ -5,9 +5,11 @@ import type { ReviewerFallback, ReviewerOrderItem, PresetLevel, ApplyPresetResul
 import { Save, CheckCircle2, AlertCircle, Info, MessageSquare, Bell, ArrowUp, ArrowDown, Plus, Trash2 } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
 import { TelegramCard } from '../components/TelegramCard';
+import { OpenProjectSettings } from '../components/OpenProjectSettings';
 import { deletePermissionRule, getPermissionRules } from '../api/chat';
 import { useTour } from '../components/tour/TourContext';
 import { InfoTooltip } from '../components/tour/InfoTooltip';
+import { SetupChatButton } from '../components/SetupChatButton';
 import { DataTable, SelectOrCustomInput, SortableModelList } from '../components/ui';
 import {
   DEFAULT_CLAUDE_MODELS,
@@ -483,7 +485,7 @@ export const SettingsPage: React.FC = () => {
           {t('extra.settingsSubtitle')}
         </p>
         </div>
-        <button type="button" onClick={() => openTour('intro')} className="rounded-lg border border-[var(--t-border)] px-3 py-2 text-xs text-[var(--t-text-2)] hover:bg-[var(--t-hover)]">{t('tour.replay')}</button>
+        <div className="flex items-center gap-2"><SetupChatButton /><button type="button" onClick={() => openTour('intro')} className="rounded-lg border border-[var(--t-border)] px-3 py-2 text-xs text-[var(--t-text-2)] hover:bg-[var(--t-hover)]">{t('tour.replay')}</button></div>
       </div>
 
       {/* Global Presets */}
@@ -624,6 +626,8 @@ export const SettingsPage: React.FC = () => {
         </div>
         {brandingLogoError && <p className="text-sm text-[var(--t-crit)]">{brandingLogoError}</p>}
       </section>
+
+      <OpenProjectSettings />
 
       {saveSuccess && (
         <div role="status" aria-live="polite" className="p-4 rounded-xl bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)] border border-[var(--t-ok)] text-[var(--t-ok)] text-sm flex items-center gap-2">

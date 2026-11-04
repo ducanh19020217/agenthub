@@ -55,6 +55,7 @@ import {
   X,
   Edit3,
   Bell,
+  ExternalLink,
 } from 'lucide-react';
 
 const VALID_MODELS = [
@@ -475,6 +476,11 @@ export const TaskDetailPage: React.FC = () => {
           {task.reviewerEscalationReason ? ` (${task.reviewerEscalationReason})` : ''}.
         </div>
       ) : null}
+      {(task.status === 'review' || task.reviewMaxRounds) ? (
+        <div data-testid="task-review-round" className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] px-4 py-3 text-sm text-[var(--t-text)]">
+          {t('extra.reviewRound', { current: task.reviewRound ?? 1, max: task.reviewMaxRounds ?? 2 })}
+        </div>
+      ) : null}
       {task.reviewChain && task.reviewChain.length > 0 ? (
         <div className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] px-4 py-3 text-xs">
           <div className="font-semibold mb-2">{t('taskDetail.reviewChain')}</div>
@@ -514,8 +520,11 @@ export const TaskDetailPage: React.FC = () => {
               <StatusBadge
                 status={task.status}
                 waitReason={task.waitReason}
-                diskFreeGB={hubStatus?.disk?.freeGB}
-                diskMinFreeGB={hubStatus?.disk?.minFreeGB}
+                blockingDisk={task.blockingDisk}
+                diskFreeGB={task.blockingDisk?.freeGB ?? hubStatus?.disk?.freeGB}
+                diskMinFreeGB={task.blockingDisk?.minFreeGB ?? hubStatus?.disk?.minFreeGB}
+                diskLabel={task.blockingDisk?.label}
+                projectId={task.projectId}
                 size="sm"
               />
               {(task.status === 'review' || (task.reviews && task.reviews.length > 0) || task.reviewChain?.length) && (
@@ -568,6 +577,7 @@ export const TaskDetailPage: React.FC = () => {
               </span>
             </div>
             <h1 className="text-xl md:text-2xl font-bold tracking-tight">{task.title}</h1>
+            {task.externalRef && <a href={task.externalRef} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-xs text-[var(--t-accent)] hover:underline" data-testid="openproject-ticket-link">{task.externalRef}<ExternalLink className="h-3 w-3" /></a>}
           </div>
         </div>
 

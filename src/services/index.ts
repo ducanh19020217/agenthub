@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { HttpError } from '../errors.js';
 import { DEFAULT_PROJECT_SETTINGS, mergeProjectSettings, ProjectSettingsInputSchema, projectSettings } from '../projects/settings.js';
-import { projectWorktreeRoots, validateProjectWorktreeRoot } from '../projects/paths.js';
+import { projectWorktreeRoot, projectWorktreeRoots, validateProjectWorktreeRoot } from '../projects/paths.js';
 import { ensureIntegrationNodeModules, ensureIntegrationWorktree, getIntegrationStatus, removeIntegrationWorktree, validateIntegrationBranch } from '../projects/integration.js';
 import { resolveProjectFile } from '../projects/paths.js';
 import path from 'node:path';
@@ -32,6 +32,7 @@ import {
   BrainDirectiveRepo,
   TaskBatchRow,
   CiRepo,
+  BlockingDiskInfo,
 } from '../db/index.js';
 import type { CiWatchService } from '../ci.js';
 import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
@@ -50,7 +51,7 @@ import { BrainService } from '../brain.js';
 import { toApiTime } from '../db/time.js';
 import { ChatService } from '../chat/service.js';
 import type { BrainRunner } from '../brain/runner.js';
-import { getDiskSpaceSync, getMonitoredDisks } from '../disk.js';
+import { getDiskSpaceSync, getMonitoredDisks, type MonitoredDisk } from '../disk.js';
 import { WorktreeService } from '../worktrees/index.js';
 import { parseAuthState, parseCodexLoginStatus } from '../profiles/auth.js';
 import { SavingsService } from '../savings.js';
@@ -76,6 +77,7 @@ import type { PerfCollector } from '../perf.js';
 import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../presets.js';
 import type { SetupTools } from '../setup-tools.js';
 import { computeEffectiveConfig } from '../effective-config.js';
+import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
 
 const execFileAsync = promisify(execFile);
 const CODEX_EMAIL_RECHECK_MS = 10 * 60 * 1000;
@@ -156,10 +158,11 @@ function apiProfile(profile: ProfileRow): ProfileRow {
   };
 }
 
-function apiTask(task: TaskRow): TaskRow {
+function apiTask(task: TaskRow, blockingDisk?: BlockingDiskInfo | null): TaskRow {
   return {
     ...task,
     waitReason: task.waitReason ?? null,
+    blockingDisk: blockingDisk !== undefined ? blockingDisk : (task.blockingDisk ?? null),
     createdAt: toApiTime(task.createdAt)!,
     updatedAt: toApiTime(task.updatedAt)!,
   };
@@ -404,6 +407,7 @@ export const ReviewTaskSchema = z.object({
   verdict: z.enum(['approved', 'changes_requested']),
   feedback: z.string().optional(),
   by: z.string().optional(),
+  source: z.enum(['content', 'operational']).optional().default('content'),
   merge: z.boolean().optional().default(false),
 }).refine(
   (d) => d.verdict !== 'changes_requested' || (typeof d.feedback === 'string' && d.feedback.trim().length > 0),
@@ -599,6 +603,7 @@ export const UpdateConfigSchema = z.object({
   }).optional(),
   disk: z.object({
     minFreeGB: z.number().positive().optional(),
+    hubHomeMinFreeGB: z.number().positive().optional(),
     extraPaths: z.array(z.object({ path: z.string().min(1), minFreeGB: z.number().positive(), label: z.string().min(1) })).optional(),
   }).optional(),
   cleanup: z.object({
@@ -627,7 +632,6 @@ export const UpdateConfigSchema = z.object({
       failed: z.boolean().optional(),
       blocked: z.boolean().optional(),
       quota: z.boolean().optional(),
-      quotaPerModel: z.boolean().optional(),
       quotaAllExhausted: z.boolean().optional(),
       fallback: z.boolean().optional(),
       brainWaiting: z.boolean().optional(),
@@ -777,10 +781,18 @@ export function formatEventSummary(
     case 'task.waiting_quota': {
       const reason = p && (p as Record<string, unknown>).reason;
       if (reason === 'disk') {
+        const message = p && (p as Record<string, unknown>).message;
+        if (typeof message === 'string' && message.length > 0) return `${taskLabel} ${message}`;
         return `${taskLabel} chờ dung lượng ổ đĩa`;
       }
-      if (reason === 'parallel') {
+      if (reason === 'parallel' || reason === 'department_parallel' || reason === 'slot') {
         return `${taskLabel} chờ slot song song`;
+      }
+      if (reason === 'load') {
+        return `${taskLabel} chờ giảm tải máy`;
+      }
+      if (reason === 'dependency') {
+        return `${taskLabel} chờ task phụ thuộc`;
       }
       if (reason === 'profile_busy') {
         return `${taskLabel} chờ tài khoản rảnh`;
@@ -1123,6 +1135,20 @@ export class AppService {
     if (!session) throw new HttpError(404, 'not_found', `Claude session "${id}" không tồn tại`);
     return this.claudeSessionRepo.setAutoResume(id, enabled);
   }
+  dismissClaudeSessionLimit(id: string) {
+    if (!this.claudeSessionRepo) throw new HttpError(500, 'internal_error', 'Claude session service chưa sẵn sàng');
+    const session = this.claudeSessionRepo.get(id);
+    if (!session) throw new HttpError(404, 'not_found', `Claude session "${id}" không tồn tại`);
+    this.claudeSessionRepo.setLimit(id, null, null);
+    return { ok: true, sessionId: id };
+  }
+  cleanResetClaudeSessions() {
+    const db = this.scheduler.getDatabase();
+    if (!db) throw new HttpError(500, 'internal_error', 'Database chưa sẵn sàng');
+    const nowSec = Math.floor(Date.now() / 1000);
+    const result = db.prepare('UPDATE claude_sessions SET limitResetAt = NULL, limitHitAt = NULL WHERE limitResetAt IS NOT NULL AND limitResetAt <= ?').run(nowSec);
+    return { ok: true, cleared: result.changes };
+  }
   async rescanClaudeSessions() { await this.claudeScanner?.scan(); return { ok: true }; }
   getClaudeQuota() {
     const quota = this.claudeSessionRepo?.quota() || { status: null, resetsAt: null, rateLimitType: null, observedAt: null };
@@ -1190,13 +1216,69 @@ export class AppService {
     if (!db) return [];
 
     const limitedRows = db.prepare(`
-      SELECT sessionId, cwd, title, limitResetAt, autoResumeEnabled
+      SELECT sessionId, cwd, title, limitResetAt, autoResumeEnabled, isHubChat
       FROM claude_sessions
       WHERE limitResetAt IS NOT NULL
       ORDER BY limitResetAt ASC
-    `).all() as Array<{ sessionId: string; cwd: string; title: string | null; limitResetAt: number; autoResumeEnabled: number }>;
+    `).all() as Array<{ sessionId: string; cwd: string; title: string | null; limitResetAt: number; autoResumeEnabled: number; isHubChat: number }>;
 
     if (limitedRows.length === 0) return [];
+
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    const chatSessionIds = new Set<string>();
+    const chatRows = db.prepare('SELECT claudeSessionId FROM chat_sessions WHERE claudeSessionId IS NOT NULL').all() as Array<{ claudeSessionId: string }>;
+    for (const r of chatRows) chatSessionIds.add(r.claudeSessionId);
+
+    const taskUsageSessionIds = new Set<string>();
+    const taskUsageRows = db.prepare('SELECT DISTINCT sessionId FROM claude_task_usage').all() as Array<{ sessionId: string }>;
+    for (const r of taskUsageRows) taskUsageSessionIds.add(r.sessionId);
+
+    const taskCreationSessionIds = new Set<string>();
+    const taskCreationRows = db.prepare('SELECT DISTINCT creationSessionId FROM tasks WHERE creationSessionId IS NOT NULL').all() as Array<{ creationSessionId: string }>;
+    for (const r of taskCreationRows) taskCreationSessionIds.add(r.creationSessionId);
+
+    const worktreeRoots: string[] = [];
+    if (this.config?.worktreesDir) worktreeRoots.push(path.resolve(this.config.worktreesDir));
+    const projects = this.projectRepo?.getAll ? this.projectRepo.getAll() : [];
+    for (const project of projects) {
+      for (const root of projectWorktreeRoots(project, this.config?.hubHome, this.config?.worktreesDir)) {
+        if (root) worktreeRoots.push(path.resolve(root));
+      }
+    }
+
+    const taskWorktrees = (db.prepare('SELECT DISTINCT worktreePath FROM tasks WHERE worktreePath IS NOT NULL').all() as Array<{ worktreePath: string }>)
+      .map((r) => path.resolve(r.worktreePath));
+
+    const isWithin = (child: string, root: string): boolean => {
+      const relative = path.relative(root, path.resolve(child));
+      return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+    };
+
+    const isHubWorktree = (cwd: string | null) => {
+      if (!cwd) return false;
+      const resolved = path.resolve(cwd);
+      if (taskWorktrees.some((wt) => resolved === wt || isWithin(resolved, wt))) return true;
+      if (worktreeRoots.some((root) => isWithin(resolved, root) && resolved !== root)) return true;
+      return false;
+    };
+
+    const filteredRows = limitedRows.filter((row) => {
+      // Exclude hub one-off sessions (reviewer, worker, brain, hub chat)
+      if (row.isHubChat === 1) return false;
+      if (chatSessionIds.has(row.sessionId)) return false;
+      if (taskUsageSessionIds.has(row.sessionId)) return false;
+      if (taskCreationSessionIds.has(row.sessionId)) return false;
+      if (isHubWorktree(row.cwd)) return false;
+      if (row.title && (row.title.startsWith('Bạn là reviewer') || row.title.startsWith('Bạn là bộ não'))) return false;
+
+      // Keep only if limitResetAt is in future OR autoResumeEnabled is 1 (and not yet auto-resumed)
+      const inFuture = row.limitResetAt > nowSec;
+      const waitingAutoResume = row.autoResumeEnabled === 1;
+      return inFuture || waitingAutoResume;
+    });
+
+    if (filteredRows.length === 0) return [];
 
     const scanRows = db.prepare('SELECT path FROM claude_scan_state').all() as Array<{ path: string }>;
     const sessionConfigDirs = new Map<string, string>();
@@ -1211,7 +1293,7 @@ export class AppService {
     const profileHome = profile.home ? path.resolve(profile.home) : null;
     const profileClaudeDir = profileHome ? path.join(profileHome, '.claude') : null;
 
-    const matched = limitedRows.filter((row) => {
+    const matched = filteredRows.filter((row) => {
       const configDir = sessionConfigDirs.get(row.sessionId);
       if (isSystemProfile) {
         return !configDir || configDir === defaultClaudeConfigDir;
@@ -1294,8 +1376,13 @@ export class AppService {
     }
 
     const focusWaitingTaskIds = new Set<string>();
+    const waitingReasons: Record<string, number> = {};
     for (const t of tasks) {
       byStatus[t.status] = (byStatus[t.status] || 0) + 1;
+      if (t.status === 'waiting_quota') {
+        const reason = t.waitReason || 'quota';
+        waitingReasons[reason] = (waitingReasons[reason] || 0) + 1;
+      }
       if (t.waitReason === 'focus') focusWaitingTaskIds.add(t.id);
       if (!tasksByProject[t.projectId]) {
         tasksByProject[t.projectId] = {
@@ -1410,7 +1497,17 @@ export class AppService {
     const diskReader = this.scheduler ? this.scheduler.getDiskReader() : getDiskSpaceSync;
     const disk = diskReader(this.config.worktreesDir);
     const worktreeRoots = [this.config.worktreesDir, ...this.projectRepo.getAll().flatMap((project) => projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir))];
-    const disks = getMonitoredDisks(worktreeRoots, this.config.disk.minFreeGB, this.config.disk.extraPaths, process.env.NODE_ENV !== 'test', diskReader);
+    const hubHomeSpace = diskReader(this.config.hubHome);
+    const hubHomeMinFreeGB = this.config.disk.hubHomeMinFreeGB ?? 1;
+    const hubHomeDisk: MonitoredDisk = {
+      path: this.config.hubHome,
+      label: 'Dữ liệu hub (~/.agenthub)',
+      minFreeGB: hubHomeMinFreeGB,
+      source: 'hub_home',
+      ...hubHomeSpace,
+      low: hubHomeSpace.freeGB < hubHomeMinFreeGB,
+    };
+    const disks = [hubHomeDisk, ...getMonitoredDisks(worktreeRoots, this.config.disk.minFreeGB, this.config.disk.extraPaths, process.env.NODE_ENV !== 'test', diskReader)];
     const runningTaskIds = runningTasks.map((r) => r.taskId);
     const overlaps = this.taskNoteRepo
       ? this.taskNoteRepo.getActiveOverlaps(runningTaskIds).map(apiTaskNote)
@@ -1418,6 +1515,7 @@ export class AppService {
 
     return {
       tasks: byStatus,
+      waitingReasons,
       tasksByProject,
       profiles: profilesStatus,
       quotaCapacity,
@@ -2812,12 +2910,60 @@ export class AppService {
   }
 
   // --- Tasks ---
+  getBlockingDiskForTask(task: TaskRow): BlockingDiskInfo | null {
+    if (task.waitReason !== 'disk') return null;
+    let disk: MonitoredDisk | undefined;
+    if (this.scheduler?.getBlockingDiskForTask) {
+      disk = this.scheduler.getBlockingDiskForTask(task);
+    } else {
+      const diskReader = this.scheduler ? this.scheduler.getDiskReader() : getDiskSpaceSync;
+      const hubHomeSpace = diskReader(this.config.hubHome);
+      const hubHomeMinFreeGB = this.config.disk.hubHomeMinFreeGB ?? 1;
+      if (hubHomeSpace.freeGB < hubHomeMinFreeGB) {
+        disk = {
+          path: this.config.hubHome,
+          label: 'Ổ chứa dữ liệu hub (~/.agenthub)',
+          minFreeGB: hubHomeMinFreeGB,
+          source: 'hub_home',
+          ...hubHomeSpace,
+          low: true,
+        };
+      } else {
+        const project = this.projectRepo.get(task.projectId);
+        const projectRoot = project ? projectWorktreeRoot(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir;
+        const projectSpace = diskReader(projectRoot);
+        const projectMinFreeGB = this.config.disk.minFreeGB;
+        if (projectSpace.freeGB < projectMinFreeGB) {
+          disk = {
+            path: projectRoot,
+            label: 'Worktrees',
+            minFreeGB: projectMinFreeGB,
+            source: 'worktrees',
+            ...projectSpace,
+            low: true,
+          };
+        } else {
+          const extraDisks = getMonitoredDisks([], projectMinFreeGB, this.config.disk.extraPaths, process.env.NODE_ENV !== 'test', diskReader);
+          disk = extraDisks.find((d) => d.source === 'extra' && d.low);
+        }
+      }
+    }
+    if (!disk) return null;
+    return {
+      path: disk.path,
+      label: disk.source === 'worktrees' ? `${disk.label} (${disk.path})` : disk.label,
+      freeGB: disk.freeGB,
+      minFreeGB: disk.minFreeGB,
+    };
+  }
+
   private decorateTasks(tasks: TaskRow[]): TaskRow[] {
     const projects = new Map(this.projectRepo.getAll().map((project) => [project.id, project]));
     const running = this.scheduler.getRunning();
     return tasks.map((task) => {
       const run = running.get(task.id);
       const project = projects.get(task.projectId);
+      const blockingDisk = this.getBlockingDiskForTask(task);
       let reviewChain = parseReviewChain(project?.reviewChain);
       if (project?.review) {
         try { reviewChain = parseReviewChain(JSON.stringify((JSON.parse(project.review) as { chain?: unknown }).chain || [])); } catch { /* invalid settings are ignored */ }
@@ -2836,9 +2982,14 @@ export class AppService {
       const reviewer = reviewerRun
         ? (reviewerRun.engine.id === 'claude' ? 'claude' : 'codex')
         : (isFallback ? fallbackReviewer : (reviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex'));
+      const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
+      const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
       return {
-        ...apiTask(task),
+        ...apiTask(task, blockingDisk),
+        blockingDisk,
         reviewChain,
+        reviewRound,
+        reviewMaxRounds,
         reviewer,
         checks: this.scheduler.getCheckResults(task.id),
         paused: Boolean(run?.paused),
@@ -2977,8 +3128,12 @@ export class AppService {
       ? (reviewerRun.engine.id === 'claude' ? 'claude' : 'codex')
       : (isFallback ? fallbackReviewer : (reviews.at(-1)?.actor === 'claude-reviewer' ? 'claude' : (activeReviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex')));
 
+    const blockingDisk = this.getBlockingDiskForTask(task);
+    const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
+    const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
     return {
-      ...apiTask(task),
+      ...apiTask(task, blockingDisk),
+      blockingDisk,
       reviewer,
       events,
       paused: Boolean(activeRun?.paused),
@@ -3002,7 +3157,8 @@ export class AppService {
       mergeAvailable: configuredMerge,
       mergeUnavailableReason: configuredMerge ? null : 'Project chưa cấu hình merge tự động. Mở Cài đặt dự án → Integration để bật.',
       reviewStep: task.reviewStep ?? 0,
-      reviewMaxRounds: reviewSettings?.maxRounds || 2,
+      reviewRound,
+      reviewMaxRounds,
       doneContent,
       blockedContent,
       modelWarnings,
@@ -3010,7 +3166,7 @@ export class AppService {
       worktreePath: task.worktreePath,
       checks: this.scheduler.getCheckResults(taskId),
       sourceRef: task.sourceRef ? JSON.parse(task.sourceRef) : null,
-      derivedTasks: this.taskRepo.getDerivedFrom(taskId).map(apiTask),
+      derivedTasks: this.taskRepo.getDerivedFrom(taskId).map((t) => apiTask(t, this.getBlockingDiskForTask(t))),
       claudeCost: (() => { const measured = this.claudeSessionRepo?.taskCost(taskId); return measured ? { measured: measured.effectiveTokens > 0, ...measured } : { measured: false, effectiveTokens: 0, sessions: 0 }; })(),
     };
   }
@@ -3370,7 +3526,7 @@ export class AppService {
         skipDeps: true,
       });
       taskDepsToPopulate.push({ taskId, deps: normalizedDeps });
-      createdTasks.push(apiTask(this.taskRepo.get(taskId)!));
+      createdTasks.push(apiTask(this.taskRepo.get(taskId)!, this.getBlockingDiskForTask(this.taskRepo.get(taskId)!)));
     }
 
     // Phase 2: populate task_deps now that all tasks exist in DB
@@ -3392,7 +3548,7 @@ export class AppService {
     if (parsed.dispatch) this.dispatchBatch(batchId);
 
     const batchRow = apiBatch(this.taskBatchRepo.get(batchId)!);
-    const tasks = this.taskRepo.getByBatch(batchId).map(apiTask);
+    const tasks = this.taskRepo.getByBatch(batchId).map((t) => apiTask(t, this.getBlockingDiskForTask(t)));
     return { ...batchRow, tasks, progress: batchProgress(tasks) };
   }
 
@@ -3404,7 +3560,7 @@ export class AppService {
     if (!batch) {
       throw new HttpError(404, 'not_found', `Đợt "${id}" không tồn tại`);
     }
-    const tasks = this.taskRepo.getByBatch(id).map(apiTask);
+    const tasks = this.taskRepo.getByBatch(id).map((t) => apiTask(t, this.getBlockingDiskForTask(t)));
     return { ...apiBatch(batch), tasks, progress: batchProgress(tasks) };
   }
 
@@ -3529,7 +3685,8 @@ export class AppService {
       batchId,
     });
 
-    return apiTask(this.taskRepo.get(taskId)!);
+    const created = this.taskRepo.get(taskId)!;
+    return apiTask(created, this.getBlockingDiskForTask(created));
   }
 
   removeTaskFromBatch(batchId: string, idParam: string): { ok: boolean } {
@@ -3696,16 +3853,17 @@ export class AppService {
       }
     }
 
-    const reviewId = crypto.randomUUID();
-    this.reviewRepo.insert({
-      id: reviewId,
-      taskId,
-      verdict: parsed.verdict,
-      feedback: parsed.feedback || null,
-      actor: parsed.by || 'claude',
-    });
+    if (!['codex-reviewer', 'claude-reviewer', 'claude-review'].includes(parsed.by || '')) {
+      this.reviewRepo.insert({
+        id: crypto.randomUUID(),
+        taskId,
+        verdict: parsed.verdict,
+        feedback: parsed.feedback || null,
+        actor: parsed.by || 'claude',
+      });
+    }
 
-    this.scheduler.reviewTask(taskId, parsed.verdict, parsed.feedback, parsed.by);
+    this.scheduler.reviewTask(taskId, parsed.verdict, parsed.feedback, parsed.by, parsed.source);
     if (parsed.verdict === 'approved' && this.knowledgeRepo) {
       const completed = this.taskRepo.get(taskId);
       const donePath = completed?.worktreePath ? path.join(completed.worktreePath, '.agenthub', 'DONE') : null;
@@ -3864,6 +4022,7 @@ export class AppService {
       await this.reviewTask(toRouteId(taskId), {
         verdict: 'changes_requested',
         by: 'auto-escalation',
+        source: 'operational',
         feedback: `${feedback}\n\n(Reviewer đã yêu cầu sửa quá số vòng cho phép; giao lại một lần với ${ESCALATION_MODEL}.)`,
       });
     } catch (error) {
@@ -3964,7 +4123,6 @@ export class AppService {
       transientRetries: 0,
       notBefore: null,
       body: newBody,
-      reviewerChangesRequested: 0,
       reviewerEscalated: 0,
       reviewerEscalatedAt: null,
       reviewerEscalationReason: null,

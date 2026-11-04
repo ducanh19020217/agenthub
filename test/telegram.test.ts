@@ -1212,6 +1212,28 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(call.body?.reply_markup).toBeUndefined();
     });
 
+    it('sends a Telegram reply to the triage message as supplemental input', async () => {
+      const inputSpy = vi.spyOn(ctx.service, 'submitOpenProjectTriageInput').mockResolvedValue({ taskId: 'p1/op-op-55-triage-r1' });
+      ctx.scheduler.getEventBus().emit('tracker.triage_ready', undefined, {
+        sourceId: 'customer:prod', wpId: 55, displayId: 'OP-55', taskId: 'p1/op-op-55-triage',
+        analysis: { conclusion: 'thiếu thông tin', size: 'nhỏ', summary: 'Cần log' }, autoDispatch: false,
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      await bot.handleUpdate({
+        update_id: 39,
+        message: {
+          message_id: 39,
+          date: 1,
+          chat: { id: CHAT_ID, type: 'private' },
+          text: 'log từ server khách hàng',
+          reply_to_message: { message_id: 101, text: '🔎 [OP-55] Phân tích xong' },
+        },
+      });
+      expect(inputSpy).toHaveBeenCalledWith('customer:prod', 55, 'log từ server khách hàng');
+      expect(recordedCalls.some((call) => String(call.body?.text).includes('Đã tạo lượt triage bổ sung'))).toBe(true);
+    });
+
     it('broadcasts task.failed and task.blocked with retry/log buttons', async () => {
       ctx.scheduler.getEventBus().emit('task.failed', 'p1/task-f', { title: 'Bị lỗi compile' });
       await bot.flushQueue(CHAT_ID);

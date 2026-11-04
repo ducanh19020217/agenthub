@@ -21,7 +21,7 @@ function harness(input: { tasks: TestTask[]; autoResolve?: boolean; autoStart?: 
   }
   const created: unknown[] = [];
   const service = new OpenProjectWritebackService({
-    config: { hubHome, integrations: { openproject: { sources: [{ id: 'op', url: 'https://op.test', project: 'main', triage: input.triage || 'off', autoResolve: input.autoResolve !== false, resolvedStatusId: 5, reviewStatusId: 6, watchStatusIds: [], reopenedStatusIds: [], openStatusIds: [], minTicketNumber: 0, pollIntervalSec: 60, autoStart: input.autoStart !== false, language: 'vi' }] } }, deploy: {} } as never,
+    config: { hubHome, integrations: { openproject: { sources: [{ id: 'op', url: 'https://op.test', project: 'main', triage: input.triage || 'off', feedbackStatusId: 6, autoResolve: input.autoResolve !== false, resolvedStatusId: 5, reviewStatusId: 6, watchStatusIds: [], reopenedStatusIds: [], openStatusIds: [], minTicketNumber: 0, pollIntervalSec: 60, autoStart: input.autoStart !== false, language: 'vi' }] } }, deploy: {} } as never,
     projectRepo: { get: (id: string) => projects.get(id), getAll: () => [...projects.values()] } as never,
     taskRepo: { get: (id: string) => tasks.get(id) } as never,
     trackerRepo: { listAll: () => [row], get: () => row, upsert: (next: any) => { Object.assign(row, next); return row; } } as never,
@@ -131,11 +131,12 @@ describe('OpenProjectWritebackService', () => {
   it('asks tester, records the decision, and creates a triage revision from user input', async () => {
     const analysis = { conclusion: 'thiếu thông tin', size: 'nhỏ', repo: ['app'], summary: 'Tóm tắt', evidence: 'Bằng chứng', cause: 'Chưa rõ', proposal: 'Hỏi thêm', risks: 'Rủi ro', questions: 'Gửi log' };
     const triage = { id: 'app/op-op-1-triage', projectId: 'app', slug: 'op-op-1-triage', title: 'Triage', externalRef: 'OP-1', status: 'done' } as TestTask;
-    const calls: string[] = [];
-    const fetchFn = (async (url: string | URL, init?: RequestInit) => { calls.push(`${init?.method || 'GET'} ${url}`); return new Response(JSON.stringify({ id: 11, lockVersion: 1 }), { status: 200 }); }) as typeof fetch;
+    const calls: Array<{ request: string; body?: string }> = [];
+    const fetchFn = (async (url: string | URL, init?: RequestInit) => { calls.push({ request: `${init?.method || 'GET'} ${url}`, body: init?.body ? String(init.body) : undefined }); return new Response(JSON.stringify({ id: 11, lockVersion: 1 }), { status: 200 }); }) as typeof fetch;
     const h = harness({ tasks: [triage], rowWriteback: JSON.stringify({ triage: { taskId: triage.id, analysis, readyAt: 'now' } }), fetchFn });
     await h.service.decide(h.row, 'ask', 'Tester kiểm tra thêm');
-    expect(calls.some((call) => call.includes('PATCH') || call.includes('POST'))).toBe(true);
+    expect(calls.some((call) => call.request.includes('PATCH') && call.request.includes('/api/v3/work_packages/10') && call.body?.includes('/api/v3/statuses/6'))).toBe(true);
+    expect(calls.some((call) => call.body?.includes('**[AgentHub] Cần thêm thông tin**'))).toBe(true);
     expect(JSON.parse(h.row.writeback).decision).toMatchObject({ action: 'ask', note: 'Tester kiểm tra thêm' });
     const input = await h.service.submitTriageInput(h.row, 'log từ server khách hàng');
     expect(input.taskId).toBe('app/op-op-1-triage-r1');
@@ -155,6 +156,12 @@ describe('OpenProjectWritebackService', () => {
     expect(h.created).toHaveLength(0);
     expect(bodies.some((body) => body.includes('**[AgentHub] Không xử lý**: Đã xác nhận là hành vi đúng'))).toBe(true);
     h.cleanup();
+
+    const noNoteBodies: string[] = [];
+    const noNote = harness({ tasks: [triage], rowWriteback: JSON.stringify({ triage: { taskId: triage.id, analysis, readyAt: 'now' } }), fetchFn: (async (_url: string | URL, init?: RequestInit) => { if (init?.body) noNoteBodies.push(String(init.body)); return new Response('{}', { status: 200 }); }) as typeof fetch });
+    await noNote.service.decide(noNote.row, 'skip');
+    expect(noNoteBodies).toHaveLength(0);
+    noNote.cleanup();
   });
 
   it('marks a manual ticket without creating a repair task', async () => {
@@ -172,6 +179,7 @@ describe('OpenProjectWritebackService', () => {
     const triage = { id: 'app/op-op-1-triage', projectId: 'app', slug: 'op-op-1-triage', title: 'Triage', externalRef: 'OP-1', status: 'done', doneReport: `Kết luận: lỗi\nĐộ lớn: nhỏ\nRepo: app\n\n### Tóm tắt yêu cầu\nBug\n\n### Bằng chứng\nTest\n\n### Nguyên nhân dự kiến\nCause\n\n### Hướng sửa đề xuất (và phương án nếu có nhiều)\nFix\n\n### Rủi ro / ảnh hưởng\nRisk\n\n### Câu hỏi cho tester (nếu thiếu thông tin)\nNone` } as TestTask;
     const h = harness({ tasks: [triage], triage: 'auto' });
     await h.emit('task.done', triage.id);
+    await h.emit('task.done', triage.id);
     expect(h.created).toHaveLength(1);
     expect(h.created[0]).toMatchObject({ slug: 'op-op-1', start: true });
     h.cleanup();
@@ -182,6 +190,17 @@ describe('OpenProjectWritebackService', () => {
     expect(w.created).toHaveLength(0);
     expect(w.events.some((event) => event.type === 'tracker.triage_ready' && (event.payload as any)?.autoDispatch === false)).toBe(true);
     w.cleanup();
+  });
+
+  it('includes manualAlongside in the tester writeback comment', async () => {
+    const analysis = { conclusion: 'lỗi', size: 'nhỏ', repo: ['app'], summary: 'Tóm tắt', evidence: 'Bằng chứng', cause: 'Nguyên nhân', proposal: 'Đề xuất', risks: 'Rủi ro', questions: 'Không có', manualAlongside: 'Cập nhật bản build trên server khách hàng.' };
+    const task = done('app/op-op-1', 'app');
+    const bodies: string[] = [];
+    const fetchFn = (async (_url: string | URL, init?: RequestInit) => { if (init?.body) bodies.push(String(init.body)); return new Response('{}', { status: 200 }); }) as typeof fetch;
+    const h = harness({ tasks: [task], rowWriteback: JSON.stringify({ triage: { taskId: 'app/op-op-1-triage', analysis, readyAt: 'now' } }), fetchFn });
+    await h.emit('task.merged', task.id, { mergeCommit: 'abc' });
+    expect(bodies.some((body) => body.includes('Cần thao tác thủ công kèm theo: Cập nhật bản build trên server khách hàng.'))).toBe(true);
+    h.cleanup();
   });
 
   it('creates multi-repo repair tasks with an API provider dependency and ignores triage in resolve checks', async () => {

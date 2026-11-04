@@ -1308,6 +1308,23 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(calls).toHaveLength(1);
       expect(calls[0].body?.text).toContain('✅ Đã đủ dung lượng, 2 task tiếp tục chạy');
 
+      // 4b. Recovery with resumedCount = 0 resets state without sending recovery message
+      recordedCalls = [];
+      currentTime += 65 * 60_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Hub Home', path: '/home/hub', source: 'hub_home', freeGB: 0.5, minFreeGB: 1, isBlocking: true });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(1);
+
+      recordedCalls = [];
+      ctx.scheduler.getEventBus().emit('disk.ok', undefined, { freeGB: 5, minFreeGB: 1, resumedCount: 0 });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
+
+      currentTime += 5 * 60_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Hub Home', path: '/home/hub', source: 'hub_home', freeGB: 0.4, minFreeGB: 1, isBlocking: true });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(1);
+
       // 5. Does not send disk notifications when notify.disk = false
       config.telegram.notify.disk = false;
       recordedCalls = [];

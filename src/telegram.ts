@@ -4182,20 +4182,20 @@ export class TelegramBotService {
           ? p.tasks.length
           : 0;
 
-        if (this.diskBlockedNotified && resumedCount > 0) {
+        if (this.diskBlockedNotified) {
           this.diskBlockedNotified = false;
           this.lastSentDisk.set('ok', now);
-          this.broadcastMessage(`✅ Đã đủ dung lượng, ${resumedCount} task tiếp tục chạy`);
+          if (resumedCount > 0) {
+            this.broadcastMessage(`✅ Đã đủ dung lượng, ${resumedCount} task tiếp tục chạy`);
+          }
           break;
         }
 
-        if (!this.diskBlockedNotified && resumedCount === 0) {
-          const last = this.lastSentDisk.get('ok');
-          if (last !== undefined && now - last < 60 * 60_000) return;
-          this.lastSentDisk.set('ok', now);
-          const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
-          this.broadcastMessage(`💾 <b>Ổ đĩa đã đủ chỗ</b> (${freeGB} GB): tiếp tục chạy task.`);
-        }
+        const last = this.lastSentDisk.get('ok');
+        if (last !== undefined && now - last < 60 * 60_000) return;
+        this.lastSentDisk.set('ok', now);
+        const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
+        this.broadcastMessage(`💾 <b>Ổ đĩa đã đủ chỗ</b> (${freeGB} GB): tiếp tục chạy task.`);
         break;
       }
 

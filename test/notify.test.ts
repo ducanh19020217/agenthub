@@ -393,6 +393,47 @@ describe('NotificationService (Desktop Notifications)', () => {
     notifier.stop();
   });
 
+  it('resets incident state on disk.ok even when resumedCount is 0', () => {
+    config.notifications.desktopLevel = 'critical';
+    let current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    // 1. First blocking incident (e.g. hub home is low)
+    eventBus.emit('disk.low', undefined, {
+      label: 'Ổ chứa dữ liệu hub (~/.agenthub)',
+      path: '/home/hub',
+      source: 'hub_home',
+      freeGB: 0.5,
+      minFreeGB: 1,
+      isBlocking: true,
+      tasks: [],
+    });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('Hết dung lượng');
+
+    // 2. Recovery with resumedCount = 0 (no waiting tasks resumed)
+    eventBus.emit('disk.ok', undefined, { freeGB: 5, minFreeGB: 1, resumedCount: 0 });
+    // No recovery notification sent when resumedCount = 0
+    expect(execCalls).toHaveLength(1);
+
+    // 3. Subsequent incident 5 minutes later (< 60 mins): should notify immediately because state was reset
+    current += 5 * 60_000;
+    eventBus.emit('disk.low', undefined, {
+      label: 'Ổ chứa dữ liệu hub (~/.agenthub)',
+      path: '/home/hub',
+      source: 'hub_home',
+      freeGB: 0.4,
+      minFreeGB: 1,
+      isBlocking: true,
+      tasks: [],
+    });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('Hết dung lượng');
+
+    notifier.stop();
+  });
+
   it('treats quota exhaustion per engine, not across all profiles', () => {
     config.notifications.desktopLevel = 'important';
     quotaMarkRepo.mark('g1', 'gemini', Math.floor(Date.now() / 1000) + 3600);

@@ -471,20 +471,20 @@ export class NotificationService {
           ? p.tasks.length
           : 0;
 
-        if (this.diskBlockedNotified && resumedCount > 0) {
+        if (this.diskBlockedNotified) {
           this.diskBlockedNotified = false;
           this.diskState = 'ok';
           this.lastSentDisk.set('ok', now);
-          this.notify(`✅ Đã đủ dung lượng, ${resumedCount} task tiếp tục chạy`, 'critical');
+          if (resumedCount > 0) {
+            this.notify(`✅ Đã đủ dung lượng, ${resumedCount} task tiếp tục chạy`, 'critical');
+          }
           break;
         }
 
-        if (!this.diskBlockedNotified && resumedCount === 0) {
-          if (freeGB < minFreeGB + 1 || this.diskState !== 'low') break;
-          if (!this.shouldSendDisk('ok', now)) break;
-          this.diskState = 'ok';
-          this.notify(`Ổ đĩa đã đủ chỗ (${freeGB} GB): tiếp tục chạy task`, 'normal');
-        }
+        if (freeGB < minFreeGB + 1 || this.diskState !== 'low') break;
+        if (!this.shouldSendDisk('ok', now)) break;
+        this.diskState = 'ok';
+        this.notify(`Ổ đĩa đã đủ chỗ (${freeGB} GB): tiếp tục chạy task`, 'normal');
         break;
       }
 

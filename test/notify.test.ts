@@ -1001,6 +1001,21 @@ describe('NotificationService (Desktop Notifications)', () => {
     eventBus.emit('task.queued', 'proj/task-postcheck-fix-merge');
     expect(execCalls).toHaveLength(3);
 
+    // 7. Restart persistence: a new NotificationService instance with the same taskRepo does not re-notify already alerted tasks
+    const restartedNotifier = new NotificationService({
+      eventBus,
+      config,
+      taskRepo,
+      profileRepo,
+      quotaMarkRepo,
+      projectRepo,
+      exec: fakeExec,
+    });
+    restartedNotifier.start();
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 6, autoRetried: false, files: 'a.ts' });
+    expect(execCalls).toHaveLength(3);
+    restartedNotifier.stop();
+
     notifier.stop();
   });
 });

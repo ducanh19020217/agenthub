@@ -3056,6 +3056,13 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     await bot.flushQueue(CHAT_ID);
     sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
     expect(sendCalls).toHaveLength(3);
+
+    // 7. Restart persistence: a new TelegramBotService instance does not re-notify already alerted tasks
+    const restartedBot = createBot('suggest');
+    restartedBot.handleEvent('merge.conflict', 'p/task-1', { conflictCount: 6, autoRetried: false, files: 'file1.ts' });
+    await restartedBot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(3);
   });
 });
 

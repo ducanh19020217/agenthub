@@ -3689,6 +3689,11 @@ export class TelegramBotService {
           this.decisionTracker.recordDecision(decisionId, text, allowedChats, now, taskId);
         }
 
+        if (type === 'merge.conflict') {
+          if (!taskId || this.isMergeConflictNotified(taskId)) return;
+          this.markMergeConflictNotified(taskId);
+        }
+
         const desc = this.describeEventForQuietHours(type, taskId, p);
         if (desc) {
           if (this.quietHoursQueue.length >= 200) {
@@ -4042,8 +4047,8 @@ export class TelegramBotService {
 
       case 'merge.conflict': {
         if (!taskId) return;
-        if (this.mergeConflictNotified.has(taskId)) return;
-        this.mergeConflictNotified.add(taskId);
+        if (this.isMergeConflictNotified(taskId)) return;
+        this.markMergeConflictNotified(taskId);
 
         const count = typeof p.conflictCount === 'number' ? p.conflictCount : 1;
         const filesText = this.extractConflictFiles(p);
@@ -4672,6 +4677,20 @@ export class TelegramBotService {
       return p.message.trim();
     }
     return '(không rõ file)';
+  }
+
+  private isMergeConflictNotified(taskId: string): boolean {
+    if (this.mergeConflictNotified.has(taskId)) return true;
+    if (this.taskRepo?.isNotificationSent('telegram', 'merge.conflict', taskId)) {
+      this.mergeConflictNotified.add(taskId);
+      return true;
+    }
+    return false;
+  }
+
+  private markMergeConflictNotified(taskId: string): void {
+    this.mergeConflictNotified.add(taskId);
+    this.taskRepo?.markNotificationSent('telegram', 'merge.conflict', taskId);
   }
 
   private renderHelp(): string {

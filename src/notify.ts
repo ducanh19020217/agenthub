@@ -278,6 +278,10 @@ export class NotificationService {
     if (isQuietHours(this.config.notifications?.quietHours, new Date(now))) {
       const isIncident = isSystemIncident(type, payload, this.profileRepo, this.quotaMarkRepo, now);
       if (!isIncident) {
+        if (type === 'merge.conflict') {
+          if (!taskId || this.isMergeConflictNotified(taskId)) return;
+          this.markMergeConflictNotified(taskId);
+        }
         if (this.quietHoursQueue.length >= 200) {
           this.quietHoursQueue.shift();
         }
@@ -444,8 +448,8 @@ export class NotificationService {
 
       case 'merge.conflict': {
         if (!taskId) break;
-        if (this.mergeConflictNotified.has(taskId)) break;
-        this.mergeConflictNotified.add(taskId);
+        if (this.isMergeConflictNotified(taskId)) break;
+        this.markMergeConflictNotified(taskId);
 
         const count = typeof p.conflictCount === 'number' ? p.conflictCount : 1;
         const filesText = this.extractConflictFiles(p);
@@ -703,6 +707,20 @@ export class NotificationService {
       return p.message.trim();
     }
     return '(không rõ file)';
+  }
+
+  private isMergeConflictNotified(taskId: string): boolean {
+    if (this.mergeConflictNotified.has(taskId)) return true;
+    if (this.taskRepo?.isNotificationSent('desktop', 'merge.conflict', taskId)) {
+      this.mergeConflictNotified.add(taskId);
+      return true;
+    }
+    return false;
+  }
+
+  private markMergeConflictNotified(taskId: string): void {
+    this.mergeConflictNotified.add(taskId);
+    this.taskRepo?.markNotificationSent('desktop', 'merge.conflict', taskId);
   }
 
   private resolveResetTime(p: Record<string, unknown>, profile: string, family: string): string {

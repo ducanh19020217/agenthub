@@ -1,6 +1,6 @@
 import React from 'react';
 import { QueryClientContext } from '@tanstack/react-query';
-import { TaskStatus, WaitReason, HubStatus } from '../types/api';
+import { TaskStatus, WaitReason, HubStatus, BlockingDiskInfo } from '../types/api';
 import { useLocale } from '../context/LocaleContext';
 import { formatReason } from '../utils/events';
 
@@ -9,9 +9,12 @@ export type ExtendedTaskStatus = TaskStatus | 'checking';
 export interface StatusBadgeProps {
   status: ExtendedTaskStatus;
   waitReason?: WaitReason;
+  blockingDisk?: BlockingDiskInfo | null;
   diskFreeGB?: number;
   diskMinFreeGB?: number;
   diskLabel?: string;
+  diskPath?: string;
+  projectId?: string;
   className?: string;
   size?: 'sm' | 'md' | 'lg';
 }
@@ -19,9 +22,12 @@ export interface StatusBadgeProps {
 export const StatusBadge: React.FC<StatusBadgeProps> = ({
   status,
   waitReason,
+  blockingDisk,
   diskFreeGB,
   diskMinFreeGB,
   diskLabel,
+  diskPath,
+  projectId,
   className = '',
   size = 'md',
 }) => {
@@ -30,18 +36,53 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
   const cachedStatus = queryClient?.getQueryData<HubStatus>(['status']);
 
   let label = t(`status.${status}`);
+  let tooltip = blockingDisk?.path || diskPath;
   if (waitReason) {
     if (waitReason === 'disk') {
-      const free = diskFreeGB ?? cachedStatus?.disk?.freeGB;
-      const min = diskMinFreeGB ?? cachedStatus?.disk?.minFreeGB;
+      const free = blockingDisk?.freeGB ?? diskFreeGB ?? cachedStatus?.disk?.freeGB;
+      const min = blockingDisk?.minFreeGB ?? diskMinFreeGB ?? cachedStatus?.disk?.minFreeGB;
       if (free !== undefined && min !== undefined) {
-        const diskName = diskLabel ?? cachedStatus?.disks?.find((disk) => disk.low)?.label;
-        label = diskName ? t('waitReason.diskNamed', { label: diskName, free, min }) : t('waitReason.disk', { free, min });
+        let diskName = blockingDisk?.label ?? diskLabel;
+        if (!diskName && cachedStatus?.disks) {
+          const hubHomeDisk = cachedStatus.disks.find((disk) => disk.source === 'hub_home' && disk.low);
+          if (hubHomeDisk) {
+            diskName = hubHomeDisk.label;
+            if (!tooltip) tooltip = hubHomeDisk.path;
+          } else if (projectId) {
+            const projectDisk = cachedStatus.disks.find(
+              (disk) => disk.source === 'worktrees' && disk.low && (disk.path.includes(projectId) || cachedStatus.disks?.filter((d) => d.source === 'worktrees' && d.low).length === 1)
+            );
+            if (projectDisk) {
+              diskName = projectDisk.path ? `${projectDisk.label} (${projectDisk.path})` : projectDisk.label;
+              if (!tooltip) tooltip = projectDisk.path;
+            }
+          }
+          if (!diskName) {
+            const lowDisk = cachedStatus.disks.find((disk) => disk.low);
+            if (lowDisk) {
+              diskName = lowDisk.path && !lowDisk.label.includes(lowDisk.path) && lowDisk.source !== 'hub_home'
+                ? `${lowDisk.label} (${lowDisk.path})`
+                : lowDisk.label;
+              if (!tooltip) tooltip = lowDisk.path;
+            }
+          }
+        }
+        if (diskName && (diskName.toLowerCase().includes('dữ liệu hub') || diskName.toLowerCase().includes('hub home'))) {
+          label = t('waitReason.hubHome', { free, min });
+        } else {
+          label = diskName ? t('waitReason.diskNamed', { label: diskName, free, min }) : t('waitReason.disk', { free, min });
+        }
       } else {
         label = t('waitReason.diskShort');
       }
     } else if (waitReason === 'quota') {
       label = t('waitReason.quota');
+    } else if (waitReason === 'slot') {
+      label = t('waitReason.slot');
+    } else if (waitReason === 'load') {
+      label = t('waitReason.load');
+    } else if (waitReason === 'dependency') {
+      label = t('waitReason.dependency');
     } else if (waitReason === 'no_department_profile') {
       label = t('waitReason.no_department_profile');
     } else if (waitReason === 'no_matching_profile') {
@@ -91,6 +132,7 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
       data-testid={`status-badge-${status}`}
       data-status={status}
       data-wait-reason={waitReason || undefined}
+      title={tooltip || undefined}
       style={{
         backgroundColor: bgStyle,
         color: colorStyle,

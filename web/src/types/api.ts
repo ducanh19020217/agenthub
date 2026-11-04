@@ -285,7 +285,27 @@ export interface Review {
   model?: string;
 }
 
-export type WaitReason = 'disk' | 'quota' | 'no_department_profile' | 'no_matching_profile' | 'parallel' | 'department_parallel' | 'profile_busy' | 'project_unavailable' | 'focus' | null;
+export type WaitReason =
+  | 'disk'
+  | 'quota'
+  | 'no_department_profile'
+  | 'no_matching_profile'
+  | 'parallel'
+  | 'department_parallel'
+  | 'profile_busy'
+  | 'project_unavailable'
+  | 'focus'
+  | 'slot'
+  | 'load'
+  | 'dependency'
+  | null;
+
+export interface BlockingDiskInfo {
+  path: string;
+  label: string;
+  freeGB: number;
+  minFreeGB: number;
+}
 
 export interface Task {
   id: string; // project~slug or project/slug
@@ -301,6 +321,7 @@ export interface Task {
   worktreePath?: string | null;
   status: TaskStatus;
   waitReason?: WaitReason;
+  blockingDisk?: BlockingDiskInfo | null;
   modelWarnings?: string[];
   dependsOn: string | string[];
   attempt: number;
@@ -313,6 +334,8 @@ export interface Task {
   reviewerEscalatedAt?: string | null;
   reviewerEscalationReason?: string | null;
   reviewStep?: number;
+  reviewRound?: number;
+  reviewMaxRounds?: number;
   reviewChain?: ReviewChainStep[];
   createdAt: string;
   updatedAt: string;
@@ -479,6 +502,12 @@ export interface ProjectBrain {
   queued: boolean;
   lastTurnAt: string | null;
   tokensToday: number;
+  turnsToday?: number;
+  inputTokensToday?: number;
+  outputTokensToday?: number;
+  rotationsToday?: number;
+  eventsSkippedToday?: number;
+  eventsBatchedToday?: number;
   directives?: Array<{ id: string; text: string; createdAt: string }>;
 }
 
@@ -523,6 +552,7 @@ export interface TaskNote {
 export interface HubStatus {
   focus?: { projectId: string | null; since: string | null; pauseRunning: boolean };
   tasks: Record<string, number>;
+  waitingReasons?: Record<string, number>;
   profiles?: Profile[];
   running: RunningWorker[];
   overlaps?: TaskNote[];
@@ -539,7 +569,7 @@ export interface HubStatus {
     totalGB: number;
     minFreeGB: number;
     low: boolean;
-    source: 'worktrees' | 'extra';
+    source: 'worktrees' | 'extra' | 'hub_home';
   }>;
   worktrees?: {
     count: number;

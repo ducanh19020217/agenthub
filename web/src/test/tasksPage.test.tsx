@@ -254,6 +254,32 @@ describe('TasksPage & Kanban Long Lists', () => {
     expect(screen.getByText(/chờ duyệt/i)).toBeInTheDocument();
   });
 
+  it('hiển thị số vòng duyệt trên Kanban card cho task trạng thái review', async () => {
+    const reviewTask: Task = {
+      id: 'p1~t-review-round',
+      projectId: 'p1',
+      slug: 't-review-round',
+      title: 'Task Alpha Review Round',
+      status: 'review' as const,
+      level: 'easy' as const,
+      dependsOn: [],
+      attempt: 1,
+      resume: 0,
+      reviewRound: 2,
+      reviewMaxRounds: 3,
+      createdAt: '2026-10-15T00:00:00Z',
+      updatedAt: '2026-10-16T00:00:00Z',
+    };
+    mockKanbanTasks([reviewTask]);
+
+    renderPage();
+
+    await screen.findByTestId('kanban-column-review');
+    const badge = await screen.findByTestId('task-review-round-p1~t-review-round');
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent('Vòng duyệt 2/3');
+  });
+
   it('sắp xếp ổn định theo createdAt giảm dần', async () => {
     const tasks: Task[] = [
       {

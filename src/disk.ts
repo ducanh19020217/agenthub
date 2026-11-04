@@ -14,7 +14,7 @@ export interface ExtraDiskPath {
 }
 
 export interface MonitoredDisk extends DiskSpace, ExtraDiskPath {
-  source: 'worktrees' | 'extra';
+  source: 'worktrees' | 'extra' | 'hub_home';
   low: boolean;
 }
 

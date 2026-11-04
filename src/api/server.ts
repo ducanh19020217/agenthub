@@ -17,6 +17,7 @@ import { registerChatRoutes } from '../chat/service.js';
 import { brandingLogoPath, saveBrandingLogo } from '../branding.js';
 import { decodeCursor } from '../pagination.js';
 import { registerOpenProjectRoutes } from '../integrations/openproject/routes.js';
+import { parseDateNoon } from '../integrations/openproject/daily-report.js';
 import { SetupSecretRequestSchema } from '../setup-tools.js';
 
 export function resolveWebDistDir(customDir?: string): string {
@@ -33,7 +34,12 @@ export function resolveWebDir(moduleUrl: string, env: NodeJS.ProcessEnv = {}): s
 export async function createServer(
   service: AppService,
   config: AgentHubConfig,
-  options?: { webDir?: string; onShutdown?: (disable: boolean) => void; openProjectSync?: (sourceId: string) => Promise<{ imported: number; comments: number }> },
+  options?: {
+    webDir?: string;
+    onShutdown?: (disable: boolean) => void;
+    openProjectSync?: (sourceId: string) => Promise<{ imported: number; comments: number }>;
+    openProjectDailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
+  },
 ): Promise<FastifyInstance> {
   const fastify = Fastify({ logger: false, forceCloseConnections: true });
 
@@ -174,7 +180,10 @@ export async function createServer(
     if (!request) return reply.status(404).type('text/plain').send('Không tìm thấy yêu cầu');
     return reply.type('text/html; charset=utf-8').send(`<!doctype html><meta charset="utf-8"><title>Nhập bí mật AgentHub</title><h1>${String(request.label)}</h1><form id="secret"><input id="value" type="password" autofocus required><button>Lưu</button></form><p id="status"></p><script>document.getElementById('secret').onsubmit=async(e)=>{e.preventDefault();const value=document.getElementById('value').value;const r=await fetch('/api/secrets/requests/${encodeURIComponent(id)}/value',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value})});document.getElementById('status').textContent=r.ok?'Đã lưu an toàn. Bạn có thể đóng trang này.':'Không thể lưu yêu cầu.';document.getElementById('value').value='';};</script>`);
   });
-  registerOpenProjectRoutes(fastify, config, { sync: options?.openProjectSync });
+  registerOpenProjectRoutes(fastify, config, {
+    sync: options?.openProjectSync,
+    dailyReport: options?.openProjectDailyReport || (service.dailyReportService ? (sourceId, date) => service.dailyReportService!.generateReport(sourceId, date ? parseDateNoon(date) : undefined, { overwrite: true }) : undefined),
+  });
 
   fastify.post('/api/hub/shutdown', async (req) => {
     const body = (req.body || {}) as { disable?: unknown };
@@ -775,6 +784,15 @@ export async function createServer(
     const body = req.body as { enabled?: unknown };
     if (typeof body?.enabled !== 'boolean') throw new HttpError(400, 'bad_request', 'enabled phải là boolean');
     return service.setClaudeAutoResume((req.params as { id: string }).id, body.enabled);
+  });
+  fastify.post('/api/claude/sessions/:id/dismiss-limit', async (req: FastifyRequest) => {
+    return service.dismissClaudeSessionLimit((req.params as { id: string }).id);
+  });
+  fastify.delete('/api/claude/sessions/:id/limit', async (req: FastifyRequest) => {
+    return service.dismissClaudeSessionLimit((req.params as { id: string }).id);
+  });
+  fastify.post('/api/claude/sessions/clean-reset', async () => {
+    return service.cleanResetClaudeSessions();
   });
   fastify.post('/api/claude/sessions/rescan', async () => service.rescanClaudeSessions());
   fastify.get('/api/claude/quota', async () => service.getClaudeQuota());

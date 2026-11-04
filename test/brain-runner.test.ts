@@ -9,7 +9,7 @@ import { EventBus } from '../src/scheduler/index.js';
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
 
-function setup(mode: 'suggest' | 'auto' = 'suggest', options: { maxConcurrent?: number; dailyTokenBudget?: number; projectSettings?: Record<string, string>; permissions?: 'standard' | 'trusted' | 'full'; setSessionMode?: (id: string, mode: 'safe' | 'full') => void; failFirstSend?: boolean; departments?: boolean } = {}) {
+function setup(mode: 'suggest' | 'auto' = 'suggest', options: { maxConcurrent?: number; dailyTokenBudget?: number; projectSettings?: Record<string, string>; permissions?: 'standard' | 'trusted' | 'full'; setSessionMode?: (id: string, mode: 'safe' | 'full') => void; failFirstSend?: boolean; departments?: boolean; wakeupEvents?: string[]; batchWindowSec?: number; rotateAtTokens?: number; rotateAfterTurns?: number; compactSession?: (id: string) => Promise<unknown> } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-brain-runner-'));
   dirs.push(dir);
   const db = openDatabase(path.join(dir, 'hub.db'));
@@ -31,6 +31,7 @@ function setup(mode: 'suggest' | 'auto' = 'suggest', options: { maxConcurrent?: 
       return sessions.get(id)!;
     },
     setSessionMode: options.setSessionMode,
+    compactSession: options.compactSession,
     sendMessage(_id: string, text: string) {
       if (options.failFirstSend) {
         options.failFirstSend = false;
@@ -39,7 +40,7 @@ function setup(mode: 'suggest' | 'auto' = 'suggest', options: { maxConcurrent?: 
       sent.push(`${_id}: ${text}`); return { userMessageId: 'u', assistantMessageId: 'a' };
     },
   };
-  const brainConfig = { fallback: [], policy: [], claudeProfile: 'p', model: 'opus', mode, permissions: options.permissions ?? 'standard', maxConcurrent: options.maxConcurrent ?? 2, maxTurnsPerHour: 20, dailyTokenBudget: options.dailyTokenBudget ?? 0 } as const;
+  const brainConfig = { fallback: [], policy: [], claudeProfile: 'p', model: 'opus', mode, permissions: options.permissions ?? 'standard', maxConcurrent: options.maxConcurrent ?? 2, maxTurnsPerHour: 20, dailyTokenBudget: options.dailyTokenBudget ?? 0, wakeupEvents: options.wakeupEvents, batchWindowSec: options.batchWindowSec, rotateAtTokens: options.rotateAtTokens, rotateAfterTurns: options.rotateAfterTurns } as const;
   const runner = new BrainRunner({
     config: brainConfig,
     eventBus: events,
@@ -51,11 +52,57 @@ function setup(mode: 'suggest' | 'auto' = 'suggest', options: { maxConcurrent?: 
     projectRepo: projects,
     departmentRepo: options.departments ? departments : undefined,
     knowledgeRepo: knowledge,
+    compactSession: options.compactSession,
   });
   return { db, sessions, turns, profiles, projects, departments, knowledge, events, sent, runner };
 }
 
 describe('BrainRunner', () => {
+  it('skips routine events and wakes for configured important events', () => {
+    const ctx = setup('suggest', { wakeupEvents: ['task.failed'] });
+    ctx.runner.start();
+    ctx.events.emit('task.done', 'p/done');
+    ctx.events.emit('load.high', undefined, { load: 99 });
+    expect(ctx.runner.getQueuedEvents()).toHaveLength(0);
+    expect(ctx.runner.getUsage(null).eventsSkippedToday).toBe(2);
+    ctx.events.emit('task.failed', 'p/failed');
+    expect(ctx.runner.getQueuedEvents()).toHaveLength(1);
+  });
+
+  it('batches events in one turn and shortens the delay for priority events', () => {
+    const ctx = setup('suggest', { wakeupEvents: ['task.failed', 'task.blocked'], batchWindowSec: 300 });
+    ctx.runner.start();
+    ctx.events.emit('task.failed', 'p/one');
+    ctx.events.emit('task.blocked', 'p/two');
+    ctx.runner.flush();
+    expect(ctx.sent).toHaveLength(1);
+    expect(ctx.sent[0]).toContain('task.failed');
+    expect(ctx.sent[0]).toContain('task.blocked');
+    expect(ctx.runner.getUsage(null).eventsBatchedToday).toBe(2);
+  });
+
+  it('rotates an overgrown session after a turn and keeps compact as the summary mechanism', async () => {
+    const compacted: string[] = [];
+    const ctx = setup('suggest', { wakeupEvents: ['task.failed'], rotateAtTokens: 10, compactSession: async (id) => { compacted.push(id); } });
+    ctx.runner.start();
+    const session = ctx.sessions.get('brain')!;
+    ctx.db.prepare('UPDATE chat_sessions SET contextTokens = 11 WHERE id = ?').run(session.id);
+    ctx.events.emit('task.failed', 'p/fail');
+    ctx.runner.flush();
+    ctx.events.emit('chat.done', undefined, { sessionId: 'brain', usage: {} });
+    await Promise.resolve();
+    expect(compacted).toEqual(['brain']);
+    expect(ctx.runner.getUsage(null).rotationsToday).toBe(1);
+  });
+
+  it('does not wake for a routine merge conflict but wakes after the fourth conflict', () => {
+    const ctx = setup('suggest', { wakeupEvents: ['merge.conflict'] });
+    ctx.runner.start();
+    ctx.events.emit('merge.conflict', 'p/task', { conflictCount: 3 });
+    expect(ctx.runner.getQueuedEvents()).toHaveLength(0);
+    ctx.events.emit('merge.conflict', 'p/task', { conflictCount: 4 });
+    expect(ctx.runner.getQueuedEvents()).toHaveLength(1);
+  });
   it('creates one pinned brain session and aggregates events', () => {
     const ctx = setup();
     ctx.runner.start();

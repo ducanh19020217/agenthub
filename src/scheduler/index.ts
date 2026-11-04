@@ -49,6 +49,7 @@ import { measureProcessTree } from '../process-tree.js';
 import { ReferenceSnapshot, takeReferenceSnapshots, detectReferenceModifications, ReferenceModification } from '../references.js';
 import { normalizeReviewerModel, reviewerSettingsFromLegacy, type ReviewerOrderItem, type ReviewerFallback } from '../reviewer-config.js';
 import { cleanupTaskRunArtifacts } from '../temp-cleanup.js';
+import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
 
 type ActivitySource = 'log' | 'conversation' | 'worktree';
 
@@ -210,6 +211,12 @@ type ReviewerActor = 'codex-reviewer' | 'claude-reviewer';
 /** Automated reviewers whose verdicts drive gates, round limits and auto-merge. */
 function isAutoReviewer(by: string | undefined): by is ReviewerActor {
   return by === 'codex-reviewer' || by === 'claude-reviewer';
+}
+
+type ReviewSource = 'content' | 'operational';
+
+function isContentReview(by: string | undefined, source: ReviewSource): boolean {
+  return source === 'content' && (isAutoReviewer(by) || by === 'claude-review');
 }
 
 /** Times an arbiter rejection sends a task back before it is blocked for a person. */
@@ -1270,29 +1277,13 @@ export class Scheduler {
     } else {
       const diskSpace = disks.find((disk) => disk.source === 'worktrees')!;
       this.dockerDiskLow = false;
-      const recovered = diskSpace.freeGB >= diskSpace.minFreeGB + 1;
+      const recovered = diskSpace ? diskSpace.freeGB >= diskSpace.minFreeGB + 1 : true;
       if (this.diskLow && recovered) {
         this.diskLow = false;
         this.eventBus.emit('disk.ok', undefined, {
-          freeGB: diskSpace.freeGB,
+          freeGB: diskSpace?.freeGB ?? 0,
           minFreeGB: this.config.disk.minFreeGB,
         });
-      }
-      if (this.tasksWaitingForDisk.size > 0) {
-        for (const taskId of [...this.tasksWaitingForDisk]) {
-          const task = this.taskRepo.get(taskId);
-          if (task && this.projectRepo.get(task.projectId) && (task.status === 'waiting_quota' || (task.status as string) === 'waiting_disk')) {
-            this.taskRepo.updateStatus(taskId, 'queued');
-            this.eventBus.emit('task.queued', taskId, { reason: 'disk_ready' });
-          }
-        }
-        this.tasksWaitingForDisk.clear();
-      }
-      const diskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
-      for (const t of diskWaiters) {
-        if (!this.projectRepo.get(t.projectId)) continue;
-        this.taskRepo.updateStatus(t.id, 'queued');
-        this.eventBus.emit('task.queued', t.id, { reason: 'disk_ready' });
       }
       if (this.recheckWaitingOnDiskOk) {
         // tasksWaitingForDisk chỉ nằm trong bộ nhớ: sau khi daemon restart, task đã vào
@@ -1303,14 +1294,46 @@ export class Scheduler {
       }
     }
 
-    // 0b. Resume parallel waiters if project slot is available
-    const parallelWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'parallel' || t.waitReason === 'department_parallel');
-    for (const task of parallelWaiters) {
+    // Resume disk waiters individually if their specific blocking disk is now free
+    const diskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
+    for (const t of diskWaiters) {
+      if (!this.projectRepo.get(t.projectId)) continue;
+      if (!this.getBlockingDiskForTask(t)) {
+        this.tasksWaitingForDisk.delete(t.id);
+        this.taskRepo.updateStatus(t.id, 'queued');
+        this.eventBus.emit('task.queued', t.id, { reason: 'disk_ready' });
+      }
+    }
+
+    // 0b. Resume slot / parallel waiters if project slot is available
+    const slotWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'slot' || t.waitReason === 'parallel' || t.waitReason === 'department_parallel');
+    for (const task of slotWaiters) {
       const project = this.projectRepo.get(task.projectId);
       if (!project) continue;
       if (this.hasParallelCapacity(project)) {
         this.taskRepo.updateStatus(task.id, 'queued');
         this.eventBus.emit('task.queued', task.id, { reason: 'parallel_available' });
+      }
+    }
+
+    // 0b2. Resume dependency waiters if dependencies are met
+    const dependencyWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'dependency');
+    for (const task of dependencyWaiters) {
+      if (this.areDependenciesMet(task)) {
+        this.taskRepo.updateStatus(task.id, 'queued');
+        this.eventBus.emit('task.queued', task.id, { reason: 'dependency_met' });
+      }
+    }
+
+    // 0b3. Resume load waiters if system is no longer overloaded
+    if (!this.loadGuard.isOverloaded()) {
+      const loadWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'load');
+      for (const task of loadWaiters) {
+        const project = this.projectRepo.get(task.projectId);
+        if (project && this.hasParallelCapacity(project)) {
+          this.taskRepo.updateStatus(task.id, 'queued');
+          this.eventBus.emit('task.queued', task.id, { reason: 'load_recovered' });
+        }
       }
     }
 
@@ -1425,8 +1448,10 @@ export class Scheduler {
     const waitingTasks = this.taskRepo.getByStatus('waiting_quota');
     for (const task of waitingTasks) {
       if (!this.projectRepo.get(task.projectId)) continue;
-      if (reason !== 'startup_recheck' && task.waitReason === 'disk') {
-        if (this.getMonitoredDisks().some((disk) => disk.low)) continue;
+      if (reason !== 'startup_recheck') {
+        if (task.waitReason === 'disk' && this.getBlockingDiskForTask(task)) continue;
+        if (task.waitReason === 'dependency' && !this.areDependenciesMet(task)) continue;
+        if (task.waitReason === 'load' && this.loadGuard.isOverloaded()) continue;
       }
       this.taskRepo.updateStatus(task.id, 'queued');
       this.eventBus.emit('task.queued', task.id, { reason });
@@ -2228,7 +2253,10 @@ export class Scheduler {
       if (this.blockForRunLimit(task)) continue;
       if (task.notBefore != null && task.notBefore > Math.floor(Date.now() / 1000)) continue;
       // Check dependencies
-      if (!this.areDependenciesMet(task)) continue;
+      if (!this.areDependenciesMet(task)) {
+        this.markQueuedWaiting(task, 'dependency');
+        continue;
+      }
 
       if (this.getModelChain(task).length === 0) {
         this.taskRepo.updateStatus(task.id, 'failed');
@@ -2254,18 +2282,19 @@ export class Scheduler {
         const department = project.departmentId ? this.departmentRepo?.get(project.departmentId) : undefined;
         const usage = this.parallelUsage(project);
         const departmentLimited = Boolean(department && department.maxParallel > 0 && usage.department >= this.loadGuard.effectiveParallel(department.maxParallel));
-        this.markQueuedWaiting(task, departmentLimited ? 'department_parallel' : 'parallel');
+        const isLoadThrottled = this.loadGuard.isOverloaded() || (usage.project >= this.effectiveParallel(project) && usage.project < project.maxParallel);
+        this.markQueuedWaiting(task, isLoadThrottled ? 'load' : (departmentLimited ? 'department_parallel' : 'parallel'));
         continue;
       }
 
       // Find a suitable (model, profile) pair
       const pair = this.findModelProfilePair(task);
       if (pair) {
-        const disk = this.getBlockingDisk();
+        const disk = this.getBlockingDiskForTask(task);
         if (disk) {
           this.tasksWaitingForDisk.add(task.id);
           this.taskRepo.updateStatus(task.id, 'waiting_quota', 'disk');
-          this.eventBus.emit('task.waiting_quota', task.id, { reason: 'disk', label: disk.label, freeGB: disk.freeGB, minFreeGB: disk.minFreeGB, message: this.diskWaitMessage(disk) });
+          this.eventBus.emit('task.waiting_quota', task.id, { reason: 'disk', label: disk.label, path: disk.path, freeGB: disk.freeGB, minFreeGB: disk.minFreeGB, message: this.diskWaitMessage(disk) });
           this.markDiskLow(disk);
           continue;
         }
@@ -2549,22 +2578,11 @@ export class Scheduler {
     return parseReviewChain(project.reviewChain);
   }
 
-  private reviewMaxRoundsForTask(task: TaskRow): number {
-    const project = this.projectRepo.get(task.projectId);
-    if (project?.review) {
-      try {
-        const value = JSON.parse(project.review) as { maxRounds?: unknown };
-        return typeof value.maxRounds === 'number' && value.maxRounds > 0 ? value.maxRounds : 2;
-      } catch {
-        return 2;
-      }
-    }
-    return this.config.reviewer?.maxChangesRequested || 2;
-  }
-
   private advanceReviewStep(task: TaskRow, chain: ReviewChainStep[], reason: string): void {
     const nextStep = (task.reviewStep ?? 0) + 1;
-    this.taskRepo.update(task.id, { reviewStep: nextStep, reviewerChangesRequested: 0 });
+    // This counter is task-scoped. Keep it across chain steps so alternating
+    // reviewers cannot reset the content-review limit.
+    this.taskRepo.update(task.id, { reviewStep: nextStep });
     if (nextStep >= chain.length || chain[nextStep]?.mode === 'final') {
       this.emitReviewReadyIfReview(task.id, { reviewChainComplete: true, reviewStep: nextStep, reason });
     } else {
@@ -2784,11 +2802,17 @@ export class Scheduler {
         runStartedAt: check.runStartedAt || 'unknown',
       }));
       const project = this.projectRepo.get(task.projectId);
+      const previousReviews = this.reviewRepo?.getByTask(task.id).map((review) => ({
+        actor: review.actor,
+        verdict: review.verdict as ReviewerVerdict,
+        feedback: review.feedback,
+        createdAt: review.createdAt,
+      })) || [];
       child = engine.spawn({
         profile,
         model: reviewerModel,
         cwd: task.worktreePath,
-        prompt: buildReviewerPrompt(task.body || task.title, task.worktreePath, checks, project ? projectSettings(project).reviewChecklist : [], project?.path),
+        prompt: buildReviewerPrompt(task.body || task.title, task.worktreePath, checks, project ? projectSettings(project).reviewChecklist : [], project?.path, previousReviews),
         logPath,
         outputPath,
         readOnly: true,
@@ -2917,16 +2941,40 @@ export class Scheduler {
     return remaining.length <= 80;
   }
 
-  private escalateReview(taskId: string, reason: string, feedback: string): void {
+  private escalateReview(taskId: string, reason: string, feedback: string, actor?: string): void {
     const task = this.taskRepo.get(taskId);
     if (!task || task.reviewerEscalated) return;
+    const allChanges = this.reviewRepo?.getByTask(taskId)
+      .filter((review) => review.verdict === 'changes_requested' && review.feedback) || [];
+    const openSections: string[] = [];
+    if (feedback) {
+      openSections.push(`[Lỗi vòng hiện tại] ${feedback}`);
+    }
+    const priorMissed = allChanges.slice(0, -1).filter((r) => r.feedback && /missed-earlier/i.test(r.feedback));
+    for (const item of priorMissed) {
+      if (item.feedback && item.feedback !== feedback) {
+        openSections.push(`[Lỗi bỏ sót ghi nhận từ vòng trước (missed-earlier - ${item.actor || 'reviewer'})] ${item.feedback}`);
+      }
+    }
+    const historyList = allChanges
+      .map((review, index) => `${index + 1}. [Lịch sử vòng ${index + 1} - ${review.actor || 'reviewer'}] ${review.feedback}`);
+    const openFeedback = [
+      ...openSections,
+      ...(historyList.length > 0 ? ['Lịch sử các vòng review:', ...historyList] : []),
+    ].join('\n\n') || feedback;
     this.taskRepo.update(taskId, {
       status: 'review',
       reviewerEscalated: 1,
       reviewerEscalatedAt: new Date().toISOString(),
       reviewerEscalationReason: reason,
     });
-    this.eventBus.emit('review.escalated', taskId, { actor: 'codex-reviewer', reason, feedback, title: task.title });
+    this.eventBus.emit('review.escalated', taskId, {
+      actor: actor || 'codex-reviewer',
+      reason,
+      feedback: openFeedback,
+      openFeedback,
+      title: task.title,
+    });
   }
 
   private areDependenciesMet(task: TaskRow): boolean {
@@ -3019,8 +3067,8 @@ export class Scheduler {
     return 50;
   }
 
-  /** Task chờ slot/tài khoản vẫn ở `queued`; chỉ ghi DB và phát sự kiện khi lý do chờ đổi. */
-  private markQueuedWaiting(task: TaskRow, reason: 'parallel' | 'department_parallel' | 'profile_busy'): void {
+  /** Task chờ slot/tài khoản/phụ thuộc/tải vẫn ở `queued`; chỉ ghi DB và phát sự kiện khi lý do chờ đổi. */
+  private markQueuedWaiting(task: TaskRow, reason: 'parallel' | 'department_parallel' | 'profile_busy' | 'slot' | 'load' | 'dependency'): void {
     if (task.status === 'queued' && task.waitReason === reason) return;
     this.taskRepo.update(task.id, { status: 'queued', waitReason: reason });
     const project = this.projectRepo.get(task.projectId);
@@ -3270,11 +3318,11 @@ export class Scheduler {
 
   async startTask(task: TaskRow, model: string, profileName: string, retryCount = 0): Promise<void> {
     const stopGeneration = this.stopGeneration;
-    const disk = this.getBlockingDisk();
+    const disk = this.getBlockingDiskForTask(task);
     if (disk) {
       this.tasksWaitingForDisk.add(task.id);
       this.taskRepo.updateStatus(task.id, 'waiting_quota', 'disk');
-      this.eventBus.emit('task.waiting_quota', task.id, { reason: 'disk', label: disk.label, freeGB: disk.freeGB, minFreeGB: disk.minFreeGB, message: this.diskWaitMessage(disk) });
+      this.eventBus.emit('task.waiting_quota', task.id, { reason: 'disk', label: disk.label, path: disk.path, freeGB: disk.freeGB, minFreeGB: disk.minFreeGB, message: this.diskWaitMessage(disk) });
       this.markDiskLow(disk);
       return;
     }
@@ -3636,7 +3684,7 @@ export class Scheduler {
   /**
    * Review a task
    */
-  reviewTask(taskId: string, verdict: 'approved' | 'changes_requested', feedback?: string, by?: string): void {
+  reviewTask(taskId: string, verdict: 'approved' | 'changes_requested', feedback?: string, by?: string, source: ReviewSource = 'content'): void {
     const task = this.taskRepo.get(taskId);
     if (!task || task.status !== 'review') return;
     this.reviewNotified.delete(taskId);
@@ -3645,7 +3693,9 @@ export class Scheduler {
 
     if (verdict === 'approved') {
       if (isAutoReviewer(by) && (!feedback || feedback.trim() === '')) return;
-      if (isAutoReviewer(by) && this.reviewRepo) this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback: feedback || null, actor: by });
+      if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
+        this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback: feedback || null, actor: by || 'reviewer' });
+      }
       if ((isAutoReviewer(by) || by === 'claude-review') && step?.mode === 'gate') {
         this.advanceReviewStep(task, chain, 'approved');
         return;
@@ -3675,16 +3725,20 @@ export class Scheduler {
       if (!feedback || feedback.trim() === '') {
         throw new Error('Feedback is required when requesting changes');
       }
-      if (isAutoReviewer(by) && this.reviewRepo) this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback, actor: by });
-      if (((isAutoReviewer(by) || by === 'claude-review') && step?.mode === 'gate') || (isAutoReviewer(by) && chain.length === 0)) {
+      if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
+        this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback, actor: by || 'reviewer' });
+      }
+      if (isContentReview(by, source)) {
         const count = (task.reviewerChangesRequested || 0) + 1;
-        const max = this.reviewMaxRoundsForTask(task);
+        const max = reviewMaxRoundsFor(this.projectRepo.get(task.projectId), this.config);
         if (count > max) {
-          this.escalateReview(taskId, 'reviewer_changes_limit', feedback);
+          this.escalateReview(taskId, 'reviewer_changes_limit', feedback, by);
           return;
         }
         this.taskRepo.update(taskId, { reviewerChangesRequested: count });
       } else {
+        // A non-automated return may be a merge conflict or another operational
+        // issue. It must not erase the durable content-review count.
         this.resetReviewerEscalation(taskId);
       }
       // Append feedback to task body
@@ -3715,7 +3769,6 @@ export class Scheduler {
 
   private resetReviewerEscalation(taskId: string): void {
     this.taskRepo.update(taskId, {
-      reviewerChangesRequested: 0,
       reviewerEscalated: 0,
       reviewerEscalatedAt: null,
       reviewerEscalationReason: null,
@@ -3814,17 +3867,63 @@ export class Scheduler {
     return this.diskReader;
   }
 
+  private getHubHomeDisk(): MonitoredDisk {
+    const space = this.diskReader(this.config.hubHome);
+    const minFreeGB = this.config.disk.hubHomeMinFreeGB ?? 1;
+    return {
+      path: this.config.hubHome,
+      label: 'Ổ chứa dữ liệu hub (~/.agenthub)',
+      minFreeGB,
+      source: 'hub_home',
+      ...space,
+      low: space.freeGB < minFreeGB,
+    };
+  }
+
   private getMonitoredDisks(): MonitoredDisk[] {
     const roots = [this.config.worktreesDir, ...this.projectRepo.getAll().flatMap((project) => projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir))];
-    return getMonitoredDisks(roots, this.config.disk.minFreeGB, this.config.disk.extraPaths, process.env.NODE_ENV !== 'test', this.diskReader);
+    const disks = getMonitoredDisks(roots, this.config.disk.minFreeGB, this.config.disk.extraPaths, process.env.NODE_ENV !== 'test', this.diskReader);
+    return [this.getHubHomeDisk(), ...disks];
   }
 
   private getBlockingDisk(): MonitoredDisk | undefined {
     return this.getMonitoredDisks().find((disk) => disk.low);
   }
 
+  getBlockingDiskForTask(task: TaskRow): MonitoredDisk | undefined {
+    // 1. Hub home check: blocks all tasks if low
+    const hubHome = this.getHubHomeDisk();
+    if (hubHome.low) return hubHome;
+
+    // 2. Project's own worktree root check
+    const project = this.projectRepo.get(task.projectId);
+    const projectRoot = project ? projectWorktreeRoot(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir;
+    const projectSpace = this.diskReader(projectRoot);
+    const projectMinFreeGB = this.config.disk.minFreeGB;
+    if (projectSpace.freeGB < projectMinFreeGB) {
+      return {
+        path: projectRoot,
+        label: 'Worktrees',
+        minFreeGB: projectMinFreeGB,
+        source: 'worktrees',
+        ...projectSpace,
+        low: true,
+      };
+    }
+
+    // 3. Extra paths check (and Docker if included)
+    const extraDisks = getMonitoredDisks([], projectMinFreeGB, this.config.disk.extraPaths, process.env.NODE_ENV !== 'test', this.diskReader);
+    const blockedExtra = extraDisks.find((disk) => disk.source === 'extra' && disk.low);
+    if (blockedExtra) return blockedExtra;
+
+    return undefined;
+  }
+
   private diskWaitMessage(disk: MonitoredDisk): string {
-    return `Chờ ${disk.label} (còn ${disk.freeGB} GB / cần ${disk.minFreeGB} GB)`;
+    if (disk.source === 'hub_home') {
+      return `Ổ chứa dữ liệu hub (~/.agenthub) sắp đầy (${disk.path}) (còn ${disk.freeGB} GB / cần ${disk.minFreeGB} GB)`;
+    }
+    return `Chờ ${disk.label} (${disk.path}) (còn ${disk.freeGB} GB / cần ${disk.minFreeGB} GB)`;
   }
 
   private markDiskLow(disk: MonitoredDisk): void {

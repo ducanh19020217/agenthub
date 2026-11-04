@@ -879,7 +879,45 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_secret_requests_status_expiry ON secret_requests(status, expiresAt);
   `,
-  // Migration 62: setup chat sessions use the setup playbook and have their own MCP policy.
+  // Migration 62: expand task wait reasons to distinguish slot, load, and dependency.
+  `
+  PRAGMA foreign_keys = OFF;
+  CREATE TABLE tasks_new (
+    id TEXT PRIMARY KEY, projectId TEXT NOT NULL, slug TEXT NOT NULL, title TEXT NOT NULL, body TEXT,
+    level TEXT NOT NULL DEFAULT 'easy' CHECK(level IN ('easy','hard')), modelChain TEXT, baseRef TEXT,
+    branch TEXT, worktreePath TEXT,
+    status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','queued','running','checking','review','done','blocked','failed','cancelled','waiting_quota','paused')),
+    dependsOn TEXT NOT NULL DEFAULT '[]', attempt INTEGER NOT NULL DEFAULT 0, resume INTEGER NOT NULL DEFAULT 0,
+    createdAt TEXT NOT NULL DEFAULT (datetime('now')), updatedAt TEXT NOT NULL DEFAULT (datetime('now')),
+    notBefore INTEGER, transientRetries INTEGER NOT NULL DEFAULT 0, slot INTEGER, checkFixAttempts INTEGER NOT NULL DEFAULT 0,
+    reviewerChangesRequested INTEGER NOT NULL DEFAULT 0, reviewerEscalated INTEGER NOT NULL DEFAULT 0,
+    reviewerEscalatedAt TEXT, reviewerEscalationReason TEXT,
+    waitReason TEXT CHECK(waitReason IS NULL OR waitReason IN ('disk','quota','no_department_profile','no_matching_profile','parallel','department_parallel','profile_busy','project_unavailable','focus','slot','load','dependency')),
+    doneReport TEXT, blockedReport TEXT, diffStat TEXT, sourceRef TEXT, reviewStep INTEGER NOT NULL DEFAULT 0, batchId TEXT,
+    creationSessionId TEXT, creationGoal TEXT, externalRef TEXT,
+    FOREIGN KEY (projectId) REFERENCES projects(id)
+  );
+  INSERT INTO tasks_new (
+    id, projectId, slug, title, body, level, modelChain, baseRef, branch, worktreePath,
+    status, dependsOn, attempt, resume, createdAt, updatedAt, notBefore, transientRetries, slot,
+    checkFixAttempts, reviewerChangesRequested, reviewerEscalated, reviewerEscalatedAt,
+    reviewerEscalationReason, waitReason, doneReport, blockedReport, diffStat, sourceRef, reviewStep, batchId,
+    creationSessionId, creationGoal, externalRef
+  ) SELECT
+    id, projectId, slug, title, body, level, modelChain, baseRef, branch, worktreePath,
+    status, dependsOn, attempt, resume, createdAt, updatedAt, notBefore, transientRetries, slot,
+    checkFixAttempts, reviewerChangesRequested, reviewerEscalated, reviewerEscalatedAt,
+    reviewerEscalationReason, waitReason, doneReport, blockedReport, diffStat, sourceRef, reviewStep, batchId,
+    creationSessionId, creationGoal, externalRef
+  FROM tasks;
+  DROP TABLE tasks;
+  ALTER TABLE tasks_new RENAME TO tasks;
+  CREATE INDEX IF NOT EXISTS idx_tasks_project_created ON tasks(projectId, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_tasks_project_status_created ON tasks(projectId, status, createdAt);
+  PRAGMA foreign_keys = ON;
+  `,
+  // Migration 63: setup chat sessions use the setup playbook and have their own MCP policy.
   `
   PRAGMA foreign_keys = OFF;
   CREATE TABLE chat_sessions_setup_new AS SELECT * FROM chat_sessions;
@@ -930,8 +968,18 @@ export function openDatabase(dbPath: string): Database.Database {
   }
   ensureProfileAvatarColumn(db);
   ensureSchedulerLimitColumns(db);
+  cleanExpiredClaudeLimits(db);
 
   return db;
+}
+
+function cleanExpiredClaudeLimits(db: Database.Database): void {
+  try {
+    const threshold = Math.floor(Date.now() / 1000) - 24 * 3600;
+    db.prepare('UPDATE claude_sessions SET limitResetAt = NULL, limitHitAt = NULL WHERE limitResetAt IS NOT NULL AND limitResetAt <= ?').run(threshold);
+  } catch {
+    // claude_sessions table may not exist in early migration states
+  }
 }
 
 function hasColumn(db: Database.Database, table: string, column: string): boolean {
@@ -1087,7 +1135,14 @@ export interface QuotaUsageRow {
   fetchedAt: number;
 }
 
-export type WaitReason = 'disk' | 'quota' | 'no_department_profile' | 'no_matching_profile' | 'parallel' | 'department_parallel' | 'profile_busy' | 'project_unavailable' | 'focus' | null;
+export type WaitReason = 'disk' | 'quota' | 'no_department_profile' | 'no_matching_profile' | 'parallel' | 'department_parallel' | 'profile_busy' | 'project_unavailable' | 'focus' | 'slot' | 'load' | 'dependency' | null;
+
+export interface BlockingDiskInfo {
+  path: string;
+  label: string;
+  freeGB: number;
+  minFreeGB: number;
+}
 
 export interface TaskRow {
   id: string;
@@ -1104,6 +1159,7 @@ export interface TaskRow {
   sourceRef?: string | null;
   status: string;
   waitReason?: WaitReason;
+  blockingDisk?: BlockingDiskInfo | null;
   dependsOn: string;
   attempt: number;
   resume: number;
@@ -2525,6 +2581,19 @@ export class BrainTurnRepo {
     return (row as { total: number }).total;
   }
 
+  tokensBreakdownSince(isoDate: string, projectId?: string | null): { inputTokens: number; outputTokens: number; total: number; count: number } {
+    const query = projectId === undefined
+      ? 'SELECT COALESCE(SUM(inputTokens), 0) AS inputTokens, COALESCE(SUM(outputTokens), 0) AS outputTokens, COUNT(*) AS count FROM brain_turns WHERE startedAt >= ?'
+      : 'SELECT COALESCE(SUM(inputTokens), 0) AS inputTokens, COALESCE(SUM(outputTokens), 0) AS outputTokens, COUNT(*) AS count FROM brain_turns WHERE startedAt >= ? AND projectId IS ?';
+    const row = (projectId === undefined ? this.db.prepare(query).get(isoDate) : this.db.prepare(query).get(isoDate, projectId)) as { inputTokens: number; outputTokens: number; count: number };
+    return {
+      inputTokens: row.inputTokens,
+      outputTokens: row.outputTokens,
+      total: row.inputTokens + row.outputTokens,
+      count: row.count,
+    };
+  }
+
   countSinceDepartment(epochMs: number, departmentId: string): number {
     const row = this.db.prepare("SELECT COUNT(*) AS count FROM brain_turns WHERE startedAt >= datetime(?, 'unixepoch') AND departmentId = ?")
       .get(Math.floor(epochMs / 1000), departmentId) as { count: number };
@@ -2535,6 +2604,17 @@ export class BrainTurnRepo {
     const row = this.db.prepare('SELECT COALESCE(SUM(inputTokens + outputTokens), 0) AS total FROM brain_turns WHERE startedAt >= ? AND departmentId = ?')
       .get(isoDate, departmentId) as { total: number };
     return row.total;
+  }
+
+  tokensBreakdownSinceDepartment(isoDate: string, departmentId: string): { inputTokens: number; outputTokens: number; total: number; count: number } {
+    const row = this.db.prepare('SELECT COALESCE(SUM(inputTokens), 0) AS inputTokens, COALESCE(SUM(outputTokens), 0) AS outputTokens, COUNT(*) AS count FROM brain_turns WHERE startedAt >= ? AND departmentId = ?')
+      .get(isoDate, departmentId) as { inputTokens: number; outputTokens: number; count: number };
+    return {
+      inputTokens: row.inputTokens,
+      outputTokens: row.outputTokens,
+      total: row.inputTokens + row.outputTokens,
+      count: row.count,
+    };
   }
 }
 

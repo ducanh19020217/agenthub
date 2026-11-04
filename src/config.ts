@@ -50,6 +50,20 @@ export const DEFAULT_BRAIN_DIGEST_CONFIG: BrainDigestConfig = {
   time: '18:00',
 };
 
+export const DEFAULT_BRAIN_WAKEUP_EVENTS: string[] = [
+  'task.review_ready',
+  'task.blocked',
+  'task.failed',
+  'review.escalated',
+  'merge.failed',
+  'merge.conflict',
+  'quota.exhausted',
+  'claude.quota_exhausted',
+  'brain.notify',
+  'brain.directive_added',
+  'ci.failed',
+];
+
 export interface BrainConfig {
   engine?: 'claude' | 'codex';
   fallback: ClaudeFallbackStep[];
@@ -65,6 +79,10 @@ export interface BrainConfig {
   maxTurnsPerHour: number;
   dailyTokenBudget: number;
   turnTimeoutSec?: number;
+  rotateAtTokens?: number;
+  rotateAfterTurns?: number;
+  batchWindowSec?: number;
+  wakeupEvents?: string[];
   digest: BrainDigestConfig;
   /** Optional cross-department coordinator. Disabled unless explicitly enabled. */
   director?: {
@@ -390,6 +408,7 @@ export interface AgentHubConfig {
   notifications: NotificationsConfig;
   disk: {
     minFreeGB: number;
+    hubHomeMinFreeGB: number;
     extraPaths: ExtraDiskPath[];
   };
   cleanup: {
@@ -453,7 +472,7 @@ export function saveConfig(
       desktopLevel: NotificationsConfig['desktopLevel'];
       quietHours?: Partial<QuietHoursConfig>;
     }>;
-    disk?: { minFreeGB?: number; extraPaths?: ExtraDiskPath[] };
+    disk?: { minFreeGB?: number; hubHomeMinFreeGB?: number; extraPaths?: ExtraDiskPath[] };
     cleanup?: { nodeModulesOnDone?: boolean; worktreeOnDoneAfterHours?: number };
     cacheDir?: string;
     cacheMaxEntries?: number;
@@ -653,7 +672,7 @@ export function updateConfigInMemory(
       desktopLevel: NotificationsConfig['desktopLevel'];
       quietHours?: Partial<QuietHoursConfig>;
     }>;
-    disk?: { minFreeGB?: number; extraPaths?: ExtraDiskPath[] };
+    disk?: { minFreeGB?: number; hubHomeMinFreeGB?: number; extraPaths?: ExtraDiskPath[] };
     cleanup?: { nodeModulesOnDone?: boolean; worktreeOnDoneAfterHours?: number };
     cacheDir?: string;
     cacheMaxEntries?: number;
@@ -741,6 +760,10 @@ export function updateConfigInMemory(
     if (patch.brain.dailyTokenBudget !== undefined) config.brain.dailyTokenBudget = patch.brain.dailyTokenBudget;
     if (patch.brain.turnTimeoutSec !== undefined) config.brain.turnTimeoutSec = patch.brain.turnTimeoutSec;
     if (patch.brain.maxConcurrent !== undefined) config.brain.maxConcurrent = patch.brain.maxConcurrent;
+    if (patch.brain.rotateAtTokens !== undefined) config.brain.rotateAtTokens = patch.brain.rotateAtTokens;
+    if (patch.brain.rotateAfterTurns !== undefined) config.brain.rotateAfterTurns = patch.brain.rotateAfterTurns;
+    if (patch.brain.batchWindowSec !== undefined) config.brain.batchWindowSec = patch.brain.batchWindowSec;
+    if (patch.brain.wakeupEvents !== undefined) config.brain.wakeupEvents = [...patch.brain.wakeupEvents];
     if (patch.brain.director) {
       config.brain.director = {
         enabled: patch.brain.director.enabled ?? config.brain.director?.enabled ?? false,
@@ -791,6 +814,9 @@ export function updateConfigInMemory(
   }
   if (patch.disk?.minFreeGB !== undefined) {
     config.disk.minFreeGB = patch.disk.minFreeGB;
+  }
+  if (patch.disk?.hubHomeMinFreeGB !== undefined) {
+    config.disk.hubHomeMinFreeGB = patch.disk.hubHomeMinFreeGB;
   }
   if (patch.disk?.extraPaths !== undefined) {
     config.disk.extraPaths = [...patch.disk.extraPaths];
@@ -979,11 +1005,12 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
   const brainRaw = (userConfig.brain as Record<string, unknown>) || {};
   const assistantRaw = (userConfig.assistant as Record<string, unknown>) || {};
 
-  const userDisk = (userConfig.disk as { minFreeGB?: number; extraPaths?: unknown } | undefined);
+  const userDisk = (userConfig.disk as { minFreeGB?: number; hubHomeMinFreeGB?: number; extraPaths?: unknown } | undefined);
   const userCleanup = (userConfig.cleanup as { nodeModulesOnDone?: boolean; worktreeOnDoneAfterHours?: number } | undefined);
 
   const disk = {
     minFreeGB: typeof userDisk?.minFreeGB === 'number' ? userDisk.minFreeGB : 3,
+    hubHomeMinFreeGB: typeof userDisk?.hubHomeMinFreeGB === 'number' ? userDisk.hubHomeMinFreeGB : 1,
     extraPaths: Array.isArray(userDisk?.extraPaths)
       ? userDisk.extraPaths.filter((entry): entry is ExtraDiskPath => {
           if (!entry || typeof entry !== 'object') return false;
@@ -1225,6 +1252,18 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
       turnTimeoutSec: typeof brainRaw.turnTimeoutSec === 'number' && brainRaw.turnTimeoutSec > 0
         ? Math.floor(brainRaw.turnTimeoutSec)
         : 20 * 60,
+      rotateAtTokens: typeof brainRaw.rotateAtTokens === 'number' && brainRaw.rotateAtTokens > 0
+        ? Math.floor(brainRaw.rotateAtTokens)
+        : 80_000,
+      rotateAfterTurns: typeof brainRaw.rotateAfterTurns === 'number' && brainRaw.rotateAfterTurns > 0
+        ? Math.floor(brainRaw.rotateAfterTurns)
+        : 40,
+      batchWindowSec: typeof brainRaw.batchWindowSec === 'number' && brainRaw.batchWindowSec > 0
+        ? Math.floor(brainRaw.batchWindowSec)
+        : 300,
+      wakeupEvents: Array.isArray(brainRaw.wakeupEvents)
+        ? brainRaw.wakeupEvents.filter((ev): ev is string => typeof ev === 'string' && ev.length > 0)
+        : [...DEFAULT_BRAIN_WAKEUP_EVENTS],
       digest: typeof brainRaw.digest === 'string'
         ? { enabled: true, time: brainRaw.digest }
         : typeof brainRaw.digest === 'object' && brainRaw.digest !== null

@@ -60,6 +60,19 @@ describe('AgentHub Chat Backend API (t-chat-api)', () => {
     expect(snapshot).not.toContain('disabled');
   });
 
+  it('sends only changed hub snapshot lines after the first snapshot', () => {
+    ctx.chatSessionRepo.insert({ id: 'brain-delta', title: 'Brain', kind: 'brain' });
+    const session = ctx.chatSessionRepo.get('brain-delta')!;
+    const chatWithSnapshot = ctx.chatService as unknown as { hubSnapshot: (session: typeof session, refresh?: boolean) => string };
+    const first = chatWithSnapshot.hubSnapshot(session);
+    ctx.scheduler.getEventBus().emit('task.failed', 'p/new');
+    const delta = chatWithSnapshot.hubSnapshot(session, true);
+    expect(first).toContain('ẢNH CHỤP HUB');
+    expect(delta).toContain('ẢNH CHỤP HUB — PHẦN THAY ĐỔI');
+    expect(delta).toContain('task.failed p/new');
+    expect(delta).not.toContain('Projects:\n');
+  });
+
   it('builds a private MCP config scoped to the chat session', () => {
     const hubHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-mcp-'));
     try {

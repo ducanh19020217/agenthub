@@ -346,7 +346,16 @@ export const TaskDag: React.FC<TaskDagProps> = ({
                             <Flame className="w-2.5 h-2.5" />
                           </span>
                         )}
-                        <StatusBadge status={task.status} size="sm" />
+                        <StatusBadge
+                          status={task.status}
+                          waitReason={task.waitReason}
+                          blockingDisk={task.blockingDisk}
+                          diskFreeGB={task.blockingDisk?.freeGB}
+                          diskMinFreeGB={task.blockingDisk?.minFreeGB}
+                          diskLabel={task.blockingDisk?.label}
+                          projectId={task.projectId}
+                          size="sm"
+                        />
                       </div>
                     </div>
 

@@ -2709,7 +2709,36 @@ export class TelegramBotService {
     let text = `📊 <b>Tổng quan trạng thái ${this.escapeHtml(this.appName)}</b>\n\n`;
     text = text + `• Điều phối: <b>${isPaused ? '⏸ Tạm dừng giao việc' : '▶️ Đang hoạt động'}</b>\n`;
     if (brain) text = text + `• Brain: <b>${this.brainLabel(brain)}</b>\n`;
-    text = text + `• Tasks: <b>${tasks.running}</b> đang chạy, <b>${tasks.review}</b> chờ review, <b>${tasks.queued}</b> hàng đợi, <b>${tasks.waiting_quota}</b> chờ quota, <b>${tasks.failed}</b> lỗi, <b>${tasks.blocked}</b> bị chặn, <b>${tasks.done}</b> hoàn thành\n`;
+
+    const waitingCount = tasks.waiting_quota || 0;
+    let waitingSummaryHtml = `<b>${waitingCount}</b> chờ quota`;
+    if (waitingCount > 0 && status.waitingReasons) {
+      const reasonLabels: Record<string, string> = {
+        disk: 'đĩa',
+        quota: 'quota',
+        slot: 'slot',
+        parallel: 'slot',
+        department_parallel: 'slot phòng ban',
+        load: 'tải máy',
+        dependency: 'phụ thuộc',
+        profile_busy: 'tài khoản bận',
+        no_department_profile: 'thiếu tài khoản phòng ban',
+        no_matching_profile: 'thiếu tài khoản phù hợp',
+        project_unavailable: 'dự án không truy cập được',
+        focus: 'tập trung dự án khác',
+      };
+      const entries = Object.entries(status.waitingReasons).filter(([, count]) => count > 0);
+      if (entries.length === 1) {
+        const [reason, count] = entries[0];
+        const label = reasonLabels[reason] || reason;
+        waitingSummaryHtml = `<b>${count}</b> chờ ${label}`;
+      } else if (entries.length > 1) {
+        const parts = entries.map(([reason, count]) => `${count} ${reasonLabels[reason] || reason}`);
+        waitingSummaryHtml = `<b>${waitingCount}</b> đang chờ (${this.escapeHtml(parts.join(', '))})`;
+      }
+    }
+
+    text = text + `• Tasks: <b>${tasks.running}</b> đang chạy, <b>${tasks.review}</b> chờ review, <b>${tasks.queued}</b> hàng đợi, ${waitingSummaryHtml}, <b>${tasks.failed}</b> lỗi, <b>${tasks.blocked}</b> bị chặn, <b>${tasks.done}</b> hoàn thành\n`;
 
     if (running.length > 0) {
       text = text + '\n🏃 <b>Đang chạy:</b>\n';
@@ -3607,7 +3636,7 @@ export class TelegramBotService {
 
     // 1. Brain auto mode: suppress raw task notifications
     try {
-      const isSystemEvent = type === 'quota.exhausted' || type === 'claude.quota_exhausted' || type.startsWith('disk.') || type.startsWith('system.') || type.startsWith('hub.') || type.startsWith('deploy.') || type.startsWith('remote_deploy.') || type === 'profile.auth_expired' || type === 'chat.limit_waiting';
+      const isSystemEvent = type === 'quota.exhausted' || type === 'claude.quota_exhausted' || type.startsWith('disk.') || type.startsWith('system.') || type.startsWith('hub.') || type.startsWith('deploy.') || type.startsWith('remote_deploy.') || type === 'profile.auth_expired' || type === 'chat.limit_waiting' || type.startsWith('daily_report.');
     this.notificationProjectId = isSystemEvent ? null : projectId;
     this.notificationDedupProjectId = projectId;
     const focusProjectId = this.config.focus?.projectId;
@@ -3632,6 +3661,7 @@ export class TelegramBotService {
         type.startsWith('deploy.') ||
         type.startsWith('gitea.sync.') ||
         type.startsWith('remote_deploy.') ||
+        type.startsWith('daily_report.') ||
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||
@@ -3919,6 +3949,20 @@ export class TelegramBotService {
         const ref = typeof p.displayId === 'string' ? p.displayId : typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
         const label = type === 'tracker.ticket_imported' ? 'đã nhập ticket thành task' : type === 'tracker.comment' ? 'có comment mới' : type === 'tracker.poll_failed' ? 'đồng bộ thất bại' : type === 'tracker.resolved' ? 'đã resolve' : type === 'tracker.review_requested' ? 'cần quyết định' : 'ghi ngược thất bại';
         this.broadcastMessage(`${prefix}🔗 <b>${this.escapeHtml(ref)}</b> ${label}.`);
+        break;
+      }
+
+      case 'daily_report.created': {
+        if (p.telegram && typeof p.content === 'string') {
+          this.broadcastMessage(this.escapeHtml(p.content));
+        }
+        break;
+      }
+
+      case 'daily_report.failed': {
+        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        const err = typeof p.error === 'string' ? `: ${p.error}` : '';
+        this.broadcastMessage(`${prefix}❌ <b>Tạo báo cáo ngày thất bại: ${this.escapeHtml(source)}</b>${this.escapeHtml(err)}`);
         break;
       }
 
@@ -4583,6 +4627,10 @@ export class TelegramBotService {
         return `${prefix}OpenProject ticket cần quyết định: ${p?.displayId || ''}`;
       case 'tracker.writeback_failed':
         return `${prefix}Ghi ngược OpenProject thất bại: ${p?.error || ''}`;
+      case 'daily_report.created':
+        return `${prefix}Đã tạo báo cáo ngày cho ${p?.sourceId || 'OpenProject'}`;
+      case 'daily_report.failed':
+        return `${prefix}Tạo báo cáo ngày thất bại: ${p?.sourceId || ''}`;
       case 'gitea.sync.succeeded':
         return `${prefix}Đồng bộ Gitea thành công`;
       case 'gitea.sync.failed':

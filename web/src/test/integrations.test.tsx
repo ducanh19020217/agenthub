@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { LocaleProvider } from '../context/LocaleContext';
@@ -548,6 +548,97 @@ describe('Integrations UI Suite', () => {
       await new Promise((resolve) => setTimeout(resolve, 3_100));
       expect(getStatus).toHaveBeenCalledTimes(3);
     }, 15_000);
+
+    it('shows loading state for Remote Deploy deploy-now and save secrets', async () => {
+      let resolveDeploy: (val: any) => void = () => {};
+      const deployPromise = new Promise((resolve) => {
+        resolveDeploy = resolve;
+      });
+      vi.spyOn(client, 'triggerRemoteDeploy').mockImplementation(() => deployPromise as any);
+
+      let resolveSaveSecrets: (val: any) => void = () => {};
+      const saveSecretsPromise = new Promise((resolve) => {
+        resolveSaveSecrets = resolve;
+      });
+      vi.spyOn(client, 'saveRemoteDeployEnv').mockImplementation(() => saveSecretsPromise as any);
+
+      renderWithProviders(
+        <ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('project-remote-deploy-section')).toBeInTheDocument();
+      });
+
+      // Click deploy now
+      const deployNowBtn = screen.getByTestId('deploy-now-button');
+      fireEvent.click(deployNowBtn);
+
+      await waitFor(() => {
+        expect(deployNowBtn).toBeDisabled();
+        expect(deployNowBtn).toHaveAttribute('aria-busy', 'true');
+        expect(deployNowBtn).toHaveTextContent('Đang deploy…');
+        expect(deployNowBtn.querySelector('.animate-spin')).toBeInTheDocument();
+      });
+
+      await act(async () => {
+        resolveDeploy({ ok: true });
+      });
+
+      await waitFor(() => {
+        expect(deployNowBtn).not.toBeDisabled();
+        expect(deployNowBtn).toHaveTextContent('Deploy ngay');
+        expect(screen.getByTestId('deploy-status-message')).toHaveTextContent('Đã kích hoạt deploy');
+        expect(screen.getByTestId('deploy-status-message')).toHaveClass('text-[var(--t-ok)]');
+      });
+
+      // Enter secret env and click save
+      const secretsInput = screen.getByPlaceholderText('KEY=VALUE');
+      fireEvent.change(secretsInput, { target: { value: 'API_KEY=123' } });
+
+      const saveSecretsBtn = screen.getByTestId('save-deploy-env-button');
+      fireEvent.click(saveSecretsBtn);
+
+      await waitFor(() => {
+        expect(saveSecretsBtn).toBeDisabled();
+        expect(saveSecretsBtn).toHaveAttribute('aria-busy', 'true');
+        expect(saveSecretsBtn).toHaveTextContent('Đang lưu…');
+        expect(saveSecretsBtn.querySelector('.animate-spin')).toBeInTheDocument();
+      });
+
+      await act(async () => {
+        resolveSaveSecrets(['API_KEY']);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('deploy-status-message')).toHaveTextContent('Đã lưu biến môi trường bí mật');
+        expect(screen.getByTestId('deploy-status-message')).toHaveClass('text-[var(--t-ok)]');
+      });
+    });
+
+    it('shows loading state and error message for Gitea save token', async () => {
+      vi.spyOn(client, 'saveGiteaToken').mockRejectedValue(new Error('Token Gitea không hợp lệ'));
+
+      renderWithProviders(
+        <ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('project-gitea-section')).toBeInTheDocument();
+      });
+
+      const tokenInput = screen.getByPlaceholderText('Dán token rồi bấm Lưu token');
+      fireEvent.change(tokenInput, { target: { value: 'bad-token' } });
+
+      const saveTokenBtn = screen.getByTestId('save-gitea-token-button');
+      fireEvent.click(saveTokenBtn);
+
+      await waitFor(() => {
+        const msg = screen.getByTestId('gitea-status-message');
+        expect(msg).toHaveTextContent('Token Gitea không hợp lệ');
+        expect(msg).toHaveClass('text-[var(--t-crit)]');
+      });
+    });
   });
 
   describe('3. OpenProjectSettings Global Settings', () => {
@@ -608,6 +699,167 @@ describe('Integrations UI Suite', () => {
       await waitFor(() => {
         expect(reportSpy).toHaveBeenCalledWith('op-corp');
         expect(screen.getByRole('status')).toHaveTextContent('Đã tạo báo cáo ngày');
+      });
+    });
+
+    it('shows loading spinner and disables sync button until promise resolves, and displays baseline results', async () => {
+      let resolveSync: (val: any) => void = () => {};
+      const syncPromise = new Promise((resolve) => {
+        resolveSync = resolve;
+      });
+      const syncSpy = vi.spyOn(client, 'syncOpenProject').mockImplementation(() => syncPromise as any);
+
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByText('Đồng bộ ngay')).toBeInTheDocument();
+      });
+
+      const syncBtn = screen.getByText('Đồng bộ ngay');
+      fireEvent.click(syncBtn);
+
+      await waitFor(() => {
+        expect(syncBtn).toBeDisabled();
+        expect(syncBtn).toHaveAttribute('aria-busy', 'true');
+        expect(syncBtn).toHaveTextContent('Đang đồng bộ…');
+        expect(syncBtn.querySelector('.animate-spin')).toBeInTheDocument();
+      }, { timeout: 5000 });
+
+      // Other buttons (e.g. Test connection) should NOT be disabled
+      expect(screen.getByText('Kiểm tra kết nối')).not.toBeDisabled();
+
+      // Resolve with baseline tickets
+      await act(async () => {
+        resolveSync({ baseline: 13, watched: 13, imported: 0, comments: 0 });
+      });
+
+      await waitFor(() => {
+        expect(syncSpy).toHaveBeenCalledWith('op-corp');
+        expect(syncBtn).not.toBeDisabled();
+        expect(syncBtn).toHaveTextContent('Đồng bộ ngay');
+        expect(screen.getByRole('status')).toHaveTextContent('Đã ghi mốc 13 ticket (lần đầu, chưa tạo task, theo dõi 13)');
+        expect(screen.getByRole('status')).toHaveClass('text-[var(--t-ok)]');
+      }, { timeout: 5000 });
+    }, 15_000);
+
+    it('displays error message from server with crit color when save fails', async () => {
+      vi.spyOn(client, 'saveOpenProjectSource').mockRejectedValue(new Error('Tên project trong OpenProject không hợp lệ'));
+
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+        expect(screen.getByText('Lưu')).not.toBeDisabled();
+      });
+
+      const saveBtn = screen.getByText('Lưu');
+      fireEvent.click(saveBtn);
+
+      await waitFor(() => {
+        const status = screen.getByRole('status');
+        expect(status).toHaveTextContent('Tên project trong OpenProject không hợp lệ');
+        expect(status).toHaveClass('text-[var(--t-crit)]');
+      });
+    });
+
+    it('displays separate error message when saving API key fails', async () => {
+      vi.spyOn(client, 'saveOpenProjectSource').mockResolvedValue(mockSources[0]);
+      vi.spyOn(client, 'saveOpenProjectKey').mockRejectedValue(new Error('Key 401 Unauthorized'));
+
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+        expect(screen.getByText('Lưu')).not.toBeDisabled();
+      });
+
+      const keyInput = screen.getByLabelText('API key');
+      fireEvent.change(keyInput, { target: { value: 'invalid-key' } });
+
+      const saveBtn = screen.getByText('Lưu');
+      fireEvent.click(saveBtn);
+
+      await waitFor(() => {
+        const status = screen.getByRole('status');
+        expect(status).toHaveTextContent('Lưu API key thất bại: Key 401 Unauthorized');
+        expect(status).toHaveClass('text-[var(--t-crit)]');
+      });
+    });
+
+    it('displays sync results with watched and baseline 0 on subsequent syncs', async () => {
+      const syncSpy = vi.spyOn(client, 'syncOpenProject').mockResolvedValue({
+        imported: 1,
+        comments: 0,
+        baseline: 0,
+        watched: 13,
+      });
+
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+        expect(screen.getByText('Đồng bộ ngay')).not.toBeDisabled();
+      });
+
+      const syncBtn = screen.getByText('Đồng bộ ngay');
+      fireEvent.click(syncBtn);
+
+      await waitFor(() => {
+        expect(syncSpy).toHaveBeenCalledWith('op-corp');
+        expect(screen.getByRole('status')).toHaveTextContent('Đã nhập 1 ticket (theo dõi 13, mốc 0)');
+        expect(screen.getByRole('status')).toHaveClass('text-[var(--t-ok)]');
+      });
+    });
+
+    it('displays sync results with baseline only when watched is not provided', async () => {
+      const syncSpy = vi.spyOn(client, 'syncOpenProject').mockResolvedValue({
+        imported: 0,
+        comments: 0,
+        baseline: 7,
+      } as any);
+
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+        expect(screen.getByText('Đồng bộ ngay')).not.toBeDisabled();
+      });
+
+      const syncBtn = screen.getByText('Đồng bộ ngay');
+      fireEvent.click(syncBtn);
+
+      await waitFor(() => {
+        expect(syncSpy).toHaveBeenCalledWith('op-corp');
+        expect(screen.getByRole('status')).toHaveTextContent('Đã ghi mốc 7 ticket (lần đầu, chưa tạo task)');
+        expect(screen.getByRole('status')).toHaveClass('text-[var(--t-ok)]');
+      });
+    });
+
+    it('disables Test Connection, Sync, and Daily Report buttons with tooltip when source is unsaved', async () => {
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+      });
+
+      // Click "Thêm nguồn"
+      const addBtn = screen.getByText('Thêm nguồn');
+      fireEvent.click(addBtn);
+
+      // Buttons should be disabled with tooltip "Lưu nguồn trước"
+      await waitFor(() => {
+        const testBtn = screen.getByText('Kiểm tra kết nối');
+        const syncBtn = screen.getByText('Đồng bộ ngay');
+        const reportBtn = screen.getByText('Tạo báo cáo ngày');
+
+        expect(testBtn).toBeDisabled();
+        expect(testBtn).toHaveAttribute('title', 'Lưu nguồn trước');
+
+        expect(syncBtn).toBeDisabled();
+        expect(syncBtn).toHaveAttribute('title', 'Lưu nguồn trước');
+
+        expect(reportBtn).toBeDisabled();
+        expect(reportBtn).toHaveAttribute('title', 'Lưu nguồn trước');
       });
     });
   });
@@ -841,19 +1093,41 @@ describe('Integrations UI Suite', () => {
       });
     });
 
-    it('reload statuses button triggers refetch', async () => {
-      const getStatusesSpy = vi.spyOn(client, 'getOpenProjectStatuses').mockResolvedValue(mockStatuses);
+    it('reload statuses button triggers refetch and shows loading state with existing data', async () => {
+      let resolveStatuses: (val: any) => void = () => {};
+      const pendingStatuses = new Promise((resolve) => {
+        resolveStatuses = resolve;
+      });
+      const getStatusesSpy = vi.spyOn(client, 'getOpenProjectStatuses')
+        .mockResolvedValueOnce(mockStatuses)
+        .mockImplementationOnce(() => pendingStatuses as any);
 
       renderWithProviders(<OpenProjectSettings />);
 
       await waitFor(() => {
         expect(screen.getByTestId('reload-statuses-button')).toBeInTheDocument();
+        expect(screen.getByTestId('reload-statuses-button')).not.toBeDisabled();
       });
 
-      fireEvent.click(screen.getByTestId('reload-statuses-button'));
+      const reloadBtn = screen.getByTestId('reload-statuses-button');
+      fireEvent.click(reloadBtn);
 
       await waitFor(() => {
-        expect(getStatusesSpy).toHaveBeenCalled();
+        expect(getStatusesSpy).toHaveBeenCalledTimes(2);
+        expect(reloadBtn).toBeDisabled();
+        expect(reloadBtn).toHaveAttribute('aria-busy', 'true');
+        expect(reloadBtn).toHaveTextContent('Đang tải trạng thái...');
+        expect(reloadBtn.querySelector('.animate-spin')).toBeInTheDocument();
+      });
+
+      await act(async () => {
+        resolveStatuses(mockStatuses);
+      });
+
+      await waitFor(() => {
+        expect(reloadBtn).not.toBeDisabled();
+        expect(reloadBtn).not.toHaveAttribute('aria-busy');
+        expect(reloadBtn).toHaveTextContent('Tải lại trạng thái');
       });
     });
   });

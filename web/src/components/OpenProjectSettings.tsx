@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, CheckCircle2, RotateCw } from 'lucide-react';
+import { Plus, Trash2, CheckCircle2, RotateCw, Loader2, AlertCircle } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
 import {
   deleteOpenProjectSource,
@@ -69,7 +69,7 @@ export const OpenProjectSettings: React.FC = () => {
 
   const [draft, setDraft] = useState<OpenProjectSourceInput | null>(null);
   const [key, setKey] = useState('');
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
   const [manualInputs, setManualInputs] = useState<Partial<Record<'watchStatusIds' | 'reopenedStatusIds' | 'openStatusIds', string>>>({});
 
   useEffect(() => {
@@ -80,11 +80,13 @@ export const OpenProjectSettings: React.FC = () => {
   }, [sources, draft]);
 
   const currentSource = sources.find((s) => s.id === draft?.id);
+  const isSaved = sources.some((s) => s.id === draft?.id);
+  const isUnsaved = !isSaved;
   const canFetchStatuses = Boolean(draft?.id && draft.url.trim() && currentSource?.keyConfigured);
 
   const {
     data: statuses,
-    isLoading: isStatusesLoading,
+    isFetching: isStatusesFetching,
     isError: isStatusesError,
     refetch: refetchStatuses,
   } = useQuery({
@@ -102,70 +104,143 @@ export const OpenProjectSettings: React.FC = () => {
     retry: false,
   });
 
-  const save = useMutation({
-    mutationFn: async () => {
-      if (!draft) throw new Error('missing');
-      let toSave: OpenProjectSourceInput = { ...draft };
+  const saveMutation = useMutation({
+    mutationFn: async (sourceDraft: OpenProjectSourceInput) => {
+      let toSave: OpenProjectSourceInput = { ...sourceDraft };
       for (const field of ['watchStatusIds', 'reopenedStatusIds', 'openStatusIds'] as const) {
         if (manualInputs[field] !== undefined) {
           toSave = { ...toSave, [field]: parseIdList(manualInputs[field]!) };
         }
       }
       const saved = await saveOpenProjectSource(toSave.id, toSave);
-      if (key.trim()) await saveOpenProjectKey(toSave.id, key.trim());
+      if (key.trim()) {
+        try {
+          await saveOpenProjectKey(toSave.id, key.trim());
+        } catch (keyErr: any) {
+          const err = new Error(keyErr?.message || String(keyErr));
+          (err as any).isKeyError = true;
+          throw err;
+        }
+      }
       return saved;
     },
     onSuccess: () => {
       setKey('');
       setManualInputs({});
-      setMessage(t('integrations.saved'));
+      setMessage({ type: 'ok', text: t('integrations.saved') });
       qc.invalidateQueries({ queryKey: ['openproject-sources'] });
       if (draft?.id) {
         qc.invalidateQueries({ queryKey: ['openproject-statuses', draft.id] });
       }
     },
+    onError: (err: any) => {
+      if (err?.isKeyError) {
+        qc.invalidateQueries({ queryKey: ['openproject-sources'] });
+        setMessage({
+          type: 'error',
+          text: t('integrations.saveKeyError', { error: err.message }),
+        });
+      } else {
+        setMessage({
+          type: 'error',
+          text: err?.message || t('integrations.saveError'),
+        });
+      }
+    },
   });
 
-  const remove = useMutation({
+  const removeMutation = useMutation({
     mutationFn: deleteOpenProjectSource,
     onSuccess: () => {
       setDraft(null);
       setManualInputs({});
+      setMessage(null);
       qc.invalidateQueries({ queryKey: ['openproject-sources'] });
+    },
+    onError: (err: any) => {
+      setMessage({
+        type: 'error',
+        text: err?.message || t('common.error'),
+      });
     },
   });
 
-  const handleTestConnection = async () => {
-    if (!draft) return;
-    try {
-      const res = await testOpenProjectConnection(draft.id);
+  const testConnectionMutation = useMutation({
+    mutationFn: (sourceId: string) => testOpenProjectConnection(sourceId),
+    onSuccess: (res) => {
       const name = res?.name;
-      setMessage(name ? t('integrations.testOkWithName', { name }) : t('integrations.testOk'));
-    } catch (e) {
-      setMessage((e as Error).message);
-    }
-  };
+      setMessage({
+        type: 'ok',
+        text: name ? t('integrations.testOkWithName', { name }) : t('integrations.testOk'),
+      });
+    },
+    onError: (err: any) => {
+      setMessage({
+        type: 'error',
+        text: err?.message || t('common.error'),
+      });
+    },
+  });
 
-  const handleSyncNow = async () => {
-    if (!draft) return;
-    try {
-      const res = (await syncOpenProject(draft.id)) as { imported?: number } | undefined;
-      const count = res?.imported ?? 0;
-      setMessage(t('integrations.syncSuccess', { count }));
-    } catch (e) {
-      setMessage((e as Error).message);
-    }
-  };
+  const syncMutation = useMutation({
+    mutationFn: (sourceId: string) => syncOpenProject(sourceId),
+    onSuccess: (res) => {
+      if (res && typeof res.baseline === 'number' && res.baseline > 0) {
+        if (typeof res.watched === 'number') {
+          setMessage({
+            type: 'ok',
+            text: t('integrations.syncBaselineWatchedSuccess', { count: res.baseline, watched: res.watched }),
+          });
+        } else {
+          setMessage({
+            type: 'ok',
+            text: t('integrations.syncBaselineSuccess', { count: res.baseline }),
+          });
+        }
+      } else if (res && typeof res.watched === 'number') {
+        const count = res?.imported ?? 0;
+        if (typeof res.baseline === 'number') {
+          setMessage({
+            type: 'ok',
+            text: t('integrations.syncDetailsSuccess', { count, watched: res.watched, baseline: res.baseline }),
+          });
+        } else {
+          setMessage({
+            type: 'ok',
+            text: t('integrations.syncWatchedSuccess', { count, watched: res.watched }),
+          });
+        }
+      } else {
+        const count = res?.imported ?? 0;
+        setMessage({
+          type: 'ok',
+          text: t('integrations.syncSuccess', { count }),
+        });
+      }
+    },
+    onError: (err: any) => {
+      setMessage({
+        type: 'error',
+        text: err?.message || t('common.error'),
+      });
+    },
+  });
 
-  const handleDailyReport = async () => {
-    if (!draft) return;
-    try {
-      await createOpenProjectDailyReport(draft.id);
-      setMessage(t('integrations.dailyReportSuccess'));
-    } catch (e) {
-      setMessage((e as Error).message);
-    }
-  };
+  const dailyReportMutation = useMutation({
+    mutationFn: (sourceId: string) => createOpenProjectDailyReport(sourceId),
+    onSuccess: () => {
+      setMessage({
+        type: 'ok',
+        text: t('integrations.dailyReportSuccess'),
+      });
+    },
+    onError: (err: any) => {
+      setMessage({
+        type: 'error',
+        text: err?.message || t('common.error'),
+      });
+    },
+  });
 
   const set = (patch: Partial<OpenProjectSourceInput>) =>
     setDraft((d) => (d ? { ...d, ...patch } : d));
@@ -174,6 +249,7 @@ export const OpenProjectSettings: React.FC = () => {
     setDraft({ ...source });
     setManualInputs({});
     setKey('');
+    setMessage(null);
   };
 
   const handleSuggestByName = () => {
@@ -274,7 +350,7 @@ export const OpenProjectSettings: React.FC = () => {
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--t-border)] pb-2">
               <div>
                 <strong className="text-xs font-semibold">{t('integrations.statusMappingTitle')}</strong>
-                {!hasValidStatuses && !isStatusesLoading && (
+                {!hasValidStatuses && !isStatusesFetching && (
                   <p className="text-xs text-[var(--t-text-3)]" data-testid="status-picker-hint">
                     {t('integrations.saveUrlAndKeyFirst')}
                   </p>
@@ -284,12 +360,17 @@ export const OpenProjectSettings: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => refetchStatuses()}
-                  disabled={isStatusesLoading}
-                  className="rounded-lg border border-[var(--t-border)] px-2.5 py-1.5 text-xs hover:bg-[var(--t-surface-2)]"
+                  disabled={isStatusesFetching}
+                  aria-busy={isStatusesFetching ? true : undefined}
+                  className="rounded-lg border border-[var(--t-border)] px-2.5 py-1.5 text-xs hover:bg-[var(--t-surface-2)] disabled:opacity-50 disabled:cursor-not-allowed"
                   data-testid="reload-statuses-button"
                 >
-                  <RotateCw className={`inline h-3 w-3 mr-1 ${isStatusesLoading ? 'animate-spin' : ''}`} />
-                  {isStatusesLoading ? t('integrations.loadingStatuses') : t('integrations.reloadStatuses')}
+                  {isStatusesFetching ? (
+                    <Loader2 className="inline h-3 w-3 mr-1 animate-spin" />
+                  ) : (
+                    <RotateCw className="inline h-3 w-3 mr-1" />
+                  )}
+                  {isStatusesFetching ? t('integrations.loadingStatuses') : t('integrations.reloadStatuses')}
                 </button>
                 {hasValidStatuses && (
                   <button
@@ -604,44 +685,86 @@ export const OpenProjectSettings: React.FC = () => {
           <div className="sm:col-span-2 flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => save.mutate()}
-              className="rounded-lg bg-[var(--t-accent)] px-3 py-2 text-xs text-[var(--t-on-accent)]"
+              onClick={() => {
+                if (draft) saveMutation.mutate(draft);
+              }}
+              disabled={saveMutation.isPending || removeMutation.isPending || !draft}
+              aria-busy={saveMutation.isPending ? true : undefined}
+              className="rounded-lg bg-[var(--t-accent)] px-3 py-2 text-xs text-[var(--t-on-accent)] disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
             >
-              {t('common.save')}
+              {saveMutation.isPending && <Loader2 className="inline h-3 w-3 animate-spin" />}
+              {saveMutation.isPending ? t('integrations.saving') : t('common.save')}
             </button>
             <button
               type="button"
-              onClick={handleTestConnection}
-              className="rounded-lg border px-3 py-2 text-xs"
+              onClick={() => testConnectionMutation.mutate(draft.id)}
+              disabled={isUnsaved || testConnectionMutation.isPending || removeMutation.isPending}
+              aria-busy={testConnectionMutation.isPending ? true : undefined}
+              title={isUnsaved ? t('integrations.saveSourceFirst') : undefined}
+              className="rounded-lg border px-3 py-2 text-xs disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
             >
-              {t('integrations.testConnection')}
+              {testConnectionMutation.isPending && <Loader2 className="inline h-3 w-3 animate-spin" />}
+              {testConnectionMutation.isPending ? t('integrations.testingConnection') : t('integrations.testConnection')}
             </button>
             <button
               type="button"
-              onClick={handleSyncNow}
-              className="rounded-lg border px-3 py-2 text-xs"
+              onClick={() => syncMutation.mutate(draft.id)}
+              disabled={isUnsaved || syncMutation.isPending || removeMutation.isPending}
+              aria-busy={syncMutation.isPending ? true : undefined}
+              title={isUnsaved ? t('integrations.saveSourceFirst') : undefined}
+              className="rounded-lg border px-3 py-2 text-xs disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
             >
-              {t('integrations.syncNow')}
+              {syncMutation.isPending && <Loader2 className="inline h-3 w-3 animate-spin" />}
+              {syncMutation.isPending ? t('integrations.syncing') : t('integrations.syncNow')}
             </button>
             <button
               type="button"
-              onClick={handleDailyReport}
-              className="rounded-lg border px-3 py-2 text-xs"
+              onClick={() => dailyReportMutation.mutate(draft.id)}
+              disabled={isUnsaved || dailyReportMutation.isPending || removeMutation.isPending}
+              aria-busy={dailyReportMutation.isPending ? true : undefined}
+              title={isUnsaved ? t('integrations.saveSourceFirst') : undefined}
+              className="rounded-lg border px-3 py-2 text-xs disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
             >
-              {t('integrations.dailyReport')}
+              {dailyReportMutation.isPending && <Loader2 className="inline h-3 w-3 animate-spin" />}
+              {dailyReportMutation.isPending ? t('integrations.creatingDailyReport') : t('integrations.dailyReport')}
             </button>
             <button
               type="button"
-              onClick={() => remove.mutate(draft.id)}
-              className="rounded-lg border border-[var(--t-crit)] px-3 py-2 text-xs text-[var(--t-crit)]"
+              onClick={() => {
+                if (isUnsaved) {
+                  setDraft(null);
+                  setManualInputs({});
+                } else if (draft?.id) {
+                  removeMutation.mutate(draft.id);
+                }
+              }}
+              disabled={removeMutation.isPending || saveMutation.isPending}
+              aria-busy={removeMutation.isPending ? true : undefined}
+              className="rounded-lg border border-[var(--t-crit)] px-3 py-2 text-xs text-[var(--t-crit)] disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
             >
-              <Trash2 className="inline h-3 w-3" /> {t('common.delete')}
+              {removeMutation.isPending ? (
+                <Loader2 className="inline h-3 w-3 animate-spin" />
+              ) : (
+                <Trash2 className="inline h-3 w-3" />
+              )}
+              {removeMutation.isPending ? t('integrations.deleting') : t('common.delete')}
             </button>
           </div>
 
           {message && (
-            <p role="status" className="sm:col-span-2 text-xs text-[var(--t-text-2)]">
-              <CheckCircle2 className="inline h-3 w-3" /> {message}
+            <p
+              role="status"
+              data-testid="openproject-status-message"
+              className={`sm:col-span-2 text-xs flex items-center gap-1.5 ${
+                message.type === 'ok' ? 'text-[var(--t-ok)]' : 'text-[var(--t-crit)]'
+              }`}
+            >
+              {message.type === 'ok' ? (
+                <CheckCircle2 className="inline h-3 w-3 shrink-0" />
+              ) : (
+                <AlertCircle className="inline h-3 w-3 shrink-0" />
+              )}
+              <span>{message.text}</span>
             </p>
           )}
         </div>

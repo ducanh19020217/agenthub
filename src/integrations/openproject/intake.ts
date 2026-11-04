@@ -2,11 +2,19 @@ import path from 'node:path';
 import type { AgentHubConfig, OpenProjectSource } from '../../config.js';
 import { projectSettings } from '../../projects/settings.js';
 import type { ProjectRepo, ProjectRow, TaskRepo, TrackerItemRepo, TrackerItemRow } from '../../db/index.js';
+import { HttpError } from '../../errors.js';
 import { OpenProjectClient, type OpenProjectActivity, type OpenProjectWorkPackage } from './client.js';
 import { readOpenProjectKey } from './secrets.js';
 import { writeTicketDirectory } from './ticket.js';
 
 const OPEN_TASK_STATUSES = new Set(['draft', 'queued', 'running', 'checking', 'review', 'waiting_quota', 'paused']);
+
+export interface OpenProjectSyncResult {
+  imported: number;
+  comments: number;
+  baseline: number;
+  watched: number;
+}
 
 export interface IntakeTaskService {
   createTask(raw: unknown): { id: string };
@@ -125,7 +133,7 @@ export class OpenProjectIntakeService {
     this.timer = undefined;
   }
 
-  async sync(sourceId: string): Promise<{ imported: number; comments: number }> {
+  async sync(sourceId: string): Promise<OpenProjectSyncResult> {
     const source = this.config.integrations.openproject.sources.find((item) => item.id === sourceId);
     if (!source) throw new Error(`Nguồn OpenProject không tồn tại: ${sourceId}`);
     return this.pollSource(source);
@@ -143,7 +151,13 @@ export class OpenProjectIntakeService {
   private async pollDue(): Promise<void> {
     const now = this.now();
     for (const source of this.config.integrations.openproject.sources) {
-      if (!this.attached(source.id)) continue;
+      if (!this.attached(source.id)) {
+        if ((this.nextPoll.get(source.id) || 0) <= now) {
+          console.debug(`[openproject-intake] Nguồn ${source.id} chưa gắn với project nào`);
+          this.nextPoll.set(source.id, now + source.pollIntervalSec * 1000);
+        }
+        continue;
+      }
       if ((this.nextPoll.get(source.id) || 0) > now) continue;
       try {
         await this.pollSource(source);
@@ -159,17 +173,20 @@ export class OpenProjectIntakeService {
     }
   }
 
-  private async pollSource(source: OpenProjectSource): Promise<{ imported: number; comments: number }> {
+  private async pollSource(source: OpenProjectSource): Promise<OpenProjectSyncResult> {
     const key = readOpenProjectKey(this.config.hubHome, source.id);
     if (!key) throw new Error('Nguồn OpenProject chưa có API key');
     const attached = this.attached(source.id);
-    if (!attached) return { imported: 0, comments: 0 };
+    if (!attached) {
+      throw new HttpError(400, 'bad_request', 'Nguồn chưa được gắn vào project nào (Dự án → Cài đặt → OpenProject → Bật + chọn nguồn, vai trò primary)');
+    }
     const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
     const watched = await client.listWatched(source.watchStatusIds);
     const me = await client.me();
     const firstPoll = !this.initializedSources.has(source.id) && this.trackerRepo.list(source.id).length === 0;
     let imported = 0;
     let comments = 0;
+    let baseline = 0;
     for (const listed of watched) {
       const wp = await client.getWorkPackage(listed.id);
       const activities = await client.listActivities(wp.id);
@@ -187,6 +204,7 @@ export class OpenProjectIntakeService {
           task_ids: '[]',
           writeback: JSON.stringify({ baseline: true }),
         });
+        baseline += 1;
         continue;
       }
 
@@ -235,7 +253,7 @@ export class OpenProjectIntakeService {
       this.trackerRepo.upsert({ ...row, display_id: displayId(wp), status_id: currentStatus, updated_at: wp.updatedAt || row.updated_at, last_comment_id: lastComment, task_ids: row.task_ids, writeback: row.writeback });
     }
     this.initializedSources.add(source.id);
-    return { imported, comments };
+    return { imported, comments, baseline, watched: watched.length };
   }
 
   private async handleTicket(source: OpenProjectSource, primary: ProjectRow, client: OpenProjectClient, wp: OpenProjectWorkPackage, activities: OpenProjectActivity[], previous: TrackerItemRow, event: 'new' | 'reopened' | 'comment'): Promise<{ row: TrackerItemRow; imported: number; comments: number }> {

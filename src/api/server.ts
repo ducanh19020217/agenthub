@@ -16,7 +16,7 @@ import { registerBrainRoutes } from '../brain.js';
 import { registerChatRoutes } from '../chat/service.js';
 import { brandingLogoPath, saveBrandingLogo } from '../branding.js';
 import { decodeCursor } from '../pagination.js';
-import { registerOpenProjectRoutes } from '../integrations/openproject/routes.js';
+import { registerOpenProjectRoutes, type OpenProjectSyncResult } from '../integrations/openproject/routes.js';
 import { parseDateNoon } from '../integrations/openproject/daily-report.js';
 import { SetupSecretRequestSchema } from '../setup-tools.js';
 
@@ -37,7 +37,7 @@ export async function createServer(
   options?: {
     webDir?: string;
     onShutdown?: (disable: boolean) => void;
-    openProjectSync?: (sourceId: string) => Promise<{ imported: number; comments: number }>;
+    openProjectSync?: (sourceId: string) => Promise<OpenProjectSyncResult>;
     openProjectDailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
   },
 ): Promise<FastifyInstance> {

@@ -506,6 +506,25 @@ describe('AgentHub API Extra Endpoints', () => {
       const onDisk = JSON.parse(fs.readFileSync(config.configFilePath, 'utf-8'));
       expect(onDisk.load.autoPauseThresholdSec).toBe(90);
     });
+
+    it('GET /api/config returns the saved brain.permissions', async () => {
+      const putRes = await server.inject({
+        method: 'PUT',
+        url: '/api/config',
+        headers: authHeaders(),
+        payload: { brain: { permissions: 'full' }, confirm: true },
+      });
+      expect(putRes.statusCode).toBe(200);
+      expect(JSON.parse(putRes.body).brain.permissions).toBe('full');
+
+      const getRes = await server.inject({
+        method: 'GET',
+        url: '/api/config',
+        headers: authHeaders(),
+      });
+      expect(getRes.statusCode).toBe(200);
+      expect(JSON.parse(getRes.body).brain.permissions).toBe('full');
+    });
   });
 
   describe('branding logo security headers', () => {

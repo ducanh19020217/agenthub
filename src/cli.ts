@@ -2,7 +2,7 @@
 
 import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig, AgentHubConfig } from './config.js';
-import { agyInstallHint, findAgyBin } from './agy.js';
+import { agyInstallHint, applyIsolatedAgyEnv, findAgyBin } from './agy.js';
 import { createContext, closeContext, startDaemon } from './daemon.js';
 import { runMcpServer } from './mcp/index.js';
 import { getOrCreateToken, getTokenPath, readExistingToken } from './auth.js';
@@ -1040,8 +1040,7 @@ export async function cmdProfile(
       if (profile.engine === 'claude' && profile.kind !== 'system' && profile.home) {
         env.CLAUDE_CONFIG_DIR = profile.home;
       } else if (profile.kind === 'isolated' && profile.home) {
-        env.HOME = profile.home;
-        env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent/agy-no-keyring';
+        applyIsolatedAgyEnv(env, profile.home);
       }
 
       console.log(`Đăng nhập hồ sơ "${name}"...`);

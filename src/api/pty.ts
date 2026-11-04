@@ -10,7 +10,7 @@ import { AppService, HttpError } from '../services/index.js';
 import { findClaudeBin } from '../chat/claude.js';
 import { CodexEngine } from '../engines/index.js';
 import { accountKey, isProfileLoggedIn } from '../profiles/index.js';
-import { agyInstallHint, findAgyBin } from '../agy.js';
+import { agyInstallHint, applyIsolatedAgyEnv, findAgyBin } from '../agy.js';
 
 const require = createRequire(import.meta.url);
 
@@ -169,8 +169,7 @@ export class PtyManager {
     if (profile.engine === 'claude' && profile.kind !== 'system' && profile.home) {
       env.CLAUDE_CONFIG_DIR = profile.home;
     } else if (profile.kind === 'isolated') {
-      env.HOME = home;
-      env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent/agy-no-keyring';
+      applyIsolatedAgyEnv(env, home);
     }
     applyNoBrowserEnv(env, this.service.config.hubHome);
 

@@ -9,7 +9,7 @@ import { ProfileRepo, ProfileRow, QuotaMarkRepo, QuotaUsageRepo, QuotaUsageRow }
 import { isProfileLoggedIn } from '../profiles/index.js';
 import { sameAccount } from '../profiles/account.js';
 import { parseAuthState } from '../profiles/auth.js';
-import { findAgyBin } from '../agy.js';
+import { applyIsolatedAgyEnv, findAgyBin } from '../agy.js';
 
 const execFileAsync = promisify(execFile);
 const GROUP_FAMILIES: Record<string, string[]> = {
@@ -63,8 +63,7 @@ export async function fetchUsage(profile: ProfileRow, agyPath = findAgyBin() || 
 async function runUsage(profile: ProfileRow, agyPath: string): Promise<UsageCheckResult> {
   const env = { ...process.env, BROWSER: '/bin/false' } as Record<string, string>;
   if (profile.kind === 'isolated' && profile.home) {
-    env.HOME = profile.home;
-    env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent/agy-no-keyring';
+    applyIsolatedAgyEnv(env, profile.home);
   }
   try {
     const { stdout, stderr } = await execFileAsync(agyPath, ['-p', '/usage'], {

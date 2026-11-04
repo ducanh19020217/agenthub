@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import type { ProfileRow, QuotaUsageRow } from '../db/index.js';
+import { applyIsolatedAgyEnv } from '../agy.js';
 
 /**
  * Đánh thức quota (như "Wake-up Tasks" của Cockpit tools): cửa sổ 5 giờ chỉ bắt đầu tính khi tài khoản
@@ -86,8 +87,7 @@ export function wakeupCommands(profile: ProfileRow, plan: WakeupPlan, bins: Wake
   const env: Record<string, string> = { ...(process.env as Record<string, string>), BROWSER: '/bin/false' };
   if (profile.engine === 'agy') {
     if (profile.kind === 'isolated' && profile.home) {
-      env.HOME = profile.home;
-      env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent/agy-no-keyring';
+      applyIsolatedAgyEnv(env, profile.home);
     }
     return plan.models.map((model) => ({
       bin: bins.agy,

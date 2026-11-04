@@ -24,8 +24,13 @@ function isPriorityEvent(type: string, payload?: unknown): boolean {
   if (type === 'brain.notify' && data.level === 'decision') {
     return true;
   }
-  if (type === 'merge.conflict' && typeof data.conflictCount === 'number' && data.conflictCount > 3) {
-    return true;
+  if (type === 'merge.conflict') {
+    if (data.autoRetried === false) {
+      return true;
+    }
+    if (typeof data.conflictCount === 'number' && data.conflictCount > 3) {
+      return true;
+    }
   }
   return false;
 }
@@ -393,6 +398,7 @@ export class BrainRunner {
     const quotaIsPartial = hasExplicitWakeupEvents && (type === 'quota.exhausted' || type === 'claude.quota_exhausted')
       && data.allExhausted !== true && data.quotaAllExhausted !== true && data.fallbackAvailable !== false;
     const conflictIsRoutine = hasExplicitWakeupEvents && type === 'merge.conflict'
+      && data.autoRetried !== false
       && (typeof data.conflictCount !== 'number' || data.conflictCount <= 3);
     const decisionOnly = hasExplicitWakeupEvents && type === 'brain.notify' && data.level !== 'decision';
     if ((hasExplicitWakeupEvents && (!wakeupEvents.includes(type) || reviewReadyIsAutomatic || quotaIsPartial || conflictIsRoutine || decisionOnly))) {

@@ -919,6 +919,7 @@ export interface TelegramStatus {
     quotaPerModel: boolean;
     quotaAllExhausted: boolean;
     fallback: boolean;
+    disk: boolean;
   };
 }
 

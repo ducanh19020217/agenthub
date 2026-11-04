@@ -171,6 +171,7 @@ export interface TelegramNotifyConfig {
   quotaAllExhausted: boolean;
   fallback: boolean;
   brainWaiting?: boolean;
+  disk?: boolean;
 }
 
 export interface TelegramChat {
@@ -228,6 +229,7 @@ export const DEFAULT_TELEGRAM_NOTIFY: TelegramNotifyConfig = {
   quotaAllExhausted: true,
   fallback: true,
   brainWaiting: true,
+  disk: true,
 };
 
 export const DEFAULT_STALL_CONFIG: StallConfig = {
@@ -1117,6 +1119,7 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
       quotaAllExhausted: rawTelegramNotify.quotaAllExhausted !== false,
       fallback: rawTelegramNotify.fallback !== false,
       brainWaiting: rawTelegramNotify.brainWaiting !== false,
+      disk: rawTelegramNotify.disk !== false,
     },
   };
 

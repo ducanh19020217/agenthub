@@ -27,7 +27,9 @@ import {
   TableCell,
   StatTile,
   SelectOrCustomInput,
+  Field,
 } from './ui';
+import { Link } from 'react-router-dom';
 import {
   DEFAULT_COMMON_BRANCHES,
   DEFAULT_CLAUDE_MODELS,
@@ -2255,27 +2257,131 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
           </Card>
 
           <Card className="p-5 space-y-4" data-testid="project-openproject-section">
-            <h3 className="text-sm font-bold">{t('integrations.projectOpenProject')}</h3>
-            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(draftSettings.openproject?.enabled)} onChange={(e) => setDraftSettings((p) => ({ ...p, openproject: { ...p.openproject!, enabled: e.target.checked } }))} />{t('integrations.enabled')}</label>
-            <div className="grid gap-3 sm:grid-cols-2"><label className="text-xs space-y-1"><span>{t('integrations.source')}</span><select value={draftSettings.openproject?.sourceId || ''} onChange={(e) => setDraftSettings((p) => ({ ...p, openproject: { ...p.openproject!, sourceId: e.target.value || null } }))} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2"><option value="">—</option>{openProjectSources.map((s) => <option key={s.id} value={s.id}>{s.id}</option>)}</select></label><label className="text-xs space-y-1"><span>{t('integrations.role')}</span><select value={draftSettings.openproject?.role || 'primary'} onChange={(e) => setDraftSettings((p) => ({ ...p, openproject: { ...p.openproject!, role: e.target.value as 'primary' | 'secondary' } }))} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2"><option value="primary">primary</option><option value="secondary">secondary</option></select></label></div>
+            <h3 className="text-sm font-bold text-[var(--t-text)]">{t('integrations.projectOpenProject')}</h3>
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 text-xs text-[var(--t-text)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draftSettings.openproject?.enabled)}
+                  onChange={(e) =>
+                    setDraftSettings((p) => ({
+                      ...p,
+                      openproject: { ...p.openproject!, enabled: e.target.checked },
+                    }))
+                  }
+                />
+                <span className="font-medium">{t('integrations.enabled')}</span>
+              </label>
+              <p className="text-xs text-[var(--t-text-3)]">{t('integrations.openProjectEnabledDesc')}</p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field
+                label={t('integrations.source')}
+                description={
+                  openProjectSources.length === 0 ? (
+                    <span>
+                      {t('integrations.sourceDesc')}.{' '}
+                      <Link to="/settings" className="text-[var(--t-accent)] hover:underline">
+                        {t('integrations.goToSettings')}
+                      </Link>
+                    </span>
+                  ) : (
+                    t('integrations.sourceDesc')
+                  )
+                }
+              >
+                <select
+                  value={draftSettings.openproject?.sourceId || ''}
+                  onChange={(e) =>
+                    setDraftSettings((p) => ({
+                      ...p,
+                      openproject: { ...p.openproject!, sourceId: e.target.value || null },
+                    }))
+                  }
+                  className="w-full h-9 px-3 text-sm rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] text-[var(--t-text)] focus:border-[var(--t-accent)] focus:ring-2 focus:ring-[var(--t-accent)] focus:outline-hidden"
+                >
+                  <option value="">—</option>
+                  {openProjectSources.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.id}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label={t('integrations.role')}>
+                <select
+                  value={draftSettings.openproject?.role || 'primary'}
+                  onChange={(e) =>
+                    setDraftSettings((p) => ({
+                      ...p,
+                      openproject: {
+                        ...p.openproject!,
+                        role: e.target.value as 'primary' | 'secondary',
+                      },
+                    }))
+                  }
+                  className="w-full h-9 px-3 text-sm rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] text-[var(--t-text)] focus:border-[var(--t-accent)] focus:ring-2 focus:ring-[var(--t-accent)] focus:outline-hidden"
+                >
+                  <option value="primary">{t('integrations.rolePrimary')}</option>
+                  <option value="secondary">{t('integrations.roleSecondary')}</option>
+                </select>
+              </Field>
+            </div>
           </Card>
 
           <Card className="p-5 space-y-4" data-testid="project-gitea-section">
-            <h3 className="text-sm font-bold">Gitea</h3>
-            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(draftSettings.gitea?.enabled)} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, enabled: e.target.checked } }))} />{t('integrations.enabled')}</label>
+            <div className="space-y-1">
+              <h3 className="text-sm font-bold text-[var(--t-text)]">Gitea</h3>
+              <p className="text-xs text-[var(--t-text-3)]">{t('integrations.giteaDescription')}</p>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-[var(--t-text)] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={Boolean(draftSettings.gitea?.enabled)}
+                onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, enabled: e.target.checked } }))}
+              />
+              <span className="font-medium">{t('integrations.enabled')}</span>
+            </label>
             {sectionErrors.gitea && (
               <div className="rounded border border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_10%,transparent)] p-2 text-xs text-[var(--t-crit)]">
                 {sectionErrors.gitea}
               </div>
             )}
+            <Field
+              label={t('integrations.giteaUrl')}
+              description={t('integrations.giteaUrlDesc')}
+            >
+              <Input
+                value={draftSettings.gitea?.url || ''}
+                onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, url: e.target.value } }))}
+                placeholder={t('integrations.giteaUrlPlaceholder')}
+              />
+            </Field>
             <div className="grid gap-3 sm:grid-cols-2">
-              <Input ariaLabel="Gitea URL" value={draftSettings.gitea?.url || ''} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, url: e.target.value } }))} placeholder="https://gitea.example" />
-              <Input ariaLabel={t('integrations.sourceBranch')} value={draftSettings.gitea?.sourceBranch || ''} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, sourceBranch: e.target.value } }))} />
-              <Input ariaLabel={t('integrations.targetBranch')} value={draftSettings.gitea?.targetBranch || ''} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, targetBranch: e.target.value } }))} />
+              <Field
+                label={t('integrations.sourceBranch')}
+                description={t('integrations.sourceBranchDesc')}
+              >
+                <Input
+                  value={draftSettings.gitea?.sourceBranch || ''}
+                  onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, sourceBranch: e.target.value } }))}
+                  placeholder={t('integrations.sourceBranchPlaceholder')}
+                />
+              </Field>
+              <Field
+                label={t('integrations.targetBranch')}
+                description={t('integrations.targetBranchDesc')}
+              >
+                <Input
+                  value={draftSettings.gitea?.targetBranch || ''}
+                  onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, targetBranch: e.target.value } }))}
+                  placeholder={t('integrations.targetBranchPlaceholder')}
+                />
+              </Field>
             </div>
-            <div className="space-y-2 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-3" data-testid="gitea-schedule-section">
+            <div className="space-y-1">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-[var(--t-text)]">{t('integrations.schedule')}</span>
+                <span className="text-xs font-medium text-[var(--t-text)]">{t('integrations.schedule')}</span>
                 <button
                   type="button"
                   data-testid="add-gitea-schedule-slot"
@@ -2288,47 +2394,285 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                   <Plus className="h-3 w-3" /> {t('integrations.addScheduleTime')}
                 </button>
               </div>
-              <div className="flex flex-wrap gap-2" data-testid="gitea-schedule-list">
-                {(draftSettings.gitea?.schedule || []).map((slot, idx) => (
-                  <div key={idx} className="flex items-center gap-1 rounded border border-[var(--t-border)] bg-[var(--t-surface)] px-2 py-1">
-                    <input
-                      type="time"
-                      aria-label={`${t('integrations.schedule')} ${idx + 1}`}
-                      value={slot}
-                      onChange={(e) => {
-                        const next = [...(draftSettings.gitea?.schedule || [])];
-                        next[idx] = e.target.value;
-                        setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, schedule: next } }));
-                      }}
-                      className="bg-transparent text-xs font-mono text-[var(--t-text)] focus:outline-hidden"
-                    />
-                    <button
-                      type="button"
-                      aria-label={`${t('integrations.removeScheduleTime')} ${idx + 1}`}
-                      onClick={() => {
-                        const next = (draftSettings.gitea?.schedule || []).filter((_, i) => i !== idx);
-                        setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, schedule: next } }));
-                      }}
-                      className="p-0.5 text-[var(--t-text-3)] hover:text-[var(--t-crit)] cursor-pointer"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </button>
-                  </div>
-                ))}
+              <p className="text-xs text-[var(--t-text-3)]">{t('integrations.scheduleDesc')}</p>
+              <div className="rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-3" data-testid="gitea-schedule-section">
+                <div className="flex flex-wrap gap-2" data-testid="gitea-schedule-list">
+                  {(draftSettings.gitea?.schedule || []).map((slot, idx) => (
+                    <div key={idx} className="flex items-center gap-1 rounded border border-[var(--t-border)] bg-[var(--t-surface)] px-2 py-1">
+                      <input
+                        type="time"
+                        aria-label={`${t('integrations.scheduleSlot')} ${idx + 1}`}
+                        value={slot}
+                        onChange={(e) => {
+                          const next = [...(draftSettings.gitea?.schedule || [])];
+                          next[idx] = e.target.value;
+                          setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, schedule: next } }));
+                        }}
+                        className="bg-transparent text-xs font-mono text-[var(--t-text)] focus:outline-hidden"
+                      />
+                      <button
+                        type="button"
+                        aria-label={`${t('integrations.removeScheduleTime')} ${idx + 1}`}
+                        onClick={() => {
+                          const next = (draftSettings.gitea?.schedule || []).filter((_, i) => i !== idx);
+                          setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, schedule: next } }));
+                        }}
+                        className="p-0.5 text-[var(--t-text-3)] hover:text-[var(--t-crit)] cursor-pointer"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
-            <label className="flex gap-2 text-xs"><input type="checkbox" checked={Boolean(draftSettings.gitea?.weekdaysOnly)} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, weekdaysOnly: e.target.checked } }))} />{t('integrations.weekdaysOnly')}</label>
-            <label className="text-xs space-y-1 block"><span>{t('integrations.checks')}</span><textarea value={(draftSettings.gitea?.checks || []).map((argv) => argv.map((arg) => /\s/.test(arg) ? JSON.stringify(arg) : arg).join(' ')).join('\n')} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, checks: e.target.value.split('\n').map(parseArgv).filter((v) => v.length) } }))} rows={3} placeholder="npm test -- --run" className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2 font-mono" /></label>
-            <Input ariaLabel={t('integrations.unionMergeGlobs')} value={(draftSettings.gitea?.unionMergeGlobs || []).join(', ')} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, unionMergeGlobs: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) } }))} placeholder="src/**, docs/**" />
-            <div className="flex gap-2"><Input type="password" ariaLabel={t('integrations.token')} value={giteaToken} onChange={(e) => setGiteaToken(e.target.value)} placeholder={t('integrations.writeOnly')} /><Button type="button" size="sm" variant="secondary" data-testid="save-gitea-token-button" onClick={() => saveGiteaTokenMutation.mutate()} disabled={!giteaToken}>{t('integrations.saveSecret')}</Button><Button type="button" size="sm" variant="secondary" data-testid="sync-gitea-button" onClick={() => giteaSyncMutation.mutate()}>{t('integrations.syncNow')}</Button></div><p className="text-xs text-[var(--t-text-3)]">{t('integrations.lastSync')}: {giteaStatus.data?.status || '—'}</p>
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 text-xs text-[var(--t-text)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draftSettings.gitea?.weekdaysOnly)}
+                  onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, weekdaysOnly: e.target.checked } }))}
+                />
+                <span className="font-medium">{t('integrations.weekdaysOnly')}</span>
+              </label>
+              <p className="text-xs text-[var(--t-text-3)]">{t('integrations.weekdaysOnlyDesc')}</p>
+            </div>
+            <Field
+              label={t('integrations.checks')}
+              description={t('integrations.checksDesc')}
+            >
+              <textarea
+                value={(draftSettings.gitea?.checks || [])
+                  .map((argv) => argv.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg)).join(' '))
+                  .join('\n')}
+                onChange={(e) =>
+                  setDraftSettings((p) => ({
+                    ...p,
+                    gitea: { ...p.gitea!, checks: e.target.value.split('\n').map(parseArgv).filter((v) => v.length) },
+                  }))
+                }
+                rows={3}
+                placeholder={t('integrations.checksPlaceholder')}
+                className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-2 font-mono text-sm text-[var(--t-text)] focus:border-[var(--t-accent)] focus:ring-2 focus:ring-[var(--t-accent)] focus:outline-hidden"
+              />
+            </Field>
+            <Field
+              label={t('integrations.unionMergeGlobs')}
+              description={t('integrations.unionMergeGlobsDesc')}
+            >
+              <Input
+                value={(draftSettings.gitea?.unionMergeGlobs || []).join(', ')}
+                onChange={(e) =>
+                  setDraftSettings((p) => ({
+                    ...p,
+                    gitea: { ...p.gitea!, unionMergeGlobs: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) },
+                  }))
+                }
+                placeholder={t('integrations.unionMergeGlobsPlaceholder')}
+              />
+            </Field>
+            <Field
+              label={t('integrations.tokenGitea')}
+              description={t('integrations.tokenGiteaDesc')}
+              badge={
+                giteaStatus.data?.tokenConfigured ? (
+                  <span
+                    data-testid="gitea-token-badge"
+                    className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-[color-mix(in_srgb,var(--t-success,#16a34a)_15%,transparent)] text-[var(--t-success,#16a34a)]"
+                  >
+                    <CheckCircle2 className="h-3 w-3" />
+                    {t('integrations.configured')}
+                  </span>
+                ) : (
+                  <span
+                    data-testid="gitea-token-badge"
+                    className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-[var(--t-surface-2)] text-[var(--t-text-3)] border border-[var(--t-border)]"
+                  >
+                    {t('integrations.noToken')}
+                  </span>
+                )
+              }
+            >
+              {({ id }) => (
+                <div className="flex gap-2">
+                  <Input
+                    id={id}
+                    type="password"
+                    value={giteaToken}
+                    onChange={(e) => setGiteaToken(e.target.value)}
+                    placeholder={t('integrations.tokenPlaceholder')}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    data-testid="save-gitea-token-button"
+                    onClick={() => saveGiteaTokenMutation.mutate()}
+                    disabled={!giteaToken}
+                  >
+                    {t('integrations.saveToken')}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    data-testid="sync-gitea-button"
+                    onClick={() => giteaSyncMutation.mutate()}
+                  >
+                    {t('integrations.syncNow')}
+                  </Button>
+                </div>
+              )}
+            </Field>
+            {giteaStatus.data?.remote && (
+              <p className="text-xs text-[var(--t-text-3)]" data-testid="gitea-repo-info">
+                {t('integrations.repo')}: {giteaStatus.data.remote.owner}/{giteaStatus.data.remote.repo} ({t('integrations.fromRemoteOrigin')})
+              </p>
+            )}
+            <p className="text-xs text-[var(--t-text-3)]">{t('integrations.lastSync')}: {giteaStatus.data?.status || '—'}</p>
           </Card>
 
           <Card className="p-5 space-y-4" data-testid="project-remote-deploy-section">
-            <h3 className="text-sm font-bold">{t('integrations.remoteDeploy')}</h3><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(draftSettings.remoteDeploy?.enabled)} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, enabled: e.target.checked } }))} />{t('integrations.enabled')}</label>
-            <div className="grid gap-3 sm:grid-cols-2"><label className="text-xs space-y-1"><span>{t('integrations.trigger')}</span><select value={draftSettings.remoteDeploy?.trigger || 'manual'} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, trigger: e.target.value as 'manual' | 'after-gitea-sync' } }))} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2"><option value="manual">manual</option><option value="after-gitea-sync">after-gitea-sync</option></select></label><Input type="number" ariaLabel={t('integrations.waitMinutes')} value={draftSettings.remoteDeploy?.waitMinutes ?? 15} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, waitMinutes: Number(e.target.value) } }))} /></div>
-            <label className="text-xs space-y-1 block"><span>{t('integrations.steps')}</span><textarea value={(draftSettings.remoteDeploy?.steps || []).map((argv) => argv.map((arg) => /\s/.test(arg) ? JSON.stringify(arg) : arg).join(' ')).join('\n')} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, steps: e.target.value.split('\n').map(parseArgv).filter((v) => v.length) } }))} rows={3} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2 font-mono" /></label>
-            <label className="text-xs space-y-1 block"><span>{t('integrations.healthChecks')}</span><textarea value={(draftSettings.remoteDeploy?.healthChecks || []).map((h) => `${h.url} ${h.expectStatusBelow}${h.contains ? ` ${JSON.stringify(h.contains)}` : ''}`).join('\n')} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, healthChecks: e.target.value.split('\n').filter(Boolean).map((line) => { const a = parseArgv(line); return { url: a[0] || '', expectStatusBelow: Number(a[1]) || 500, ...(a[2] ? { contains: a[2] } : {}) }; }) } }))} rows={2} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2 font-mono" /></label>
-            <div className="flex gap-2"><Input type="password" ariaLabel={t('integrations.deploySecrets')} value={deployEnv} onChange={(e) => setDeployEnv(e.target.value)} placeholder="KEY=VALUE" /><Button type="button" size="sm" variant="secondary" data-testid="save-deploy-env-button" onClick={() => saveDeployEnvMutation.mutate()} disabled={!deployEnv.trim()}>{t('integrations.saveSecret')}</Button><Button type="button" size="sm" variant="secondary" data-testid="deploy-now-button" onClick={() => deployNowMutation.mutate()}>{t('integrations.deployNow')}</Button></div>{savedDeployKeys.length > 0 && <p className="text-xs text-[var(--t-text-3)]" data-testid="saved-deploy-keys">{t('integrations.savedKeys')}: {savedDeployKeys.join(', ')}</p>}<p className="text-xs text-[var(--t-text-3)]">{t('integrations.lastDeploy')}: {remoteDeployStatus.data?.status || '—'}</p>
+            <div className="space-y-1">
+              <h3 className="text-sm font-bold text-[var(--t-text)]">{t('integrations.remoteDeploy')}</h3>
+              <p className="text-xs text-[var(--t-text-3)]">{t('integrations.remoteDeployDescription')}</p>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-[var(--t-text)] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={Boolean(draftSettings.remoteDeploy?.enabled)}
+                onChange={(e) =>
+                  setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, enabled: e.target.checked } }))
+                }
+              />
+              <span className="font-medium">{t('integrations.enabled')}</span>
+            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label={t('integrations.trigger')}>
+                <select
+                  value={draftSettings.remoteDeploy?.trigger || 'manual'}
+                  onChange={(e) =>
+                    setDraftSettings((p) => ({
+                      ...p,
+                      remoteDeploy: { ...p.remoteDeploy!, trigger: e.target.value as 'manual' | 'after-gitea-sync' },
+                    }))
+                  }
+                  className="w-full h-9 px-3 text-sm rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] text-[var(--t-text)] focus:border-[var(--t-accent)] focus:ring-2 focus:ring-[var(--t-accent)] focus:outline-hidden"
+                >
+                  <option value="manual">{t('integrations.triggerManual')}</option>
+                  <option value="after-gitea-sync">{t('integrations.triggerAfterGiteaSync')}</option>
+                </select>
+              </Field>
+              <Field
+                label={t('integrations.waitMinutes')}
+                description={t('integrations.waitMinutesDesc')}
+              >
+                <Input
+                  type="number"
+                  value={draftSettings.remoteDeploy?.waitMinutes ?? 15}
+                  onChange={(e) =>
+                    setDraftSettings((p) => ({
+                      ...p,
+                      remoteDeploy: { ...p.remoteDeploy!, waitMinutes: Number(e.target.value) },
+                    }))
+                  }
+                />
+              </Field>
+            </div>
+            <Field
+              label={t('integrations.steps')}
+              description={t('integrations.stepsDesc')}
+            >
+              <textarea
+                value={(draftSettings.remoteDeploy?.steps || [])
+                  .map((argv) => argv.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg)).join(' '))
+                  .join('\n')}
+                onChange={(e) =>
+                  setDraftSettings((p) => ({
+                    ...p,
+                    remoteDeploy: {
+                      ...p.remoteDeploy!,
+                      steps: e.target.value.split('\n').map(parseArgv).filter((v) => v.length),
+                    },
+                  }))
+                }
+                rows={3}
+                placeholder={t('integrations.stepsPlaceholder')}
+                className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-2 font-mono text-sm text-[var(--t-text)] focus:border-[var(--t-accent)] focus:ring-2 focus:ring-[var(--t-accent)] focus:outline-hidden"
+              />
+            </Field>
+            <Field
+              label={t('integrations.healthChecks')}
+              description={t('integrations.healthChecksDesc')}
+            >
+              <textarea
+                value={(draftSettings.remoteDeploy?.healthChecks || [])
+                  .map((h) => `${h.url} ${h.expectStatusBelow}${h.contains ? ` ${JSON.stringify(h.contains)}` : ''}`)
+                  .join('\n')}
+                onChange={(e) =>
+                  setDraftSettings((p) => ({
+                    ...p,
+                    remoteDeploy: {
+                      ...p.remoteDeploy!,
+                      healthChecks: e.target.value
+                        .split('\n')
+                        .filter(Boolean)
+                        .map((line) => {
+                          const a = parseArgv(line);
+                          return {
+                            url: a[0] || '',
+                            expectStatusBelow: Number(a[1]) || 500,
+                            ...(a[2] ? { contains: a[2] } : {}),
+                          };
+                        }),
+                    },
+                  }))
+                }
+                rows={2}
+                className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-2 font-mono text-sm text-[var(--t-text)] focus:border-[var(--t-accent)] focus:ring-2 focus:ring-[var(--t-accent)] focus:outline-hidden"
+              />
+            </Field>
+            <Field
+              label={t('integrations.deploySecrets')}
+              description={t('integrations.deploySecretsDesc')}
+            >
+              {({ id }) => (
+                <div className="flex gap-2">
+                  <Input
+                    id={id}
+                    type="password"
+                    value={deployEnv}
+                    onChange={(e) => setDeployEnv(e.target.value)}
+                    placeholder="KEY=VALUE"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    data-testid="save-deploy-env-button"
+                    onClick={() => saveDeployEnvMutation.mutate()}
+                    disabled={!deployEnv.trim()}
+                  >
+                    {t('integrations.saveEnvSecrets')}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    data-testid="deploy-now-button"
+                    onClick={() => deployNowMutation.mutate()}
+                  >
+                    {t('integrations.deployNow')}
+                  </Button>
+                </div>
+              )}
+            </Field>
+            {savedDeployKeys.length > 0 && (
+              <p className="text-xs text-[var(--t-text-3)]" data-testid="saved-deploy-keys">
+                {t('integrations.savedKeys')}: {savedDeployKeys.join(', ')}
+              </p>
+            )}
+            <p className="text-xs text-[var(--t-text-3)]">{t('integrations.lastDeploy')}: {remoteDeployStatus.data?.status || '—'}</p>
           </Card>
 
           {/* Section 4: Tham chiếu chỉ đọc (Read-only References) */}

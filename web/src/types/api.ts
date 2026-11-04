@@ -253,6 +253,7 @@ export interface OpenProjectStatusDto {
   isClosed: boolean;
   position: number;
 }
+export interface OpenProjectSyncResult { imported: number; comments: number; baseline: number; watched: number; }
 export interface GiteaStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
 export interface RemoteDeployStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
 

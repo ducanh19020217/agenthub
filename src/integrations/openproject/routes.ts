@@ -5,6 +5,9 @@ import { OpenProjectSourceSchema, saveConfig, updateConfigInMemory } from '../..
 import { HttpError } from '../../errors.js';
 import { OpenProjectClient } from './client.js';
 import { readOpenProjectKey, saveOpenProjectKey } from './secrets.js';
+import type { OpenProjectSyncResult } from './intake.js';
+
+export type { OpenProjectSyncResult };
 
 const idParams = z.object({ id: z.string().regex(/^[a-z0-9-]+$/) });
 
@@ -21,7 +24,7 @@ function persist(config: AgentHubConfig, sources: OpenProjectSource[]): void {
 
 export interface RegisterOpenProjectRoutesOptions {
   fetch?: typeof globalThis.fetch;
-  sync?: (sourceId: string) => Promise<{ imported: number; comments: number }>;
+  sync?: (sourceId: string) => Promise<OpenProjectSyncResult>;
   dailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
 }
 

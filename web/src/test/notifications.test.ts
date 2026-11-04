@@ -111,6 +111,11 @@ describe('browser notification policy', () => {
     expect(shouldNotifyBrowserEvent(ev4)).toBe(true);
     expect(browserNotificationBody(ev4)).toBe('⚠️ p/task-1 xung đột merge lần thứ 4, cần xem: file1.ts, file2.ts');
 
+    // Contradictory payload (conflictCount > 3 but autoRetried is true) must still notify:
+    const evContradictory = { ...event('merge.conflict', { conflictCount: 4, autoRetried: true, files: 'c.ts' }), taskId: 'p/task-contradictory' };
+    expect(shouldNotifyBrowserEvent(evContradictory)).toBe(true);
+    expect(browserNotificationBody(evContradictory)).toBe('⚠️ p/task-contradictory xung đột merge lần thứ 4, cần xem: c.ts');
+
     // Cannot auto-reassign: true
     const evCannot = { ...event('merge.conflict', { conflictCount: 1, autoRetried: false, message: 'bad.ts' }), taskId: 'p/task-cancel' };
     expect(shouldNotifyBrowserEvent(evCannot)).toBe(true);

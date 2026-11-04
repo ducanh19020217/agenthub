@@ -975,19 +975,24 @@ describe('NotificationService (Desktop Notifications)', () => {
     eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 5, autoRetried: false, files: 'a.ts, b.ts' });
     expect(execCalls).toHaveLength(1);
 
+    // Contradictory payload: conflictCount > 3 but autoRetried is true must still notify
+    eventBus.emit('merge.conflict', 'proj/task-contradictory', { conflictCount: 4, autoRetried: true, files: 'c.ts' });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('⚠️ proj/task-contradictory xung đột merge lần thứ 4, cần xem: c.ts');
+
     // 3. Cannot auto-reassign: sends notification
     eventBus.emit('merge.conflict', 'proj/task-cancelled', { conflictCount: 1, autoRetried: false, message: 'Xung đột merge ở: bad.ts' });
-    expect(execCalls).toHaveLength(2);
-    expect(execCalls[1].args.at(-1)).toContain('⚠️ proj/task-cancelled xung đột merge lần thứ 1, cần xem: bad.ts');
+    expect(execCalls).toHaveLength(3);
+    expect(execCalls[2].args.at(-1)).toContain('⚠️ proj/task-cancelled xung đột merge lần thứ 1, cần xem: bad.ts');
 
     // 4. merge.failed with fix task: no notification
     eventBus.emit('merge.failed', 'proj/task-postcheck', { autoFixCreated: true, message: 'Checks sau merge thất bại' });
-    expect(execCalls).toHaveLength(2);
+    expect(execCalls).toHaveLength(3);
 
     // 5. merge.failed due to environment error: sends notification
     eventBus.emit('merge.failed', 'proj/task-env', { environment: true, message: 'Thiếu dependency' });
-    expect(execCalls).toHaveLength(3);
-    expect(execCalls[2].args.at(-1)).toContain('Lỗi môi trường khi tự động gộp: proj/task-env');
+    expect(execCalls).toHaveLength(4);
+    expect(execCalls[3].args.at(-1)).toContain('Lỗi môi trường khi tự động gộp: proj/task-env');
 
     // 6. -fix-merge draft task: no notification
     taskRepo.insert({
@@ -999,7 +1004,7 @@ describe('NotificationService (Desktop Notifications)', () => {
       sourceRef: JSON.stringify({ checkName: 'merge' }),
     });
     eventBus.emit('task.queued', 'proj/task-postcheck-fix-merge');
-    expect(execCalls).toHaveLength(3);
+    expect(execCalls).toHaveLength(4);
 
     // 7. Restart persistence: a new NotificationService instance with the same taskRepo does not re-notify already alerted tasks
     const restartedNotifier = new NotificationService({
@@ -1013,7 +1018,7 @@ describe('NotificationService (Desktop Notifications)', () => {
     });
     restartedNotifier.start();
     eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 6, autoRetried: false, files: 'a.ts' });
-    expect(execCalls).toHaveLength(3);
+    expect(execCalls).toHaveLength(4);
     restartedNotifier.stop();
 
     notifier.stop();

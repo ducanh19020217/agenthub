@@ -3023,25 +3023,32 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
     expect(sendCalls).toHaveLength(1);
 
+    // Contradictory payload (conflictCount > 3 but autoRetried is true) must still notify
+    bot.handleEvent('merge.conflict', 'p/task-contradictory', { conflictCount: 4, autoRetried: true, files: 'c.ts' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(2);
+    expect(sendCalls[1].body?.text).toContain('⚠️ p/task-contradictory xung đột merge lần thứ 4, cần xem: c.ts');
+
     // 3. Cannot auto-reassign (e.g. task cancelled or missing base branch): sends notification
     bot.handleEvent('merge.conflict', 'p/task-cancelled', { conflictCount: 1, autoRetried: false, message: 'Xung đột merge ở: bad.ts' });
     await bot.flushQueue(CHAT_ID);
     sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
-    expect(sendCalls).toHaveLength(2);
-    expect(sendCalls[1].body?.text).toContain('⚠️ p/task-cancelled xung đột merge lần thứ 1, cần xem: bad.ts');
+    expect(sendCalls).toHaveLength(3);
+    expect(sendCalls[2].body?.text).toContain('⚠️ p/task-cancelled xung đột merge lần thứ 1, cần xem: bad.ts');
 
     // 4. merge.failed when hub already created fix task: no notification
     bot.handleEvent('merge.failed', 'p/task-postcheck', { autoFixCreated: true, message: 'Checks sau merge thất bại' });
     await bot.flushQueue(CHAT_ID);
     sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
-    expect(sendCalls).toHaveLength(2);
+    expect(sendCalls).toHaveLength(3);
 
     // 5. merge.failed due to environment error (no fix task created): sends notification
     bot.handleEvent('merge.failed', 'p/task-env', { environment: true, message: 'Thiếu dependency' });
     await bot.flushQueue(CHAT_ID);
     sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
-    expect(sendCalls).toHaveLength(3);
-    expect(sendCalls[2].body?.text).toContain('Lỗi môi trường khi tự động gộp: p/task-env');
+    expect(sendCalls).toHaveLength(4);
+    expect(sendCalls[3].body?.text).toContain('Lỗi môi trường khi tự động gộp: p/task-env');
 
     // 6. Automatically created draft task with -fix-merge: no notification
     ctx.taskRepo.insert({
@@ -3055,14 +3062,14 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     bot.handleEvent('batch.created', 'p/task-postcheck-fix-merge', { title: 'Fix merge' });
     await bot.flushQueue(CHAT_ID);
     sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
-    expect(sendCalls).toHaveLength(3);
+    expect(sendCalls).toHaveLength(4);
 
     // 7. Restart persistence: a new TelegramBotService instance does not re-notify already alerted tasks
     const restartedBot = createBot('suggest');
     restartedBot.handleEvent('merge.conflict', 'p/task-1', { conflictCount: 6, autoRetried: false, files: 'file1.ts' });
     await restartedBot.flushQueue(CHAT_ID);
     sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
-    expect(sendCalls).toHaveLength(3);
+    expect(sendCalls).toHaveLength(4);
   });
 });
 

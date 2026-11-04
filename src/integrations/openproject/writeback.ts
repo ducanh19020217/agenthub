@@ -26,7 +26,14 @@ type WritebackState = {
   failed?: string;
   triage?: { taskId: string; analysis: TriageAnalysis; readyAt: string };
   decision?: { action: 'do' | 'split' | 'ask' | 'skip' | 'manual'; by: string; at: string; note?: string };
-  split?: { planTaskId?: string; children?: string[]; childTickets?: Record<string, { id: number; displayId: string; url: string }>; plan?: SplitPlan };
+  split?: {
+    planTaskId?: string;
+    children?: string[];
+    childTickets?: Record<string, { id: number; displayId: string; url: string }>;
+    plan?: SplitPlan;
+    planCommented?: boolean;
+    planDiscarded?: boolean;
+  };
 };
 
 export interface OpenProjectWritebackServiceOptions {
@@ -37,6 +44,7 @@ export interface OpenProjectWritebackServiceOptions {
   taskService: { createTask(raw: unknown): { id: string } };
   batchService?: { createBatch(raw: unknown): { id: string; tasks: TaskRow[] } };
   taskBatchRepo?: { get(id: string): { goal: string | null; status: string } | undefined };
+  reviewRepo?: { getByTask(taskId: string): Array<{ actor?: string | null; verdict: string; feedback?: string | null }> };
   eventBus: Pick<EventBus, 'on' | 'off' | 'emit'>;
   fetchFn?: typeof fetch;
   git?: GitRunner;
@@ -86,6 +94,7 @@ export class OpenProjectWritebackService {
   private readonly taskService: OpenProjectWritebackServiceOptions['taskService'];
   private readonly batchService: OpenProjectWritebackServiceOptions['batchService'];
   private readonly taskBatchRepo: OpenProjectWritebackServiceOptions['taskBatchRepo'];
+  private readonly reviewRepo: OpenProjectWritebackServiceOptions['reviewRepo'];
   private readonly eventBus: OpenProjectWritebackServiceOptions['eventBus'];
   private readonly fetchFn: typeof fetch;
   private readonly git: GitRunner;
@@ -97,6 +106,7 @@ export class OpenProjectWritebackService {
   private readonly bound = (type: string, taskId?: string, payload?: unknown) => {
     if (type === 'task.done' || type === 'task.merged' || type === 'task.blocked') void this.handleTaskEvent(type, taskId, payload);
     if (type === 'batch.dispatched') void this.handleBatchDispatched(payload);
+    if (type === 'batch.discarded') void this.handleBatchDiscarded(payload);
     if (type === 'deploy.succeeded' || type === 'gitea.sync.succeeded') void this.handlePushEvent(type, payload);
   };
   private started = false;
@@ -110,6 +120,7 @@ export class OpenProjectWritebackService {
     this.taskService = options.taskService;
     this.batchService = options.batchService;
     this.taskBatchRepo = options.taskBatchRepo;
+    this.reviewRepo = options.reviewRepo;
     this.eventBus = options.eventBus;
     this.fetchFn = options.fetchFn || globalThis.fetch;
     this.git = options.git || defaultGit;
@@ -137,15 +148,16 @@ export class OpenProjectWritebackService {
     if (!taskId) return;
     const task = this.taskRepo.get(taskId);
     if (!task?.externalRef) return;
-    const matches = this.trackerRepo.listAll().filter((row) => row.display_id === task.externalRef && parseIds(row).includes(taskId));
+    const matches = this.trackerRepo.listAll().filter((row) => parseIds(row).includes(taskId) || row.display_id === task.externalRef);
     for (const row of matches) await this.enqueue(row, async () => {
       const source = sourceFor(this.config, row.source_id);
-      if ((type === 'task.done' || type === 'task.blocked') && source?.triage === 'off' && splitConfig(source).workerMayRequest !== false) {
-        const report = type === 'task.done' ? task.doneReport : task.blockedReport;
-        if (task.slug.endsWith('-plan') || splitSection(report)) {
-          await this.handleSplitPlanDone(this.latest(row), task, report || '');
-          return;
-        }
+      const isPlanTask = task.slug.endsWith('-plan');
+      const report = type === 'task.done' ? task.doneReport : task.blockedReport;
+      const hasSplit = Boolean(splitSection(report));
+      const workerMayRequest = source ? splitConfig(source).workerMayRequest !== false : true;
+      if ((type === 'task.done' || type === 'task.blocked') && (isPlanTask || (workerMayRequest && hasSplit))) {
+        await this.handleSplitPlanDone(this.latest(row), task, report || '', type === 'task.blocked' ? 'blocked' : 'done');
+        return;
       }
       if (type === 'task.done' && isTriageTaskSlug(task.slug)) {
         await this.handleTriageDone(this.latest(row), task);
@@ -161,30 +173,69 @@ export class OpenProjectWritebackService {
     });
   }
 
-  private async handleSplitPlanDone(row: TrackerItemRow, task: TaskRow, report: string): Promise<void> {
+  private async handleSplitPlanDone(row: TrackerItemRow, task: TaskRow, report: string, sourceKind: 'done' | 'blocked' = 'done'): Promise<void> {
     const source = sourceFor(this.config, row.source_id);
     if (!source || !this.batchService) return;
-    const parsed = parseSplitPlan(report, splitConfig(source).maxParts, task.projectId);
+    const parsed = parseSplitPlan(report, splitConfig(source).maxParts, task.projectId, sourceKind);
     if (!parsed.plan) {
+      const feedback = parsed.errors.join('\n');
+      const newBody = `${task.body || ''}\n\n## Feedback review\n\n${feedback}`;
+      this.taskRepo.update(task.id, {
+        body: newBody,
+        status: 'queued',
+        resume: 1,
+        reviewStep: 0,
+      });
       this.eventBus.emit('tracker.split_invalid', task.id, { sourceId: row.source_id, displayId: row.display_id, errors: parsed.errors });
+      return;
+    }
+    if (parsed.plan.parts.length === 1) {
+      const single = parsed.plan.parts[0];
+      const newBody = `Ticket: [${row.display_id}]\n\nKế hoạch chỉ có 1 phần, thực hiện như task thường:\n${single.description || single.title}\n\nYêu cầu: sửa code, chạy test, commit theo quy ước và ghi DONE kèm ## Comment cho tester.`;
+      this.taskRepo.update(task.id, {
+        body: newBody,
+        status: 'queued',
+        resume: 1,
+        reviewStep: 0,
+      });
+      this.eventBus.emit('tracker.split_single_task', task.id, { sourceId: row.source_id, displayId: row.display_id });
       return;
     }
     const current = parseState(row);
     if (current.split?.children?.length) return;
     const prefix = `op-${row.display_id.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+    const reviews = this.reviewRepo?.getByTask(task.id) || [];
+    const reviewSummary = reviews.map((r, i) => `Vòng ${i + 1} (${r.actor || 'reviewer'}, ${r.verdict}): ${r.feedback || ''}`).join('\n\n');
     const batch = this.batchService.createBatch({
       project: task.projectId,
       title: `[${row.display_id}] ${task.title}`,
-      goal: JSON.stringify({ kind: 'openproject-split', sourceId: row.source_id, wpId: row.wp_id, displayId: row.display_id, plan: parsed.plan, planTaskId: task.id }),
+      goal: JSON.stringify({
+        kind: 'openproject-split',
+        sourceId: row.source_id,
+        wpId: row.wp_id,
+        displayId: row.display_id,
+        plan: parsed.plan,
+        planTaskId: task.id,
+        reviewSummary: reviewSummary || undefined,
+        ticketUrl: `${source.url.replace(/\/+$/, '')}/work_packages/${row.wp_id}`,
+      }),
       createdBy: 'openproject-split',
       dispatch: source.autoStart,
-      tasks: parsed.plan.parts.map((part) => ({
-        slug: `${prefix}-${part.index}`,
-        title: `[${row.display_id}] ${part.title}`,
-        level: part.level,
-        dependsOn: part.dependsOn.map((dep) => `${prefix}-${dep}`),
-        body: `Ticket cha: [${row.display_id}]\n\n${part.description}\n\nĐọc context ticket cha trong .agenthub/context/ticket/. Khi xong ghi ## Comment cho tester trong DONE; khi bị chặn ghi ## Cần quyết định trong BLOCKED.`,
-      })),
+      tasks: parsed.plan.parts.map((part) => {
+        const partProject = this.projectRepo.get(part.project) ? part.project : task.projectId;
+        return {
+          project: partProject,
+          slug: `${prefix}-${part.index}`,
+          title: `[${row.display_id}] ${part.title}`,
+          level: part.level,
+          dependsOn: part.dependsOn.map((dep) => {
+            const depPart = parsed.plan?.parts.find((p) => p.index === dep);
+            const depProject = depPart && this.projectRepo.get(depPart.project) ? depPart.project : task.projectId;
+            return `${depProject}/${prefix}-${dep}`;
+          }),
+          body: `Ticket cha: [${row.display_id}]\n\n${part.description}\n\nĐọc context ticket cha trong .agenthub/context/ticket/. Khi xong ghi ## Comment cho tester trong DONE; khi bị chặn ghi ## Cần quyết định trong BLOCKED.`,
+        };
+      }),
     });
     const children = batch.tasks.map((item) => item.id);
     for (const child of children) this.taskRepo.update(child, { externalRef: row.display_id });
@@ -207,27 +258,98 @@ export class OpenProjectWritebackService {
     const parent = source && this.trackerRepo.get(meta.sourceId, meta.wpId);
     if (!source || !key || !parent) return;
     const state = parseState(parent);
-    if (state.split?.childTickets || !splitConfig(source).createChildTickets) {
-      if (!splitConfig(source).createChildTickets) await new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn }).addComment(meta.wpId, `**[AgentHub] Kế hoạch**\n${meta.plan.parts.map((part) => `- ${part.title}`).join('\n')}`);
+    const splitConf = splitConfig(source);
+
+    if (!splitConf.createChildTickets) {
+      if (!state.split?.planCommented) {
+        const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
+        await client.addComment(meta.wpId, `**[AgentHub] Kế hoạch**\n${meta.plan.parts.map((part) => `- ${part.title}`).join('\n')}`);
+        state.split = { ...(state.split || {}), planTaskId: meta.planTaskId, plan: meta.plan, planCommented: true };
+        this.save(parent, state);
+      }
       return;
     }
+
     const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
-    const childTickets: Record<string, { id: number; displayId: string; url: string }> = {};
+    const childTickets: Record<string, { id: number; displayId: string; url: string }> = {
+      ...(state.split?.childTickets || {}),
+    };
     const parentTasks = parseIds(parent).map((id) => this.taskRepo.get(id)).filter((item): item is TaskRow => Boolean(item));
     try {
       for (const part of meta.plan.parts) {
-        const task = parentTasks.find((item) => item.title.endsWith(`] ${part.title}`));
+        const task = parentTasks.find((item) => item.slug.endsWith(`-${part.index}`));
         if (!task) continue;
-        const created = await client.createWorkPackage({ subject: `[${meta.displayId}] ${part.title}`, descriptionMarkdown: part.description, typeId: source.createTypeId ?? undefined, parentId: meta.wpId, assigneeMe: true, statusId: source.createStatusId ?? undefined });
+        if (childTickets[task.id]) continue;
+
+        const created = await client.createWorkPackage({
+          subject: `[${meta.displayId}] ${part.title}`,
+          descriptionMarkdown: part.description,
+          typeId: source.createTypeId ?? undefined,
+          parentId: meta.wpId,
+          assigneeMe: true,
+          statusId: source.createStatusId ?? undefined,
+        });
         childTickets[task.id] = created;
         this.taskRepo.update(task.id, { externalRef: created.displayId });
-        this.trackerRepo.upsert({ source_id: source.id, wp_id: created.id, display_id: created.displayId, status_id: null, updated_at: new Date(this.now()).toISOString(), last_comment_id: null, task_ids: JSON.stringify([task.id]), writeback: '{}' });
+        this.trackerRepo.upsert({
+          source_id: source.id,
+          wp_id: created.id,
+          display_id: created.displayId,
+          status_id: null,
+          updated_at: new Date(this.now()).toISOString(),
+          last_comment_id: null,
+          task_ids: JSON.stringify([task.id]),
+          writeback: '{}',
+        });
+        state.split = {
+          ...(state.split || {}),
+          planTaskId: meta.planTaskId,
+          plan: meta.plan,
+          childTickets,
+          children: Object.keys(childTickets),
+        };
+        this.save(parent, state);
       }
-      const links = Object.values(childTickets).map((ticket) => `- [${ticket.displayId}](${ticket.url})`).join('\n');
-      await client.addComment(meta.wpId, `**[AgentHub] Kế hoạch**\n${meta.plan.parts.map((part) => `- ${part.title}`).join('\n')}${links ? `\n\nTicket con:\n${links}` : ''}`);
-      state.split = { ...(state.split || {}), planTaskId: meta.planTaskId, plan: meta.plan, childTickets, children: Object.keys(childTickets) };
-      this.save(parent, state);
-    } catch (error) { await this.handleError(parent, error, 'split child ticket creation'); }
+      if (!state.split?.planCommented) {
+        const links = Object.values(childTickets).map((ticket) => `- [${ticket.displayId}](${ticket.url})`).join('\n');
+        await client.addComment(
+          meta.wpId,
+          `**[AgentHub] Kế hoạch**\n${meta.plan.parts.map((part) => `- ${part.title}`).join('\n')}${links ? `\n\nTicket con:\n${links}` : ''}`
+        );
+        state.split.planCommented = true;
+        this.save(parent, state);
+      }
+    } catch (error) {
+      await this.handleError(parent, error, 'split child ticket creation');
+    }
+  }
+
+  private async handleBatchDiscarded(payload: unknown): Promise<void> {
+    const batchId = payload && typeof payload === 'object' && typeof (payload as { batchId?: unknown }).batchId === 'string'
+      ? (payload as { batchId: string }).batchId : undefined;
+    if (!batchId || !this.taskBatchRepo) return;
+    const batch = this.taskBatchRepo.get(batchId);
+    if (!batch?.goal) return;
+    let meta: { kind?: string; sourceId: string; wpId: number; displayId: string };
+    try { meta = JSON.parse(batch.goal); } catch { return; }
+    if (meta.kind !== 'openproject-split') return;
+    const source = sourceFor(this.config, meta.sourceId);
+    const key = source && readOpenProjectKey(this.config.hubHome, source.id);
+    const parent = source && this.trackerRepo.get(meta.sourceId, meta.wpId);
+    if (!source || !key || !parent) return;
+    const state = parseState(parent);
+    if (state.split?.planCommented) {
+      try {
+        const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
+        await client.addComment(meta.wpId, '**[AgentHub] Huỷ kế hoạch**');
+        state.split.planCommented = false;
+        state.split.planDiscarded = true;
+        this.save(parent, state);
+        this.eventBus.emit('tracker.split_discarded', undefined, { sourceId: meta.sourceId, displayId: meta.displayId });
+      } catch (error) {
+        await this.handleError(parent, error, 'split plan discard comment');
+      }
+    }
   }
 
   private async handleTriageDone(row: TrackerItemRow, task: TaskRow): Promise<void> {
@@ -434,6 +556,7 @@ export class OpenProjectWritebackService {
   private async requestReview(row: TrackerItemRow, task: TaskRow): Promise<void> {
     row = this.latest(row);
     const state = parseState(row);
+    if (state.split?.children?.includes(task.id)) return;
     const content = section(task.blockedReport, '## Cần quyết định');
     if (!content) return;
     if (state.reviewRequested?.[task.id] === content) return;
@@ -500,7 +623,13 @@ export class OpenProjectWritebackService {
     try {
       const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
       if (!currentState.commented) {
-        await client.addComment(row.wp_id, `**[AgentHub] Đã sửa**\n${comments.map((text, i) => `### ${tasks[i].id}\n${text}`).join('\n\n')}`);
+        const commentList = comments.map((text, i) => {
+          const childTask = tasks[i];
+          const childTicket = currentState.split?.childTickets?.[childTask.id];
+          const heading = childTicket ? `[${childTicket.displayId}] ${childTask.title}` : (childTask.title || childTask.id);
+          return `### ${heading}\n${text}`;
+        }).join('\n\n');
+        await client.addComment(row.wp_id, `**[AgentHub] Đã sửa**\n${commentList}`);
         currentState.commented = true;
       }
       if (source.autoResolve && source.resolvedStatusId !== null && !currentState.resolved) {

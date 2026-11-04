@@ -356,6 +356,107 @@ describe('Gitea Integration', () => {
   });
 
   describe('5. GiteaSyncService Flow Cases', () => {
+    it('startSync trả started/running, lưu last và phục hồi state sau khi tạo service mới', async () => {
+      const f = initGitRepoFixture();
+      saveGiteaToken(f.hubHome, 'p1', 'tok-123');
+      const projectRepo = {
+        get: () => ({
+          id: 'p1',
+          name: 'Project 1',
+          path: f.repoDir,
+          settings: JSON.stringify({
+            gitea: {
+              enabled: true,
+              url: 'https://gitea.example.com',
+              sourceBranch: 'source',
+              targetBranch: 'target',
+            },
+          }),
+        }),
+        getAll: () => [],
+      } as unknown as ProjectRepo;
+      const service = new GiteaSyncService({
+        config: makeTestConfig(f.hubHome),
+        projectRepo,
+        eventBus: { emit: () => true } as unknown as EventBus,
+        service: { createTask: vi.fn() as any },
+      });
+
+      let finish!: () => void;
+      const work = new Promise<void>((resolve) => { finish = resolve; });
+      (service as any).executeSync = vi.fn(async () => {
+        (service as any).steps.set('p1', 'fetch');
+        await work;
+        return { ok: true, status: 'succeeded', prNumber: 7, url: 'https://gitea.example.com/acme/repo/pulls/7' };
+      });
+
+      const started = service.startSync('p1');
+      expect(started.status).toBe('started');
+      expect(started.startedAt).toBeTruthy();
+      expect(service.getStatus('p1')).toMatchObject({
+        running: true,
+        startedAt: started.startedAt,
+        step: 'fetch',
+      });
+
+      expect(service.startSync('p1')).toEqual({ status: 'running', startedAt: started.startedAt });
+      finish();
+      await vi.waitFor(() => expect(service.getStatus('p1').last).toMatchObject({
+        status: 'succeeded',
+        prNumber: 7,
+        finishedAt: expect.any(String),
+      }));
+      expect(service.getStatus('p1').running).toBe(false);
+      expect(fs.statSync(path.join(f.hubHome, 'gitea-sync-state.json')).mode & 0o777).toBe(0o600);
+
+      const restarted = new GiteaSyncService({
+        config: makeTestConfig(f.hubHome),
+        projectRepo,
+        eventBus: { emit: () => true } as unknown as EventBus,
+        service: { createTask: vi.fn() as any },
+      });
+      expect(restarted.getStatus('p1').last).toMatchObject({ status: 'succeeded', prNumber: 7 });
+    });
+
+    it('giữ event loop hoạt động trong lúc git fetch giả chạy chậm', async () => {
+      const f = initGitRepoFixture();
+      saveGiteaToken(f.hubHome, 'p1', 'tok-123');
+      const fakeGitDir = path.join(f.root, 'fake-bin');
+      fs.mkdirSync(fakeGitDir);
+      fs.writeFileSync(path.join(fakeGitDir, 'git'), `#!/bin/sh
+if [ "$3" = "remote" ] && [ "$4" = "get-url" ]; then
+  printf '%s\\n' 'https://gitea.example.com/acme/repo.git'
+elif [ "$3" = "fetch" ]; then
+  sleep 0.25
+fi
+`, { mode: 0o755 });
+      const originalPath = process.env.PATH;
+      vi.stubEnv('PATH', `${fakeGitDir}${path.delimiter}${originalPath || ''}`);
+      const projectRepo = {
+        get: () => ({
+          id: 'p1', name: 'Project 1', path: f.repoDir,
+          settings: JSON.stringify({ gitea: { enabled: true, url: 'https://gitea.example.com', sourceBranch: 'source', targetBranch: 'target' } }),
+        }),
+        getAll: () => [],
+      } as unknown as ProjectRepo;
+      const service = new GiteaSyncService({
+        config: makeTestConfig(f.hubHome),
+        projectRepo,
+        eventBus: { emit: () => true } as unknown as EventBus,
+        service: { createTask: vi.fn() as any },
+      });
+      let ticks = 0;
+      const timer = setInterval(() => { ticks += 1; }, 20);
+      try {
+        const result = await service.syncProject('p1');
+        expect(result).toEqual({ ok: true, status: 'skipped', reason: 'Không có commit mới cần đồng bộ' });
+        expect(ticks).toBeGreaterThan(3);
+      } finally {
+        clearInterval(timer);
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('skips sync when there are no non-merge commits to sync', async () => {
       const f = initGitRepoFixture();
       saveGiteaToken(f.hubHome, 'p1', 'tok-123');
@@ -920,6 +1021,8 @@ describe('Gitea Integration', () => {
         }),
       };
 
+      let syncStarted = false;
+      const startedAt = '2026-11-04T10:00:00.000Z';
       const mockService = {
         getProject: vi.fn().mockReturnValue(mockProject),
         saveGiteaToken: vi.fn((id: string, token: string) => {
@@ -930,7 +1033,11 @@ describe('Gitea Integration', () => {
           tokenConfigured: isGiteaTokenConfigured(hubHome, id),
           remote: { host: 'gitea.example.com', owner: 'owner', repo: 'repo' },
         })),
-        triggerGiteaSync: vi.fn().mockResolvedValue({ ok: true, status: 'succeeded' }),
+        triggerGiteaSync: vi.fn(() => {
+          if (syncStarted) return { status: 'running', startedAt };
+          syncStarted = true;
+          return { status: 'started', startedAt };
+        }),
       };
 
       // Register routes
@@ -943,9 +1050,10 @@ describe('Gitea Integration', () => {
         const { id } = req.params as { id: string };
         return mockService.getGiteaStatus(id);
       });
-      app.post('/api/projects/:id/gitea/sync', async (req) => {
+      app.post('/api/projects/:id/gitea/sync', async (req, reply) => {
         const { id } = req.params as { id: string };
-        return mockService.triggerGiteaSync(id);
+        const result = mockService.triggerGiteaSync(id);
+        return reply.status(result.status === 'started' ? 202 : 200).send(result);
       });
 
       await app.ready();
@@ -977,8 +1085,11 @@ describe('Gitea Integration', () => {
 
       // POST sync
       const postSync = await app.inject({ method: 'POST', url: '/api/projects/proj1/gitea/sync' });
-      expect(postSync.statusCode).toBe(200);
-      expect(JSON.parse(postSync.body)).toEqual({ ok: true, status: 'succeeded' });
+      expect(postSync.statusCode).toBe(202);
+      expect(JSON.parse(postSync.body)).toEqual({ status: 'started', startedAt });
+      const postSyncAgain = await app.inject({ method: 'POST', url: '/api/projects/proj1/gitea/sync' });
+      expect(postSyncAgain.statusCode).toBe(200);
+      expect(JSON.parse(postSyncAgain.body)).toEqual({ status: 'running', startedAt });
 
       await app.close();
     });

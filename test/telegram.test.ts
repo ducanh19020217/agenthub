@@ -1266,6 +1266,7 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       bot.handleEvent('quota.exhausted', undefined, { profile: 'pa-gemini', family: 'claude', engine: 'agy', allExhausted: true });
       bot.handleEvent('quota.exhausted', undefined, { profile: 'pa-gemini', family: 'gpt', engine: 'agy', allExhausted: true });
       bot.handleEvent('claude.quota_exhausted', undefined, { fallbackAvailable: false, profileName: 'pa-gemini' });
+      bot.handleEvent('review.fallback', 'p1/task-fb', { title: 'Task fallback review', from: 'codex', to: 'claude' });
       await new Promise((resolve) => setTimeout(resolve, 120));
       await bot.flushQueue(CHAT_ID);
 
@@ -2591,25 +2592,35 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     expect(sends[1].body?.text).toContain('P2 failed');
   });
 
-  it('thông báo review.fallback một lần cho mỗi task ("Codex hết quota, Claude đang duyệt …")', async () => {
+  it('silences review.fallback khi còn quota và chỉ thông báo một lần cho mỗi task khi hết sạch ("Codex hết quota, Claude đang duyệt …")', async () => {
+    ctx.profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
     const bot = createBot('suggest');
 
+    // 1. Khi còn quota (p1 agy runnable): không thông báo Telegram
     bot.handleEvent('review.fallback', 'p1/task-fb', { title: 'Task fallback review', from: 'codex', to: 'claude', profile: 'claude-1' });
     await bot.flushQueue(CHAT_ID);
-
     let sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends).toHaveLength(0);
+
+    // 2. Khi runnableCapacity rỗng (hết sạch): thông báo một lần cho task
+    const future = Math.floor(currentTime / 1000) + 3600;
+    for (const family of ['gemini', 'claude', 'gpt']) ctx.quotaMarkRepo.mark('p1', family, future);
+    bot.handleEvent('review.fallback', 'p1/task-fb', { title: 'Task fallback review', from: 'codex', to: 'claude', profile: 'claude-1', allExhausted: true });
+    await bot.flushQueue(CHAT_ID);
+
+    sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
     expect(sends).toHaveLength(1);
     expect(sends[0].body?.text).toContain('Codex hết quota, Claude đang duyệt …');
     expect(sends[0].body?.text).toContain('Task fallback review');
 
     // Subsequent review.fallback event for the same task is deduplicated (not sent again)
-    bot.handleEvent('review.fallback', 'p1/task-fb', { title: 'Task fallback review', from: 'codex', to: 'claude', profile: 'claude-1' });
+    bot.handleEvent('review.fallback', 'p1/task-fb', { title: 'Task fallback review', from: 'codex', to: 'claude', profile: 'claude-1', allExhausted: true });
     await bot.flushQueue(CHAT_ID);
     sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
     expect(sends).toHaveLength(1);
 
-    // Another task gets its notification
-    bot.handleEvent('review.fallback', 'p1/task-fb-2', { title: 'Task 2', from: 'codex', to: 'claude' });
+    // Another task gets its notification when allExhausted
+    bot.handleEvent('review.fallback', 'p1/task-fb-2', { title: 'Task 2', from: 'codex', to: 'claude', allExhausted: true });
     await bot.flushQueue(CHAT_ID);
     sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
     expect(sends).toHaveLength(2);

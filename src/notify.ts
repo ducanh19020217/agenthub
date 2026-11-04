@@ -56,6 +56,7 @@ export class NotificationService {
   private boundHandler: ((type: string, taskId?: string, payload?: unknown) => void) | null = null;
   private quietHoursQueue: Array<{ type: string; taskId?: string; payload?: unknown; timestamp: number }> = [];
   private focusDigest = new Map<string, number>();
+  private mergeConflictNotified = new Set<string>();
   private get appName(): string { return this.config.branding?.name || 'AgentHub'; }
   private checkTimer?: NodeJS.Timeout;
 
@@ -175,9 +176,38 @@ export class NotificationService {
       'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
       'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.waiting_quota',
       'quota.cleared', 'remote_deploy.failed', 'remote_deploy.health_timeout',
+      'merge.conflict', 'merge.failed',
     ]).has(type)) return;
 
     const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+
+    if (type === 'merge.conflict') {
+      const isAutoRetried = p.autoRetried === true || (
+        p.autoRetried === undefined &&
+        typeof p.conflictCount === 'number' &&
+        p.conflictCount <= 3 &&
+        (() => {
+          if (!taskId || !this.taskRepo) return true;
+          const task = this.taskRepo.get(taskId);
+          return task && task.status !== 'cancelled';
+        })()
+      );
+      if (isAutoRetried) return;
+    }
+
+    if (type === 'merge.failed') {
+      if (p.autoFixCreated === true) return;
+      if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+        /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+      )) {
+        return;
+      }
+    }
+
+    if (taskId && /-fix-merge(?:-\d+)?$/.test(taskId)) {
+      const task = this.taskRepo?.get(taskId);
+      if (!task || task.status === 'draft') return;
+    }
     const notifyConfig = this.config.telegram?.notify;
     const notifyPerModel = notifyConfig
       ? typeof notifyConfig.quotaPerModel === 'boolean' ? notifyConfig.quotaPerModel : (notifyConfig as unknown as { quota?: boolean }).quota === true
@@ -229,6 +259,8 @@ export class NotificationService {
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||
+        type === 'merge.conflict' ||
+        type === 'merge.failed' ||
         type.startsWith('remote_deploy.') ||
         type.startsWith('tracker.') ||
         allExhausted ||
@@ -407,6 +439,31 @@ export class NotificationService {
       case 'review.escalated': {
         const title = this.resolveTaskTitle(taskId, p);
         this.notify(`Cần người duyệt: ${title}`, 'normal');
+        break;
+      }
+
+      case 'merge.conflict': {
+        if (!taskId) break;
+        if (this.mergeConflictNotified.has(taskId)) break;
+        this.mergeConflictNotified.add(taskId);
+
+        const count = typeof p.conflictCount === 'number' ? p.conflictCount : 1;
+        const filesText = this.extractConflictFiles(p);
+        this.notify(`⚠️ ${taskId} xung đột merge lần thứ ${count}, cần xem: ${filesText}`, 'critical');
+        break;
+      }
+
+      case 'merge.failed': {
+        if (p.autoFixCreated === true) break;
+        if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+          /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+        )) {
+          break;
+        }
+        const message = typeof p.message === 'string' ? p.message : 'Lỗi khi merge tự động';
+        const taskLabel = taskId || 'Task';
+        const title = p.environment ? 'Lỗi môi trường khi tự động gộp' : 'Lỗi tự động gộp';
+        this.notify(`${this.appName}: ${title}: ${taskLabel} - ${message}`, 'critical');
         break;
       }
 
@@ -635,6 +692,17 @@ export class NotificationService {
       return taskId;
     }
     return 'Task';
+  }
+
+  private extractConflictFiles(p: Record<string, unknown>): string {
+    if (typeof p.files === 'string' && p.files.trim()) return p.files.trim();
+    if (Array.isArray(p.files) && p.files.length > 0) return p.files.join(', ');
+    if (typeof p.message === 'string') {
+      const match = p.message.match(/Xung đột merge ở:\s*(.+)/i);
+      if (match && match[1].trim()) return match[1].trim();
+      return p.message.trim();
+    }
+    return '(không rõ file)';
   }
 
   private resolveResetTime(p: Record<string, unknown>, profile: string, family: string): string {

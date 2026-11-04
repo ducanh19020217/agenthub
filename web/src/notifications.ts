@@ -2,7 +2,11 @@ import { EventItem } from './types/api';
 import { getActiveLocale } from './utils/apiError';
 import { formatEventType } from './utils/events';
 
-const IMPORTANT = new Set(['brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.pause_reminder']);
+const IMPORTANT = new Set([
+  'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
+  'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.pause_reminder',
+  'merge.conflict', 'merge.failed',
+]);
 const DESKTOP_EVENTS = new Set([
   ...IMPORTANT,
   'batch.created', 'task.paused', 'load.task_paused', 'load.high', 'task.resumed', 'task.pause_reminder',
@@ -197,6 +201,21 @@ export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 
       ? `CI passed: [${projId}] ${workflow}${sha ? ` @ ${sha}` : ''}`
       : `CI đã xanh: [${projId}] ${workflow}${sha ? ` @ ${sha}` : ''}`;
   }
+  if (event.type === 'merge.conflict') {
+    const count = typeof payload.conflictCount === 'number' ? payload.conflictCount : 1;
+    let files = '';
+    if (typeof payload.files === 'string') files = payload.files;
+    else if (Array.isArray(payload.files)) files = payload.files.join(', ');
+    else if (typeof payload.message === 'string') {
+      const match = payload.message.match(/Xung đột merge ở:\s*(.+)/i);
+      files = match ? match[1].trim() : payload.message;
+    }
+    return `⚠️ ${event.taskId || 'Task'} xung đột merge lần thứ ${count}, cần xem: ${files || '(không rõ file)'}`;
+  }
+  if (event.type === 'merge.failed') {
+    const title = payload.environment ? 'Lỗi môi trường khi tự động gộp' : 'Lỗi tự động gộp';
+    return `${appName}: ${title}: ${event.taskId || 'Task'}`;
+  }
   return isEn ? `${appName} has an update requiring attention` : `${appName} có cập nhật cần chú ý`;
 }
 
@@ -209,8 +228,19 @@ export function shouldNotifyBrowserEvent(
   if (level === 'off' || !DESKTOP_EVENTS.has(event.type)) return false;
   if (level === 'important' && !IMPORTANT.has(event.type)) return false;
   const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
+  if (event.type === 'merge.conflict') {
+    if (payload.autoRetried === true) return false;
+    if (typeof payload.conflictCount === 'number' && payload.conflictCount <= 3 && payload.autoRetried !== false) return false;
+  }
+  if (event.type === 'merge.failed') {
+    if (payload.autoFixCreated === true) return false;
+  }
+  if (event.taskId && /-fix-merge(?:-\d+)?$/.test(event.taskId)) {
+    return false;
+  }
   if (options.brainMode === 'auto' && !new Set([
     'brain.notify', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed',
+    'merge.conflict', 'merge.failed',
   ]).has(event.type)) return false;
   if (isBrowserQuietHours(options.quietHours, event.ts) && event.type !== 'disk.low' && event.type !== 'disk.docker_low' && event.type !== 'quota.exhausted') return false;
   if (event.type === 'quota.exhausted') {
@@ -265,6 +295,8 @@ export function notifyBrowserEvent(
     ? `quota:${engine || 'unknown'}:${family || 'unknown'}`
     : event.type === 'task.paused' || event.type === 'load.task_paused' || event.type === 'load.high'
     ? 'load:summary'
+    : event.type === 'merge.conflict'
+    ? `merge.conflict:${event.taskId || ''}`
     : `${event.type}:${event.taskId || ''}:${JSON.stringify(payload)}`;
 
   const key = `agenthub:notification:${identity}`;

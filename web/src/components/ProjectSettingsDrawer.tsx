@@ -2478,7 +2478,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 giteaStatus.data?.tokenConfigured ? (
                   <span
                     data-testid="gitea-token-badge"
-                    className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-[color-mix(in_srgb,var(--t-success,#16a34a)_15%,transparent)] text-[var(--t-success,#16a34a)]"
+                    className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)] text-[var(--t-ok)] border border-[var(--t-ok)]/30"
                   >
                     <CheckCircle2 className="h-3 w-3" />
                     {t('integrations.configured')}

@@ -752,6 +752,11 @@ export function formatEventSummary(
       return `${taskLabel} bắt đầu chạy`;
     }
 
+    case 'task.auto_closed':
+      return p.reason === 'merged_elsewhere'
+        ? `${taskLabel} tự động hoàn thành (đã merge qua nhánh khác)`
+        : `${taskLabel} đã tự động đóng`;
+
     case 'task.blocked':
       return `${taskLabel} bị chặn`;
 
@@ -759,7 +764,9 @@ export function formatEventSummary(
       return `${taskLabel} thất bại`;
 
     case 'task.done':
-      return `${taskLabel} hoàn thành`;
+      return p.reason === 'merged_elsewhere'
+        ? `${taskLabel} hoàn thành (đã merge qua nhánh khác)`
+        : `${taskLabel} hoàn thành`;
 
     case 'task.cancelled':
       return `${taskLabel} đã bị hủy`;
@@ -3941,6 +3948,7 @@ export class AppService {
     if (parsed.verdict === 'approved' && parsed.merge) {
       const project = this.projectRepo.get(task.projectId);
       if (!project) throw new HttpError(404, 'not_found', `Project "${task.projectId}" không tồn tại`);
+      this.scheduler.setTaskMerging(taskId, true);
       try {
         mergeResult = await mergeTaskIntoBase(task, project, {
           hubHome: this.config.hubHome,
@@ -3977,6 +3985,8 @@ export class AppService {
           throw new HttpError(error.statusCode, error.error, error.message);
         }
         throw error;
+      } finally {
+        this.scheduler.setTaskMerging(taskId, false);
       }
     }
 
@@ -4228,6 +4238,10 @@ export class AppService {
       }
     }
     return cancelled;
+  }
+
+  async autoCloseMergedTasks(): Promise<number> {
+    return this.scheduler.autoCloseMergedTasks();
   }
 
   retryTask(idParam: string, raw: unknown): TaskRow {

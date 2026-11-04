@@ -6,7 +6,7 @@ import { TaskDetailPage } from '../pages/TaskDetailPage';
 import { LocaleProvider } from '../context/LocaleContext';
 import * as client from '../api/client';
 import * as sse from '../api/sse';
-import { TaskDetail } from '../types/api';
+import { TaskDetail, TaskStatus } from '../types/api';
 
 describe('TaskDetailPage', () => {
   let queryClient: QueryClient;
@@ -129,6 +129,33 @@ describe('TaskDetailPage', () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['task', 'proj-1~t1'] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['tasks'] });
     expect(screen.queryByRole('heading', { name: /Xác nhận hủy task/i })).not.toBeInTheDocument();
+  });
+
+  it('2b. Nút Hủy hiển thị với blocked, failed, review, waiting_quota, paused, draft và ẩn với done, cancelled', async () => {
+    const statusesToShow = ['blocked', 'failed', 'review', 'waiting_quota', 'paused', 'draft'] as const;
+    for (const status of statusesToShow) {
+      queryClient.clear();
+      vi.spyOn(client, 'getTask').mockResolvedValue({
+        ...baseTask,
+        status: status as unknown as TaskStatus,
+      });
+      const { unmount } = renderPage();
+      expect(await screen.findByRole('button', { name: /^Hủy$/i })).toBeInTheDocument();
+      unmount();
+    }
+
+    const statusesToHide = ['done', 'cancelled'] as const;
+    for (const status of statusesToHide) {
+      queryClient.clear();
+      vi.spyOn(client, 'getTask').mockResolvedValue({
+        ...baseTask,
+        status: status as unknown as TaskStatus,
+      });
+      const { unmount } = renderPage();
+      await screen.findByText('Task Alpha');
+      expect(screen.queryByRole('button', { name: /^Hủy$/i })).not.toBeInTheDocument();
+      unmount();
+    }
   });
 
   it('3. Nút Thử lại kèm ghi chú: mở modal khi status failed, nhập note và gọi retryTask', async () => {

@@ -1511,6 +1511,7 @@ export const en: typeof vi = {
       install_refresh_error: "Environment setup refresh error",
     },
     task: {
+      auto_closed: "Task auto-closed",
       blocked: "Task blocked",
       cancelled: "Task cancelled",
       checking: "Task checking",
@@ -1555,6 +1556,7 @@ export const en: typeof vi = {
     "dotnet-build": ".NET build",
   },
   reasons: {
+    merged_elsewhere: "Merged via another branch",
     lock_busy: "Reviewer lock is busy",
     quota: "Reviewer quota exhausted",
     timeout: "Review timed out",

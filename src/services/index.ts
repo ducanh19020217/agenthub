@@ -3821,6 +3821,7 @@ export class AppService {
     if (parsed.verdict === 'approved' && parsed.merge) {
       const project = this.projectRepo.get(task.projectId);
       if (!project) throw new HttpError(404, 'not_found', `Project "${task.projectId}" không tồn tại`);
+      this.scheduler.setTaskMerging(taskId, true);
       try {
         mergeResult = await mergeTaskIntoBase(task, project, {
           hubHome: this.config.hubHome,
@@ -3857,6 +3858,8 @@ export class AppService {
           throw new HttpError(error.statusCode, error.error, error.message);
         }
         throw error;
+      } finally {
+        this.scheduler.setTaskMerging(taskId, false);
       }
     }
 
@@ -4110,7 +4113,7 @@ export class AppService {
     return cancelled;
   }
 
-  autoCloseMergedTasks(): number {
+  async autoCloseMergedTasks(): Promise<number> {
     return this.scheduler.autoCloseMergedTasks();
   }
 

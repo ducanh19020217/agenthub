@@ -175,7 +175,7 @@ export class NotificationService {
     if (level === 'off') return;
     if (level === 'important' && !new Set([
       'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
-      'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.waiting_quota',
+      'disk.low', 'disk.ok', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.waiting_quota',
       'quota.cleared', 'remote_deploy.failed', 'remote_deploy.health_timeout',
     ]).has(type)) return;
 
@@ -475,7 +475,7 @@ export class NotificationService {
           this.diskBlockedNotified = false;
           this.diskState = 'ok';
           this.lastSentDisk.set('ok', now);
-          this.notify(`✅ Đã đủ dung lượng, ${resumedCount} task tiếp tục chạy`, 'normal');
+          this.notify(`✅ Đã đủ dung lượng, ${resumedCount} task tiếp tục chạy`, 'critical');
           break;
         }
 

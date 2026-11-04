@@ -326,6 +326,73 @@ describe('NotificationService (Desktop Notifications)', () => {
     notifier.stop();
   });
 
+  it('sends critical notification with waiting tasks when disk blocks dispatch, repeats after 60m, and notifies recovery', () => {
+    config.notifications.desktopLevel = 'critical';
+    taskRepo.insert({ id: 'proj/a', projectId: 'proj', slug: 'a', title: 'Task A', status: 'waiting_quota', waitReason: 'disk', level: 'easy' });
+    taskRepo.insert({ id: 'proj/b', projectId: 'proj', slug: 'b', title: 'Task B', status: 'waiting_quota', waitReason: 'disk', level: 'easy' });
+    taskRepo.insert({ id: 'proj/c', projectId: 'proj', slug: 'c', title: 'Task C', status: 'waiting_quota', waitReason: 'disk', level: 'easy' });
+
+    let current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    // 1. Emit disk.low: blocks dispatch -> critical urgency notification
+    eventBus.emit('disk.low', undefined, {
+      label: 'Worktrees',
+      path: '/worktrees',
+      freeGB: 1.4,
+      minFreeGB: 1.5,
+      cacheDir: '/cache',
+      cacheBytes: 2.5 * 1024 ** 3,
+    });
+
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args).toContain('critical');
+    const msg = execCalls[0].args.at(-1)!;
+    expect(msg).toContain('💾 Hết dung lượng: Worktrees (/worktrees) còn 1.4 GB, cần 1.5 GB.');
+    expect(msg).toContain('3 task đang phải chờ: a, b, c.');
+    expect(msg).toContain('Gợi ý: dọn thùng rác hoặc cache node_modules (/cache, 2.5 GB).');
+
+    // 2. 30 minutes later: still within 60 minutes -> throttled
+    current += 30 * 60_000;
+    eventBus.emit('disk.low', undefined, {
+      label: 'Worktrees',
+      path: '/worktrees',
+      freeGB: 1.4,
+      minFreeGB: 1.5,
+    });
+    expect(execCalls).toHaveLength(1);
+
+    // 3. 61 minutes later: 60m reminder fires
+    current += 31 * 60_000;
+    eventBus.emit('disk.low', undefined, {
+      label: 'Worktrees',
+      path: '/worktrees',
+      freeGB: 1.4,
+      minFreeGB: 1.5,
+    });
+    expect(execCalls).toHaveLength(2);
+
+    // 4. Recovery: disk.ok with resumed tasks
+    eventBus.emit('disk.ok', undefined, { freeGB: 10, minFreeGB: 1.5, resumedCount: 3 });
+    expect(execCalls).toHaveLength(3);
+    expect(execCalls[2].args.at(-1)).toBe('✅ Đã đủ dung lượng, 3 task tiếp tục chạy');
+
+    notifier.stop();
+  });
+
+  it('does not send recovery notification on disk.ok if there was no prior blocking notification', () => {
+    config.notifications.desktopLevel = 'all';
+    let current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    eventBus.emit('disk.ok', undefined, { freeGB: 10, resumedCount: 2 });
+    expect(execCalls).toHaveLength(0);
+
+    notifier.stop();
+  });
+
   it('treats quota exhaustion per engine, not across all profiles', () => {
     config.notifications.desktopLevel = 'important';
     quotaMarkRepo.mark('g1', 'gemini', Math.floor(Date.now() / 1000) + 3600);

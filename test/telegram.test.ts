@@ -1250,6 +1250,77 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(calls[0].body?.text).toContain('Ổ đĩa thấp');
     });
 
+    it('handles disk notifications with notify.disk toggle, waiting tasks list, 60m reminder, and recovery message', async () => {
+      config.telegram.notify.fallback = false;
+      config.telegram.notify.disk = true;
+
+      ctx.projectRepo.insert({
+        id: 'p1',
+        name: 'Project 1',
+        path: tmpDir,
+        defaultBranch: 'main',
+        envTemplate: null,
+        maxParallel: 2,
+        merge: JSON.stringify({ enabled: false }),
+      });
+
+      ctx.taskRepo.insert({ id: 'p1/t-alpha', projectId: 'p1', slug: 't-alpha', title: 'Task Alpha', status: 'waiting_quota', waitReason: 'disk', level: 'easy' });
+      ctx.taskRepo.insert({ id: 'p1/t-beta', projectId: 'p1', slug: 't-beta', title: 'Task Beta', status: 'waiting_quota', waitReason: 'disk', level: 'easy' });
+
+      recordedCalls = [];
+      // 1. Sends when notify.fallback = false and notify.disk = true
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, {
+        label: 'Worktrees',
+        path: '/worktrees',
+        freeGB: 1.4,
+        minFreeGB: 1.5,
+        cacheDir: '/cache',
+        cacheBytes: 2 * 1024 ** 3,
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      let calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      const text = calls[0].body?.text;
+      expect(text).toContain('💾 Hết dung lượng: Worktrees (/worktrees) còn 1.4 GB, cần 1.5 GB.');
+      expect(text).toContain('2 task đang phải chờ: t-alpha, t-beta.');
+      expect(text).toContain('Gợi ý: dọn thùng rác hoặc cache node_modules (/cache, 2.0 GB).');
+
+      // 2. Throttled within 60 minutes
+      recordedCalls = [];
+      currentTime += 30 * 60_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Worktrees', path: '/worktrees', freeGB: 1.4, minFreeGB: 1.5 });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
+
+      // 3. Reminds after 60 minutes
+      currentTime += 31 * 60_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Worktrees', path: '/worktrees', freeGB: 1.4, minFreeGB: 1.5 });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+
+      // 4. Recovery message sent when prior blocking notification was sent
+      recordedCalls = [];
+      ctx.scheduler.getEventBus().emit('disk.ok', undefined, { freeGB: 10, minFreeGB: 1.5, resumedCount: 2 });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('✅ Đã đủ dung lượng, 2 task tiếp tục chạy');
+
+      // 5. Does not send disk notifications when notify.disk = false
+      config.telegram.notify.disk = false;
+      recordedCalls = [];
+      currentTime += 65 * 60_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Worktrees', path: '/worktrees', freeGB: 1.4, minFreeGB: 1.5 });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
+
+      ctx.scheduler.getEventBus().emit('disk.ok', undefined, { freeGB: 10, minFreeGB: 1.5, resumedCount: 2 });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
+    });
+
     it('reproduces 2026-11-03 incident: claude/gpt exhausted on all 4 agy profiles, gemini and codex remain -> only 1 info, no critical', async () => {
       // Setup 4 agy profiles and 1 codex profile
       for (const name of ['g3', 'g4', 'pa-gemini', 'g2']) {

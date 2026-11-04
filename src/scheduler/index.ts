@@ -40,7 +40,7 @@ import { parseCodexTokens, parseShortstat, recalculateTaskLines, measureTaskLine
 const execFileAsync = promisify(execFile);
 import { ClaudeFailoverState } from '../chat/failover.js';
 import { ensureIntegrationNodeModules, ensureIntegrationWorktree } from '../projects/integration.js';
-import { buildReviewerPrompt, parseReviewerOutput, ReviewerVerdict } from '../reviewer.js';
+import { buildReviewerPrompt, parseReviewerOutput, ReviewerVerdict, isAutoReviewer, type ReviewerActor } from '../reviewer.js';
 import { CLAUDE_REVIEW_ENGINE_KEY } from '../engines/claude-review.js';
 import { parseReviewChain, reviewerModel, type ReviewChainStep } from '../review-chain.js';
 import { isOrphanProcess, listAllWorktreeProcesses, reap, reapSyncForWorktree } from '../reaper.js';
@@ -206,12 +206,6 @@ interface StartingTask {
   profileName: string;
 }
 
-type ReviewerActor = 'codex-reviewer' | 'claude-reviewer';
-
-/** Automated reviewers whose verdicts drive gates, round limits and auto-merge. */
-function isAutoReviewer(by: string | undefined): by is ReviewerActor {
-  return by === 'codex-reviewer' || by === 'claude-reviewer';
-}
 
 type ReviewSource = 'content' | 'operational';
 
@@ -2694,7 +2688,9 @@ export class Scheduler {
     // This counter is task-scoped. Keep it across chain steps so alternating
     // reviewers cannot reset the content-review limit.
     this.taskRepo.update(task.id, { reviewStep: nextStep });
+    task.reviewStep = nextStep;
     if (nextStep >= chain.length || chain[nextStep]?.mode === 'final') {
+      this.markReviewNotified(task, 'complete');
       this.emitReviewReadyIfReview(task.id, { reviewChainComplete: true, reviewStep: nextStep, reason });
     } else {
       this.eventBus.emit('review.gate_completed', task.id, { reviewStep: nextStep, reason });

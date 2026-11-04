@@ -3615,7 +3615,7 @@ export class TelegramBotService {
 
     // 1. Brain auto mode: suppress raw task notifications
     try {
-      const isSystemEvent = type === 'quota.exhausted' || type === 'claude.quota_exhausted' || type.startsWith('disk.') || type.startsWith('system.') || type.startsWith('hub.') || type.startsWith('deploy.') || type.startsWith('remote_deploy.') || type === 'profile.auth_expired' || type === 'chat.limit_waiting';
+      const isSystemEvent = type === 'quota.exhausted' || type === 'claude.quota_exhausted' || type.startsWith('disk.') || type.startsWith('system.') || type.startsWith('hub.') || type.startsWith('deploy.') || type.startsWith('remote_deploy.') || type === 'profile.auth_expired' || type === 'chat.limit_waiting' || type.startsWith('daily_report.');
     this.notificationProjectId = isSystemEvent ? null : projectId;
     this.notificationDedupProjectId = projectId;
     const focusProjectId = this.config.focus?.projectId;
@@ -3636,6 +3636,7 @@ export class TelegramBotService {
         type.startsWith('deploy.') ||
         type.startsWith('gitea.sync.') ||
         type.startsWith('remote_deploy.') ||
+        type.startsWith('daily_report.') ||
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||
@@ -3916,10 +3917,27 @@ export class TelegramBotService {
 
       case 'tracker.ticket_imported':
       case 'tracker.comment':
-      case 'tracker.poll_failed': {
+      case 'tracker.poll_failed':
+      case 'tracker.resolved':
+      case 'tracker.review_requested':
+      case 'tracker.writeback_failed': {
         const ref = typeof p.displayId === 'string' ? p.displayId : typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
-        const label = type === 'tracker.ticket_imported' ? 'đã nhập ticket thành task' : type === 'tracker.comment' ? 'có comment mới' : 'đồng bộ thất bại';
+        const label = type === 'tracker.ticket_imported' ? 'đã nhập ticket thành task' : type === 'tracker.comment' ? 'có comment mới' : type === 'tracker.poll_failed' ? 'đồng bộ thất bại' : type === 'tracker.resolved' ? 'đã resolve' : type === 'tracker.review_requested' ? 'cần quyết định' : 'ghi ngược thất bại';
         this.broadcastMessage(`${prefix}🔗 <b>${this.escapeHtml(ref)}</b> ${label}.`);
+        break;
+      }
+
+      case 'daily_report.created': {
+        if (p.telegram && typeof p.content === 'string') {
+          this.broadcastMessage(this.escapeHtml(p.content));
+        }
+        break;
+      }
+
+      case 'daily_report.failed': {
+        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        const err = typeof p.error === 'string' ? `: ${p.error}` : '';
+        this.broadcastMessage(`${prefix}❌ <b>Tạo báo cáo ngày thất bại: ${this.escapeHtml(source)}</b>${this.escapeHtml(err)}`);
         break;
       }
 
@@ -4499,6 +4517,16 @@ export class TelegramBotService {
         return `${prefix}Ticket ${p?.displayId || 'OpenProject'} có comment mới`;
       case 'tracker.poll_failed':
         return `${prefix}Đồng bộ OpenProject thất bại: ${p?.sourceId || ''}`;
+      case 'tracker.resolved':
+        return `${prefix}OpenProject ticket đã resolve: ${p?.displayId || ''}`;
+      case 'tracker.review_requested':
+        return `${prefix}OpenProject ticket cần quyết định: ${p?.displayId || ''}`;
+      case 'tracker.writeback_failed':
+        return `${prefix}Ghi ngược OpenProject thất bại: ${p?.error || ''}`;
+      case 'daily_report.created':
+        return `${prefix}Đã tạo báo cáo ngày cho ${p?.sourceId || 'OpenProject'}`;
+      case 'daily_report.failed':
+        return `${prefix}Tạo báo cáo ngày thất bại: ${p?.sourceId || ''}`;
       case 'gitea.sync.succeeded':
         return `${prefix}Đồng bộ Gitea thành công`;
       case 'gitea.sync.failed':

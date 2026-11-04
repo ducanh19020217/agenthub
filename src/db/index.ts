@@ -863,6 +863,22 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_tracker_items_source_updated ON tracker_items(source_id, updated_at);
   `,
+  // Migration 60: persist BLOCKED reports after the worktree is cleaned up.
+  `ALTER TABLE tasks ADD COLUMN blockedReport TEXT;`,
+  // Migration 61: pending secret entry requests never store secret values in SQLite.
+  `
+  CREATE TABLE IF NOT EXISTS secret_requests (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,
+    label TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','configured','expired')),
+    createdAt INTEGER NOT NULL,
+    expiresAt INTEGER NOT NULL,
+    configuredAt INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_secret_requests_status_expiry ON secret_requests(status, expiresAt);
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -893,8 +909,18 @@ export function openDatabase(dbPath: string): Database.Database {
   }
   ensureProfileAvatarColumn(db);
   ensureSchedulerLimitColumns(db);
+  cleanExpiredClaudeLimits(db);
 
   return db;
+}
+
+function cleanExpiredClaudeLimits(db: Database.Database): void {
+  try {
+    const threshold = Math.floor(Date.now() / 1000) - 24 * 3600;
+    db.prepare('UPDATE claude_sessions SET limitResetAt = NULL, limitHitAt = NULL WHERE limitResetAt IS NOT NULL AND limitResetAt <= ?').run(threshold);
+  } catch {
+    // claude_sessions table may not exist in early migration states
+  }
 }
 
 function hasColumn(db: Database.Database, table: string, column: string): boolean {
@@ -1081,6 +1107,7 @@ export interface TaskRow {
   reviewerEscalationReason?: string | null;
   reviewStep?: number;
   doneReport?: string | null;
+  blockedReport?: string | null;
   diffStat?: string | null;
   slot: number | null;
   batchId?: string | null;
@@ -1698,6 +1725,7 @@ export class TaskRepo {
     waitReason?: WaitReason;
     worktreePath?: string | null;
     doneReport?: string | null;
+    blockedReport?: string | null;
     diffStat?: string | null;
     sourceRef?: string | null;
     batchId?: string | null;
@@ -1708,8 +1736,8 @@ export class TaskRepo {
     const deps = JSON.stringify(row.dependsOn || []);
     this.db
       .prepare(
-        `INSERT INTO tasks (id, projectId, slug, title, externalRef, body, level, modelChain, baseRef, branch, dependsOn, status, waitReason, worktreePath, doneReport, diffStat, sourceRef, batchId, creationSessionId, creationGoal)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, projectId, slug, title, externalRef, body, level, modelChain, baseRef, branch, dependsOn, status, waitReason, worktreePath, doneReport, blockedReport, diffStat, sourceRef, batchId, creationSessionId, creationGoal)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -1727,6 +1755,7 @@ export class TaskRepo {
         row.waitReason || null,
         row.worktreePath || null,
         row.doneReport || null,
+        row.blockedReport || null,
         row.diffStat || null,
         row.sourceRef || null,
         row.batchId || null,
@@ -1774,7 +1803,7 @@ export class TaskRepo {
 
   update(
     id: string,
-    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'diffStat' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
+    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'blockedReport' | 'diffStat' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
   ): void {
     const sets: string[] = ["updatedAt = datetime('now')"];
     const values: unknown[] = [];
@@ -2485,6 +2514,19 @@ export class BrainTurnRepo {
     return (row as { total: number }).total;
   }
 
+  tokensBreakdownSince(isoDate: string, projectId?: string | null): { inputTokens: number; outputTokens: number; total: number; count: number } {
+    const query = projectId === undefined
+      ? 'SELECT COALESCE(SUM(inputTokens), 0) AS inputTokens, COALESCE(SUM(outputTokens), 0) AS outputTokens, COUNT(*) AS count FROM brain_turns WHERE startedAt >= ?'
+      : 'SELECT COALESCE(SUM(inputTokens), 0) AS inputTokens, COALESCE(SUM(outputTokens), 0) AS outputTokens, COUNT(*) AS count FROM brain_turns WHERE startedAt >= ? AND projectId IS ?';
+    const row = (projectId === undefined ? this.db.prepare(query).get(isoDate) : this.db.prepare(query).get(isoDate, projectId)) as { inputTokens: number; outputTokens: number; count: number };
+    return {
+      inputTokens: row.inputTokens,
+      outputTokens: row.outputTokens,
+      total: row.inputTokens + row.outputTokens,
+      count: row.count,
+    };
+  }
+
   countSinceDepartment(epochMs: number, departmentId: string): number {
     const row = this.db.prepare("SELECT COUNT(*) AS count FROM brain_turns WHERE startedAt >= datetime(?, 'unixepoch') AND departmentId = ?")
       .get(Math.floor(epochMs / 1000), departmentId) as { count: number };
@@ -2495,6 +2537,17 @@ export class BrainTurnRepo {
     const row = this.db.prepare('SELECT COALESCE(SUM(inputTokens + outputTokens), 0) AS total FROM brain_turns WHERE startedAt >= ? AND departmentId = ?')
       .get(isoDate, departmentId) as { total: number };
     return row.total;
+  }
+
+  tokensBreakdownSinceDepartment(isoDate: string, departmentId: string): { inputTokens: number; outputTokens: number; total: number; count: number } {
+    const row = this.db.prepare('SELECT COALESCE(SUM(inputTokens), 0) AS inputTokens, COALESCE(SUM(outputTokens), 0) AS outputTokens, COUNT(*) AS count FROM brain_turns WHERE startedAt >= ? AND departmentId = ?')
+      .get(isoDate, departmentId) as { inputTokens: number; outputTokens: number; count: number };
+    return {
+      inputTokens: row.inputTokens,
+      outputTokens: row.outputTokens,
+      total: row.inputTokens + row.outputTokens,
+      count: row.count,
+    };
   }
 }
 

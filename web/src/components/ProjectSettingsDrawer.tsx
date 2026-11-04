@@ -56,6 +56,7 @@ import {
   applyPreset,
   getEffectiveConfig,
   getDepartments,
+  getOpenProjectSources, getGiteaStatus, syncGitea, saveGiteaToken, getRemoteDeployStatus, triggerRemoteDeploy, saveRemoteDeployEnv,
 } from '../api/client';
 
 export interface StructuredCheckItem {
@@ -91,6 +92,70 @@ export function structuredToChecksArray(list: StructuredCheckItem[]): Array<{ na
   }));
 }
 
+/** Split a command line without invoking a shell; supports quoted strings and backslash escapes. */
+export function parseArgv(input: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let quote = '';
+  let escaped = false;
+  let inToken = false;
+
+  for (const char of input.trim()) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      inToken = true;
+      continue;
+    }
+    if (char === '\\' && quote !== "'") {
+      escaped = true;
+      inToken = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        quote = '';
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      inToken = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (inToken) {
+        result.push(current);
+        current = '';
+        inToken = false;
+      }
+    } else {
+      current += char;
+      inToken = true;
+    }
+  }
+  if (escaped) current += '\\';
+  if (inToken) result.push(current);
+  return result;
+}
+
+/** Parse KEY=VALUE lines for deploy secrets, preserving any '=' in the value. */
+export function parseDeployEnv(input: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const line of input.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf('=');
+    if (idx <= 0) continue;
+    const key = trimmed.slice(0, idx).trim();
+    const val = trimmed.slice(idx + 1);
+    if (key) result[key] = val;
+  }
+  return result;
+}
+
 export interface ProjectSettingsDrawerProps {
   project: Project | null;
   departments?: Department[];
@@ -112,6 +177,9 @@ export const defaultProjectSettings = (): NonNullable<Project['settings']> => ({
   references: [],
   reviewChecklist: [],
   notifications: { telegramContent: 'full' },
+  openproject: { enabled: false, sourceId: null, role: 'primary' },
+  gitea: { enabled: false, schedule: ['12:00', '18:00'], weekdaysOnly: false, checks: [], unionMergeGlobs: [] },
+  remoteDeploy: { enabled: false, trigger: 'manual', steps: [], healthChecks: [], waitMinutes: 15 },
 });
 
 function normalizeProjectSettings(settings?: Partial<NonNullable<Project['settings']>>): NonNullable<Project['settings']> {
@@ -128,6 +196,9 @@ function normalizeProjectSettings(settings?: Partial<NonNullable<Project['settin
     brain: { ...defaults.brain, ...settings?.brain },
     worktree: { ...defaults.worktree, ...settings?.worktree },
     integration: { ...defaults.integration, ...settings?.integration },
+    openproject: { ...defaults.openproject, ...settings?.openproject, enabled: settings?.openproject?.enabled ?? false, sourceId: settings?.openproject?.sourceId ?? null, role: settings?.openproject?.role ?? 'primary' },
+    gitea: { ...defaults.gitea, ...settings?.gitea, enabled: settings?.gitea?.enabled ?? false, schedule: settings?.gitea?.schedule ?? defaults.gitea!.schedule, weekdaysOnly: settings?.gitea?.weekdaysOnly ?? false, checks: settings?.gitea?.checks ?? [], unionMergeGlobs: settings?.gitea?.unionMergeGlobs ?? [] },
+    remoteDeploy: { ...defaults.remoteDeploy, ...settings?.remoteDeploy, enabled: settings?.remoteDeploy?.enabled ?? false, trigger: settings?.remoteDeploy?.trigger ?? 'manual', steps: settings?.remoteDeploy?.steps ?? [], healthChecks: settings?.remoteDeploy?.healthChecks ?? [], waitMinutes: settings?.remoteDeploy?.waitMinutes ?? 15 },
     ci: { ...defaults.ci, ...settings?.ci },
     notifications: { ...defaults.notifications, ...settings?.notifications },
     references: settings?.references ?? defaults.references,
@@ -162,6 +233,9 @@ export function changedSettings(
     'brain',
     'worktree',
     'integration',
+    'openproject',
+    'gitea',
+    'remoteDeploy',
     'ci',
     'references',
     'reviewChecklist',
@@ -257,6 +331,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     queryFn: getConfig,
     staleTime: 30_000,
   });
+  const { data: openProjectSources = [] } = useQuery({ queryKey: ['openproject-sources'], queryFn: getOpenProjectSources, enabled: Boolean(isOpen) });
 
   const { data: allProfiles = [] } = useQuery({
     queryKey: ['profiles'],
@@ -284,6 +359,9 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const [draftDepartmentId, setDraftDepartmentId] = useState('chung');
   const [checklistDraft, setChecklistDraft] = useState('');
   const [showCommitExample, setShowCommitExample] = useState(false);
+  const [giteaToken, setGiteaToken] = useState('');
+  const [deployEnv, setDeployEnv] = useState('');
+  const [savedDeployKeys, setSavedDeployKeys] = useState<string[]>([]);
 
   const [reviewerOrder, setReviewerOrder] = useState<
     Array<{ engine: 'codex' | 'claude'; model: string; profiles: string[] }>
@@ -775,6 +853,24 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       JSON.stringify(origSettings.integration),
     [draftSettings.integration, origSettings.integration],
   );
+  const openprojectChanged = useMemo(
+    () =>
+      JSON.stringify(draftSettings.openproject) !==
+      JSON.stringify(origSettings.openproject),
+    [draftSettings.openproject, origSettings.openproject],
+  );
+  const giteaChanged = useMemo(
+    () =>
+      JSON.stringify(draftSettings.gitea) !==
+      JSON.stringify(origSettings.gitea),
+    [draftSettings.gitea, origSettings.gitea],
+  );
+  const remoteDeployChanged = useMemo(
+    () =>
+      JSON.stringify(draftSettings.remoteDeploy) !==
+      JSON.stringify(origSettings.remoteDeploy),
+    [draftSettings.remoteDeploy, origSettings.remoteDeploy],
+  );
   const referencesChanged = useMemo(
     () =>
       JSON.stringify(draftSettings.references) !==
@@ -845,6 +941,9 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     if (JSON.stringify(draftSettings.commitConvention) !== JSON.stringify(origSettings.commitConvention)) count++;
     if (worktreeChanged) count++;
     if (integrationChanged) count++;
+    if (openprojectChanged) count++;
+    if (giteaChanged) count++;
+    if (remoteDeployChanged) count++;
     if (referencesChanged) count++;
     if (checklistChanged) count++;
     if (notificationsChanged) count++;
@@ -861,6 +960,9 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     origSettings.commitConvention,
     worktreeChanged,
     integrationChanged,
+    openprojectChanged,
+    giteaChanged,
+    remoteDeployChanged,
     referencesChanged,
     checklistChanged,
     notificationsChanged,
@@ -896,6 +998,21 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       });
       setToastMessage(t('projects.saveSuccessToast'));
       setTimeout(() => setToastMessage(null), 3000);
+    },
+  });
+
+  const giteaStatus = useQuery({ queryKey: ['gitea-status', project?.id], queryFn: () => getGiteaStatus(project!.id), enabled: Boolean(isOpen && project?.id), refetchInterval: 10_000 });
+  const remoteDeployStatus = useQuery({ queryKey: ['remote-deploy-status', project?.id], queryFn: () => getRemoteDeployStatus(project!.id), enabled: Boolean(isOpen && project?.id), refetchInterval: 10_000 });
+  const giteaSyncMutation = useMutation({ mutationFn: () => syncGitea(project!.id), onSuccess: () => giteaStatus.refetch() });
+  const deployNowMutation = useMutation({ mutationFn: () => triggerRemoteDeploy(project!.id), onSuccess: () => remoteDeployStatus.refetch() });
+  const saveGiteaTokenMutation = useMutation({ mutationFn: () => saveGiteaToken(project!.id, giteaToken), onSuccess: () => setGiteaToken('') });
+  const saveDeployEnvMutation = useMutation({
+    mutationFn: () => saveRemoteDeployEnv(project!.id, parseDeployEnv(deployEnv)),
+    onSuccess: (res) => {
+      const parsedKeys = Object.keys(parseDeployEnv(deployEnv));
+      const keys = Array.isArray(res) ? res : (res as any)?.keys || parsedKeys;
+      setSavedDeployKeys(keys);
+      setDeployEnv('');
     },
   });
 
@@ -967,6 +1084,15 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
           setSectionErrors((prev) => ({ ...prev, integration: `${t('projects.integrationBaseRef')}: ${err}` }));
           return;
         }
+      }
+    }
+
+    if (draftSettings.gitea?.enabled && draftSettings.gitea.schedule) {
+      const timeRegex = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+      const invalid = draftSettings.gitea.schedule.some((slot) => !timeRegex.test(slot));
+      if (invalid) {
+        setSectionErrors((prev) => ({ ...prev, gitea: t('integrations.invalidScheduleTime') }));
+        return;
       }
     }
 
@@ -2128,6 +2254,83 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
             </div>
           </Card>
 
+          <Card className="p-5 space-y-4" data-testid="project-openproject-section">
+            <h3 className="text-sm font-bold">{t('integrations.projectOpenProject')}</h3>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(draftSettings.openproject?.enabled)} onChange={(e) => setDraftSettings((p) => ({ ...p, openproject: { ...p.openproject!, enabled: e.target.checked } }))} />{t('integrations.enabled')}</label>
+            <div className="grid gap-3 sm:grid-cols-2"><label className="text-xs space-y-1"><span>{t('integrations.source')}</span><select value={draftSettings.openproject?.sourceId || ''} onChange={(e) => setDraftSettings((p) => ({ ...p, openproject: { ...p.openproject!, sourceId: e.target.value || null } }))} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2"><option value="">—</option>{openProjectSources.map((s) => <option key={s.id} value={s.id}>{s.id}</option>)}</select></label><label className="text-xs space-y-1"><span>{t('integrations.role')}</span><select value={draftSettings.openproject?.role || 'primary'} onChange={(e) => setDraftSettings((p) => ({ ...p, openproject: { ...p.openproject!, role: e.target.value as 'primary' | 'secondary' } }))} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2"><option value="primary">primary</option><option value="secondary">secondary</option></select></label></div>
+          </Card>
+
+          <Card className="p-5 space-y-4" data-testid="project-gitea-section">
+            <h3 className="text-sm font-bold">Gitea</h3>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(draftSettings.gitea?.enabled)} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, enabled: e.target.checked } }))} />{t('integrations.enabled')}</label>
+            {sectionErrors.gitea && (
+              <div className="rounded border border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_10%,transparent)] p-2 text-xs text-[var(--t-crit)]">
+                {sectionErrors.gitea}
+              </div>
+            )}
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Input ariaLabel="Gitea URL" value={draftSettings.gitea?.url || ''} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, url: e.target.value } }))} placeholder="https://gitea.example" />
+              <Input ariaLabel={t('integrations.sourceBranch')} value={draftSettings.gitea?.sourceBranch || ''} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, sourceBranch: e.target.value } }))} />
+              <Input ariaLabel={t('integrations.targetBranch')} value={draftSettings.gitea?.targetBranch || ''} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, targetBranch: e.target.value } }))} />
+            </div>
+            <div className="space-y-2 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-3" data-testid="gitea-schedule-section">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-[var(--t-text)]">{t('integrations.schedule')}</span>
+                <button
+                  type="button"
+                  data-testid="add-gitea-schedule-slot"
+                  onClick={() => {
+                    const next = [...(draftSettings.gitea?.schedule || []), '12:00'];
+                    setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, schedule: next } }));
+                  }}
+                  className="inline-flex items-center gap-1 rounded border border-dashed border-[var(--t-border)] px-2 py-0.5 text-xs text-[var(--t-accent)] hover:border-[var(--t-accent)] cursor-pointer"
+                >
+                  <Plus className="h-3 w-3" /> {t('integrations.addScheduleTime')}
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2" data-testid="gitea-schedule-list">
+                {(draftSettings.gitea?.schedule || []).map((slot, idx) => (
+                  <div key={idx} className="flex items-center gap-1 rounded border border-[var(--t-border)] bg-[var(--t-surface)] px-2 py-1">
+                    <input
+                      type="time"
+                      aria-label={`${t('integrations.schedule')} ${idx + 1}`}
+                      value={slot}
+                      onChange={(e) => {
+                        const next = [...(draftSettings.gitea?.schedule || [])];
+                        next[idx] = e.target.value;
+                        setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, schedule: next } }));
+                      }}
+                      className="bg-transparent text-xs font-mono text-[var(--t-text)] focus:outline-hidden"
+                    />
+                    <button
+                      type="button"
+                      aria-label={`${t('integrations.removeScheduleTime')} ${idx + 1}`}
+                      onClick={() => {
+                        const next = (draftSettings.gitea?.schedule || []).filter((_, i) => i !== idx);
+                        setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, schedule: next } }));
+                      }}
+                      className="p-0.5 text-[var(--t-text-3)] hover:text-[var(--t-crit)] cursor-pointer"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <label className="flex gap-2 text-xs"><input type="checkbox" checked={Boolean(draftSettings.gitea?.weekdaysOnly)} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, weekdaysOnly: e.target.checked } }))} />{t('integrations.weekdaysOnly')}</label>
+            <label className="text-xs space-y-1 block"><span>{t('integrations.checks')}</span><textarea value={(draftSettings.gitea?.checks || []).map((argv) => argv.map((arg) => /\s/.test(arg) ? JSON.stringify(arg) : arg).join(' ')).join('\n')} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, checks: e.target.value.split('\n').map(parseArgv).filter((v) => v.length) } }))} rows={3} placeholder="npm test -- --run" className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2 font-mono" /></label>
+            <Input ariaLabel={t('integrations.unionMergeGlobs')} value={(draftSettings.gitea?.unionMergeGlobs || []).join(', ')} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, unionMergeGlobs: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) } }))} placeholder="src/**, docs/**" />
+            <div className="flex gap-2"><Input type="password" ariaLabel={t('integrations.token')} value={giteaToken} onChange={(e) => setGiteaToken(e.target.value)} placeholder={t('integrations.writeOnly')} /><Button type="button" size="sm" variant="secondary" data-testid="save-gitea-token-button" onClick={() => saveGiteaTokenMutation.mutate()} disabled={!giteaToken}>{t('integrations.saveSecret')}</Button><Button type="button" size="sm" variant="secondary" data-testid="sync-gitea-button" onClick={() => giteaSyncMutation.mutate()}>{t('integrations.syncNow')}</Button></div><p className="text-xs text-[var(--t-text-3)]">{t('integrations.lastSync')}: {giteaStatus.data?.status || '—'}</p>
+          </Card>
+
+          <Card className="p-5 space-y-4" data-testid="project-remote-deploy-section">
+            <h3 className="text-sm font-bold">{t('integrations.remoteDeploy')}</h3><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(draftSettings.remoteDeploy?.enabled)} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, enabled: e.target.checked } }))} />{t('integrations.enabled')}</label>
+            <div className="grid gap-3 sm:grid-cols-2"><label className="text-xs space-y-1"><span>{t('integrations.trigger')}</span><select value={draftSettings.remoteDeploy?.trigger || 'manual'} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, trigger: e.target.value as 'manual' | 'after-gitea-sync' } }))} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2"><option value="manual">manual</option><option value="after-gitea-sync">after-gitea-sync</option></select></label><Input type="number" ariaLabel={t('integrations.waitMinutes')} value={draftSettings.remoteDeploy?.waitMinutes ?? 15} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, waitMinutes: Number(e.target.value) } }))} /></div>
+            <label className="text-xs space-y-1 block"><span>{t('integrations.steps')}</span><textarea value={(draftSettings.remoteDeploy?.steps || []).map((argv) => argv.map((arg) => /\s/.test(arg) ? JSON.stringify(arg) : arg).join(' ')).join('\n')} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, steps: e.target.value.split('\n').map(parseArgv).filter((v) => v.length) } }))} rows={3} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2 font-mono" /></label>
+            <label className="text-xs space-y-1 block"><span>{t('integrations.healthChecks')}</span><textarea value={(draftSettings.remoteDeploy?.healthChecks || []).map((h) => `${h.url} ${h.expectStatusBelow}${h.contains ? ` ${JSON.stringify(h.contains)}` : ''}`).join('\n')} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, healthChecks: e.target.value.split('\n').filter(Boolean).map((line) => { const a = parseArgv(line); return { url: a[0] || '', expectStatusBelow: Number(a[1]) || 500, ...(a[2] ? { contains: a[2] } : {}) }; }) } }))} rows={2} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2 font-mono" /></label>
+            <div className="flex gap-2"><Input type="password" ariaLabel={t('integrations.deploySecrets')} value={deployEnv} onChange={(e) => setDeployEnv(e.target.value)} placeholder="KEY=VALUE" /><Button type="button" size="sm" variant="secondary" data-testid="save-deploy-env-button" onClick={() => saveDeployEnvMutation.mutate()} disabled={!deployEnv.trim()}>{t('integrations.saveSecret')}</Button><Button type="button" size="sm" variant="secondary" data-testid="deploy-now-button" onClick={() => deployNowMutation.mutate()}>{t('integrations.deployNow')}</Button></div>{savedDeployKeys.length > 0 && <p className="text-xs text-[var(--t-text-3)]" data-testid="saved-deploy-keys">{t('integrations.savedKeys')}: {savedDeployKeys.join(', ')}</p>}<p className="text-xs text-[var(--t-text-3)]">{t('integrations.lastDeploy')}: {remoteDeployStatus.data?.status || '—'}</p>
+          </Card>
+
           {/* Section 4: Tham chiếu chỉ đọc (Read-only References) */}
           <Card className="p-5 space-y-4">
             <div className="flex items-center justify-between">
@@ -3115,6 +3318,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 type="button"
                 variant="primary"
                 size="sm"
+                data-testid="save-changes-button"
                 onClick={handleSave}
                 loading={saveMutation.isPending}
                 disabled={hasValidationError || saveMutation.isPending}

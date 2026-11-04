@@ -98,18 +98,22 @@ export class OpenProjectClient {
     return this.request<OpenProjectUser>('/api/v3/users/me');
   }
 
-  async listWatched(statusIds: number[]): Promise<OpenProjectWorkPackage[]> {
+  async listProjects(): Promise<OpenProjectCollection<Record<string, unknown>>> {
+    return this.request<OpenProjectCollection<Record<string, unknown>>>('/api/v3/projects?pageSize=100');
+  }
+
+  async listStatuses(): Promise<OpenProjectCollection<{ id: number; name: string; isClosed?: boolean }>> {
+    return this.request<OpenProjectCollection<{ id: number; name: string; isClosed?: boolean }>>('/api/v3/statuses?pageSize=100');
+  }
+
+  private async listWorkPackagesWithFilters(filtersJson: string, sortBy = '[["id","asc"]]'): Promise<OpenProjectWorkPackage[]> {
     const out: OpenProjectWorkPackage[] = [];
     let page = 1;
     for (;;) {
-      const filters = JSON.stringify([
-        { assignee: { operator: '=', values: ['me'] } },
-        { status: { operator: '=', values: statusIds.map(String) } },
-      ]);
       if (!this.options.project) throw new Error('OpenProject project is required');
 
       const collection = await this.request<OpenProjectCollection<OpenProjectWorkPackage>>(
-        `/api/v3/projects/${encodeURIComponent(this.options.project)}/work_packages?filters=${encodeURIComponent(filters)}&pageSize=100&offset=${page}&sortBy=${encodeURIComponent('[["id","asc"]]')}`,
+        `/api/v3/projects/${encodeURIComponent(this.options.project)}/work_packages?filters=${encodeURIComponent(filtersJson)}&pageSize=100&offset=${page}&sortBy=${encodeURIComponent(sortBy)}`,
       );
       const rows = collection._embedded?.elements || [];
       out.push(...rows);
@@ -118,6 +122,30 @@ export class OpenProjectClient {
       }
       page += 1;
     }
+  }
+
+  async listWatched(statusIds: number[]): Promise<OpenProjectWorkPackage[]> {
+    const filters = JSON.stringify([
+      { assignee: { operator: '=', values: ['me'] } },
+      { status: { operator: '=', values: statusIds.map(String) } },
+    ]);
+    return this.listWorkPackagesWithFilters(filters, '[["id","asc"]]');
+  }
+
+  async listAssignedWorkPackages(statusIds: number[]): Promise<OpenProjectWorkPackage[]> {
+    if (!statusIds.length) return [];
+    const filters = JSON.stringify([
+      { assignee: { operator: '=', values: ['me'] } },
+      { status: { operator: '=', values: statusIds.map(String) } },
+    ]);
+    return this.listWorkPackagesWithFilters(filters, '[["updatedAt","desc"]]');
+  }
+
+  async listUpdatedWorkPackages(start: string, end: string): Promise<OpenProjectWorkPackage[]> {
+    const filters = JSON.stringify([
+      { updatedAt: { operator: '<>d', values: [start, end] } },
+    ]);
+    return this.listWorkPackagesWithFilters(filters, '[["updatedAt","desc"]]');
   }
 
   async getWorkPackage(id: number | string): Promise<OpenProjectWorkPackage> {
@@ -161,6 +189,17 @@ export class OpenProjectClient {
         body: JSON.stringify({ comment: { raw: markdown } }),
       },
     );
+  }
+
+  async createWorkPackage(input: { project: string; subject: string; description: string }): Promise<OpenProjectWorkPackage> {
+    return this.request<OpenProjectWorkPackage>('/api/v3/work_packages', {
+      method: 'POST',
+      body: JSON.stringify({
+        subject: input.subject,
+        description: { raw: input.description },
+        _links: { project: { href: `/api/v3/projects/${encodeURIComponent(input.project)}` } },
+      }),
+    });
   }
 
   async setStatus(id: number | string, statusId: number | string): Promise<OpenProjectWorkPackage> {

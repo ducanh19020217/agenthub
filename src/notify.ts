@@ -238,6 +238,7 @@ export class NotificationService {
         type === 'ci.failed' ||
         type === 'ci.passed' ||
         type.startsWith('remote_deploy.') ||
+        type.startsWith('tracker.') ||
         type === 'quota.exhausted' ||
         (type === 'task.waiting_quota' && p.reason === 'no_department_profile');
 
@@ -328,6 +329,34 @@ export class NotificationService {
       case 'tracker.poll_failed': {
         const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
         this.notify(`${this.appName}: đồng bộ ${source} thất bại`, 'critical');
+        break;
+      }
+
+      case 'tracker.resolved': {
+        this.notify(`${this.appName}: OpenProject ticket đã được resolve`, 'normal');
+        break;
+      }
+
+      case 'tracker.review_requested': {
+        this.notify(`${this.appName}: OpenProject ticket cần quyết định`, 'normal');
+        break;
+      }
+
+      case 'tracker.writeback_failed': {
+        const error = typeof p.error === 'string' ? `: ${p.error}` : '';
+        this.notify(`${this.appName}: ghi ngược OpenProject thất bại${error}`, 'critical');
+        break;
+      }
+
+      case 'daily_report.created': {
+        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        this.notify(`${this.appName}: đã tạo báo cáo ngày (${source})`, 'normal');
+        break;
+      }
+
+      case 'daily_report.failed': {
+        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        this.notify(`${this.appName}: tạo báo cáo ngày (${source}) thất bại`, 'critical');
         break;
       }
 

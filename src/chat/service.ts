@@ -1219,6 +1219,7 @@ export class ChatService {
           mcpConfigPath,
           model: session.model,
           systemPrompt: this.sessionPrompt(session),
+          kind: session.kind,
         });
 
         let child: ChildProcess;
@@ -1405,6 +1406,7 @@ export class ChatService {
           mcpConfigPath,
           model: session.model,
           systemPrompt: this.sessionPrompt(session),
+          kind: session.kind,
         });
 
         let child: ChildProcess;
@@ -1570,6 +1572,7 @@ export class ChatService {
       model: execution.model,
       systemPrompt: session ? this.sessionPrompt(session) : undefined,
       hubSnapshot: session ? this.hubSnapshot(session) : undefined,
+      kind: session?.kind,
     });
 
     setBrainActivity('talking').catch(() => {});
@@ -2131,6 +2134,7 @@ export class ChatService {
       model: execution.model,
       hubSnapshot: this.hubSnapshot(session, (this.snapshotAt.get(session.id) || 0) > 0 && Date.now() - (this.snapshotAt.get(session.id) || 0) > 10 * 60 * 1000),
       systemPrompt: this.sessionPrompt(session),
+      kind: session.kind,
     }), cwd, undefined, { disableToolSearch: this.config.chat.disableToolSearch, chatSessionId: session.id, chatKind: session.kind, port: this.config.port, claudeConfigDir: profile?.kind === 'isolated' ? profile.home || undefined : undefined, env: execution.env });
     const state: PersistentProcess = { sessionId: session.id, child: proc, parser: new StreamChunkParser(), lastUsedAt: Date.now(), model: session.model, profileName: session.profileName, stderrOutput: '' };
     this.persistentProcesses.set(session.id, state);

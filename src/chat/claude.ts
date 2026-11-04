@@ -42,7 +42,7 @@ function loadSetupPlaybook(): string {
 }
 
 export const BRAIN_PROMPT =
-  'Bạn là Claude, bộ não điều phối của AgentHub. Người dùng chat với bạn qua dashboard. Dùng trực tiếp các tool mcp__agenthub__hub_status, mcp__agenthub__hub_projects, mcp__agenthub__hub_register_project, mcp__agenthub__hub_profiles, mcp__agenthub__hub_create_task, mcp__agenthub__hub_update_task, mcp__agenthub__hub_create_batch, mcp__agenthub__hub_batch, mcp__agenthub__hub_dispatch_batch, mcp__agenthub__hub_tasks, mcp__agenthub__hub_task, mcp__agenthub__hub_task_log, mcp__agenthub__hub_review, mcp__agenthub__hub_retry, mcp__agenthub__hub_cancel, mcp__agenthub__hub_pause, mcp__agenthub__hub_resume, mcp__agenthub__hub_wait, mcp__agenthub__hub_mark_quota, mcp__agenthub__hub_git (git status/log/diff/show an toàn), cùng hub_effective_config, hub_presets, hub_departments, hub_integration_discover và hub_request_secret; không cần tìm tool. Các tool ghi cấu hình hub_preset_apply, hub_project_settings, hub_department, hub_config_set luôn phải gọi dryRun trước và chỉ ghi khi người dùng xác nhận. Không bao giờ yêu cầu người dùng gửi bí mật trong chat. Khi tạm dừng task vì quá tải, bắt buộc dùng hub_pause với reason:\'load\' để hệ thống tự resume khi máy hạ tải. Số % trong hub_profiles là phần CÒN LẠI. Ảnh chụp hub ở trên là mới nhất; KHÔNG gọi lại hub_status/hub_projects/hub_tasks/git log để tìm hiểu lại trừ khi cần chi tiết cụ thể. Trước khi khám phá nhiều bước, viết 1–2 câu cho người dùng biết bạn sẽ làm gì; sau mỗi khoảng 5 tool call, viết 1 câu báo tiến độ. {{PLANNING_RULE}}Trả lời ngắn gọn bằng tiếng Việt. Không tự viết code tính năng: hãy chia việc thành task nhỏ cho worker (Gemini/Codex) qua hub_create_task hoặc hub_create_batch, sau đó review.' + `\n\nSỔ TAY BRAIN-PLAYBOOK:\n${loadBrainPlaybook()}`;
+  'Bạn là Claude, bộ não điều phối của AgentHub. Người dùng chat với bạn qua dashboard. Dùng trực tiếp các tool mcp__agenthub__hub_status, mcp__agenthub__hub_projects, mcp__agenthub__hub_register_project, mcp__agenthub__hub_profiles, mcp__agenthub__hub_create_task, mcp__agenthub__hub_update_task, mcp__agenthub__hub_create_batch, mcp__agenthub__hub_batch, mcp__agenthub__hub_dispatch_batch, mcp__agenthub__hub_tasks, mcp__agenthub__hub_task, mcp__agenthub__hub_task_log, mcp__agenthub__hub_review, mcp__agenthub__hub_retry, mcp__agenthub__hub_cancel, mcp__agenthub__hub_pause, mcp__agenthub__hub_resume, mcp__agenthub__hub_wait, mcp__agenthub__hub_mark_quota, mcp__agenthub__hub_git (git status/log/diff/show an toàn), cùng hub_effective_config, hub_presets, hub_departments, hub_integration_discover, hub_request_secret và hub_setup_import; không cần tìm tool. Các tool ghi cấu hình hub_preset_apply, hub_project_settings, hub_department, hub_config_set và hub_setup_import luôn phải gọi dryRun trước và chỉ ghi khi người dùng xác nhận. Không bao giờ yêu cầu người dùng gửi bí mật trong chat. Khi tạm dừng task vì quá tải, bắt buộc dùng hub_pause với reason:\'load\' để hệ thống tự resume khi máy hạ tải. Số % trong hub_profiles là phần CÒN LẠI. Ảnh chụp hub ở trên là mới nhất; KHÔNG gọi lại hub_status/hub_projects/hub_tasks/git log để tìm hiểu lại trừ khi cần chi tiết cụ thể. Trước khi khám phá nhiều bước, viết 1–2 câu cho người dùng biết bạn sẽ làm gì; sau mỗi khoảng 5 tool call, viết 1 câu báo tiến độ. {{PLANNING_RULE}}Trả lời ngắn gọn bằng tiếng Việt. Không tự viết code tính năng: hãy chia việc thành task nhỏ cho worker (Gemini/Codex) qua hub_create_task hoặc hub_create_batch, sau đó review.' + `\n\nSỔ TAY BRAIN-PLAYBOOK:\n${loadBrainPlaybook()}`;
 
 export const ASSISTANT_PROMPT =
   'Bạn là Trợ lý AgentHub, chuyên trả lời người dùng nhanh bằng tiếng Việt. Đọc dữ liệu thật trước khi trả lời tiến độ, không bịa. Trước khi làm bất cứ điều gì dựa trên lịch sử hội thoại, hãy đọc trạng thái hiện tại bằng hub_status, hub_tasks và hub_git (chỉ đọc); không lặp lại thao tác cũ nếu người dùng chưa yêu cầu lại. Nếu người dùng chỉ hỏi tình hình, chỉ trả lời tình hình. Bạn có thể đọc cấu hình bằng hub_effective_config, hub_presets, hub_departments và hub_integration_discover; có thể xem trước các thay đổi bằng hub_preset_apply, hub_project_settings, hub_department và hub_config_set với dryRun, nhưng không được ghi cấu hình hay yêu cầu bí mật. Bạn có thể xem trạng thái và tạo/cập nhật task nháp hoặc queued, retry/cancel/pause/resume, và gửi thông báo; nếu tạo từ 2 task liên quan trở lên phải dùng hub_create_batch với goal. Không duyệt, merge hoặc dispatch thay bộ não; nếu cần quyết định duyệt/merge thì nói rõ và dùng hub_ask_brain. Các thay đổi cách làm của bộ não phải ghi bằng hub_brain_directive. Khi phiên dài, hãy compact hoặc mở phiên mới và giữ tóm tắt cần thiết. {{PLAYBOOK}}';
@@ -329,7 +329,15 @@ export interface BuildClaudeArgsOptions {
   hubSnapshot?: string;
   planning?: { requireApproval?: boolean; approvalMinTasks?: number };
   systemPrompt?: string;
+  kind?: 'chat' | 'brain' | 'assistant' | 'setup';
 }
+
+export const SETUP_ALLOWED_TOOLS = [
+  'mcp__agenthub__hub_effective_config', 'mcp__agenthub__hub_presets', 'mcp__agenthub__hub_departments',
+  'mcp__agenthub__hub_preset_apply', 'mcp__agenthub__hub_project_settings', 'mcp__agenthub__hub_department',
+  'mcp__agenthub__hub_config_set', 'mcp__agenthub__hub_integration_discover', 'mcp__agenthub__hub_request_secret',
+  'mcp__agenthub__hub_setup_import', 'mcp__agenthub__hub_projects', 'mcp__agenthub__hub_register_project',
+].join(',');
 
 export function buildClaudeArgs(opts: BuildClaudeArgsOptions): string[] {
   const args: string[] = [
@@ -364,7 +372,9 @@ export function buildClaudeArgs(opts: BuildClaudeArgsOptions): string[] {
       '--permission-prompt-tool',
       'mcp__agenthub__permission_prompt',
       '--allowedTools',
-      'Read,Grep,Glob,LS,mcp__agenthub,Bash(git status:*),Bash(git log:*),Bash(npm test:*),Bash(npm run lint:*),Bash(npm run typecheck:*)',
+      opts.kind === 'setup'
+        ? `Read,Grep,Glob,LS,${SETUP_ALLOWED_TOOLS}`
+        : 'Read,Grep,Glob,LS,mcp__agenthub,Bash(git status:*),Bash(git log:*),Bash(npm test:*),Bash(npm run lint:*),Bash(npm run typecheck:*)',
     );
   }
 

@@ -230,8 +230,9 @@ export function shouldNotifyBrowserEvent(
   if (level === 'important' && !IMPORTANT.has(event.type)) return false;
   const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
   if (event.type === 'merge.conflict') {
-    if (payload.autoRetried === true) return false;
-    if (typeof payload.conflictCount === 'number' && payload.conflictCount <= 3 && payload.autoRetried !== false) return false;
+    const conflictCount = typeof payload.conflictCount === 'number' ? payload.conflictCount : undefined;
+    const isRoutine = (conflictCount === undefined || conflictCount <= 3) && payload.autoRetried !== false;
+    if (isRoutine) return false;
   }
   if (event.type === 'merge.failed') {
     if (payload.autoFixCreated === true) return false;

@@ -374,6 +374,16 @@ export class TelegramBotService {
     return this.quotaService.capacitySnapshot(undefined, Math.floor(this.now() / 1000));
   }
 
+  private isAllQuotaExhausted(payload?: Record<string, unknown>, now = this.now()): boolean {
+    const snapshot = this.quotaCapacity();
+    const hasProfiles = Boolean(this.profileRepo && this.profileRepo.getAll().length > 0);
+    return snapshot
+      ? snapshot.runnable.length === 0
+      : (hasProfiles && this.quotaMarkRepo
+          ? new QuotaService(this.quotaMarkRepo, this.profileRepo!).runnableCapacity(undefined, Math.floor(now / 1000)).length === 0
+          : Boolean(payload?.allExhausted === true));
+  }
+
   private quotaIncidentMessage(snapshot: QuotaCapacitySnapshot | null): string {
     const next = snapshot?.nextReset;
     const reset = next ? ` Sớm nhất có lại: ${this.escapeHtml(next.profileName)}/${this.escapeHtml(next.model)} lúc ${this.escapeHtml(formatReset(next.at, this.now()))}.` : '';
@@ -3579,11 +3589,7 @@ export class TelegramBotService {
     const now = this.now();
     if (type === 'quota.exhausted' || type === 'claude.quota_exhausted') {
       const snapshot = this.quotaCapacity();
-      const isAllExhausted = snapshot
-        ? snapshot.runnable.length === 0
-        : (this.profileRepo && this.quotaMarkRepo
-            ? new QuotaService(this.quotaMarkRepo, this.profileRepo).runnableCapacity(undefined, Math.floor(now / 1000)).length === 0
-            : Boolean(p.allExhausted === true));
+      const isAllExhausted = this.isAllQuotaExhausted(p, now);
 
       const quotaKey = (typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '') || 'all';
       if (!isAllExhausted) {
@@ -3592,6 +3598,12 @@ export class TelegramBotService {
           this.quotaIncidentActive = false;
           if (snapshot && snapshot.runnable.length > 0) this.broadcastMessage('✅ <b>Có quota trở lại</b>');
         }
+        return;
+      }
+    }
+
+    if (type === 'review.fallback') {
+      if (!this.isAllQuotaExhausted(p, now)) {
         return;
       }
     }
@@ -3835,6 +3847,7 @@ export class TelegramBotService {
 
       case 'review.fallback': {
         if (!notify.fallback) return;
+        if (!this.isAllQuotaExhausted(p, now)) return;
         if (taskId && this.reviewFallbackNotified.has(taskId)) return;
         if (taskId) this.reviewFallbackNotified.add(taskId);
 
@@ -4538,6 +4551,7 @@ export class TelegramBotService {
       case 'merge.failed':
         return `${prefix}Lỗi khi merge tự động (${taskId || 'task'})`;
       case 'review.fallback':
+        if (!this.isAllQuotaExhausted(p)) return '';
         return `${prefix}Codex hết quota, Claude đang duyệt …`;
       case 'quota.exhausted':
       case 'claude.quota_exhausted':

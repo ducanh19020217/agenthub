@@ -74,6 +74,16 @@ export class NotificationService {
     return this.quotaService.capacitySnapshot(undefined, Math.floor(this.now() / 1000));
   }
 
+  private isAllQuotaExhausted(payload?: Record<string, unknown>, now = this.now(), defaultWhenNoProfiles = false): boolean {
+    const snapshot = this.quotaCapacity();
+    const hasProfiles = Boolean(this.profileRepo && this.profileRepo.getAll().length > 0);
+    return snapshot
+      ? snapshot.runnable.length === 0
+      : (hasProfiles && this.quotaMarkRepo
+          ? new QuotaService(this.quotaMarkRepo, this.profileRepo!).runnableCapacity(undefined, Math.floor(now / 1000)).length === 0
+          : (defaultWhenNoProfiles ? Boolean(payload?.allExhausted !== false) : Boolean(payload?.allExhausted === true)));
+  }
+
   private quotaRecoveryMessage(snapshot: QuotaCapacitySnapshot): string {
     const first = snapshot.runnable[0];
     return first ? `✅ Có quota trở lại: ${first.profileName}/${first.model}` : '✅ Có quota trở lại';
@@ -198,11 +208,7 @@ export class NotificationService {
 
     if (type === 'quota.exhausted' || type === 'claude.quota_exhausted') {
       const snapshot = this.quotaCapacity();
-      const isAllExhausted = snapshot
-        ? snapshot.runnable.length === 0
-        : (this.profileRepo && this.quotaMarkRepo
-            ? new QuotaService(this.quotaMarkRepo, this.profileRepo).runnableCapacity(undefined, Math.floor(this.now() / 1000)).length === 0
-            : Boolean(p.allExhausted === true));
+      const isAllExhausted = this.isAllQuotaExhausted(p, this.now());
 
       const quotaKey = (typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '') || 'all';
       if (!isAllExhausted) {
@@ -462,14 +468,7 @@ export class NotificationService {
       case 'claude.fallback_changed': {
         const step = p.step && typeof p.step === 'object' ? p.step as Record<string, unknown> : null;
         if (p.fallbackAvailable === true || (step && step.type !== 'wait')) break;
-        const snapshot = this.quotaCapacity();
-        const hasProfiles = Boolean(this.profileRepo && this.profileRepo.getAll().length > 0);
-        const isAllExhausted = snapshot
-          ? snapshot.runnable.length === 0
-          : (hasProfiles && this.quotaMarkRepo
-              ? new QuotaService(this.quotaMarkRepo, this.profileRepo!).runnableCapacity(undefined, Math.floor(this.now() / 1000)).length === 0
-              : Boolean(p.allExhausted !== false));
-        if (!isAllExhausted) break;
+        if (!this.isAllQuotaExhausted(p, this.now(), true)) break;
         const label = step?.type === 'model' ? `model ${String(step.model)}`
           : step?.type === 'profile' ? `tài khoản ${String(step.profile || 'khác')}`
           : step?.type === 'apiKey' ? 'API key'

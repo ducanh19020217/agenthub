@@ -40,6 +40,7 @@ import type { OpenProjectIntakeService } from '../integrations/openproject/intak
 import type { DailyReportService } from '../integrations/openproject/daily-report.js';
 import type { GiteaSyncService } from '../integrations/gitea/service.js';
 import { isGiteaTokenConfigured, saveGiteaToken } from '../integrations/gitea/secrets.js';
+import { parseRemote } from '../integrations/gitea/client.js';
 import { BulletinService } from '../bulletin.js';
 import { ProfileService as CoreProfileService, accountKey, isProfileLoggedIn, exchangeAgyRefreshToken, writeAgyIsolatedToken, fetchAgyGoogleUserInfo, fetchAgyGoogleUserInfoDetailed, inspectAgyAccessToken } from '../profiles/index.js';
 import { Scheduler } from '../scheduler/index.js';
@@ -640,6 +641,7 @@ export const UpdateConfigSchema = z.object({
       quotaAllExhausted: z.boolean().optional(),
       fallback: z.boolean().optional(),
       brainWaiting: z.boolean().optional(),
+      disk: z.boolean().optional(),
     }).optional(),
   }).optional(),
   updates: z.object({
@@ -751,6 +753,11 @@ export function formatEventSummary(
       return `${taskLabel} bắt đầu chạy`;
     }
 
+    case 'task.auto_closed':
+      return p.reason === 'merged_elsewhere'
+        ? `${taskLabel} tự động hoàn thành (đã merge qua nhánh khác)`
+        : `${taskLabel} đã tự động đóng`;
+
     case 'task.blocked':
       return `${taskLabel} bị chặn`;
 
@@ -758,7 +765,9 @@ export function formatEventSummary(
       return `${taskLabel} thất bại`;
 
     case 'task.done':
-      return `${taskLabel} hoàn thành`;
+      return p.reason === 'merged_elsewhere'
+        ? `${taskLabel} hoàn thành (đã merge qua nhánh khác)`
+        : `${taskLabel} hoàn thành`;
 
     case 'task.cancelled':
       return `${taskLabel} đã bị hủy`;
@@ -1785,9 +1794,30 @@ export class AppService {
   }
 
   getGiteaStatus(id: string) {
-    this.getProject(id);
-    return this.giteaSyncService?.getStatus(id) || {
+    const project = this.getProject(id);
+    if (this.giteaSyncService) {
+      return this.giteaSyncService.getStatus(id);
+    }
+    let remote: { owner: string; repo: string; host?: string } | null = null;
+    if (project?.path) {
+      try {
+        const cleanPath = (process.env.PATH || '')
+          .split(path.delimiter)
+          .filter((entry) => !entry.includes(`${path.sep}shims${path.sep}worker`))
+          .join(path.delimiter);
+        const remoteUrl = execFileSync('git', ['-C', project.path, 'remote', 'get-url', 'origin'], {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: cleanPath },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }).trim();
+        remote = parseRemote(remoteUrl);
+      } catch {
+        remote = null;
+      }
+    }
+    return {
       tokenConfigured: isGiteaTokenConfigured(this.config.hubHome, id),
+      remote,
     };
   }
 
@@ -3974,6 +4004,7 @@ export class AppService {
     if (parsed.verdict === 'approved' && parsed.merge) {
       const project = this.projectRepo.get(task.projectId);
       if (!project) throw new HttpError(404, 'not_found', `Project "${task.projectId}" không tồn tại`);
+      this.scheduler.setTaskMerging(taskId, true);
       try {
         mergeResult = await mergeTaskIntoBase(task, project, {
           hubHome: this.config.hubHome,
@@ -4010,6 +4041,8 @@ export class AppService {
           throw new HttpError(error.statusCode, error.error, error.message);
         }
         throw error;
+      } finally {
+        this.scheduler.setTaskMerging(taskId, false);
       }
     }
 
@@ -4261,6 +4294,10 @@ export class AppService {
       }
     }
     return cancelled;
+  }
+
+  async autoCloseMergedTasks(): Promise<number> {
+    return this.scheduler.autoCloseMergedTasks();
   }
 
   retryTask(idParam: string, raw: unknown): TaskRow {

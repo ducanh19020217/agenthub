@@ -90,4 +90,77 @@ describe('DashboardPage - Disk status display', () => {
     expect(diskBadge).toHaveTextContent('Ổ đĩa: 2.1 / 73 GB trống (ngưỡng 5 GB)');
     expect(diskBadge.className).toContain('text-[var(--t-warn)]');
   });
+
+  it('hiển thị banner cảnh báo đầu trang khi có task đang chờ vì đĩa', async () => {
+    vi.spyOn(client, 'getStatus').mockResolvedValue({
+      tasks: { running: 0, waiting_quota: 2 },
+      waitingReasons: { disk: 2 },
+      running: [],
+      disk: { freeGB: 1.2, totalGB: 50.0, minFreeGB: 3.0 },
+      disks: [
+        { path: '/worktrees', label: 'Worktrees', freeGB: 1.2, totalGB: 50.0, minFreeGB: 3.0, low: true, source: 'worktrees' },
+      ],
+    } as any);
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <DashboardPage />
+        </BrowserRouter>
+      </QueryClientProvider>
+    );
+
+    const banner = await screen.findByTestId('disk-blocking-banner');
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveTextContent('Tạm dừng dispatch: Hết dung lượng ổ đĩa');
+    expect(banner).toHaveTextContent('2 task đang phải chờ vì hết dung lượng (Worktrees (1.2 GB / 3 GB))');
+  });
+
+  it('hiển thị banner cảnh báo đầu trang khi ổ hub home dưới ngưỡng', async () => {
+    vi.spyOn(client, 'getStatus').mockResolvedValue({
+      tasks: { running: 0 },
+      waitingReasons: {},
+      running: [],
+      disk: { freeGB: 10.0, totalGB: 50.0, minFreeGB: 3.0 },
+      disks: [
+        { path: '/home/user/.agenthub', label: 'Dữ liệu hub (~/.agenthub)', freeGB: 0.4, totalGB: 20.0, minFreeGB: 1.0, low: true, source: 'hub_home' },
+      ],
+    } as any);
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <DashboardPage />
+        </BrowserRouter>
+      </QueryClientProvider>
+    );
+
+    const banner = await screen.findByTestId('disk-blocking-banner');
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveTextContent('Tạm dừng dispatch: Hết dung lượng ổ đĩa');
+    expect(banner).toHaveTextContent('Ổ chứa dữ liệu hub (~/.agenthub) sắp đầy. Toàn bộ dispatch bị tạm dừng.');
+  });
+
+  it('không hiển thị banner cảnh báo khi không bị chặn vì đĩa', async () => {
+    vi.spyOn(client, 'getStatus').mockResolvedValue({
+      tasks: { running: 0 },
+      waitingReasons: {},
+      running: [],
+      disk: { freeGB: 10.0, totalGB: 50.0, minFreeGB: 3.0 },
+      disks: [
+        { path: '/worktrees', label: 'Worktrees', freeGB: 10.0, totalGB: 50.0, minFreeGB: 3.0, low: false, source: 'worktrees' },
+      ],
+    } as any);
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <DashboardPage />
+        </BrowserRouter>
+      </QueryClientProvider>
+    );
+
+    await screen.findByTestId('disk-status');
+    expect(screen.queryByTestId('disk-blocking-banner')).toBeNull();
+  });
 });

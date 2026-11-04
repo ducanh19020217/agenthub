@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import path from 'node:path';
 import { AgentHubConfig, updateConfigInMemory } from './config.js';
 import { EventBus } from './scheduler/index.js';
 import { QuotaMarkRepo, TaskRepo, ProfileRepo, CiRepo } from './db/index.js';
@@ -49,6 +50,9 @@ export class NotificationService {
   private lastSentSummary = new Map<string, number>();
   private lastSentDisk = new Map<'low' | 'ok', number>();
   private diskState: 'low' | 'ok' | undefined;
+  private diskBlockedNotified = false;
+  private lastSentDiskBlocked = 0;
+  private lastSentDiskBlockedByPath = new Map<string, number>();
   private readonly eventDeduper: NotificationDeduper;
   private boundHandler: ((type: string, taskId?: string, payload?: unknown) => void) | null = null;
   private quietHoursQueue: Array<{ type: string; taskId?: string; payload?: unknown; timestamp: number }> = [];
@@ -177,7 +181,7 @@ export class NotificationService {
     if (level === 'off') return;
     if (level === 'important' && !new Set([
       'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
-      'disk.low', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed', 'task.waiting_quota',
+      'disk.low', 'disk.ok', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed', 'task.waiting_quota',
       'quota.cleared', 'remote_deploy.failed', 'remote_deploy.health_timeout',
       'merge.conflict', 'merge.failed',
     ]).has(type)) return;
@@ -501,10 +505,50 @@ export class NotificationService {
       }
 
       case 'disk.low': {
-        if (!this.shouldSendDisk('low', now)) break;
         this.diskState = 'low';
         const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
         const minFreeGB = typeof p.minFreeGB === 'number' ? p.minFreeGB : 0;
+        const isHubHomeLow = p.source === 'hub_home'
+          || p.label === 'Ổ chứa dữ liệu hub (~/.agenthub)'
+          || p.label === 'Dữ liệu hub (~/.agenthub)';
+
+        let waitingTasks: Array<{ id: string; slug?: string; title?: string }> = [];
+        if (Array.isArray(p.tasks)) {
+          waitingTasks = p.tasks.map((item) => typeof item === 'string' ? { id: item, slug: item, title: item } : item as { id: string; slug?: string; title?: string });
+        } else if (this.taskRepo) {
+          waitingTasks = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
+        }
+
+        const isBlocking = isHubHomeLow || waitingTasks.length > 0 || p.isBlocking === true;
+
+        if (isBlocking) {
+          const diskKey = typeof p.path === 'string' && p.path ? path.resolve(p.path) : (typeof p.label === 'string' ? p.label : 'default');
+          const lastSent = this.lastSentDiskBlockedByPath.get(diskKey) ?? 0;
+          if (lastSent > 0 && now - lastSent < 60 * 60_000) break;
+          this.diskBlockedNotified = true;
+          this.lastSentDiskBlocked = now;
+          this.lastSentDiskBlockedByPath.set(diskKey, now);
+          this.lastSentDisk.set('low', now);
+
+          const label = typeof p.label === 'string' && p.label ? p.label : 'Ổ đĩa';
+          const pathStr = typeof p.path === 'string' && p.path ? ` (${p.path})` : '';
+          const taskNames = waitingTasks.map((t) => t.slug || t.title || t.id).filter(Boolean);
+          const taskListStr = taskNames.length > 0 ? ` ${taskNames.length} task đang phải chờ: ${taskNames.join(', ')}.` : '';
+
+          const cacheDir = typeof p.cacheDir === 'string' && p.cacheDir ? p.cacheDir : this.config.cacheDir;
+          const cacheBytes = typeof p.cacheBytes === 'number' ? p.cacheBytes : 0;
+          const cacheGB = cacheBytes > 0
+            ? `${(cacheBytes / (1024 ** 3)).toFixed(1)} GB`
+            : typeof p.cacheGB === 'number' ? `${p.cacheGB} GB` : '';
+          const cacheSuggestion = cacheDir
+            ? ` Gợi ý: dọn thùng rác hoặc cache node_modules (${cacheDir}${cacheGB ? `, ${cacheGB}` : ''}).`
+            : ' Gợi ý: dọn thùng rác hoặc cache node_modules.';
+
+          this.notify(`💾 Hết dung lượng: ${label}${pathStr} còn ${freeGB} GB, cần ${minFreeGB} GB.${taskListStr}${cacheSuggestion}`, 'critical');
+          break;
+        }
+
+        if (!this.shouldSendDisk('low', now)) break;
         const cacheDir = typeof p.cacheDir === 'string' ? ` Cache node_modules: ${p.cacheDir}.` : '';
         const largest = typeof p.largestCacheEntry === 'string'
           ? ` Bản lớn nhất: ${p.largestCacheEntry}${typeof p.largestCacheEntryBytes === 'number' ? ` (${(p.largestCacheEntryBytes / 1024 ** 3).toFixed(2)} GB)` : ''}.`
@@ -516,6 +560,52 @@ export class NotificationService {
       case 'disk.ok': {
         const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
         const minFreeGB = typeof p.minFreeGB === 'number' ? p.minFreeGB : 0;
+        const resumedCount = typeof p.resumedCount === 'number'
+          ? p.resumedCount
+          : Array.isArray(p.tasks)
+          ? p.tasks.length
+          : 0;
+
+        if (this.diskBlockedNotified) {
+          this.lastSentDisk.set('ok', now);
+          if (resumedCount > 0) {
+            this.notify(`✅ Đã đủ dung lượng, ${resumedCount} task tiếp tục chạy`, 'critical');
+          }
+          if (typeof p.remainingCount === 'number' && p.remainingCount > 0) {
+            if (typeof p.path === 'string' && p.path) {
+              const resolved = path.resolve(p.path);
+              this.lastSentDiskBlockedByPath.delete(resolved);
+              for (const key of Array.from(this.lastSentDiskBlockedByPath.keys())) {
+                if (key === resolved || key.startsWith(resolved + path.sep) || resolved.startsWith(key + path.sep)) {
+                  this.lastSentDiskBlockedByPath.delete(key);
+                }
+              }
+              for (const key of Array.from(this.lastSent.keys())) {
+                if (key.includes(p.path) || key.includes(resolved)) {
+                  this.lastSent.delete(key);
+                }
+              }
+            }
+            if (typeof p.label === 'string' && p.label) {
+              this.lastSentDiskBlockedByPath.delete(p.label);
+            }
+            if (this.lastSentDiskBlockedByPath.size === 0) {
+              this.diskBlockedNotified = false;
+              this.diskState = 'ok';
+            }
+          } else {
+            this.diskBlockedNotified = false;
+            this.lastSentDiskBlockedByPath.clear();
+            for (const key of Array.from(this.lastSent.keys())) {
+              if (key.includes('💾 Hết dung lượng')) {
+                this.lastSent.delete(key);
+              }
+            }
+            this.diskState = 'ok';
+          }
+          break;
+        }
+
         if (freeGB < minFreeGB + 1 || this.diskState !== 'low') break;
         if (!this.shouldSendDisk('ok', now)) break;
         this.diskState = 'ok';

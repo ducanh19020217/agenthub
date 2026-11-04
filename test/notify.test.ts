@@ -337,6 +337,176 @@ describe('NotificationService (Desktop Notifications)', () => {
     notifier.stop();
   });
 
+  it('sends critical notification with waiting tasks when disk blocks dispatch, repeats after 60m, and notifies recovery', () => {
+    config.notifications.desktopLevel = 'critical';
+    taskRepo.insert({ id: 'proj/a', projectId: 'proj', slug: 'a', title: 'Task A', status: 'waiting_quota', waitReason: 'disk', level: 'easy' });
+    taskRepo.insert({ id: 'proj/b', projectId: 'proj', slug: 'b', title: 'Task B', status: 'waiting_quota', waitReason: 'disk', level: 'easy' });
+    taskRepo.insert({ id: 'proj/c', projectId: 'proj', slug: 'c', title: 'Task C', status: 'waiting_quota', waitReason: 'disk', level: 'easy' });
+
+    let current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    // 1. Emit disk.low: blocks dispatch -> critical urgency notification
+    eventBus.emit('disk.low', undefined, {
+      label: 'Worktrees',
+      path: '/worktrees',
+      freeGB: 1.4,
+      minFreeGB: 1.5,
+      cacheDir: '/cache',
+      cacheBytes: 2.5 * 1024 ** 3,
+    });
+
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args).toContain('critical');
+    const msg = execCalls[0].args.at(-1)!;
+    expect(msg).toContain('💾 Hết dung lượng: Worktrees (/worktrees) còn 1.4 GB, cần 1.5 GB.');
+    expect(msg).toContain('3 task đang phải chờ: a, b, c.');
+    expect(msg).toContain('Gợi ý: dọn thùng rác hoặc cache node_modules (/cache, 2.5 GB).');
+
+    // 2. 30 minutes later: still within 60 minutes -> throttled
+    current += 30 * 60_000;
+    eventBus.emit('disk.low', undefined, {
+      label: 'Worktrees',
+      path: '/worktrees',
+      freeGB: 1.4,
+      minFreeGB: 1.5,
+    });
+    expect(execCalls).toHaveLength(1);
+
+    // 3. 61 minutes later: 60m reminder fires
+    current += 31 * 60_000;
+    eventBus.emit('disk.low', undefined, {
+      label: 'Worktrees',
+      path: '/worktrees',
+      freeGB: 1.4,
+      minFreeGB: 1.5,
+    });
+    expect(execCalls).toHaveLength(2);
+
+    // 4. Recovery: disk.ok with resumed tasks
+    eventBus.emit('disk.ok', undefined, { freeGB: 10, minFreeGB: 1.5, resumedCount: 3 });
+    expect(execCalls).toHaveLength(3);
+    expect(execCalls[2].args.at(-1)).toBe('✅ Đã đủ dung lượng, 3 task tiếp tục chạy');
+
+    notifier.stop();
+  });
+
+  it('does not send recovery notification on disk.ok if there was no prior blocking notification', () => {
+    config.notifications.desktopLevel = 'all';
+    const current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    eventBus.emit('disk.ok', undefined, { freeGB: 10, resumedCount: 2 });
+    expect(execCalls).toHaveLength(0);
+
+    notifier.stop();
+  });
+
+  it('resets incident state on disk.ok even when resumedCount is 0', () => {
+    config.notifications.desktopLevel = 'critical';
+    let current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    // 1. First blocking incident (e.g. hub home is low)
+    eventBus.emit('disk.low', undefined, {
+      label: 'Ổ chứa dữ liệu hub (~/.agenthub)',
+      path: '/home/hub',
+      source: 'hub_home',
+      freeGB: 0.5,
+      minFreeGB: 1,
+      isBlocking: true,
+      tasks: [],
+    });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('Hết dung lượng');
+
+    // 2. Recovery with resumedCount = 0 (no waiting tasks resumed)
+    eventBus.emit('disk.ok', undefined, { freeGB: 5, minFreeGB: 1, resumedCount: 0 });
+    // No recovery notification sent when resumedCount = 0
+    expect(execCalls).toHaveLength(1);
+
+    // 3. Subsequent incident 5 minutes later (< 60 mins): should notify immediately because state was reset
+    current += 5 * 60_000;
+    eventBus.emit('disk.low', undefined, {
+      label: 'Ổ chứa dữ liệu hub (~/.agenthub)',
+      path: '/home/hub',
+      source: 'hub_home',
+      freeGB: 0.4,
+      minFreeGB: 1,
+      isBlocking: true,
+      tasks: [],
+    });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('Hết dung lượng');
+
+    notifier.stop();
+  });
+
+  it('notifies recovery sequentially when multiple disks recover at different times', () => {
+    config.notifications.desktopLevel = 'critical';
+    let current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    // 1. Two separate disk blocking alerts
+    eventBus.emit('disk.low', undefined, { label: 'Drive A', path: '/drive-a', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-a'] });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('Drive A');
+
+    eventBus.emit('disk.low', undefined, { label: 'Drive B', path: '/drive-b', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-b'] });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('Drive B');
+
+    // 2. Drive A recovers first (1 task resumed, 1 remaining)
+    eventBus.emit('disk.ok', undefined, { path: '/drive-a', freeGB: 10, minFreeGB: 3, resumedCount: 1, remainingCount: 1, tasks: ['t-a'] });
+    expect(execCalls).toHaveLength(3);
+    expect(execCalls[2].args.at(-1)).toBe('✅ Đã đủ dung lượng, 1 task tiếp tục chạy');
+
+    // 3. Drive B recovers afterwards (31m later to clear dedupe, 1 task resumed, 0 remaining)
+    current += 31 * 60_000;
+    eventBus.emit('disk.ok', undefined, { path: '/drive-b', freeGB: 10, minFreeGB: 3, resumedCount: 1, remainingCount: 0, tasks: ['t-b'] });
+    expect(execCalls).toHaveLength(4);
+    expect(execCalls[3].args.at(-1)).toBe('✅ Đã đủ dung lượng, 1 task tiếp tục chạy');
+
+    notifier.stop();
+  });
+
+  it('notifies a new blocking incident after partial recovery without 60m throttle', () => {
+    config.notifications.desktopLevel = 'critical';
+    let current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    // 1. Two separate disk blocking alerts
+    eventBus.emit('disk.low', undefined, { label: 'Drive A', path: '/drive-a', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-a'] });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('Drive A');
+
+    eventBus.emit('disk.low', undefined, { label: 'Drive B', path: '/drive-b', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-b'] });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('Drive B');
+
+    // 2. Drive A recovers first (1 task resumed, 1 remaining on Drive B)
+    eventBus.emit('disk.ok', undefined, { path: '/drive-a', freeGB: 10, minFreeGB: 3, resumedCount: 1, remainingCount: 1, tasks: ['t-a'] });
+    expect(execCalls).toHaveLength(3);
+    expect(execCalls[2].args.at(-1)).toBe('✅ Đã đủ dung lượng, 1 task tiếp tục chạy');
+
+    // 3. 5 minutes later, Drive A becomes low again (< 60m since first alert)
+    current += 5 * 60_000;
+    eventBus.emit('disk.low', undefined, { label: 'Drive A', path: '/drive-a', freeGB: 0.4, minFreeGB: 3, isBlocking: true, tasks: ['t-a'] });
+    expect(execCalls).toHaveLength(4);
+    expect(execCalls[3].args.at(-1)).toContain('Drive A');
+
+    // 4. Meanwhile Drive B emitting disk.low at 5m remains throttled
+    eventBus.emit('disk.low', undefined, { label: 'Drive B', path: '/drive-b', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-b'] });
+    expect(execCalls).toHaveLength(4);
+
+    notifier.stop();
+  });
+
   it('treats quota exhaustion per engine, not across all profiles', () => {
     config.notifications.desktopLevel = 'important';
     quotaMarkRepo.mark('g1', 'gemini', Math.floor(Date.now() / 1000) + 3600);

@@ -927,6 +927,7 @@ export interface TelegramStatus {
     blocked: boolean;
     quotaAllExhausted: boolean;
     fallback: boolean;
+    disk: boolean;
   };
 }
 

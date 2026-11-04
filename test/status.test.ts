@@ -159,6 +159,8 @@ describe('GET /api/status enrichment', () => {
       expect(formatEventSummary('task.blocked', null, 'task-b')).toBe('task-b bị chặn');
       expect(formatEventSummary('task.failed', null, 'task-f')).toBe('task-f thất bại');
       expect(formatEventSummary('task.done', null, 'task-d')).toBe('task-d hoàn thành');
+      expect(formatEventSummary('task.done', { reason: 'merged_elsewhere' }, 'task-d')).toBe('task-d hoàn thành (đã merge qua nhánh khác)');
+      expect(formatEventSummary('task.auto_closed', { reason: 'merged_elsewhere' }, 'task-a')).toBe('task-a tự động hoàn thành (đã merge qua nhánh khác)');
       expect(formatEventSummary('task.cancelled', null, 'task-c')).toBe('task-c đã bị hủy');
       expect(formatEventSummary('task.waiting_quota', null, 'task-w')).toBe('task-w chờ quota khả dụng');
       expect(formatEventSummary('task.queued', null, 'task-q')).toBe('task-q được đưa vào hàng đợi');

@@ -362,6 +362,7 @@ export function createContext(
     if (taskId) void service.cleanupOrphanedMergeFixTasks(taskId);
   });
   void service.cleanupOrphanedMergeFixTasks();
+  void scheduler.autoCloseMergedTasks();
 
   const ciRepo = new CiRepo(db);
   const ciService = new CiWatchService({

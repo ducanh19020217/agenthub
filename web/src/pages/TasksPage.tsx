@@ -316,6 +316,12 @@ export const TasksPage: React.FC = () => {
     queryFn: getTasks,
     enabled: viewMode === 'project',
   });
+  const { data: completedTasks = [] } = useQuery({
+    queryKey: ['tasks-triage-pending'],
+    queryFn: () => getTasks({ status: 'done' }),
+    refetchInterval: 5000,
+  });
+  const pendingTriageTasks = completedTasks.filter((task) => task.triage?.analysis && !task.triage.decision);
 
   const { data, isLoading: isPageLoading } = useQuery({
     queryKey: ['tasks', selectedProject, selectedStatus, search, page, pageSize, cursor, sortKey, sortDirection],
@@ -378,6 +384,23 @@ export const TasksPage: React.FC = () => {
 
   return (
     <div className="space-y-6" data-tour="task-lifecycle">
+      {pendingTriageTasks.length > 0 && (
+        <section data-testid="triage-pending-section" className="rounded-xl border border-[var(--t-accent)] bg-[var(--t-surface-2)] p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="font-semibold text-[var(--t-text)]">{t('tasks.triagePending')}</h2>
+            <span className="rounded-full bg-[var(--t-accent)] px-2 py-0.5 text-xs text-[var(--t-on-accent)]">{pendingTriageTasks.length}</span>
+          </div>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {pendingTriageTasks.map((task) => (
+              <Link key={task.id} to={`/tasks/${encodeURIComponent(task.id.replace('/', '~'))}`} className="rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] p-3 hover:border-[var(--t-accent)]">
+                <div className="text-xs font-mono text-[var(--t-text-2)]">{task.triage?.displayId || task.slug}</div>
+                <div className="mt-1 text-sm font-semibold text-[var(--t-text)]">{task.title}</div>
+                <div className="mt-1 text-xs text-[var(--t-text-2)]">{task.triage?.analysis?.conclusion} · {task.triage?.analysis?.size}</div>
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
       {/* Top Bar: Filter & New Task Button */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4" data-tour="task-filters">
         <div>

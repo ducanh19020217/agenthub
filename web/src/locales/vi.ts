@@ -152,6 +152,7 @@ export const vi = {
     failoverTurnOff: 'Tắt failover',
   },
   tasks: {
+    triagePending: 'Chờ bạn quyết định',
     title: 'Quản lý Task',
     subtitle: 'Theo dõi tiến độ Kanban và can thiệp vòng đời tác vụ AI.',
     filterProject: 'Lọc theo project',

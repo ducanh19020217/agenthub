@@ -154,6 +154,7 @@ export const en: typeof vi = {
     failoverTurnOff: 'Disable failover',
   },
   tasks: {
+    triagePending: 'Waiting for your decision',
     title: 'Task Management',
     subtitle: 'Track Kanban progress and intervene in AI task lifecycles.',
     filterProject: 'Filter by project',

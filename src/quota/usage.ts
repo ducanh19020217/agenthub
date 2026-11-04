@@ -250,7 +250,7 @@ export class QuotaUsageService {
 
   /**
    * Quota và gói Codex qua `chatgpt.com/backend-api/wham/usage` (như Cockpit tools), không cần chạy Codex.
-   * Chỉ cho hồ sơ isolated (DEC-012). `message` giải thích kết quả, không bao giờ chứa token.
+   * Chỉ cho hồ sơ isolated (DEC-013). `message` giải thích kết quả, không bao giờ chứa token.
    */
   async collectCodexFromApi(profile: ProfileRow, now = Math.floor(Date.now() / 1000)): Promise<{ rows: QuotaUsageRow[]; plan: string | null; message: string }> {
     if (profile.engine !== 'codex' || profile.kind !== 'isolated' || !profile.home) {

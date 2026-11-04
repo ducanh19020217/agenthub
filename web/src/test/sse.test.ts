@@ -65,7 +65,7 @@ describe('Web SSE client (web/src/api/sse.ts)', () => {
     expect(getBackoffDelay(10)).toBe(MAX_RECONNECT_DELAY_MS);
   });
 
-  it('parses unified envelope for bus events and notifies event subscribers', () => {
+  it('parses unified envelope for bus events and notifies event subscribers', async () => {
     const received: EventItem[] = [];
     const unsub = subscribeToEvents((ev) => {
       received.push(ev);
@@ -89,6 +89,7 @@ describe('Web SSE client (web/src/api/sse.ts)', () => {
       lastEventId: '42',
       data: JSON.stringify(envelope),
     });
+    await vi.runAllTicks();
 
     expect(received).toHaveLength(1);
     expect(received[0]).toEqual({
@@ -103,6 +104,14 @@ describe('Web SSE client (web/src/api/sse.ts)', () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['status'] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['task', 'myproj/task-1'] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['task', 'myproj~task-1'] });
+
+    const invalidationsBeforeReplay = invalidateSpy.mock.calls.length;
+    taskListener({
+      lastEventId: '42',
+      data: JSON.stringify(envelope),
+    });
+    expect(received).toHaveLength(1);
+    expect(invalidateSpy).toHaveBeenCalledTimes(invalidationsBeforeReplay);
 
     unsub();
     cleanup();

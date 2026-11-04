@@ -405,14 +405,15 @@ find_node_major() {
 
 check_native_modules() {
   _native_root="$1"
+  # Packages such as node-pty ship prebuilds for every platform; only this host's one can load.
+  _native_plat="$("$_node_bin" -p 'process.platform + "-" + process.arch' 2>/dev/null || true)"
   for _native_name in node-pty better-sqlite3; do
     _native_dir="$_native_root/node_modules/$_native_name"
     [ -d "$_native_dir" ] || continue
-    _native_file="$(find "$_native_dir" -type f -name '*.node' -print 2>/dev/null | head -n 1)"
-    [ -n "$_native_file" ] || continue
-    _native_output="$("$_node_bin" -e 'process.dlopen(module, process.argv[1])' "$_native_file" 2>&1)" || {
-      installer_log "native $_native_name ($_native_file): $_native_output"
-      echo "Lỗi: module native không nạp được: $_native_file" >&2
+    # Load the package the way the app does, so it picks the binary built for this platform.
+    _native_output="$("$_node_bin" -e 'require(process.argv[1])' "$_native_dir" 2>&1)" || {
+      installer_log "native $_native_name ($_native_dir): $_native_output"
+      echo "Lỗi: module native không nạp được: $_native_name ($_native_dir)" >&2
       if printf '%s' "$_native_output" | grep -Eqi 'GLIBC_[0-9]+\.[0-9]+'; then
         _glibc_need="$(printf '%s' "$_native_output" | sed -n 's/.*GLIBC_\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | sort -V | tail -n 1)"
         _glibc_have="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
@@ -438,6 +439,8 @@ check_native_modules() {
   for _native_file in $(find "$_native_root/node_modules" -type f -name '*.node' -print 2>/dev/null); do
     case "$_native_file" in
       */node-pty/*|*/better-sqlite3/*) continue ;;
+      */prebuilds/"$_native_plat"/*) ;;
+      */prebuilds/*) continue ;;
     esac
     _native_output="$("$_node_bin" -e 'process.dlopen(module, process.argv[1])' "$_native_file" 2>&1)" || {
       installer_log "native file ($_native_file): $_native_output"

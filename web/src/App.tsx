@@ -17,7 +17,6 @@ const TasksPage = lazy(() => import('./pages/TasksPage').then((m) => ({ default:
 const CreateTaskPage = lazy(() => import('./pages/CreateTaskPage').then((m) => ({ default: m.CreateTaskPage })));
 const TaskDetailPage = lazy(() => import('./pages/TaskDetailPage').then((m) => ({ default: m.TaskDetailPage })));
 const ProfilesPage = lazy(() => import('./pages/ProfilesPage').then((m) => ({ default: m.ProfilesPage })));
-const ChatPage = lazy(() => import('./pages/ChatPage').then((m) => ({ default: m.ChatPage })));
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((m) => ({ default: m.ProjectsPage })));
 const DepartmentsPage = lazy(() => import('./pages/DepartmentsPage').then((m) => ({ default: m.DepartmentsPage })));
 const PlansPage = lazy(() => import('./pages/PlansPage').then((m) => ({ default: m.PlansPage })));
@@ -25,6 +24,7 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ de
 const SavingsPage = lazy(() => import('./pages/SavingsPage').then((m) => ({ default: m.SavingsPage })));
 const ClaudeSessionsPage = lazy(() => import('./pages/ClaudeSessionsPage').then((m) => ({ default: m.ClaudeSessionsPage })));
 const SetupPage = lazy(() => import('./pages/SetupPage').then((m) => ({ default: m.SetupPage })));
+const ChatPage = lazy(() => import('./pages/ChatPage').then((m) => ({ default: m.ChatPage })));
 
 const queryClient = new QueryClient({
   defaultOptions: {

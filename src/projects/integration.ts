@@ -282,7 +282,7 @@ export async function ensureIntegrationNodeModules(
   },
 ): Promise<void> {
   const settings = projectSettings(project);
-  if (settings.worktree.install === 'skip') return;
+  if (settings.worktree.install !== 'auto') return;
   const integrationPath = getIntegrationPath(project, hubHome);
   if (!fs.existsSync(integrationPath)) return;
   const hasDependencyLock = (dir: string): boolean =>

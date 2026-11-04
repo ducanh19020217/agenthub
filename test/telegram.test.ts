@@ -739,6 +739,64 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(ctx.service.isSchedulerPaused()).toBe(false);
     });
 
+    it('/pause <id> and /resume <id> pause and resume specific task', async () => {
+      const pauseSpy = vi.spyOn(ctx.service, 'pauseTask').mockReturnValue({ ok: true, paused: true });
+      const resumeSpy = vi.spyOn(ctx.service, 'resumeTask').mockReturnValue({ ok: true, paused: false });
+
+      await bot.handleUpdate({
+        update_id: 171,
+        message: {
+          message_id: 171,
+          date: 123456,
+          chat: { id: CHAT_ID, type: 'private' },
+          text: '/pause p1/task-run',
+        },
+      });
+      expect(pauseSpy).toHaveBeenCalledWith('p1/task-run', 'manual');
+
+      await bot.handleUpdate({
+        update_id: 172,
+        message: {
+          message_id: 172,
+          date: 123456,
+          chat: { id: CHAT_ID, type: 'private' },
+          text: '/resume p1/task-run',
+        },
+      });
+      expect(resumeSpy).toHaveBeenCalledWith('p1/task-run');
+    });
+
+    it('/task shows paused badge and resume button when task is paused', async () => {
+      vi.spyOn(ctx.service, 'getTask').mockResolvedValueOnce({
+        id: 'p1/task-run',
+        projectId: 'p1',
+        slug: 'task-run',
+        title: 'Task Paused',
+        status: 'running',
+        level: 'easy',
+        paused: true,
+        pauseReason: 'load',
+        runs: [],
+      } as unknown as Awaited<ReturnType<typeof ctx.service.getTask>>);
+
+      await bot.handleUpdate({
+        update_id: 173,
+        message: {
+          message_id: 173,
+          date: 123456,
+          chat: { id: CHAT_ID, type: 'private' },
+          text: '/task task-run',
+        },
+      });
+
+      const calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      const text = String(calls[calls.length - 1].body?.text);
+      expect(text).toContain('[Tạm dừng (quá tải)]');
+      const markup = calls[calls.length - 1].body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+      expect(markup.inline_keyboard[0][0].callback_data).toBe('task:resume:p1/task-run');
+      expect(markup.inline_keyboard[0][0].text).toContain('Tiếp tục');
+    });
+
     it('/cancel sends confirmation prompt with inline buttons', async () => {
       await bot.handleUpdate({
         update_id: 18,
@@ -1029,6 +1087,26 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(calls[0].body?.text).toContain('Diff tóm tắt');
       expect(calls[0].body?.text).toContain('2 files changed, 15 insertions(+)');
     });
+
+    it('task:resume resumes paused task', async () => {
+      const resumeSpy = vi.spyOn(ctx.service, 'resumeTask').mockReturnValue({ ok: true, paused: false });
+      await bot.handleUpdate({
+        update_id: 35,
+        callback_query: {
+          id: 'cb-resume',
+          from: { id: CHAT_ID },
+          message: {
+            message_id: 35,
+            chat: { id: CHAT_ID },
+          },
+          data: 'task:resume:p1/task-cb-run',
+        },
+      });
+
+      expect(resumeSpy).toHaveBeenCalledWith('p1/task-cb-run');
+      const calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls[0].body?.text).toContain('Đã tiếp tục task');
+    });
   });
 
   describe('5. EventBus notifications and deduplication', () => {
@@ -1083,6 +1161,25 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(calls[0].body?.text).toContain('Thiếu key');
     });
 
+    it('broadcasts task.pause_reminder with resume button', async () => {
+      ctx.scheduler.getEventBus().emit('task.pause_reminder', 'p1/task-paused', {
+        title: 'Task Đang Tạm Dừng',
+        pausedMinutes: 35,
+        reason: 'load',
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      const calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Nhắc nhở: Tạm dừng (quá tải)');
+      expect(calls[0].body?.text).toContain('p1/task-paused');
+      expect(calls[0].body?.text).toContain('35 phút');
+
+      const markup = calls[0].body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+      expect(markup.inline_keyboard[0][0].callback_data).toBe('task:resume:p1/task-paused');
+      expect(markup.inline_keyboard[0][0].text).toContain('Tiếp tục');
+    });
+
     it('suppresses duplicate event notifications within 10 seconds', async () => {
       ctx.scheduler.getEventBus().emit('task.failed', 'p1/task-dedup', { title: 'Lỗi' });
       ctx.scheduler.getEventBus().emit('task.failed', 'p1/task-dedup', { title: 'Lỗi' });
@@ -1121,7 +1218,28 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       await bot.flushQueue(CHAT_ID);
 
       let calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
-      expect(calls[0].body?.text).toContain('Mọi tài khoản đều đã hết quota');
+      expect(calls[0].body?.text).toContain('Hết sạch quota ở mọi tài khoản và model');
+      expect(calls[0].body?.text).toContain('Hệ thống tạm dừng thực thi task.');
+
+      // Repeated critical event does not send a duplicate broadcast
+      recordedCalls = [];
+      ctx.scheduler.getEventBus().emit('quota.exhausted', undefined, {
+        profile: 'g1',
+        family: 'gemini-pro',
+        allExhausted: true,
+      });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
+
+      // Recovery notification when quota is cleared and capacity restored
+      ctx.profileRepo.upsert({ name: 'g1', engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
+      ctx.quotaMarkRepo.clear('g1', 'gemini');
+      ctx.quotaMarkRepo.clear('g1', 'claude');
+      ctx.quotaMarkRepo.clear('g1', 'gpt');
+      ctx.scheduler.getEventBus().emit('quota.cleared', undefined, { family: 'gemini' });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls.some((c) => c.body?.text?.includes('Có quota trở lại'))).toBe(true);
 
       recordedCalls = [];
       currentTime += 15_000;
@@ -1130,6 +1248,81 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
 
       calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
       expect(calls[0].body?.text).toContain('Ổ đĩa thấp');
+    });
+
+    it('reproduces 2026-11-03 incident: claude/gpt exhausted on all 4 agy profiles, gemini and codex remain -> only 1 info, no critical', async () => {
+      // Setup 4 agy profiles and 1 codex profile
+      for (const name of ['g3', 'g4', 'pa-gemini', 'g2']) {
+        ctx.profileRepo.upsert({ name, engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
+      }
+      ctx.profileRepo.upsert({ name: 'codeX1', engine: 'codex', kind: 'codex', home: tmpDir, email: null, enabled: 1 });
+      const future = Math.floor(currentTime / 1000) + 3600;
+      for (const profile of ['g3', 'g4', 'pa-gemini', 'g2']) {
+        ctx.quotaMarkRepo.mark(profile, 'claude', future);
+        ctx.quotaMarkRepo.mark(profile, 'gpt', future);
+      }
+      recordedCalls = [];
+      await bot.stop();
+      bot.handleEvent('quota.exhausted', undefined, { profile: 'pa-gemini', family: 'claude', engine: 'agy', allExhausted: true });
+      bot.handleEvent('quota.exhausted', undefined, { profile: 'pa-gemini', family: 'gpt', engine: 'agy', allExhausted: true });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await bot.flushQueue(CHAT_ID);
+
+      const calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      const text = calls[0].body?.text || '';
+      expect(text).toContain('Hết quota <b>Claude/GPT</b> trên mọi tài khoản Antigravity');
+      expect(text).toContain('Vẫn chạy bằng: Gemini (4 tài khoản), Codex (codeX1)');
+      expect(text).not.toContain('Hết sạch quota');
+      expect(text).not.toContain('mọi tài khoản đều hết');
+      expect(text).not.toContain('Hệ thống tạm dừng');
+    });
+
+    it('uses info for partial exhaustion and deduplicates critical outage until recovery', async () => {
+      await bot.stop();
+      for (const name of ['p1', 'p2']) {
+        ctx.profileRepo.upsert({ name, engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
+      }
+      ctx.profileRepo.upsert({ name: 'codeX1', engine: 'codex', kind: 'codex', home: tmpDir, email: null, enabled: 1 });
+      const future = Math.floor(currentTime / 1000) + 3600;
+
+      for (const profile of ['p1', 'p2']) {
+        ctx.quotaMarkRepo.mark(profile, 'claude', future);
+        ctx.quotaMarkRepo.mark(profile, 'gpt', future);
+      }
+      bot.handleEvent('quota.exhausted', undefined, { profile: 'p1', family: 'claude', engine: 'agy' });
+      bot.handleEvent('quota.exhausted', undefined, { profile: 'p1', family: 'gpt', engine: 'agy' });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await bot.flushQueue(CHAT_ID);
+
+      let calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Vẫn chạy bằng: Gemini (2 tài khoản), Codex (codeX1)');
+      expect(calls[0].body?.text).not.toContain('Hệ thống tạm dừng');
+      expect(calls[0].body?.text).not.toContain('mọi tài khoản đều hết');
+
+      recordedCalls = [];
+      for (const profile of ['p1', 'p2']) {
+        for (const family of ['gemini', 'claude', 'gpt']) ctx.quotaMarkRepo.mark(profile, family, future);
+      }
+      ctx.quotaMarkRepo.mark('codeX1', 'codex', future);
+      const outage = { profile: 'p2', family: 'gemini', engine: 'agy' };
+      bot.handleEvent('quota.exhausted', undefined, outage);
+      bot.handleEvent('quota.exhausted', undefined, outage);
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Hệ thống tạm dừng thực thi task');
+
+      recordedCalls = [];
+      for (const profile of ['p1', 'p2']) {
+        for (const family of ['gemini', 'claude', 'gpt']) ctx.quotaMarkRepo.clear(profile, family);
+      }
+      ctx.quotaMarkRepo.clear('codeX1', 'codex');
+      bot.handleEvent('quota.cleared', undefined, { family: 'gemini' });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls.some((c) => c.body?.text?.includes('Có quota trở lại'))).toBe(true);
     });
 
     it('broadcasts task.waiting_quota only for no_department_profile with 30-minute dedupe', async () => {
@@ -2337,11 +2530,15 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
 
     // Allowed: moi tai khoan het quota
     ctx.quotaMarkRepo.mark('p2', 'gemini', Math.floor(currentTime / 1000) + 3600);
+    ctx.quotaMarkRepo.mark('p1', 'claude', Math.floor(currentTime / 1000) + 3600);
+    ctx.quotaMarkRepo.mark('p2', 'claude', Math.floor(currentTime / 1000) + 3600);
+    ctx.quotaMarkRepo.mark('p1', 'gpt', Math.floor(currentTime / 1000) + 3600);
+    ctx.quotaMarkRepo.mark('p2', 'gpt', Math.floor(currentTime / 1000) + 3600);
     bot.handleEvent('quota.exhausted', undefined, { profile: 'p2', family: 'gemini' });
     await bot.flushQueue(CHAT_ID);
     sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
     expect(sendCalls).toHaveLength(3);
-    expect(sendCalls[2].body?.text).toContain('Mọi tài khoản đều đã hết quota');
+    expect(sendCalls[2].body?.text).toContain('Hết sạch quota ở mọi tài khoản và model');
   });
 
   it('lọc thông báo thô theo brain mode hiệu lực của từng project', async () => {

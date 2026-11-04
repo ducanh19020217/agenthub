@@ -1,6 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import { z } from 'zod';
 import { DEFAULT_LOAD_CONFIG, LoadConfig } from './load.js';
 import type { ExtraDiskPath } from './disk.js';
 import { normalizeFallbackSteps, ClaudeFallbackStep } from './chat/failover.js';
@@ -54,6 +55,20 @@ export const DEFAULT_BRAIN_DIGEST_CONFIG: BrainDigestConfig = {
   time: '18:00',
 };
 
+export const DEFAULT_BRAIN_WAKEUP_EVENTS: string[] = [
+  'task.review_ready',
+  'task.blocked',
+  'task.failed',
+  'review.escalated',
+  'merge.failed',
+  'merge.conflict',
+  'quota.exhausted',
+  'claude.quota_exhausted',
+  'brain.notify',
+  'brain.directive_added',
+  'ci.failed',
+];
+
 export interface BrainConfig {
   engine?: 'claude' | 'codex';
   fallback: ClaudeFallbackStep[];
@@ -69,6 +84,10 @@ export interface BrainConfig {
   maxTurnsPerHour: number;
   dailyTokenBudget: number;
   turnTimeoutSec?: number;
+  rotateAtTokens?: number;
+  rotateAfterTurns?: number;
+  batchWindowSec?: number;
+  wakeupEvents?: string[];
   digest: BrainDigestConfig;
   /** Optional cross-department coordinator. Disabled unless explicitly enabled. */
   director?: {
@@ -113,6 +132,35 @@ export const DEFAULT_SAVINGS_CONFIG: SavingsConfig = {
   },
   claudeFactor: 0.9,
   claudeOverheadPerTask: 40_000,
+};
+
+export interface SchedulerLimitsConfig {
+  maxRunsPerTask: number;
+  maxConsecutiveCrashesPerTask: number;
+  maxPausedMin?: number;
+}
+
+export const DEFAULT_SCHEDULER_LIMITS: SchedulerLimitsConfig = {
+  maxRunsPerTask: 15,
+  maxConsecutiveCrashesPerTask: 3,
+  maxPausedMin: 30,
+};
+
+export interface ProfileCoolingConfig {
+  /** Number of consecutive crashes across all tasks before cooling activates. */
+  threshold: number;
+  /** Time window in minutes to count consecutive crashes. */
+  windowMin: number;
+  /** Duration of cooling period in minutes. */
+  coolingMin: number;
+}
+
+export type SchedulerConfig = SchedulerLimitsConfig;
+
+export const DEFAULT_PROFILE_COOLING: ProfileCoolingConfig = {
+  threshold: 3,
+  windowMin: 30,
+  coolingMin: 30,
 };
 
 export interface StallConfig {
@@ -275,6 +323,61 @@ export function parseWakeupConfig(raw: unknown): WakeupConfig {
   };
 }
 
+// --- OpenProject source configuration ---
+
+export const DailyReportConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  time: z.string().default('08:00'),
+  weekdaysOnly: z.boolean().default(true),
+  dir: z.string().min(1).optional(),
+  maxItems: z.number().int().positive().default(10),
+  telegram: z.boolean().default(false),
+});
+
+export type DailyReportConfig = z.infer<typeof DailyReportConfigSchema>;
+
+export const OpenProjectSourceSchema = z.object({
+  id: z.string().regex(/^[a-z0-9-]+$/, 'id must be lowercase alphanumeric with hyphens'),
+  url: z.string().url(),
+  project: z.string().min(1),
+  pollIntervalSec: z.number().int().positive().default(120),
+  watchStatusIds: z.array(z.number().int()).default([]),
+  reopenedStatusIds: z.array(z.number().int()).default([]),
+  resolvedStatusId: z.number().int().nullable().default(null),
+  reviewStatusId: z.number().int().nullable().default(null),
+  openStatusIds: z.array(z.number().int()).default([]),
+  minTicketNumber: z.number().int().min(0).default(0),
+  autoStart: z.boolean().default(true),
+  autoResolve: z.boolean().default(true),
+  language: z.string().default('vi'),
+  dailyReport: DailyReportConfigSchema.optional(),
+});
+
+export type OpenProjectSource = z.infer<typeof OpenProjectSourceSchema>;
+
+export const OpenProjectIntegrationSchema = z.object({
+  sources: z.array(OpenProjectSourceSchema).default([]),
+});
+
+export interface IntegrationsConfig {
+  openproject: {
+    sources: OpenProjectSource[];
+  };
+}
+
+export const DEFAULT_INTEGRATIONS_CONFIG: IntegrationsConfig = {
+  openproject: { sources: [] },
+};
+
+export function parseOpenProjectSources(raw: unknown): OpenProjectSource[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const obj = raw as Record<string, unknown>;
+  const opRaw = obj.openproject;
+  if (!opRaw || typeof opRaw !== 'object') return [];
+  const result = OpenProjectIntegrationSchema.safeParse(opRaw);
+  return result.success ? result.data.sources : [];
+}
+
 export interface AgentHubConfig {
   hubHome: string;
   agyHomesDir: string;
@@ -312,17 +415,10 @@ export interface AgentHubConfig {
   claudeSessions: ClaudeSessionsConfig;
   reviewer: {
     enabled: boolean;
-    model: string;
     timeoutSec: number;
     failoverSec: number;
     maxChangesRequested: number;
-    /** Review with Claude when every Codex account is out of quota or logged out. */
-    claudeFallback: boolean;
-    /** Claude profiles to use for that fallback, in order; empty = any logged-in Claude profile. */
     claudeProfiles: string[];
-    claudeModel: string;
-    /** Minutes a review may wait for a busy Codex account before Claude reviews instead. */
-    claudeFallbackAfterMin: number;
     order: ReviewerOrderItem[];
     fallback: ReviewerFallback;
     arbiter: ReviewerArbiter;
@@ -354,6 +450,10 @@ export interface AgentHubConfig {
   checks: ChecksConfig;
   branding: BrandingConfig;
   deploy: Record<string, DeployProjectConfig>;
+  integrations: IntegrationsConfig;
+  scheduler: SchedulerConfig;
+  schedulerLimits: SchedulerLimitsConfig;
+  profileCooling: ProfileCoolingConfig;
 }
 
 type ReviewerConfigPatch = Partial<Omit<AgentHubConfig['reviewer'], 'fallback' | 'arbiter'>> & {
@@ -416,8 +516,11 @@ export function saveConfig(
       notify?: Partial<TelegramNotifyConfig>;
     }>;
     workers?: Partial<WorkersConfig>;
+    scheduler?: Partial<SchedulerConfig>;
+    profileCooling?: Partial<ProfileCoolingConfig>;
     ui?: Partial<UiConfig>;
     branding?: Partial<BrandingConfig>;
+    integrations?: Partial<{ openproject: { sources: unknown[] } }>;
   }>,
 ): void {
   const configFilePath = path.join(hubHome, 'config.json');
@@ -554,6 +657,14 @@ export function saveConfig(
           },
         }
       : {}),
+    ...(patch.integrations && typeof patch.integrations === 'object'
+      ? {
+          integrations: {
+            ...((current.integrations as Record<string, unknown>) || {}),
+            ...patch.integrations,
+          },
+        }
+      : {}),
   };
   fs.writeFileSync(configFilePath, JSON.stringify(updated, null, 2), 'utf-8');
 }
@@ -607,8 +718,11 @@ export function updateConfigInMemory(
       notify?: Partial<TelegramNotifyConfig>;
     }>;
     workers?: Partial<WorkersConfig>;
+    scheduler?: Partial<SchedulerConfig>;
+    profileCooling?: Partial<ProfileCoolingConfig>;
     ui?: Partial<UiConfig>;
     branding?: Partial<BrandingConfig>;
+    integrations?: Partial<{ openproject: { sources: unknown[] } }>;
   }>,
 ): void {
   if (patch.modelChainHard) {
@@ -669,6 +783,10 @@ export function updateConfigInMemory(
     if (patch.brain.dailyTokenBudget !== undefined) config.brain.dailyTokenBudget = patch.brain.dailyTokenBudget;
     if (patch.brain.turnTimeoutSec !== undefined) config.brain.turnTimeoutSec = patch.brain.turnTimeoutSec;
     if (patch.brain.maxConcurrent !== undefined) config.brain.maxConcurrent = patch.brain.maxConcurrent;
+    if (patch.brain.rotateAtTokens !== undefined) config.brain.rotateAtTokens = patch.brain.rotateAtTokens;
+    if (patch.brain.rotateAfterTurns !== undefined) config.brain.rotateAfterTurns = patch.brain.rotateAfterTurns;
+    if (patch.brain.batchWindowSec !== undefined) config.brain.batchWindowSec = patch.brain.batchWindowSec;
+    if (patch.brain.wakeupEvents !== undefined) config.brain.wakeupEvents = [...patch.brain.wakeupEvents];
     if (patch.brain.director) {
       config.brain.director = {
         enabled: patch.brain.director.enabled ?? config.brain.director?.enabled ?? false,
@@ -805,6 +923,9 @@ export function updateConfigInMemory(
       ...patch.workers,
     };
   }
+  if (patch.scheduler) config.scheduler = { ...config.scheduler, ...patch.scheduler };
+  if (patch.scheduler) config.schedulerLimits = config.scheduler;
+  if (patch.profileCooling) config.profileCooling = { ...config.profileCooling, ...patch.profileCooling };
   if (patch.ui?.tours) config.ui = { ...config.ui, tours: { ...config.ui.tours, ...patch.ui.tours } };
   if (patch.branding) config.branding = parseBranding({ ...config.branding, ...patch.branding });
   if (patch.tools?.installers) {
@@ -817,6 +938,14 @@ export function updateConfigInMemory(
         ...(value.docsUrl !== undefined ? { docsUrl: value.docsUrl } : {}),
       };
     }
+  }
+  if (patch.integrations?.openproject) {
+    config.integrations = {
+      ...config.integrations,
+      openproject: {
+        sources: parseOpenProjectSources(patch.integrations),
+      },
+    };
   }
 }
 
@@ -1034,6 +1163,12 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
       : 2,
   };
   const rawTools = (userConfig.tools as Record<string, unknown>) || {};
+  const integrationsRaw = userConfig.integrations && typeof userConfig.integrations === 'object'
+    ? userConfig.integrations : {};
+  const integrationsResult = z.object({ openproject: OpenProjectIntegrationSchema.default({}) }).safeParse(integrationsRaw);
+  const integrations: IntegrationsConfig = integrationsResult.success
+    ? integrationsResult.data
+    : DEFAULT_INTEGRATIONS_CONFIG;
   const rawDeploy = (userConfig.deploy as Record<string, unknown>) || {};
   const rawProjectsConfig = (userConfig.projects as Record<string, unknown>) || {};
   for (const [projectId, rawProject] of Object.entries(rawProjectsConfig)) {
@@ -1142,6 +1277,18 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
       turnTimeoutSec: typeof brainRaw.turnTimeoutSec === 'number' && brainRaw.turnTimeoutSec > 0
         ? Math.floor(brainRaw.turnTimeoutSec)
         : 20 * 60,
+      rotateAtTokens: typeof brainRaw.rotateAtTokens === 'number' && brainRaw.rotateAtTokens > 0
+        ? Math.floor(brainRaw.rotateAtTokens)
+        : 80_000,
+      rotateAfterTurns: typeof brainRaw.rotateAfterTurns === 'number' && brainRaw.rotateAfterTurns > 0
+        ? Math.floor(brainRaw.rotateAfterTurns)
+        : 40,
+      batchWindowSec: typeof brainRaw.batchWindowSec === 'number' && brainRaw.batchWindowSec > 0
+        ? Math.floor(brainRaw.batchWindowSec)
+        : 300,
+      wakeupEvents: Array.isArray(brainRaw.wakeupEvents)
+        ? brainRaw.wakeupEvents.filter((ev): ev is string => typeof ev === 'string' && ev.length > 0)
+        : [...DEFAULT_BRAIN_WAKEUP_EVENTS],
       digest: typeof brainRaw.digest === 'string'
         ? { enabled: true, time: brainRaw.digest }
         : typeof brainRaw.digest === 'object' && brainRaw.digest !== null
@@ -1190,16 +1337,12 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
     },
     reviewer: {
       enabled: reviewerRaw.enabled !== false,
-      model: typeof reviewerRaw.model === 'string' ? reviewerRaw.model : 'codex:gpt-5.6-luna',
       timeoutSec: typeof reviewerRaw.timeoutSec === 'number' ? reviewerRaw.timeoutSec : 900,
       failoverSec: typeof reviewerRaw.failoverSec === 'number' ? reviewerRaw.failoverSec : 5 * 60 * 60,
       maxChangesRequested: typeof reviewerRaw.maxChangesRequested === 'number' ? reviewerRaw.maxChangesRequested : 2,
-      claudeFallback: reviewerRaw.claudeFallback !== false,
       claudeProfiles: Array.isArray(reviewerRaw.claudeProfiles)
         ? reviewerRaw.claudeProfiles.filter((name): name is string => typeof name === 'string' && name.length > 0)
         : [],
-      claudeModel: typeof reviewerRaw.claudeModel === 'string' && reviewerRaw.claudeModel ? reviewerRaw.claudeModel : 'sonnet',
-      claudeFallbackAfterMin: typeof reviewerRaw.claudeFallbackAfterMin === 'number' ? reviewerRaw.claudeFallbackAfterMin : 10,
       ...(() => {
         const migrated = reviewerSettingsFromLegacy(reviewerRaw);
         return {
@@ -1298,5 +1441,42 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
     checks,
     branding,
     deploy,
+    integrations,
+    scheduler: (() => {
+      const raw = (userConfig.scheduler as Record<string, unknown>) || {};
+      return {
+        maxRunsPerTask: typeof raw.maxRunsPerTask === 'number' && raw.maxRunsPerTask > 0 ? Math.floor(raw.maxRunsPerTask) : DEFAULT_SCHEDULER_LIMITS.maxRunsPerTask,
+        maxConsecutiveCrashesPerTask: typeof raw.maxConsecutiveCrashesPerTask === 'number' && raw.maxConsecutiveCrashesPerTask > 0 ? Math.floor(raw.maxConsecutiveCrashesPerTask) : DEFAULT_SCHEDULER_LIMITS.maxConsecutiveCrashesPerTask,
+        maxPausedMin: typeof raw.maxPausedMin === 'number' && raw.maxPausedMin > 0 ? Math.floor(raw.maxPausedMin) : DEFAULT_SCHEDULER_LIMITS.maxPausedMin,
+      };
+    })(),
+    schedulerLimits: (() => {
+      const raw = (userConfig.scheduler as Record<string, unknown>) || {};
+      return {
+        maxRunsPerTask: typeof raw.maxRunsPerTask === 'number' && raw.maxRunsPerTask > 0
+          ? Math.floor(raw.maxRunsPerTask)
+          : DEFAULT_SCHEDULER_LIMITS.maxRunsPerTask,
+        maxConsecutiveCrashesPerTask: typeof raw.maxConsecutiveCrashesPerTask === 'number' && raw.maxConsecutiveCrashesPerTask > 0
+          ? Math.floor(raw.maxConsecutiveCrashesPerTask)
+          : DEFAULT_SCHEDULER_LIMITS.maxConsecutiveCrashesPerTask,
+        maxPausedMin: typeof raw.maxPausedMin === 'number' && raw.maxPausedMin > 0
+          ? Math.floor(raw.maxPausedMin)
+          : DEFAULT_SCHEDULER_LIMITS.maxPausedMin,
+      };
+    })(),
+    profileCooling: (() => {
+      const raw = (userConfig.profileCooling as Record<string, unknown>) || {};
+      return {
+        threshold: typeof raw.threshold === 'number' && raw.threshold > 0
+          ? Math.floor(raw.threshold)
+          : DEFAULT_PROFILE_COOLING.threshold,
+        windowMin: typeof raw.windowMin === 'number' && raw.windowMin > 0
+          ? raw.windowMin
+          : DEFAULT_PROFILE_COOLING.windowMin,
+        coolingMin: typeof raw.coolingMin === 'number' && raw.coolingMin > 0
+          ? raw.coolingMin
+          : DEFAULT_PROFILE_COOLING.coolingMin,
+      };
+    })(),
   };
 }

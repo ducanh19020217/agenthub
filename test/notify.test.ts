@@ -7,6 +7,7 @@ import { openDatabase, TaskRepo, QuotaMarkRepo, EventRepo, ProjectRepo, ProfileR
 import { EventBus } from '../src/scheduler/index.js';
 import { NotificationService } from '../src/notify.js';
 import { areAllProfilesQuotaExhaustedForFamily } from '../src/brain/digest.js';
+import { QuotaService, formatRunnableCapacity } from '../src/quota/index.js';
 
 describe('NotificationService (Desktop Notifications)', () => {
   let tmpDir: string;
@@ -66,6 +67,15 @@ describe('NotificationService (Desktop Notifications)', () => {
     eventBus.emit('quota.exhausted', undefined, { profile: 'g1', family: 'gemini' });
     eventBus.emit('task.overlap', 'proj/task-1', { otherTaskId: 'proj/task-2', file: 'shared.ts' });
     expect(execCalls).toHaveLength(0);
+  });
+
+  it('notifies writeback failures without a task id', () => {
+    const notifier = new NotificationService({ eventBus, config, exec: fakeExec });
+    notifier.start();
+    eventBus.emit('tracker.writeback_failed', undefined, { sourceId: 'op', displayId: 'OP-1', error: 'Project liên kết không hợp lệ' });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.join(' ')).toContain('Project liên kết không hợp lệ');
+    notifier.stop();
   });
 
   it('suppresses account-specific quota notifications even at all level', () => {
@@ -325,10 +335,70 @@ describe('NotificationService (Desktop Notifications)', () => {
     expect(execCalls).toHaveLength(0);
 
     quotaMarkRepo.mark('chinh', 'gemini', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('g1', 'claude', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('chinh', 'claude', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('g1', 'gpt', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('chinh', 'gpt', Math.floor(Date.now() / 1000) + 3600);
     eventBus.emit('quota.exhausted', undefined, { profile: 'chinh', family: 'gemini', engine: 'agy' });
     expect(execCalls).toHaveLength(1);
-    expect(execCalls[0].args.at(-1)).toBe('AgentHub: Mọi tài khoản đều đã hết quota');
+    expect(execCalls[0].args.at(-1)).toContain('🚨 Hết sạch quota ở mọi tài khoản và model');
+    eventBus.emit('quota.exhausted', undefined, { profile: 'g1', family: 'claude', engine: 'agy' });
+    expect(execCalls).toHaveLength(1);
+    for (const profile of ['g1', 'chinh']) {
+      for (const family of ['gemini', 'claude', 'gpt']) quotaMarkRepo.clear(profile, family);
+    }
+    eventBus.emit('quota.cleared', undefined, { family: 'claude' });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('✅ Có quota trở lại');
     notifier.stop();
+  });
+
+  it('uses runnable capacity for the shared info notification and batches families', async () => {
+    profileRepo.update('g1', { enabled: 0 });
+    profileRepo.update('chinh', { enabled: 0 });
+    for (const name of ['g3', 'g4', 'pa-gemini', 'g2']) {
+      profileRepo.upsert({ name, engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
+    }
+    profileRepo.upsert({ name: 'codeX1', engine: 'codex', kind: 'codex', home: tmpDir, email: null, enabled: 1 });
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    for (const profile of ['g3', 'g4', 'pa-gemini', 'g2']) {
+      quotaMarkRepo.mark(profile, 'claude', future);
+      quotaMarkRepo.mark(profile, 'gpt', future);
+    }
+    const quota = new QuotaService(quotaMarkRepo, profileRepo);
+    expect(formatRunnableCapacity(quota.capacitySnapshot())).toBe('Gemini (4 tài khoản), Codex (codeX1)');
+    const notifier = new NotificationService({ eventBus, config, profileRepo, quotaMarkRepo, exec: fakeExec });
+    notifier.start();
+    eventBus.emit('quota.exhausted', undefined, { profile: 'g2', family: 'gpt', engine: 'agy' });
+    eventBus.emit('quota.exhausted', undefined, { profile: 'g2', family: 'claude', engine: 'agy' });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args).not.toContain('critical');
+    expect(execCalls.some((c) => c.args.includes('critical'))).toBe(false);
+    expect(execCalls[0].args.at(-1)).toContain('Hết quota Claude/GPT trên mọi tài khoản Antigravity');
+    expect(execCalls[0].args.at(-1)).toContain('Vẫn chạy bằng: Gemini (4 tài khoản), Codex (codeX1)');
+    expect(execCalls[0].args.at(-1)).not.toContain('mọi tài khoản đều hết');
+    expect(execCalls[0].args.at(-1)).not.toContain('tạm dừng');
+    notifier.stop();
+  });
+
+  it('capacity ignores disabled/auth-error profiles and reports reset only for unavailable families', () => {
+    const quota = new QuotaService(quotaMarkRepo, profileRepo);
+    profileRepo.update('chinh', { enabled: 0 });
+    profileRepo.update('g1', { authState: 'not_logged_in' });
+    expect(quota.runnableCapacity(['gemini-3.8-flash-medium'])).toEqual([]);
+    expect(quota.capacitySnapshot(['gemini-3.8-flash-medium'])).toMatchObject({ runnable: [], nextResetAt: null, nextReset: undefined });
+
+    profileRepo.update('g1', { authState: 'ok' });
+    profileRepo.update('chinh', { enabled: 1 });
+    const now = Math.floor(Date.now() / 1000);
+    quotaMarkRepo.mark('g1', 'gemini', now + 10);
+    quotaMarkRepo.mark('g1', 'claude', now + 20);
+    quotaMarkRepo.mark('chinh', 'claude', now + 20);
+    const snapshot = quota.capacitySnapshot(['gemini-3.8-flash-medium', 'claude-sonnet-4-6'], now);
+    expect(snapshot.runnable.some((entry) => entry.family === 'gemini' && entry.profileName === 'chinh')).toBe(true);
+    expect(snapshot.nextResetAt).toBe(now + 20);
+    expect(snapshot.nextReset?.model).toBe('claude-sonnet-4-6');
   });
 
   it('areAllProfilesQuotaExhaustedForFamily does not conflate claude engine profiles with agy profiles', () => {
@@ -477,9 +547,12 @@ describe('NotificationService (Desktop Notifications)', () => {
     // 4. All profiles quota exhausted is a system incident and should be notified
     quotaMarkRepo.mark('g1', 'claude', Math.floor(Date.now() / 1000) + 3600);
     quotaMarkRepo.mark('chinh', 'claude', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('chinh', 'gemini', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('g1', 'gpt', Math.floor(Date.now() / 1000) + 3600);
+    quotaMarkRepo.mark('chinh', 'gpt', Math.floor(Date.now() / 1000) + 3600);
     eventBus.emit('quota.exhausted', undefined, { profile: 'chinh', family: 'claude' });
     expect(execCalls).toHaveLength(3);
-    expect(execCalls[2].args.at(-1)).toBe('AgentHub: Mọi tài khoản đều đã hết quota');
+    expect(execCalls[2].args.at(-1)).toContain('🚨 Hết sạch quota ở mọi tài khoản và model');
 
     notifier.stop();
   });
@@ -851,6 +924,25 @@ describe('NotificationService (Desktop Notifications)', () => {
     });
     expect(execCalls).toHaveLength(1);
     expect(execCalls[0].args.at(-1)).toContain('task đang chờ vì phòng Phòng SYSTEM chưa có tài khoản được phép');
+
+    notifier.stop();
+  });
+
+  it('notifies for daily_report.created and daily_report.failed events', () => {
+    const notifier = new NotificationService({
+      eventBus,
+      config,
+      exec: fakeExec,
+    });
+    notifier.start();
+
+    eventBus.emit('daily_report.created', undefined, { sourceId: 'demo-source', path: '/reports/demo-source/bao-cao-03-11-2026.txt' });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('đã tạo báo cáo ngày (demo-source)');
+
+    eventBus.emit('daily_report.failed', undefined, { sourceId: 'demo-source', error: 'Network error' });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('tạo báo cáo ngày (demo-source) thất bại');
 
     notifier.stop();
   });

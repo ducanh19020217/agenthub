@@ -1,11 +1,11 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { getProjects, getStatus, getTaskGraph, getTasks, getTasksPage } from '../api/client';
+import { getProjects, getStatus, getTaskGraph, getTasks, getTasksPage, resumeTask } from '../api/client';
 import { StatusBadge } from '../components/StatusBadge';
 import { KANBAN_STATUSES } from '../utils/tasks';
 import { Task } from '../types/api';
-import { Plus, Filter, ArrowUpRight, Zap, Flame, LayoutGrid, Network, List, FolderKanban } from 'lucide-react';
+import { Plus, Filter, ArrowUpRight, Zap, Flame, LayoutGrid, Network, List, FolderKanban, Play } from 'lucide-react';
 import { SilentRunIndicator } from '../components/SilentRunIndicator';
 import { useLocale } from '../context/LocaleContext';
 import { TaskDag } from '../components/dag';
@@ -21,6 +21,15 @@ export interface KanbanColumnProps {
 
 const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project, search }) => {
   const { t } = useLocale();
+  const queryClient = useQueryClient();
+  const resumeMutation = useMutation({
+    mutationFn: (id: string) => resumeTask(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
+      queryClient.invalidateQueries({ queryKey: ['status'] });
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+  });
   // Dùng chung cache ['status'] giữa các cột, chỉ để hiện dung lượng đĩa trong nhãn "Chờ ổ đĩa".
   const { data: hubStatus } = useQuery({
     queryKey: ['status'],
@@ -131,6 +140,11 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
                   {t('extra.waitingApprover')}
                 </span>
               ) : null}
+              {task.status === 'review' ? (
+                <span data-testid={`task-review-round-${task.id}`} className="inline-flex mb-2 text-[11px] font-medium text-[var(--t-text-2)]">
+                  {t('extra.reviewRound', { current: task.reviewRound ?? 1, max: task.reviewMaxRounds ?? 2 })}
+                </span>
+              ) : null}
 
               {task.waitReason && (
                 <div className="mb-2">
@@ -146,7 +160,41 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
 
               {task.status === 'running' && (
                 <div className="flex items-center gap-1.5 flex-wrap mb-2">
-                  <SilentRunIndicator lastActivityAt={task.currentRun?.lastActivityAt} />
+                  {(task.paused || task.currentRun?.paused) ? (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span
+                        data-testid={`task-paused-badge-${task.id}`}
+                        className={`inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-semibold border ${
+                          (task.pauseReason === 'load' || task.pauseReason === 'brain_load' || task.currentRun?.pauseReason === 'load' || task.currentRun?.pauseReason === 'brain_load')
+                            ? 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)] border-[color-mix(in_srgb,var(--t-warn)_30%,transparent)]'
+                            : 'bg-[var(--t-surface-2)] text-[var(--t-text-2)] border-[var(--t-border)]'
+                        }`}
+                      >
+                        {(task.pauseReason === 'load' || task.pauseReason === 'brain_load' || task.currentRun?.pauseReason === 'load' || task.currentRun?.pauseReason === 'brain_load')
+                          ? t('status.pausedOverload')
+                          : (task.pauseReason === 'focus' || task.currentRun?.pauseReason === 'focus')
+                            ? t('status.pausedFocus')
+                            : t('status.pausedManual')}
+                      </span>
+                      <button
+                        type="button"
+                        data-testid={`task-resume-btn-${task.id}`}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          resumeMutation.mutate(task.id);
+                        }}
+                        disabled={resumeMutation.isPending}
+                        title={t('common.resume')}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)] hover:bg-[color-mix(in_srgb,var(--t-ok)_25%,transparent)] text-[var(--t-on-accent)] border border-[color-mix(in_srgb,var(--t-ok)_30%,transparent)] shadow-2xs cursor-pointer transition-colors"
+                      >
+                        <Play className="w-3 h-3 fill-current" />
+                        <span>{t('common.resume')}</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <SilentRunIndicator lastActivityAt={task.currentRun?.lastActivityAt} paused={Boolean(task.paused || task.currentRun?.paused)} />
+                  )}
                   {task.currentRun?.noCommitMinutes != null && task.currentRun.noCommitMinutes > 0 && (
                     <span className="inline-flex items-center rounded bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--t-warn)] border border-[color-mix(in_srgb,var(--t-warn)_30%,transparent)]">
                       {t('extra.noCommit', { minutes: task.currentRun.noCommitMinutes })}
@@ -210,11 +258,20 @@ const ProjectTaskGroup: React.FC<{ project: { id: string; name: string }; tasks:
       </div>
       <div className="border-t border-[var(--t-border)] p-3 sm:p-4">
         {visible.visibleItems.length > 0 ? <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">{visible.visibleItems.map((task) => (
-          <Link key={task.id} to={`/tasks/${encodeURIComponent(task.id.replace('/', '~'))}`} className="block rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] p-3 hover:border-[var(--t-accent)] transition-colors">
-            <div className="text-xs font-mono text-[var(--t-text-2)] truncate">{task.slug}</div>
-            <div className="mt-1 text-sm font-semibold text-[var(--t-text)] line-clamp-2">{task.title}</div>
-            <StatusBadge status={task.status} size="sm" />
-          </Link>
+          <div key={task.id} className="rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] p-3 hover:border-[var(--t-accent)] transition-colors flex flex-col justify-between">
+            <Link to={`/tasks/${encodeURIComponent(task.id.replace('/', '~'))}`} className="block">
+              <div className="text-xs font-mono text-[var(--t-text-2)] truncate">{task.slug}</div>
+              <div className="mt-1 text-sm font-semibold text-[var(--t-text)] line-clamp-2">{task.title}</div>
+            </Link>
+            {task.externalRef && (
+              <a href={task.externalRef} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-xs text-[var(--t-accent)] hover:underline" data-testid="openproject-ticket-link">
+                {task.externalRef}
+              </a>
+            )}
+            <div className="mt-2">
+              <StatusBadge status={task.status} size="sm" />
+            </div>
+          </div>
         ))}</div> : <div className="rounded-lg border border-dashed border-[var(--t-border)] p-5 text-center text-xs italic text-[var(--t-text-3)]">{t('common.empty')}</div>}
         {visible.hasMore && <button type="button" onClick={visible.showMore} className="mt-3 text-xs font-medium text-[var(--t-accent)] hover:underline">{t('tasks.showMore')}</button>}
       </div>
@@ -484,7 +541,16 @@ export const TasksPage: React.FC = () => {
           loading={isPageLoading}
           columns={[
             { key: 'slug', title: t('tasks.slug'), sortable: true, sortValue: (task) => task.slug, render: (task) => <Link className="font-mono text-[var(--t-accent)] hover:underline" to={`/tasks/${encodeURIComponent(task.id.replace('/', '~'))}`}>{task.slug}</Link> },
-            { key: 'title', title: t('tasks.title'), sortable: true, sortValue: (task) => task.title, render: (task) => <span className="truncate" title={task.title}>{task.title}</span> },
+            { key: 'title', title: t('tasks.title'), sortable: true, sortValue: (task) => task.title, render: (task) => (
+              <div>
+                <span className="truncate block" title={task.title}>{task.title}</span>
+                {task.externalRef && (
+                  <a href={task.externalRef} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-[var(--t-accent)] hover:underline" data-testid="openproject-ticket-link">
+                    {task.externalRef}
+                  </a>
+                )}
+              </div>
+            ) },
             { key: 'status', title: t('tasks.status'), render: (task) => <StatusBadge status={task.status} size="sm" /> },
             { key: 'project', title: t('tasks.project'), render: (task) => <span>{task.projectId}</span> },
           ]}

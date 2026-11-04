@@ -19,7 +19,6 @@ import {
   Moon,
   Monitor,
   Bot,
-  MessageSquare,
   TrendingUp,
   Layers,
   Wifi,
@@ -110,7 +109,6 @@ export const Layout: React.FC = () => {
 
   const navItems = [
     { to: '/', label: t('common.dashboard'), icon: Activity },
-    { to: '/chat', label: 'Chat', icon: MessageSquare },
     { to: '/plans', label: t('common.plans'), icon: Layers },
     { to: '/tasks', label: t('common.tasks'), icon: CheckSquare },
     { to: '/savings', label: t('extra.pageSavings'), icon: TrendingUp },
@@ -123,7 +121,6 @@ export const Layout: React.FC = () => {
 
   const getPageTitle = (pathname: string): string => {
     if (pathname === '/') return t('common.dashboard');
-    if (pathname.startsWith('/chat')) return 'Chat';
     if (pathname.startsWith('/claude-sessions')) return t('extra.claudeSessions');
     if (pathname.startsWith('/plans')) return t('extra.pagePlans');
     if (pathname === '/tasks/new') return t('extra.pageTaskCreate');

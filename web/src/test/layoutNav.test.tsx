@@ -35,7 +35,7 @@ describe('Layout Navigation', () => {
 
     // Verify other main links exist
     expect(screen.getByRole('link', { name: /Tổng quan/i })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /Chat/i })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Chat/i })).toBeNull();
     expect(screen.getByRole('link', { name: /Tài khoản/i })).toBeInTheDocument();
   });
 

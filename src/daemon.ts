@@ -24,14 +24,21 @@ import {
   BrainTurnRepo,
   BrainDirectiveRepo,
   CiRepo,
+  TrackerItemRepo,
 } from './db/index.js';
 import { CiWatchService } from './ci.js';
+import { OpenProjectIntakeService } from './integrations/openproject/intake.js';
+import { DailyReportService, parseDateNoon } from './integrations/openproject/daily-report.js';
+import { SetupTools } from './setup-tools.js';
+import { OpenProjectWritebackService } from './integrations/openproject/writeback.js';
+import { GiteaSyncService } from './integrations/gitea/service.js';
 import { ProfileService } from './profiles/index.js';
 import { Scheduler } from './scheduler/index.js';
 import { Engine, AgyEngine, CodexEngine, FakeEngine } from './engines/index.js';
 import { AppService } from './services/index.js';
 import { createServer } from './api/server.js';
 import { QuotaUsageService } from './quota/usage.js';
+import { QuotaService } from './quota/index.js';
 import { ProfileLockService } from './profiles/locks.js';
 import { BrainRepo, BrainService } from './brain.js';
 import { ChatService } from './chat/service.js';
@@ -54,6 +61,7 @@ import { BrainPolicy, projectBrainPolicy, assistantPolicy, globalAssistantPolicy
 import { BrainRunner } from './brain/runner.js';
 import { type DiskSpace } from './disk.js';
 import { DeployService } from './deploy.js';
+import { RemoteDeployService } from './remote-deploy.js';
 import { PerfCollector } from './perf.js';
 import { pruneNodeModulesCache } from './cache.js';
 import { cleanupStaleAgentHubTempDirs } from './temp-cleanup.js';
@@ -95,8 +103,14 @@ export interface DaemonContext {
   brainRunner: BrainRunner;
   directiveRepo: BrainDirectiveRepo;
   deployService: DeployService;
+  remoteDeployService: RemoteDeployService;
   ciRepo: CiRepo;
   ciService: CiWatchService;
+  trackerRepo: TrackerItemRepo;
+  intakeService: OpenProjectIntakeService;
+  writebackService: OpenProjectWritebackService;
+  dailyReportService: DailyReportService;
+  giteaSyncService: GiteaSyncService;
   perfCollector: PerfCollector;
 }
 
@@ -130,6 +144,7 @@ export function createContext(
   const profileRepo = new ProfileRepo(db);
   const quotaMarkRepo = new QuotaMarkRepo(db);
   const taskRepo = new TaskRepo(db);
+  const trackerRepo = new TrackerItemRepo(db);
   const runRepo = new RunRepo(db);
   const runMetricsRepo = new RunMetricsRepo(db);
   const reviewRepo = new ReviewRepo(db);
@@ -181,6 +196,7 @@ export function createContext(
   const profileService = new ProfileService(config, profileRepo, quotaMarkRepo);
   const locks = new ProfileLockService(path.join(config.agyHomesDir, '.state'), config.slotsPerAgyProfile, config.slotsPerCodexProfile);
   const usageService = new QuotaUsageService(profileRepo, usageRepo, quotaMarkRepo);
+  const quotaService = new QuotaService(quotaMarkRepo, profileRepo);
   const savingsService = new SavingsService(
     config,
     taskRepo,
@@ -283,6 +299,9 @@ export function createContext(
   });
   deployService.start();
 
+  const remoteDeployService = new RemoteDeployService(config, projectRepo, scheduler.getEventBus());
+  remoteDeployService.start();
+
   const bulletinService = new BulletinService({
     config,
     taskRepo,
@@ -320,13 +339,15 @@ export function createContext(
     directiveRepo,
     departmentRepo,
   );
+  service.setSetupTools(new SetupTools(config, db, scheduler.getEventBus(), () => service));
   service.deployService = deployService;
+  service.remoteDeployService = remoteDeployService;
   scheduler.getEventBus().on('task.review_ready', (taskId, payload) => {
     const data = payload && typeof payload === 'object' ? payload as { reviewChainComplete?: unknown } : {};
     if (taskId && data.reviewChainComplete === true) {
       // ReviewTask emits this event before it releases its reviewingTasks guard.
       // Defer the merge so the normal service path can finish first.
-      setImmediate(() => void service.autoMergeReviewedTask(taskId));
+      setImmediate(() => void service.autoMergeReviewedTask(taskId).catch(() => undefined));
     }
   });
   scheduler.getEventBus().on('task.queued', (taskId) => {
@@ -352,6 +373,37 @@ export function createContext(
   });
   service.ciRepo = ciRepo;
   service.ciService = ciService;
+  const intakeService = new OpenProjectIntakeService({
+    config,
+    projectRepo,
+    taskRepo,
+    trackerRepo,
+    taskService: service,
+    eventBus: scheduler.getEventBus(),
+  });
+  service.intakeService = intakeService;
+  const writebackService = new OpenProjectWritebackService({
+    config,
+    projectRepo,
+    taskRepo,
+    trackerRepo,
+    taskService: service,
+    eventBus: scheduler.getEventBus(),
+  });
+
+  const dailyReportService = new DailyReportService({
+    config,
+    eventBus: scheduler.getEventBus(),
+  });
+  service.dailyReportService = dailyReportService;
+
+  const giteaSyncService = new GiteaSyncService({
+    config,
+    projectRepo,
+    eventBus: scheduler.getEventBus(),
+    service,
+  });
+  service.giteaSyncService = giteaSyncService;
 
   const notifier = new NotificationService({
     eventBus: scheduler.getEventBus(),
@@ -359,6 +411,7 @@ export function createContext(
     taskRepo,
     profileRepo,
     quotaMarkRepo,
+    quotaService,
     projectRepo,
     ciRepo,
   });
@@ -372,6 +425,7 @@ export function createContext(
     departmentRepo,
     profileRepo,
     quotaMarkRepo,
+    quotaService,
     chatService,
     brainSession: true,
     directiveRepo,
@@ -415,8 +469,14 @@ export function createContext(
     brainRunner,
     directiveRepo,
     deployService,
+    remoteDeployService,
     ciRepo,
     ciService,
+    trackerRepo,
+    intakeService,
+    writebackService,
+    dailyReportService,
+    giteaSyncService,
     perfCollector,
   };
 }
@@ -444,6 +504,31 @@ export function closeContext(ctx: DaemonContext): void {
   }
   try {
     ctx.ciService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.giteaSyncService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.intakeService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.writebackService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.dailyReportService?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.remoteDeployService?.stop();
   } catch {
     // ignore
   }
@@ -518,6 +603,10 @@ export async function startDaemon(
   ctx.bulletinService.start();
   ctx.brainRunner.start();
   ctx.ciService.start();
+  ctx.intakeService.start();
+  ctx.writebackService.start();
+  ctx.dailyReportService.start();
+  ctx.giteaSyncService.start();
   ctx.perfCollector.start();
 
   // Start Telegram bot if enabled
@@ -527,6 +616,13 @@ export async function startDaemon(
 
   // Start Fastify HTTP server with security and API endpoints
   const fastify = await createServer(ctx.service, config, {
+    openProjectSync: (sourceId) => ctx.intakeService.sync(sourceId),
+    openProjectDailyReport: (sourceId, date) =>
+      ctx.dailyReportService.generateReport(
+        sourceId,
+        date ? parseDateNoon(date) : undefined,
+        { overwrite: true },
+      ),
     onShutdown: (disable) => {
       if (disable) {
         try {

@@ -73,6 +73,8 @@ export interface Profile {
   avatarUrl?: string | null;
   /** Gói tài khoản đã chuẩn hoá: free, plus, pro, team, max_20x… (null khi chưa biết). */
   plan?: string | null;
+  crashCount?: number;
+  coolingUntil?: number | null;
   /** Chỉ có trong phản hồi của nút Làm mới: kết quả lấy ảnh đại diện. */
   avatarMessage?: string;
   /** Chỉ có trong phản hồi của nút Làm mới cho Codex: kết quả lấy quota/gói qua API. */
@@ -163,7 +165,7 @@ export interface Department {
   maxParallel: number;
   claudeDailyTokenBudget: number;
   telegramTopicId: number | null;
-  brainEngine?: 'claude' | 'codex';
+  brainEngine?: 'inherit' | 'claude' | 'codex';
   brainModel?: string;
   brainCodexProfile?: string | null;
   brainMode?: 'inherit' | 'off' | 'suggest' | 'auto';
@@ -217,6 +219,9 @@ export interface DeployStatus {
 
 /** Mirrors src/projects/settings.ts. */
 export interface ProjectSettings {
+  preset?: 'safe' | 'balanced' | 'auto' | 'custom' | string;
+  autoFixOnFail?: boolean;
+  planning?: { requireApproval?: boolean; approvalMinTasks?: number };
   commitConvention?: { branchTemplate: string; commitTemplate: string; commitRegex?: string; mergeMessageTemplate: string };
   brain: {
     engine?: 'inherit' | 'claude' | 'codex';
@@ -226,14 +231,28 @@ export interface ProjectSettings {
     dailyTokenBudget?: number;
     maxTurnsPerHour?: number;
   };
-  worktree: { root?: string; logsInRoot?: boolean; install: 'auto' | 'skip'; gitHooks: 'run' | 'skip' };
+  worktree: { root?: string; logsInRoot?: boolean; install: 'auto' | 'skip' | 'worker'; gitHooks: 'run' | 'skip' };
   integration: { enabled: boolean; branch?: string; baseRef?: string; autoMerge?: boolean };
   review?: { autoMerge?: boolean; order?: ReviewerOrderItem[]; fallback?: Partial<ReviewerFallback> };
   ci: { enabled?: boolean; branch?: string };
   references: Array<{ name: string; path: string; inject: boolean }>;
   reviewChecklist?: string[];
   notifications: { telegramContent: 'full' | 'minimal' };
+  openproject?: { enabled: boolean; sourceId: string | null; role: 'primary' | 'secondary' };
+  gitea?: { enabled: boolean; url?: string; sourceBranch?: string; targetBranch?: string; schedule: string[]; weekdaysOnly: boolean; checks: string[][]; unionMergeGlobs: string[] };
+  remoteDeploy?: { enabled: boolean; trigger: 'after-gitea-sync' | 'manual'; steps: string[][]; healthChecks: Array<{ url: string; expectStatusBelow: number; contains?: string }>; waitMinutes: number; timeoutSec?: number };
 }
+
+export interface OpenProjectSource {
+  id: string; url: string; project: string; keyConfigured?: boolean;
+  pollIntervalSec: number; watchStatusIds: number[]; reopenedStatusIds: number[];
+  resolvedStatusId: number | null; reviewStatusId: number | null; openStatusIds: number[];
+  minTicketNumber: number; autoStart: boolean; autoResolve: boolean; language: string;
+  dailyReport?: { time: string; weekdaysOnly: boolean; dir?: string; maxItems: number; telegram: boolean };
+}
+export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured'> { key?: string; }
+export interface GiteaStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
+export interface RemoteDeployStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
 
 export interface KnowledgeEntry {
   id: number;
@@ -298,6 +317,8 @@ export interface Task {
   reviewerEscalatedAt?: string | null;
   reviewerEscalationReason?: string | null;
   reviewStep?: number;
+  reviewRound?: number;
+  reviewMaxRounds?: number;
   reviewChain?: ReviewChainStep[];
   createdAt: string;
   updatedAt: string;
@@ -313,12 +334,12 @@ export interface Task {
     model?: string;
     profileName?: string;
     paused?: boolean;
-    pauseReason?: 'manual' | 'load' | 'focus' | null;
+    pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
     rss?: number;
     cpu?: number;
   } | null;
   paused?: boolean;
-  pauseReason?: 'manual' | 'load' | 'focus' | null;
+  pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
   checks?: CheckResult[];
   sourceRef?: {
     taskId: string;
@@ -426,7 +447,7 @@ export interface RunningWorker {
   rss?: number;
   cpu?: number;
   paused?: boolean;
-  pauseReason?: 'manual' | 'load' | 'focus' | null;
+  pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
 }
 
 export type BrainActivity =
@@ -464,6 +485,12 @@ export interface ProjectBrain {
   queued: boolean;
   lastTurnAt: string | null;
   tokensToday: number;
+  turnsToday?: number;
+  inputTokensToday?: number;
+  outputTokensToday?: number;
+  rotationsToday?: number;
+  eventsSkippedToday?: number;
+  eventsBatchedToday?: number;
   directives?: Array<{ id: string; text: string; createdAt: string }>;
 }
 
@@ -874,6 +901,7 @@ export interface CreateNewProjectInput {
   path: string;
   defaultBranch?: string;
   maxParallel?: number;
+  departmentId?: string;
   checks?: Array<{ name: string; cmd: string[]; timeoutSec?: number }> | null;
   settings?: ProjectSettings;
 }
@@ -993,3 +1021,77 @@ export interface TaskGraphResponse {
   maxBlockingTaskId: string | null;
   maxBlockedCount: number;
 }
+
+export type PresetLevel = 'safe' | 'balanced' | 'auto';
+
+export interface PresetDetails {
+  id: PresetLevel;
+  name: { vi: string; en: string };
+  description: { vi: string; en: string };
+  config: {
+    brain: {
+      mode: 'suggest' | 'auto';
+      permissions: 'standard' | 'trusted';
+    };
+    review: {
+      chainDescription: { vi: string; en: string };
+      maxRounds: number;
+      autoMerge: boolean;
+    };
+    autoFixOnFail: boolean;
+    planning: {
+      requireApproval: boolean;
+      approvalMinTasks: number;
+    };
+  };
+}
+
+export interface ApplyPresetInput {
+  scope: string; // 'global' | 'department:<id>' | 'project:<id>'
+  preset: PresetLevel;
+  dryRun?: boolean;
+}
+
+export interface ApplyPresetResult {
+  preset: PresetLevel;
+  scope: string;
+  applied: boolean;
+  diff: {
+    before: Record<string, unknown>;
+    after: Record<string, unknown>;
+  };
+  warnings?: string[];
+  suggestedChecks?: Array<{ name: string; cmd: string[]; reason?: string }>;
+}
+
+export type ConfigSource = 'global' | 'department' | 'project';
+
+export interface EffectiveValue<T> {
+  value: T;
+  source: ConfigSource;
+}
+
+export interface EffectiveConfigResponse {
+  brain: {
+    mode: EffectiveValue<string>;
+    permissions: EffectiveValue<string>;
+    engine: EffectiveValue<string>;
+    model: EffectiveValue<string>;
+    budgets: {
+      maxTurnsPerHour: EffectiveValue<number>;
+      dailyTokenBudget: EffectiveValue<number>;
+    };
+  };
+  review: {
+    chain: EffectiveValue<Array<{ reviewer: string; mode: 'gate' | 'final' }>>;
+    maxRounds: EffectiveValue<number>;
+    autoMerge: EffectiveValue<boolean>;
+    checks: EffectiveValue<Array<{ name: string; cmd: string[]; timeoutSec?: number }>>;
+  };
+  autoMergeReadiness: {
+    ready: boolean;
+    missing: string[];
+  };
+  preset: string;
+}
+

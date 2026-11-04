@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -13,6 +13,9 @@ import { loadConfig } from '../src/config.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { createMcpServer } from '../src/mcp/index.js';
 import { Engine } from '../src/engines/index.js';
+import { saveOpenProjectKey } from '../src/integrations/openproject/secrets.js';
+import { OpenProjectSourceSchema } from '../src/config.js';
+import { DailyReportService } from '../src/integrations/openproject/daily-report.js';
 
 describe('AgentHub MCP Server Tools', () => {
   let tmpDir: string;
@@ -98,6 +101,19 @@ describe('AgentHub MCP Server Tools', () => {
     await offlineClient.close();
   });
 
+  it('exposes setup tools with dry-run defaults and no raw integration secret input', async () => {
+    const tools = await client.listTools();
+    const names = tools.tools.map((tool) => tool.name);
+    expect(names).toEqual(expect.arrayContaining([
+      'hub_effective_config', 'hub_presets', 'hub_departments', 'hub_preset_apply', 'hub_project_settings',
+      'hub_department', 'hub_config_set', 'hub_integration_discover', 'hub_request_secret',
+    ]));
+    const preset = tools.tools.find((tool) => tool.name === 'hub_preset_apply');
+    expect(preset?.inputSchema).toMatchObject({ properties: { dryRun: { default: true } } });
+    const discover = tools.tools.find((tool) => tool.name === 'hub_integration_discover');
+    expect(discover?.inputSchema.properties).not.toHaveProperty('key');
+  });
+
   it('hub_status returns overview with task counts, running tasks, and profile quota status', async () => {
     ctx.profileRepo.upsert({
       name: 'chinh',
@@ -114,6 +130,16 @@ describe('AgentHub MCP Server Tools', () => {
     expect(res.content[0].text).toContain('Đang chạy 0 · chờ review 0 · chờ quota 0 · lỗi 0');
     expect(res.content[0].text).toContain('Hồ sơ:');
     expect(res.content[0].text).toContain('chinh(gemini✓ claude✗→');
+    expect(res.content[0].text).toContain('Quota: Vẫn chạy bằng');
+
+    const until = Math.floor(Date.now() / 1000) + 3600;
+    ctx.quotaMarkRepo.mark('chinh', 'gemini', until);
+    ctx.quotaMarkRepo.mark('chinh', 'gpt', until);
+    const exhausted = (await client.callTool({ name: 'hub_status', arguments: {} })) as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(exhausted.content[0].text).toContain('🚨 Hết sạch quota ở mọi tài khoản và model');
+    expect(exhausted.content[0].text).toContain('Hệ thống tạm dừng thực thi task');
   });
 
   it('hub_status displays task title on the running worker line', async () => {
@@ -487,6 +513,53 @@ describe('AgentHub MCP Server Tools', () => {
     expect(['queued', 'waiting_quota']).toContain(ctx.taskRepo.get('proj/t-fail')?.status);
   });
 
+  it('hub_review supports source: operational without incrementing reviewerChangesRequested', async () => {
+    ctx.projectRepo.insert({
+      id: 'proj-op',
+      name: 'proj-op',
+      path: tmpDir,
+      defaultBranch: 'main',
+      envTemplate: null,
+      maxParallel: 1,
+    });
+    ctx.taskRepo.insert({
+      id: 'proj-op/t-conflict',
+      projectId: 'proj-op',
+      slug: 't-conflict',
+      title: 'Conflict task',
+      status: 'review',
+    });
+
+    const opRes = (await client.callTool({
+      name: 'hub_review',
+      arguments: {
+        id: 'proj-op/t-conflict',
+        verdict: 'changes_requested',
+        feedback: 'Gỡ xung đột merge conflict trên nhánh main',
+        source: 'operational',
+      },
+    })) as { content: Array<{ type: string; text: string }> };
+
+    expect(opRes.content[0].text).toContain('changes_requested');
+    expect(ctx.taskRepo.get('proj-op/t-conflict')?.reviewerChangesRequested).toBe(0);
+    expect(ctx.reviewRepo.getByTask('proj-op/t-conflict')).toHaveLength(1);
+
+    // Default source is content and increments counter
+    ctx.taskRepo.update('proj-op/t-conflict', { status: 'review' });
+    const contentRes = (await client.callTool({
+      name: 'hub_review',
+      arguments: {
+        id: 'proj-op/t-conflict',
+        verdict: 'changes_requested',
+        feedback: 'Sửa lỗi logic code',
+      },
+    })) as { content: Array<{ type: string; text: string }> };
+
+    expect(contentRes.content[0].text).toContain('changes_requested');
+    expect(ctx.taskRepo.get('proj-op/t-conflict')?.reviewerChangesRequested).toBe(1);
+    expect(ctx.reviewRepo.getByTask('proj-op/t-conflict')).toHaveLength(2);
+  });
+
   it('hub_cancel cancels a task', async () => {
     ctx.projectRepo.insert({
       id: 'proj',
@@ -748,6 +821,52 @@ describe('AgentHub MCP Server Tools', () => {
     })) as { content: Array<{ type: string; text: string }>; isError?: boolean };
     expect(largeDiff.isError).toBeUndefined();
     expect(largeDiff.content[0].text).toContain('[output truncated at 64KB]');
+  });
+
+  it('hub_daily_report triggers daily report generation via API', async () => {
+    const source = OpenProjectSourceSchema.parse({
+      id: 'op-demo',
+      url: 'https://op.example.test',
+      project: 'demo',
+      openStatusIds: [],
+      dailyReport: {
+        enabled: true,
+        time: '08:00',
+        weekdaysOnly: true,
+        maxItems: 10,
+        telegram: false,
+      },
+    });
+    ctx.config.integrations.openproject.sources = [source];
+    saveOpenProjectKey(ctx.config.hubHome, 'op-demo', 'test-key');
+
+    const fakeFetch = vi.fn(async (url: string | URL) => {
+      const urlStr = url.toString();
+      if (urlStr.includes('/users/me')) {
+        return new Response(JSON.stringify({ id: 1, name: 'Alice' }));
+      }
+      return new Response(JSON.stringify({ total: 0, _embedded: { elements: [] } }));
+    });
+
+    ctx.dailyReportService = new DailyReportService({
+      config: ctx.config,
+      eventBus: ctx.scheduler.getEventBus(),
+      fetchFn: fakeFetch as unknown as typeof fetch,
+      now: () => new Date('2026-11-03T12:00:00Z').getTime(),
+    });
+    ctx.service.dailyReportService = ctx.dailyReportService;
+
+    const res = (await client.callTool({
+      name: 'hub_daily_report',
+      arguments: {
+        sourceId: 'op-demo',
+        date: '2026-11-03',
+      },
+    })) as { content: Array<{ type: string; text: string }>; isError?: boolean };
+
+    expect(res.isError).toBeUndefined();
+    expect(res.content[0].text).toContain('✓ Đã tạo báo cáo ngày cho nguồn op-demo');
+    expect(res.content[0].text).toContain('Ngày: 03/11/2026');
   });
 });
 

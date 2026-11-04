@@ -59,6 +59,12 @@ describe('tour help and tooltips', () => {
     expect(translations.en.tour.steps).toBeDefined();
   });
 
+  it('does not advertise or navigate to the removed chat page', () => {
+    expect(pageTours['/chat']).toBeUndefined();
+    const definitions = [...tourDefinitions, ...Object.values(pageTours), ...modalTourDefinitions];
+    expect(definitions.flatMap((tour) => tour.steps).some((step) => step.route === '/chat')).toBe(false);
+  });
+
   it('suggests a modal tour only once', async () => {
     localStorage.clear();
     let suggest: ((id: string) => void) | undefined;

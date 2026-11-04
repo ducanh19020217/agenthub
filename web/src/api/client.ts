@@ -34,6 +34,11 @@ import {
   PerfReport,
   Department,
   EventItem,
+  PresetDetails,
+  ApplyPresetInput,
+  ApplyPresetResult,
+  EffectiveConfigResponse,
+  OpenProjectSource, OpenProjectSourceInput, GiteaStatus, RemoteDeployStatus,
 } from '../types/api';
 import { getActiveLocale, translateApiErrorMessage } from '../utils/apiError';
 
@@ -75,6 +80,7 @@ export const installSetupMcp = () => apiFetch('/api/setup/mcp', { method: 'POST'
 export const getSetupLog = (tool: string) => apiFetch<string>(`/api/setup/log/${encodeURIComponent(tool)}`);
 
 const TOKEN_STORAGE_KEY = 'agenthub_token';
+export const API_REQUEST_TIMEOUT_MS = 15_000;
 
 let unauthorizedListeners: Array<() => void> = [];
 
@@ -154,57 +160,72 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
     headers.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(path, {
-    ...options,
-    headers,
-  });
-
-  if (response.status === 401) {
-    clearToken();
-    throw new AuthError(getActiveLocale() === 'en' ? 'Token is invalid or expired' : 'Token không hợp lệ hoặc đã hết hạn');
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (options.signal?.aborted) {
+    controller.abort();
+  } else {
+    options.signal?.addEventListener('abort', onAbort, { once: true });
   }
+  const timeout = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
 
-  if (!response.ok) {
-    let errorMsg = getActiveLocale() === 'en' ? `Error ${response.status}: ${response.statusText}` : `Lỗi ${response.status}: ${response.statusText}`;
-    let errorCode: string | undefined;
-    try {
-      const errJson = await response.json();
-      if (errJson) {
-        if (typeof errJson.error === 'string') {
-          errorCode = errJson.error;
-        } else if (typeof errJson.code === 'string') {
-          errorCode = errJson.code;
-        }
+  try {
+    const response = await fetch(path, {
+      ...options,
+      headers,
+      signal: controller.signal,
+    });
 
-        if (errJson.message) {
-          errorMsg = errJson.message;
-        } else if (errJson.error) {
-          errorMsg = errJson.error;
-        }
-      }
-    } catch {
-      try {
-        const errText = await response.text();
-        if (errText) errorMsg = errText;
-      } catch {
-        // fallback
-      }
+    if (response.status === 401) {
+      clearToken();
+      throw new AuthError(getActiveLocale() === 'en' ? 'Token is invalid or expired' : 'Token không hợp lệ hoặc đã hết hạn');
     }
-    const rawMsg = errorMsg;
-    errorMsg = translateApiErrorMessage(errorMsg, errorCode, getActiveLocale());
-    const err: any = new Error(errorMsg);
-    err.status = response.status;
-    err.code = errorCode;
-    err.rawMessage = rawMsg;
-    throw err;
-  }
 
-  // Handle empty or text responses
-  const contentType = response.headers.get('content-type');
-  if (contentType && contentType.includes('application/json')) {
-    return (await response.json()) as T;
+    if (!response.ok) {
+      let errorMsg = getActiveLocale() === 'en' ? `Error ${response.status}: ${response.statusText}` : `Lỗi ${response.status}: ${response.statusText}`;
+      let errorCode: string | undefined;
+      try {
+        const errJson = await response.json();
+        if (errJson) {
+          if (typeof errJson.error === 'string') {
+            errorCode = errJson.error;
+          } else if (typeof errJson.code === 'string') {
+            errorCode = errJson.code;
+          }
+
+          if (errJson.message) {
+            errorMsg = errJson.message;
+          } else if (errJson.error) {
+            errorMsg = errJson.error;
+          }
+        }
+      } catch {
+        try {
+          const errText = await response.text();
+          if (errText) errorMsg = errText;
+        } catch {
+          // fallback
+        }
+      }
+      const rawMsg = errorMsg;
+      errorMsg = translateApiErrorMessage(errorMsg, errorCode, getActiveLocale());
+      const err: any = new Error(errorMsg);
+      err.status = response.status;
+      err.code = errorCode;
+      err.rawMessage = rawMsg;
+      throw err;
+    }
+
+    // Handle empty or text responses
+    const contentType = response.headers.get('content-type');
+    if (contentType && contentType.includes('application/json')) {
+      return (await response.json()) as T;
+    }
+    return (await response.text()) as unknown as T;
+  } finally {
+    clearTimeout(timeout);
+    options.signal?.removeEventListener('abort', onAbort);
   }
-  return (await response.text()) as unknown as T;
 }
 
 // API methods
@@ -290,15 +311,42 @@ export async function rescanClaudeSessions(): Promise<{ ok: boolean }> {
   return apiFetch<{ ok: boolean }>('/api/claude/sessions/rescan', { method: 'POST' });
 }
 
+export async function dismissClaudeSessionLimit(sessionId: string): Promise<{ ok: boolean; sessionId: string }> {
+  return apiFetch<{ ok: boolean; sessionId: string }>(`/api/claude/sessions/${encodeURIComponent(sessionId)}/dismiss-limit`, { method: 'POST' });
+}
+
+export async function cleanResetClaudeSessions(): Promise<{ ok: boolean; cleared: number }> {
+  return apiFetch<{ ok: boolean; cleared: number }>('/api/claude/sessions/clean-reset', { method: 'POST' });
+}
+
 export async function getProjects(): Promise<Project[]> {
   return apiFetch<Project[]>('/api/projects');
 }
+
+export const getOpenProjectSources = () => apiFetch<OpenProjectSource[]>('/api/integrations/openproject/sources');
+export const saveOpenProjectSource = (id: string, data: OpenProjectSourceInput) => apiFetch<OpenProjectSource>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) });
+export const deleteOpenProjectSource = (id: string) => apiFetch<{ ok: boolean }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export const saveOpenProjectKey = (id: string, key: string) => apiFetch<{ configured: boolean }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/key`, { method: 'PUT', body: JSON.stringify({ key }) });
+export const testOpenProjectConnection = (id: string) => apiFetch<{ ok: boolean; name?: string }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/test`, { method: 'POST' });
+export const syncOpenProject = (id: string) => apiFetch<{ imported: number; comments: number }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/sync`, { method: 'POST' });
+export const createOpenProjectDailyReport = (id: string) => apiFetch<{ ok: boolean; path: string; content: string }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/daily-report`, { method: 'POST' });
+export const saveGiteaToken = (projectId: string, token: string) => apiFetch<{ configured: boolean }>(`/api/projects/${encodeURIComponent(projectId)}/gitea/token`, { method: 'PUT', body: JSON.stringify({ token }) });
+export const getGiteaStatus = (projectId: string) => apiFetch<GiteaStatus>(`/api/projects/${encodeURIComponent(projectId)}/gitea/status`);
+export const syncGitea = (projectId: string) => apiFetch<GiteaStatus>(`/api/projects/${encodeURIComponent(projectId)}/gitea/sync`, { method: 'POST' });
+export const saveRemoteDeployEnv = (projectId: string, env: Record<string, string>) => apiFetch<{ keys: string[] }>(`/api/projects/${encodeURIComponent(projectId)}/remote-deploy/env`, { method: 'PUT', body: JSON.stringify(env) });
+export const triggerRemoteDeploy = (projectId: string) => apiFetch<RemoteDeployStatus>(`/api/projects/${encodeURIComponent(projectId)}/remote-deploy`, { method: 'POST' });
+export const getRemoteDeployStatus = (projectId: string) => apiFetch<RemoteDeployStatus>(`/api/projects/${encodeURIComponent(projectId)}/remote-deploy/status`);
 
 export const getDepartments = () => apiFetch<Department[]>('/api/departments');
 export const createDepartment = (data: Partial<Department> & { name: string }) => apiFetch<Department>('/api/departments', { method: 'POST', body: JSON.stringify(data) });
 export const updateDepartment = (id: string, data: Partial<Department>) => apiFetch<Department>(`/api/departments/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) });
 export const deleteDepartment = (id: string) => apiFetch<{ ok: boolean }>(`/api/departments/${encodeURIComponent(id)}`, { method: 'DELETE' });
 export const updateDepartmentProfiles = (id: string, profiles: Array<Pick<Department['profiles'][number], 'profileName' | 'share'>>) => apiFetch<Department>(`/api/departments/${encodeURIComponent(id)}/profiles`, { method: 'PUT', body: JSON.stringify({ profiles }) });
+export const updateDepartmentProjects = (id: string, data: { projectIds?: string[]; projectId?: string }) => apiFetch<Department>(`/api/departments/${encodeURIComponent(id)}/projects`, { method: 'PUT', body: JSON.stringify(data) });
+
+export const getPresets = () => apiFetch<PresetDetails[]>('/api/presets');
+export const applyPreset = (input: ApplyPresetInput) => apiFetch<ApplyPresetResult>('/api/presets/apply', { method: 'POST', body: JSON.stringify(input) });
+export const getEffectiveConfig = (projectId: string) => apiFetch<EffectiveConfigResponse>(`/api/projects/${encodeURIComponent(projectId)}/effective-config`);
 
 export async function getArchivedProjects(): Promise<Project[]> {
   return apiFetch<Project[]>('/api/projects?archived=true');

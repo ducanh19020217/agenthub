@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { getStatus, getProfiles, getClaudeQuota, getClaudeFailover, clearClaudeFailover, getOrphans, reapOrphans, pauseTask, resumeTask, getBrain, getProjects, getPerf, getEventHistoryPage } from '../api/client';
-import { getChatSessions, createChatSession, sendChatMessage, retryChatLimitNow } from '../api/chat';
+import { retryChatLimitNow } from '../api/chat';
 import { subscribeToEvents } from '../api/sse';
 import { EventItem } from '../types/api';
 import { parseApiTime, formatTimeAgo } from '../lib/time';
@@ -15,7 +15,6 @@ import {
   Cpu,
   ArrowRight,
   Radio,
-  Send,
   HardDrive,
   Play,
   Pause,
@@ -36,6 +35,8 @@ import { QuotaUsage } from '../components/QuotaUsage';
 import { Profile, QuotaUsageItem, ProjectBrain } from '../types/api';
 import { formatReset, formatTimeTitle } from '../lib/time';
 import { GettingStartedChecklist } from '../components/GettingStartedChecklist';
+
+export type DashboardPollingProfile = 'optimized' | 'baseline';
 
 function providerUsage(profiles: Profile[], engine: Profile['engine']): QuotaUsageItem[] {
   const rows = profiles.filter((profile) => profile.engine === engine).flatMap((profile) => profile.usage || []);
@@ -79,12 +80,12 @@ function RunningDuration({ startedAt }: { startedAt: string }) {
   return <span className="font-mono text-xs">{elapsed}</span>;
 }
 
-export const DashboardPage: React.FC = () => {
+export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile }> = ({ pollingProfile = 'optimized' }) => {
+  const polling = pollingProfile === 'baseline'
+    ? { status: 5_000, eventHistory: 10_000, fast: 5_000, slow: 30_000, queue: 5_000 }
+    : { status: 15_000, eventHistory: 30_000, fast: 30_000, slow: 30_000, queue: 15_000 };
   const { t, locale } = useLocale();
-  const navigate = useNavigate();
   const [liveEvents, setLiveEvents] = useState<EventItem[]>([]);
-  const [quickChatText, setQuickChatText] = useState('');
-  const [isSubmittingQuickChat, setIsSubmittingQuickChat] = useState(false);
   const [isReaping, setIsReaping] = useState(false);
   const [urlParams, setUrlParams] = useSearchParams();
   const [eventPageNumber, setEventPageNumber] = useState(Math.max(1, Number(urlParams.get('eventsPage') || 1)));
@@ -94,12 +95,17 @@ export const DashboardPage: React.FC = () => {
   const { data: status, isLoading, error } = useQuery({
     queryKey: ['status'],
     queryFn: getStatus,
-    refetchInterval: 5000,
+    // Status changes arrive over SSE; keep a slower poll as a recovery path.
+    refetchInterval: polling.status,
+    refetchIntervalInBackground: false,
+    retry: false,
   });
   const { data: eventPage } = useQuery({
     queryKey: ['event-history', 'dashboard', eventPageNumber, eventCursor],
     queryFn: () => getEventHistoryPage({ limit: 20, cursor: eventCursor, offset: eventCursor ? undefined : (eventPageNumber - 1) * 20 }),
-    refetchInterval: 10_000,
+    refetchInterval: polling.eventHistory,
+    refetchIntervalInBackground: false,
+    retry: false,
   });
   useEffect(() => {
     if (eventPage?.nextCursor) setEventCursors((current) => ({ ...current, [eventPageNumber]: eventPage.nextCursor || undefined }));
@@ -113,15 +119,16 @@ export const DashboardPage: React.FC = () => {
   const { data: profiles = [], refetch: refetchProfiles } = useQuery({
     queryKey: ['profiles'],
     queryFn: getProfiles,
-    refetchInterval: 30_000,
+    refetchInterval: polling.slow,
+    refetchIntervalInBackground: false,
   });
-  const { data: claudeQuota } = useQuery({ queryKey: ['claude-quota'], queryFn: getClaudeQuota, refetchInterval: 30_000 });
-  const { data: brainOverview } = useQuery({ queryKey: ['brain'], queryFn: getBrain, refetchInterval: 5000 });
-  const { data: claudeFailover } = useQuery({ queryKey: ['claude-failover'], queryFn: getClaudeFailover, refetchInterval: 5000 });
+  const { data: claudeQuota } = useQuery({ queryKey: ['claude-quota'], queryFn: getClaudeQuota, refetchInterval: polling.slow, refetchIntervalInBackground: false });
+  const { data: brainOverview } = useQuery({ queryKey: ['brain'], queryFn: getBrain, refetchInterval: polling.fast, refetchIntervalInBackground: false });
+  const { data: claudeFailover } = useQuery({ queryKey: ['claude-failover'], queryFn: getClaudeFailover, refetchInterval: polling.fast, refetchIntervalInBackground: false });
   const failoverMutation = useMutation({ mutationFn: clearClaudeFailover });
-  const { data: orphans = [], refetch: refetchOrphans } = useQuery({ queryKey: ['system-orphans'], queryFn: getOrphans, refetchInterval: 30_000 });
-  const { data: projects = [] } = useQuery({ queryKey: ['projects'], queryFn: getProjects, refetchInterval: 30_000 });
-  const { data: perf } = useQuery({ queryKey: ['perf'], queryFn: getPerf, refetchInterval: 30_000 });
+  const { data: orphans = [], refetch: refetchOrphans } = useQuery({ queryKey: ['system-orphans'], queryFn: getOrphans, refetchInterval: polling.slow, refetchIntervalInBackground: false });
+  const { data: projects = [] } = useQuery({ queryKey: ['projects'], queryFn: getProjects, refetchInterval: polling.slow, refetchIntervalInBackground: false });
+  const { data: perf } = useQuery({ queryKey: ['perf'], queryFn: getPerf, refetchInterval: polling.slow, refetchIntervalInBackground: false });
 
   const queryClient = useQueryClient();
   const pauseMutation = useMutation({
@@ -148,40 +155,17 @@ export const DashboardPage: React.FC = () => {
     }
   };
 
-  const handleQuickChat = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const text = quickChatText.trim();
-    if (!text || isSubmittingQuickChat) return;
-
-    try {
-      setIsSubmittingQuickChat(true);
-      const sessionsPage = await getChatSessions({ limit: 1 });
-      const sessions = sessionsPage.items;
-      let targetSessionId: string;
-      if (sessions.length > 0) {
-        targetSessionId = sessions[0].id;
-      } else {
-        const newSession = await createChatSession({
-          title: text.length > 30 ? text.slice(0, 30) + '...' : text,
-          mode: 'safe',
-        });
-        targetSessionId = newSession.id;
-      }
-
-      await sendChatMessage(targetSessionId, text);
-      navigate(`/chat/${targetSessionId}`);
-    } catch (err: any) {
-      alert(err.message || t('extra.quickChatError'));
-      setIsSubmittingQuickChat(false);
-    }
-  };
-
   useEffect(() => {
     const unsub = subscribeToEvents((event) => {
-      setLiveEvents((prev) => [event, ...prev.filter((e) => e.id !== event.id)].slice(0, 20));
+      setLiveEvents((prev) => {
+        // Replayed events are possible after SSE reconnect via Last-Event-ID.
+        // Keep the same state reference so a duplicate does not rerender the page.
+        if (pollingProfile !== 'baseline' && prev.some((current) => current.id === event.id)) return prev;
+        return [event, ...prev].slice(0, 20);
+      });
     });
     return unsub;
-  }, []);
+  }, [pollingProfile]);
 
   if (isLoading) {
     return (
@@ -351,11 +335,10 @@ export const DashboardPage: React.FC = () => {
         <h2 className="text-base font-semibold">{t('dashboard.brains')}</h2>
         {brainOverview.brains.map((brain: ProjectBrain) => <div key={brain.projectId || 'system'} className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--t-border)] pt-3 first:border-0 first:pt-0" data-testid={`brain-row-${brain.projectId || 'system'}`}>
           <div><div className="font-medium text-sm">{brain.projectName}</div><div className="text-xs text-[var(--t-text-2)]">{t('dashboard.brainMode')}: {t(`dashboard.brainMode_${brain.mode}`)} · {t('dashboard.brainEngine')}: {brain.engine || 'claude'} · {t('projects.brainPermissions')}: {brain.permissions} · {t('dashboard.brainSessionMode')}: {brain.sessionMode || 'safe'} · {t(`dashboard.brainState${brain.state}`)}{brain.queued ? ` · ${t('dashboard.brainQueued')}` : ''}</div>{brain.directives?.length ? <div className="mt-1 text-xs text-[var(--t-text-2)]">📌 {brain.directives.map((directive) => directive.text).join(' · ')}</div> : null}</div>
-          <div className="flex items-center gap-3 text-xs"><span>{t('dashboard.brainTokens')}: {brain.tokensToday.toLocaleString()}</span><Link to={`/chat/${encodeURIComponent(brain.sessionId)}`} className="text-[var(--t-accent)] hover:underline">{t('dashboard.openBrainChat')}</Link></div>
+          <div className="flex items-center gap-3 text-xs"><span>{t('dashboard.brainTokens')}: {brain.tokensToday.toLocaleString()}</span><span>{brain.turnsToday || 0} {t('dashboard.brainTurns')}</span><span>{t('dashboard.brainRotations')} {brain.rotationsToday || 0}</span><span>{t('dashboard.brainSkipped')} {brain.eventsSkippedToday || 0}</span></div>
         </div>)}
         {brainOverview.assistants?.map((assistant) => <div key={`assistant-${assistant.projectId || 'system'}`} className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--t-border)] pt-3" data-testid={`assistant-row-${assistant.projectId || 'system'}`}>
           <div><div className="font-medium text-sm">{t('dashboard.assistant')} · {assistant.projectName}</div><div className="text-xs text-[var(--t-text-2)]">{assistant.busy ? t('dashboard.assistantWorking') : t('dashboard.assistantReady')}</div></div>
-          <Link to={`/chat/${encodeURIComponent(assistant.sessionId)}`} className="text-xs text-[var(--t-accent)] hover:underline">{t('dashboard.openAssistantChat')}</Link>
         </div>)}
       </div>}
 
@@ -525,16 +508,16 @@ export const DashboardPage: React.FC = () => {
                             <span
                               data-testid={`worker-paused-${worker.taskId}`}
                               className={`inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium border ${
-                                worker.pauseReason === 'load'
+                                worker.pauseReason === 'load' || worker.pauseReason === 'brain_load'
                                   ? 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)] border-[color-mix(in_srgb,var(--t-warn)_30%,transparent)]'
                                   : 'bg-[var(--t-surface-2)] text-[var(--t-text-2)] border-[var(--t-border)]'
                               }`}
                             >
-                              {worker.pauseReason === 'load'
+                              {worker.pauseReason === 'load' || worker.pauseReason === 'brain_load'
                                 ? t('status.pausedOverload')
                                 : worker.pauseReason === 'focus'
                                   ? t('status.pausedFocus')
-                                  : t('status.paused')}
+                                  : t('status.pausedManual')}
                             </span>
                           </div>
                         )}
@@ -617,12 +600,13 @@ export const DashboardPage: React.FC = () => {
 
       {/* Review queue */}
       <div className="order-1">
-        <ReviewQueue activeTaskId={status.brain?.taskId} />
+        <ReviewQueue activeTaskId={status.brain?.taskId} pollingInterval={polling.queue} />
       </div>
 
       {/* Waiting queue */}
       <div className="order-1">
         <WaitingQueue
+          pollingInterval={polling.queue}
           diskFreeGB={(status.disks?.find((disk) => disk.low) ?? status.disks?.[0])?.freeGB ?? status.disk?.freeGB}
           diskMinFreeGB={(status.disks?.find((disk) => disk.low) ?? status.disks?.[0])?.minFreeGB ?? status.disk?.minFreeGB}
           diskLabel={(status.disks?.find((disk) => disk.low) ?? status.disks?.[0])?.label}
@@ -692,38 +676,6 @@ export const DashboardPage: React.FC = () => {
           {claudeFailover.active && <button type="button" onClick={() => failoverMutation.mutate()} disabled={failoverMutation.isPending} className="shrink-0 px-3 py-2 rounded-lg bg-[var(--t-warn)] text-[var(--t-on-accent)] text-xs font-semibold disabled:opacity-50">{failoverMutation.isPending ? t('dashboard.failoverTurningOff') : t('dashboard.failoverTurnOff')}</button>}
         </div>
       </div>}
-
-      {/* Compact quick chat */}
-      <div className="order-5 p-4 rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] shadow-xs transition-colors">
-        <form onSubmit={handleQuickChat} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-          <div className="flex items-center gap-2 text-xs font-semibold text-[var(--t-text)] shrink-0">
-            <div className="w-6 h-6 rounded-full bg-[var(--t-claude)] text-[var(--t-on-accent)] font-bold text-xs flex items-center justify-center shadow-xs">
-              C
-            </div>
-            <span>{t('extra.quickChat')}</span>
-          </div>
-
-          <div className="flex-1 relative">
-            <input
-              type="text"
-              value={quickChatText}
-              onChange={(e) => setQuickChatText(e.target.value)}
-              placeholder={t('extra.quickChatPlaceholder')}
-              disabled={isSubmittingQuickChat}
-              className="w-full text-xs rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-[var(--t-text)] placeholder-[var(--t-text-3)] focus:outline-none focus:ring-2 focus:ring-[var(--t-accent)] disabled:opacity-50"
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={!quickChatText.trim() || isSubmittingQuickChat}
-            className="px-4 py-2 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center justify-center gap-1.5 shadow-xs disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shrink-0 transition-colors"
-          >
-            <Send className="w-3.5 h-3.5" />
-            <span>{isSubmittingQuickChat ? t('extra.sending') : t('extra.send')}</span>
-          </button>
-        </form>
-      </div>
 
       {orphans.length > 0 && <div data-testid="orphan-processes" className="order-1 bg-[var(--t-surface)] rounded-xl border border-[var(--t-border)] overflow-hidden shadow-xs">
         <div className="px-6 py-4 border-b border-[var(--t-border)] flex items-center justify-between gap-3">

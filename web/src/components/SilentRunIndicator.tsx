@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { parseApiTime } from '../lib/time';
 import { useLocale } from '../context/LocaleContext';
 
-export const SilentRunIndicator: React.FC<{ lastActivityAt?: string | null }> = ({ lastActivityAt }) => {
+export const SilentRunIndicator: React.FC<{ lastActivityAt?: string | null; paused?: boolean }> = ({ lastActivityAt, paused }) => {
   const { t } = useLocale();
   const [, refresh] = useState(0);
 
@@ -11,7 +11,7 @@ export const SilentRunIndicator: React.FC<{ lastActivityAt?: string | null }> = 
     return () => clearInterval(timer);
   }, []);
 
-  if (!lastActivityAt) return null;
+  if (paused || !lastActivityAt) return null;
   const minutes = Math.floor(Math.max(0, Date.now() - parseApiTime(lastActivityAt)) / 60000);
   if (minutes <= 3) return null;
   return (

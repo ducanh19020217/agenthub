@@ -610,7 +610,7 @@ describe('ProfilesPage - Bật/Tắt, Nút Check và Quota Mark', () => {
     renderPage();
 
     expect(await screen.findByText('claude-may')).toBeInTheDocument();
-    expect(screen.getByText('Phiên bị giới hạn')).toBeInTheDocument();
+    expect(screen.getAllByText('Phiên đang chờ reset').length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('Implement feature X')).toBeInTheDocument();
     expect(screen.getByText('/projects/repo-a')).toBeInTheDocument();
 
@@ -631,7 +631,7 @@ describe('ProfilesPage - Bật/Tắt, Nút Check và Quota Mark', () => {
     );
   });
 
-  it('13. Claude card: displays empty state when there are no limited sessions', async () => {
+  it('13. Claude card: hides limited sessions section when there are no limited sessions', async () => {
     const claudeProfile: Profile = {
       name: 'claude-may',
       engine: 'claude',
@@ -647,8 +647,57 @@ describe('ProfilesPage - Bật/Tắt, Nút Check và Quota Mark', () => {
     renderPage();
 
     expect(await screen.findByText('claude-may')).toBeInTheDocument();
-    expect(screen.getByText('Phiên bị giới hạn')).toBeInTheDocument();
-    expect(screen.getByText('Không có phiên nào bị giới hạn')).toBeInTheDocument();
+    expect(screen.queryByTestId('claude-limited-section-claude-may')).not.toBeInTheDocument();
+    expect(screen.queryByText('Phiên đang chờ reset')).not.toBeInTheDocument();
+  });
+
+  it('13b. Claude card: dismiss and clean buttons invoke APIs correctly', async () => {
+    const claudeProfile: Profile = {
+      name: 'claude-may',
+      engine: 'claude',
+      kind: 'system',
+      email: 'user@example.com',
+      loggedIn: true,
+      enabled: 1,
+      quotaMarks: [],
+      limitedSessions: [
+        {
+          sessionId: 'sess-fut',
+          title: 'Future Session',
+          cwd: '/projects/repo-a',
+          limitResetAt: Math.floor(Date.now() / 1000) + 1800,
+          autoResumeEnabled: true,
+        },
+        {
+          sessionId: 'sess-past',
+          title: 'Past Session',
+          cwd: '/projects/repo-b',
+          limitResetAt: Math.floor(Date.now() / 1000) - 1800,
+          autoResumeEnabled: true,
+        },
+      ],
+    };
+    vi.spyOn(client, 'getProfiles').mockResolvedValue([claudeProfile]);
+    const apiFetchSpy = vi.spyOn(client, 'apiFetch').mockResolvedValue({} as any);
+
+    renderPage();
+
+    expect(await screen.findByText('claude-may')).toBeInTheDocument();
+    expect(screen.getByText('Chờ tự tiếp tục')).toBeInTheDocument();
+
+    const dismissBtn = screen.getByTestId('dismiss-limit-sess-fut');
+    fireEvent.click(dismissBtn);
+    expect(apiFetchSpy).toHaveBeenCalledWith(
+      '/api/claude/sessions/sess-fut/dismiss-limit',
+      expect.objectContaining({ method: 'POST' }),
+    );
+
+    const cleanBtn = screen.getByTestId('clean-reset-sessions-claude-may');
+    fireEvent.click(cleanBtn);
+    expect(apiFetchSpy).toHaveBeenCalledWith(
+      '/api/claude/sessions/clean-reset',
+      expect.objectContaining({ method: 'POST' }),
+    );
   });
 
   it('14. displays error message and retry button when profiles fail to load', async () => {

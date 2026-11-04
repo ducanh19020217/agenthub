@@ -242,7 +242,8 @@ describe('Brain API Endpoints (/api/brain)', () => {
       .run('p2-turn', 'event', 'p2', 'p2', 'done', 3, 4, now);
 
     ctx.brainRunner.start();
-    ctx.scheduler.getEventBus().emit('task.done', 'p1/task');
+    // task.done is intentionally ignored by an explicitly configured wake-up list.
+    ctx.scheduler.getEventBus().emit('task.failed', 'p1/task');
     const response = await server.inject({
       method: 'GET',
       url: '/api/brain',

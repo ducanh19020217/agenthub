@@ -319,7 +319,7 @@ export class DeployService {
       logPath: prev.logPath || logPath,
     };
     this.latest.set(projectId, status);
-    this.eventBus.emit('deploy.succeeded', undefined, { projectId, logPath, pushStatus: pushMsg });
+    this.eventBus.emit('deploy.succeeded', undefined, { projectId, logPath, commit: status.commit, pushStatus: pushMsg, pushRemote: definition.push.remote, pushRef: definition.push.to });
     return status;
   }
 
@@ -480,7 +480,12 @@ export class DeployService {
         this.eventBus.emit('deploy.restarting', undefined, { projectId, commit, logPath });
         await this.restartHub(status);
       } else {
-        this.eventBus.emit('deploy.succeeded', undefined, { projectId, commit, logPath });
+        this.eventBus.emit('deploy.succeeded', undefined, {
+          projectId,
+          commit,
+          logPath,
+          ...(definition.push ? { pushRemote: definition.push.remote, pushRef: definition.push.to } : {}),
+        });
       }
     } catch (error) {
       status.status = 'failed';
@@ -507,7 +512,7 @@ export class DeployService {
     const settings = projectSettings(project);
     if (settings.integration.enabled) {
       const worktree = ensureIntegrationWorktree(project, this.config.hubHome);
-      if (settings.worktree.install !== 'skip') {
+      if (settings.worktree.install === 'auto') {
         await ensureIntegrationNodeModules(project, this.config.hubHome, {
           cacheDir: this.config.cacheDir,
           cacheMaxEntries: this.config.cacheMaxEntries,
@@ -525,7 +530,7 @@ export class DeployService {
       const target = merge.worktrees[project.defaultBranch];
       if (!target || !path.isAbsolute(target)) return null;
       const worktree = path.resolve(target);
-      if (settings.worktree.install !== 'skip') {
+      if (settings.worktree.install === 'auto') {
         await ensureWorktreeNodeModules(worktree, project.path || undefined, this.config.cacheDir).catch((err) => {
           console.warn(`[deploy] Failed to prepare legacy worktree node_modules:`, err);
         });

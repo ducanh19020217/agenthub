@@ -1,22 +1,41 @@
 import crypto from 'node:crypto';
-import type { BrainConfig } from '../config.js';
+import { type BrainConfig, DEFAULT_BRAIN_WAKEUP_EVENTS } from '../config.js';
 import { BrainDirectiveRepo, BrainTurnRepo, ChatSessionRepo, DepartmentRepo, KnowledgeRepo, ProfileRepo, TaskRepo } from '../db/index.js';
 import { resolveClaudeProfile, resolveCodexProfile } from '../profiles/index.js';
 import type { ChatService } from '../chat/service.js';
 import { EventBus } from '../scheduler/index.js';
-import { effectiveBrainMode, effectiveBrainPermission, type EffectiveBrainMode } from './mode.js';
+import { effectiveBrainMode, type EffectiveBrainMode } from './mode.js';
 import { projectSettings } from '../projects/settings.js';
 import { buildProjectKnowledgeContext } from '../projects/knowledge-context.js';
-import { effectiveBrainCodexProfile, effectiveBrainEngine } from './engine.js';
+import { effectiveBrainCodexProfile } from './engine.js';
 
-const EVENT_TYPES = new Set(['task.review_ready', 'task.failed', 'task.blocked', 'task.done', 'batch.created', 'batch.dispatched', 'merge.failed', 'merge.conflict', 'quota.exhausted', 'claude.quota_exhausted', 'disk.low', 'load.high', 'brain.directive_added', 'brain.department_summary', 'brain.profile_transfer', 'ci.failed', 'brain.trust_changed', 'config.updated']);
+const EVENT_TYPES = new Set(['task.review_ready', 'task.failed', 'task.blocked', 'task.done', 'batch.created', 'batch.dispatched', 'merge.failed', 'merge.conflict', 'quota.exhausted', 'claude.quota_exhausted', 'disk.low', 'load.high', 'brain.directive_added', 'brain.department_summary', 'brain.profile_transfer', 'ci.failed', 'brain.trust_changed', 'config.updated', 'brain.notify', 'review.escalated']);
 const SYSTEM_EVENTS = new Set(['quota.exhausted', 'claude.quota_exhausted', 'disk.low', 'load.high']);
 const MAX_RETRIES = 3;
+
+function isPriorityEvent(type: string, payload?: unknown): boolean {
+  if (type === 'brain.directive_added' || type === 'task.blocked' || type === 'task.failed' || type === 'ci.failed' || type === 'review.escalated' || type === 'merge.failed') {
+    return true;
+  }
+  const data = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
+  if ((type === 'quota.exhausted' || type === 'claude.quota_exhausted') && (data.allExhausted || data.quotaAllExhausted || data.fallbackAvailable === false)) {
+    return true;
+  }
+  if (type === 'brain.notify' && data.level === 'decision') {
+    return true;
+  }
+  if (type === 'merge.conflict' && typeof data.conflictCount === 'number' && data.conflictCount > 3) {
+    return true;
+  }
+  return false;
+}
 
 export interface BrainRunnerOptions {
   config: BrainConfig;
   eventBus: EventBus;
-  chatService: Pick<ChatService, 'getOrCreateSession' | 'sendMessage'>;
+  chatService: Pick<ChatService, 'getOrCreateSession' | 'sendMessage'> & {
+    compactSession?: (sessionId: string) => Promise<unknown>;
+  };
   chatSessionRepo: ChatSessionRepo;
   profileRepo?: Pick<ProfileRepo, 'getAll'>;
   taskRepo?: Pick<TaskRepo, 'get'>;
@@ -39,12 +58,19 @@ export class BrainRunner {
   private readonly now: () => number;
   private pending: BrainQueuedEvent[] = [];
   private timer?: NodeJS.Timeout;
+  private scheduledFor?: number;
   private active = new Map<string, ActiveTurn>();
   private userBusy = new Set<string>();
   private retryCounts = new Map<string, number>();
   private roundRobinCursor = 0;
   private started = false;
   private sentKnowledgeHash = new Map<string, string>();
+  private eventsSkippedToday = 0;
+  private eventsBatchedToday = 0;
+  private rotationsToday = 0;
+  private metricDay = '';
+  private turnsBySession = new Map<string, number>();
+  private rotating = new Set<string>();
   private bound = (type: string, taskId?: string, payload?: unknown) => this.onEvent(type, taskId, payload);
 
   constructor(private readonly opts: BrainRunnerOptions) {
@@ -74,19 +100,47 @@ export class BrainRunner {
 
   getQueuedEvents(): BrainQueuedEvent[] { return [...this.pending]; }
   isQueued(projectId: string | null): boolean { return this.pending.some((event) => (event.projectId ?? null) === projectId); }
-  getUsage(projectId: string | null): { queued: boolean; lastTurnAt: string | null; tokensToday: number } {
+  getUsage(projectId: string | null): {
+    queued: boolean;
+    lastTurnAt: string | null;
+    tokensToday: number;
+    turnsToday: number;
+    inputTokensToday: number;
+    outputTokensToday: number;
+    rotationsToday: number;
+    eventsSkippedToday: number;
+    eventsBatchedToday: number;
+  } {
+    this.resetDailyMetrics();
     const day = new Date(this.now());
     day.setHours(0, 0, 0, 0);
+    const isoDate = day.toISOString();
     const departmentId = this.department(projectId)?.id;
     const departmentLatest = departmentId ? this.opts.turnRepo.latestDepartment(departmentId) : undefined;
     const projectLatest = this.opts.turnRepo.latest(projectId);
     const latest = [departmentLatest, projectLatest]
       .filter((turn): turn is NonNullable<typeof turn> => Boolean(turn))
       .sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0];
-    const departmentTokens = departmentId ? this.opts.turnRepo.tokensSinceDepartment(day.toISOString(), departmentId) : 0;
-    const projectTokens = this.opts.turnRepo.tokensSince(day.toISOString(), projectId);
-    const tokensToday = departmentId ? departmentTokens + projectTokens : projectTokens;
-    return { queued: this.isQueued(projectId), lastTurnAt: latest?.finishedAt || latest?.startedAt || null, tokensToday };
+
+    const deptBreakdown = departmentId ? this.opts.turnRepo.tokensBreakdownSinceDepartment(isoDate, departmentId) : { inputTokens: 0, outputTokens: 0, total: 0, count: 0 };
+    const projBreakdown = this.opts.turnRepo.tokensBreakdownSince(isoDate, projectId);
+
+    const inputTokensToday = departmentId ? deptBreakdown.inputTokens + projBreakdown.inputTokens : projBreakdown.inputTokens;
+    const outputTokensToday = departmentId ? deptBreakdown.outputTokens + projBreakdown.outputTokens : projBreakdown.outputTokens;
+    const tokensToday = inputTokensToday + outputTokensToday;
+    const turnsToday = departmentId ? deptBreakdown.count + projBreakdown.count : projBreakdown.count;
+
+    return {
+      queued: this.isQueued(projectId),
+      lastTurnAt: latest?.finishedAt || latest?.startedAt || null,
+      tokensToday,
+      turnsToday,
+      inputTokensToday,
+      outputTokensToday,
+      rotationsToday: this.rotationsToday,
+      eventsSkippedToday: this.eventsSkippedToday,
+      eventsBatchedToday: this.eventsBatchedToday,
+    };
   }
 
   flush(): void {
@@ -135,10 +189,23 @@ export class BrainRunner {
     const settings = this.projectSettings(projectId);
     const department = this.department(projectId);
     const departmentId = department?.id;
-    const maxTurns = departmentId ? (department.brainMaxTurnsPerHour || this.opts.config.maxTurnsPerHour) : (settings.brain.maxTurnsPerHour ?? this.opts.config.maxTurnsPerHour);
-    const budget = departmentId ? (department.brainDailyTokenBudget || this.opts.config.dailyTokenBudget) : (settings.brain.dailyTokenBudget ?? this.opts.config.dailyTokenBudget);
-    const count = departmentId ? this.opts.turnRepo.countSinceDepartment(now - 3600000, departmentId) : this.opts.turnRepo.countSince(now - 3600000, projectId);
-    const tokens = departmentId ? this.opts.turnRepo.tokensSinceDepartment(day.toISOString(), departmentId) : this.opts.turnRepo.tokensSince(day.toISOString(), projectId);
+    // Priority: project > department > global for maxTurnsPerHour and dailyTokenBudget
+    const projectMaxTurns = settings.brain.maxTurnsPerHour;
+    const deptMaxTurns = departmentId && department.brainMaxTurnsPerHour && department.brainMaxTurnsPerHour > 0 ? department.brainMaxTurnsPerHour : undefined;
+    const maxTurns = projectMaxTurns ?? deptMaxTurns ?? this.opts.config.maxTurnsPerHour;
+    const projectBudget = settings.brain.dailyTokenBudget;
+    const deptBudget = departmentId && department.brainDailyTokenBudget && department.brainDailyTokenBudget > 0 ? department.brainDailyTokenBudget : undefined;
+    const budget = projectBudget ?? deptBudget ?? this.opts.config.dailyTokenBudget;
+    const count = projectMaxTurns !== undefined
+      ? this.opts.turnRepo.countSince(now - 3600000, projectId)
+      : departmentId
+        ? this.opts.turnRepo.countSinceDepartment(now - 3600000, departmentId)
+        : this.opts.turnRepo.countSince(now - 3600000, projectId);
+    const tokens = projectBudget !== undefined
+      ? this.opts.turnRepo.tokensSince(day.toISOString(), projectId)
+      : departmentId
+        ? this.opts.turnRepo.tokensSinceDepartment(day.toISOString(), departmentId)
+        : this.opts.turnRepo.tokensSince(day.toISOString(), projectId);
     if (count >= maxTurns || (budget > 0 && tokens >= budget)) {
       this.opts.eventBus.emit('brain.limited', projectId || undefined, { reason: 'budget' });
       return 'limited';
@@ -153,10 +220,11 @@ export class BrainRunner {
   private startProjectTurn(projectId: string | null): void {
     const sessionId = this.sessionIdFor(projectId);
     const projectEvents = this.pending.filter((event) => this.sessionIdFor(event.projectId ?? null) === sessionId);
-    const priority = projectEvents.find((event) => event.priority);
+    const priority = projectEvents.find((event) => event.type === 'brain.directive_added');
     const events = priority ? [priority] : projectEvents;
+    if (events.length > 1) this.eventsBatchedToday += events.length;
     this.pending = this.pending.filter((event) => this.sessionIdFor(event.projectId ?? null) !== sessionId || (priority ? event !== priority : false));
-    const formatted = priority
+    const formatted = priority?.type === 'brain.directive_added'
       ? { text: this.formatDirectiveAcknowledgement(priority, projectId) }
       : this.formatEvents(events, this.mode(projectId), projectId);
     const input = formatted.text;
@@ -184,11 +252,12 @@ export class BrainRunner {
     return project?.departmentId ? this.opts.departmentRepo?.get(project.departmentId) : undefined;
   }
   private mode(projectId: string | null): EffectiveBrainMode {
-    if (this.opts.config.mode === 'off' && !this.opts.config.director?.enabled) return 'off';
     const project = projectId ? this.opts.projectRepo?.get(projectId) : null;
-    const projectMode = effectiveBrainMode(projectId, project, this.opts.config);
+    const projectMode = projectSettings(project).brain.mode;
+    if (projectMode !== 'inherit') return projectMode;
     const departmentMode = this.department(projectId)?.brainMode;
-    return departmentMode && departmentMode !== 'inherit' && projectSettings(project).brain.mode === 'inherit' ? departmentMode : projectMode;
+    if (departmentMode && departmentMode !== 'inherit') return departmentMode;
+    return effectiveBrainMode(projectId, project, this.opts.config);
   }
   private sessionIdFor(projectId: string | null): string {
     const department = this.department(projectId);
@@ -201,8 +270,13 @@ export class BrainRunner {
     const id = this.sessionIdFor(projectId);
     const project = projectId ? this.opts.projectRepo?.get(projectId) : undefined;
     const department = this.department(projectId);
-    const permission = department?.brainPermissions && department.brainPermissions !== 'inherit'
-      ? department.brainPermissions : effectiveBrainPermission(project, this.opts.config);
+    // Priority: project > department > global for permissions
+    const projectSettings_ = projectSettings(project);
+    const permission = projectSettings_.brain.permissions !== 'inherit'
+      ? projectSettings_.brain.permissions
+      : (department?.brainPermissions && department.brainPermissions !== 'inherit'
+        ? department.brainPermissions
+        : this.opts.config.permissions);
     const director = !projectId ? this.opts.config.director : undefined;
     const effectivePermission = director?.permissions || permission;
     const mode = effectivePermission === 'full' ? 'full' : 'safe';
@@ -224,9 +298,15 @@ export class BrainRunner {
       }
       return this.opts.chatSessionRepo.get(existing.id) || existing;
     }
-    const engine = effectiveBrainEngine(project, this.opts.config);
-    const resolvedEngine = director?.engine || department?.brainEngine || engine;
-    const resolvedModel = director?.model || department?.brainModel || (resolvedEngine === 'codex' ? (this.opts.config.codexModel || 'gpt-5.6-luna') : this.opts.config.model);
+    // Priority: project > department > global for engine and model
+    const projectEngine = projectSettings_.brain.engine;
+    const deptEngine = department?.brainEngine && department.brainEngine !== 'inherit' ? department.brainEngine : undefined;
+    const resolvedEngine = director?.engine || (projectEngine !== 'inherit' ? projectEngine : (deptEngine ?? (this.opts.config.engine || 'claude')));
+
+    const projectModel = projectSettings_.brain.model;
+    const deptModel = department?.brainModel && department.brainModel !== 'inherit' ? department.brainModel : undefined;
+    const defaultModel = resolvedEngine === 'codex' ? (this.opts.config.codexModel || 'gpt-5.6-luna') : this.opts.config.model;
+    const resolvedModel = director?.model || (projectModel ? projectModel : (deptModel ?? defaultModel));
     this.opts.chatService.getOrCreateSession(id, {
       title: department ? `Bộ não · ${department.name}` : project ? `Bộ não · ${project.name}` : director ? 'Bộ não Giám đốc' : 'Bộ não', mode,
       model: resolvedModel,
@@ -259,6 +339,7 @@ export class BrainRunner {
   }
 
   private onEvent(type: string, taskId?: string, payload?: unknown): void {
+    this.resetDailyMetrics();
     const data = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
     if (type === 'brain.trust_changed' || type === 'config.updated') {
       if (type === 'config.updated' && (!data.brain || typeof data.brain !== 'object' || !('permissions' in data.brain))) return;
@@ -298,11 +379,31 @@ export class BrainRunner {
       const affectedTask = taskId ? this.opts.taskRepo.get(taskId) : undefined;
       if (!affectedTask || (affectedTask.status !== 'running' && affectedTask.status !== 'queued')) return;
     }
+    const hasExplicitWakeupEvents = this.opts.config.wakeupEvents !== undefined;
+    const wakeupEvents = hasExplicitWakeupEvents && this.opts.config.wakeupEvents!.length
+      ? this.opts.config.wakeupEvents!
+      : hasExplicitWakeupEvents
+        ? DEFAULT_BRAIN_WAKEUP_EVENTS
+        : [...DEFAULT_BRAIN_WAKEUP_EVENTS, 'task.done', 'disk.low', 'load.high', 'task.review_ready'];
     const candidate = typeof data.projectId === 'string' ? data.projectId : taskId?.includes('/') ? taskId.slice(0, taskId.indexOf('/')) : null;
+    const project = candidate ? this.opts.projectRepo?.get(candidate) : undefined;
+    const settings = project ? this.projectSettings(candidate) : undefined;
+    const autoMergeEnabled = settings?.review.autoMerge === true || settings?.integration.autoMerge === true;
+    const reviewReadyIsAutomatic = hasExplicitWakeupEvents && type === 'task.review_ready' && data.reviewChainComplete === true && (data.autoMerge === true || autoMergeEnabled);
+    const quotaIsPartial = hasExplicitWakeupEvents && (type === 'quota.exhausted' || type === 'claude.quota_exhausted')
+      && data.allExhausted !== true && data.quotaAllExhausted !== true && data.fallbackAvailable !== false;
+    const conflictIsRoutine = hasExplicitWakeupEvents && type === 'merge.conflict'
+      && (typeof data.conflictCount !== 'number' || data.conflictCount <= 3);
+    const decisionOnly = hasExplicitWakeupEvents && type === 'brain.notify' && data.level !== 'decision';
+    if ((hasExplicitWakeupEvents && (!wakeupEvents.includes(type) || reviewReadyIsAutomatic || quotaIsPartial || conflictIsRoutine || decisionOnly))) {
+      this.eventsSkippedToday += 1;
+      return;
+    }
     const projectId = SYSTEM_EVENTS.has(type) ? null : (candidate && this.opts.projectRepo?.get(candidate) ? candidate : null);
     if (this.mode(projectId) === 'off' || this.mode(projectId) === 'external') return;
-    this.pending.push({ id: crypto.randomUUID(), type, taskId, projectId, payload, priority: type === 'brain.directive_added' });
-    this.schedule();
+    const priority = isPriorityEvent(type, payload);
+    this.pending.push({ id: crypto.randomUUID(), type, taskId, projectId, payload, priority });
+    this.schedule(priority);
   }
 
   private finishChatEvent(type: string, data: Record<string, unknown>): void {
@@ -331,6 +432,7 @@ export class BrainRunner {
       if (session?.kind === 'brain') this.ensureSession(session.projectId);
       return;
     }
+    if (type === 'chat.done') this.maybeRotate(sessionId, session);
     if (type === 'chat.error') {
       this.retryFailedEvents(active, String(data.message || 'brain turn failed'));
       if (session?.kind === 'brain') this.ensureSession(session.projectId);
@@ -340,10 +442,53 @@ export class BrainRunner {
     if (session?.kind === 'brain') this.ensureSession(session.projectId);
   }
 
-  private schedule(): void {
-    if (this.timer) return;
-    this.timer = setTimeout(() => { this.timer = undefined; this.flush(); }, this.debounceMs);
+  private schedule(priority = false): void {
+    const configuredWindow = (this.opts.config.batchWindowSec ?? 0) * 1000;
+    const normalDelay = configuredWindow > 0 ? configuredWindow : this.debounceMs;
+    const delay = priority ? Math.min(normalDelay, 30_000) : normalDelay;
+    const due = this.now() + delay;
+    if (this.timer && this.scheduledFor !== undefined && this.scheduledFor <= due) return;
+    if (this.timer) clearTimeout(this.timer);
+    this.scheduledFor = due;
+    this.timer = setTimeout(() => { this.timer = undefined; this.scheduledFor = undefined; this.flush(); }, delay);
     this.timer.unref?.();
+  }
+
+  private resetDailyMetrics(): void {
+    const day = new Date(this.now());
+    const key = `${day.getFullYear()}-${day.getMonth()}-${day.getDate()}`;
+    if (this.metricDay && this.metricDay !== key) {
+      this.eventsSkippedToday = 0;
+      this.eventsBatchedToday = 0;
+      this.rotationsToday = 0;
+    }
+    this.metricDay = key;
+  }
+
+  private maybeRotate(sessionId: string, session: ReturnType<ChatSessionRepo['get']>): void {
+    if (!session || this.rotating.has(sessionId)) return;
+    const turns = (this.turnsBySession.get(sessionId) || 0) + 1;
+    this.turnsBySession.set(sessionId, turns);
+    const tokenLimit = this.opts.config.rotateAtTokens ?? 80_000;
+    const turnLimit = this.opts.config.rotateAfterTurns ?? 40;
+    const oldDay = session.lastMessageAt ? new Date(session.lastMessageAt).toDateString() !== new Date(this.now()).toDateString() : false;
+    if (session.contextTokens < tokenLimit && turns < turnLimit && !oldDay) return;
+    const compact = this.opts.chatService.compactSession;
+    if (!compact) {
+      this.opts.chatSessionRepo.clearClaudeSessionId(sessionId);
+      this.rotationsToday += 1;
+      this.turnsBySession.set(sessionId, 0);
+      return;
+    }
+    this.rotating.add(sessionId);
+    void compact.call(this.opts.chatService, sessionId).then(() => {
+      this.rotationsToday += 1;
+      this.turnsBySession.set(sessionId, 0);
+      this.rotating.delete(sessionId);
+      this.flush();
+    }).catch(() => {
+      this.rotating.delete(sessionId);
+    });
   }
 
   private formatEvents(events: BrainQueuedEvent[], mode: EffectiveBrainMode, projectId: string | null): { text: string; knowledgeHash?: string } {

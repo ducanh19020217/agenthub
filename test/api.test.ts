@@ -715,6 +715,7 @@ describe('AgentHub HTTP API Endpoints', () => {
 
     // 4. Set to failed and retry task -> queued
     ctx.taskRepo.updateStatus('myproj/task-abc', 'failed');
+    ctx.taskRepo.update('myproj/task-abc', { reviewerChangesRequested: 2 });
     const retryRes = await server.inject({
       method: 'POST',
       url: '/api/tasks/myproj~task-abc/retry',
@@ -722,6 +723,10 @@ describe('AgentHub HTTP API Endpoints', () => {
       payload: { note: 'Retrying task abc' },
     });
     expect(retryRes.statusCode).toBe(200);
+    expect(JSON.parse(retryRes.body)).toEqual(expect.objectContaining({
+      status: expect.any(String),
+      reviewerChangesRequested: 2,
+    }));
     expect(['queued', 'running']).toContain(JSON.parse(retryRes.body).status);
 
     // Cancel the retried task to avoid background process race with step 5

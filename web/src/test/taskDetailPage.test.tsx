@@ -185,11 +185,14 @@ describe('TaskDetailPage', () => {
     vi.spyOn(client, 'getTask').mockResolvedValue({
       ...baseTask,
       status: 'review',
+      reviewRound: 2,
+      reviewMaxRounds: 3,
     });
 
     renderPage();
 
     expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    expect(screen.getByTestId('task-review-round')).toHaveTextContent('Vòng duyệt 2/3');
 
     const approveBtn = screen.getByRole('button', { name: /^Duyệt$/i });
     await act(async () => {
@@ -627,7 +630,7 @@ describe('TaskDetailPage', () => {
     });
   });
 
-  it('16. Nút Tiếp tục khi task paused, nhãn Tạm dừng do quá tải, gọi resumeTask', async () => {
+  it('16. Nút Tiếp tục khi task paused, nhãn Tạm dừng (quá tải), gọi resumeTask', async () => {
     const resumeSpy = vi.spyOn(client, 'resumeTask').mockResolvedValue({ ok: true, paused: false });
 
     vi.spyOn(client, 'getTask').mockResolvedValue({
@@ -646,7 +649,7 @@ describe('TaskDetailPage', () => {
     });
 
     renderPage();
-    expect(await screen.findByText('Tạm dừng do quá tải')).toBeInTheDocument();
+    expect(await screen.findByText('Tạm dừng (quá tải)')).toBeInTheDocument();
     const resumeBtn = screen.getByRole('button', { name: /^Tiếp tục$/i });
     fireEvent.click(resumeBtn);
     await vi.waitFor(() => {

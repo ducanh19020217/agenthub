@@ -146,12 +146,48 @@ export function handleRunOutput(
   }
 }
 
-export function connectSSE(queryClient: QueryClient): () => void {
+export interface SSEConnectionOptions {
+  deduplicateEvents?: boolean;
+  coalesceInvalidations?: boolean;
+  onInvalidation?: (queryKey: readonly unknown[], eventId: number) => void;
+}
+
+export function connectSSE(queryClient: QueryClient, options: SSEConnectionOptions = {}): () => void {
+  const deduplicateEvents = options.deduplicateEvents !== false;
+  const coalesceInvalidations = options.coalesceInvalidations !== false;
   let eventSource: EventSource | null = null;
   let isClosed = false;
   let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempts = 0;
   let lastEventId: string | null = null;
+  const seenEventIds = new Set<string>();
+  const pendingInvalidations = new Map<string, { queryKey: readonly unknown[]; eventId: number }>();
+  let invalidationFlushScheduled = false;
+  let currentEventId: number | undefined;
+
+  function invalidateQueries(queryKey: readonly unknown[]): void {
+    const eventId = currentEventId;
+    if (eventId === undefined) {
+      queryClient.invalidateQueries({ queryKey });
+      return;
+    }
+    if (!coalesceInvalidations) {
+      options.onInvalidation?.(queryKey, eventId);
+      queryClient.invalidateQueries({ queryKey });
+      return;
+    }
+    pendingInvalidations.set(JSON.stringify(queryKey), { queryKey, eventId });
+    if (invalidationFlushScheduled) return;
+    invalidationFlushScheduled = true;
+    queueMicrotask(() => {
+      invalidationFlushScheduled = false;
+      for (const { queryKey: key, eventId: cause } of pendingInvalidations.values()) {
+        options.onInvalidation?.(key, cause);
+        queryClient.invalidateQueries({ queryKey: key });
+      }
+      pendingInvalidations.clear();
+    });
+  }
 
   function initSSE() {
     if (isClosed) return;
@@ -199,6 +235,20 @@ export function connectSSE(queryClient: QueryClient): () => void {
         const rawId = rawLastEventId ? Number(rawLastEventId) : parsed.id;
         const eventId = typeof rawId === 'number' && !isNaN(rawId) ? rawId : Date.now();
 
+        // The server replays events after Last-Event-ID reconnects. Ignore a
+        // replay before notifying the UI or invalidating query caches; the
+        // Dashboard already de-duplicates its rendered list, but cache
+        // invalidation here would still start duplicate requests.
+        if (deduplicateEvents && (rawLastEventId || parsed.id)) {
+          const eventKey = String(eventId);
+          if (seenEventIds.has(eventKey)) return;
+          seenEventIds.add(eventKey);
+          if (seenEventIds.size > 256) {
+            const oldest = seenEventIds.values().next().value;
+            if (oldest !== undefined) seenEventIds.delete(oldest);
+          }
+        }
+
         const eventItem: EventItem = {
           id: eventId,
           ts: parsed.ts || new Date().toISOString(),
@@ -206,6 +256,7 @@ export function connectSSE(queryClient: QueryClient): () => void {
           taskId: parsed.taskId || null,
           payload: parsed.payload !== undefined ? parsed.payload : parsed,
         };
+        currentEventId = eventId;
 
         const appConfig = queryClient.getQueryData<{ brain?: { mode?: BrowserNotificationOptions['brainMode'] }; notifications?: { desktop?: boolean; desktopLevel?: 'all' | 'important' | 'critical' | 'off'; quietHours?: BrowserNotificationOptions['quietHours'] } }>(['config']);
         const notificationConfig = appConfig?.notifications;
@@ -237,55 +288,57 @@ export function connectSSE(queryClient: QueryClient): () => void {
         if (type.startsWith('task.')) {
           const patched = patchTaskCaches(queryClient, taskId || '', eventItem.payload);
           if (!patched) {
-            queryClient.invalidateQueries({ queryKey: ['tasks'] });
-            queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
+            invalidateQueries(['tasks']);
+            invalidateQueries(['tasks-kanban']);
           } else if (['task.queued', 'task.running', 'task.review_ready', 'task.done', 'task.blocked', 'task.failed', 'task.cancelled', 'task.waiting_quota'].includes(type)) {
             // A status transition can move a card between columns; refresh only then.
-            queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
+            invalidateQueries(['tasks-kanban']);
           }
-          queryClient.invalidateQueries({ queryKey: ['status'] });
+          invalidateQueries(['status']);
           if (taskId) {
-            queryClient.invalidateQueries({ queryKey: ['task', taskId] });
-            queryClient.invalidateQueries({ queryKey: ['task', taskId.replace('/', '~')] });
+            invalidateQueries(['task', taskId]);
+            invalidateQueries(['task', taskId.replace('/', '~')]);
             if (type === 'task.running') {
-              queryClient.invalidateQueries({ queryKey: ['taskLog', taskId] });
-              queryClient.invalidateQueries({ queryKey: ['taskLog', taskId.replace('/', '~')] });
+              invalidateQueries(['taskLog', taskId]);
+              invalidateQueries(['taskLog', taskId.replace('/', '~')]);
             }
           }
         } else if (type.startsWith('run.')) {
-          queryClient.invalidateQueries({ queryKey: ['tasks'] });
-          queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
-          queryClient.invalidateQueries({ queryKey: ['status'] });
+          invalidateQueries(['tasks']);
+          invalidateQueries(['tasks-kanban']);
+          invalidateQueries(['status']);
           if (taskId) {
-            queryClient.invalidateQueries({ queryKey: ['task', taskId] });
-            queryClient.invalidateQueries({ queryKey: ['task', taskId.replace('/', '~')] });
+            invalidateQueries(['task', taskId]);
+            invalidateQueries(['task', taskId.replace('/', '~')]);
             if (type !== 'run.output') {
-              queryClient.invalidateQueries({ queryKey: ['taskLog', taskId] });
-              queryClient.invalidateQueries({ queryKey: ['taskLog', taskId.replace('/', '~')] });
+              invalidateQueries(['taskLog', taskId]);
+              invalidateQueries(['taskLog', taskId.replace('/', '~')]);
             }
           }
         } else if (type.startsWith('profile.')) {
-          queryClient.invalidateQueries({ queryKey: ['profiles'] });
-          queryClient.invalidateQueries({ queryKey: ['status'] });
+          invalidateQueries(['profiles']);
+          invalidateQueries(['status']);
         } else if (type.startsWith('quota.')) {
-          queryClient.invalidateQueries({ queryKey: ['profiles'] });
-          queryClient.invalidateQueries({ queryKey: ['status'] });
+          invalidateQueries(['profiles']);
+          invalidateQueries(['status']);
         } else if (type.startsWith('config.')) {
-          queryClient.invalidateQueries({ queryKey: ['config'] });
+          invalidateQueries(['config']);
         } else if (type === 'brain.status' || type === 'brain.updated') {
-          queryClient.invalidateQueries({ queryKey: ['status'] });
-          queryClient.invalidateQueries({ queryKey: ['brain'] });
+          invalidateQueries(['status']);
+          invalidateQueries(['brain']);
         } else if (type.startsWith('chat.')) {
           const sessionId = typeof eventItem.payload === 'object' && eventItem.payload
             ? String((eventItem.payload as { sessionId?: string }).sessionId || '')
             : '';
           if (!patchChatSessionCaches(queryClient, sessionId, eventItem.payload)) {
-            queryClient.invalidateQueries({ queryKey: ['chatSessions'] });
+            invalidateQueries(['chatSessions']);
           }
         } else if (type.startsWith('batch.')) {
-          queryClient.invalidateQueries({ queryKey: ['batches'] });
+          invalidateQueries(['batches']);
         }
+        currentEventId = undefined;
       } catch (err) {
+        currentEventId = undefined;
         console.error('Failed to parse SSE event:', err);
       }
     };

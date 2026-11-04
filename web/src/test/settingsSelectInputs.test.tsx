@@ -14,6 +14,8 @@ import {
   validateReviewChainReviewerSyntax,
   validateReviewerModelSyntax,
   validateBranchSyntax,
+  getModelProvider,
+  getModelsForProvider,
 } from '../utils/models';
 import * as client from '../api/client';
 import * as sse from '../api/sse';
@@ -52,6 +54,32 @@ function TestSortableWrapper({ initialModels = ['sonnet', 'haiku'] }: { initialM
 }
 
 describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)', () => {
+  it('classifies and filters models without mixing providers', () => {
+    expect(getModelProvider('gemini-3.8-flash-high')).toBe('gemini');
+    expect(getModelProvider('claude-opus-4-6-thinking')).toBe('claude');
+    expect(getModelProvider('codex:gpt-5.6-luna')).toBe('codex');
+    expect(getModelProvider('gpt-oss-120b-medium')).toBeNull();
+    expect(getModelProvider('codex:gpt-oss-120b-medium')).toBeNull();
+    expect(getModelsForProvider([
+      'gemini-3.8-flash-high',
+      'claude-opus-4-6-thinking',
+      'codex:gpt-5.6-luna',
+      'sonnet',
+    ], 'gemini')).toEqual(['gemini-3.8-flash-high']);
+    expect(getModelsForProvider([
+      'gemini-3.8-flash-high',
+      'claude-opus-4-6-thinking',
+      'codex:gpt-5.6-luna',
+      'sonnet',
+    ], 'claude')).toEqual(['claude-opus-4-6-thinking', 'sonnet']);
+    expect(getModelsForProvider([
+      'gemini-3.8-flash-high',
+      'claude-opus-4-6-thinking',
+      'codex:gpt-5.6-luna',
+      'gpt-5.6-turbo',
+    ], 'codex')).toEqual(['codex:gpt-5.6-luna', 'gpt-5.6-turbo']);
+  });
+
   describe('1. SelectOrCustomInput Component', () => {
     it('renders preset options and allows selecting a standard model', () => {
       render(
@@ -913,7 +941,11 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
           },
         },
         review: {
-          chain: [{ reviewer: 'codex:custom-model-dynamic', mode: 'gate' }],
+          chain: [
+            { reviewer: 'codex:custom-model-dynamic', mode: 'gate' },
+            { reviewer: 'gemini-3.8-flash-high', mode: 'gate' },
+            { reviewer: 'codex:gpt-oss-120b-medium', mode: 'gate' },
+          ],
           maxRounds: 2,
         },
       };
@@ -951,6 +983,8 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       // Ensure hardcoded models like gpt-5.6-turbo/luna are NOT included when not in API or config
       expect(within(stepSelect).queryByRole('option', { name: 'codex:gpt-5.6-turbo' })).not.toBeInTheDocument();
       expect(within(stepSelect).queryByRole('option', { name: 'codex:gpt-5.6-luna' })).not.toBeInTheDocument();
+      expect(within(stepSelect).queryByRole('option', { name: 'gemini-3.8-flash-high' })).not.toBeInTheDocument();
+      expect(within(stepSelect).queryByRole('option', { name: 'codex:gpt-oss-120b-medium' })).not.toBeInTheDocument();
 
       // Reviewer order select should also have codex:custom-model-dynamic as option
       const orderBlock = screen.getByTestId('project-reviewer-order');
@@ -959,6 +993,16 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(reviewerSelect.value).toBe('codex:custom-model-dynamic');
       expect(within(reviewerSelect).queryByRole('option', { name: 'codex:gpt-5.6-turbo' })).not.toBeInTheDocument();
       expect(within(reviewerSelect).queryByRole('option', { name: 'gpt-5.6-turbo' })).not.toBeInTheDocument();
+
+      // Models from another provider must not leak into the Codex selector.
+      expect(within(reviewerSelect).queryByRole('option', { name: 'gemini-3.8-flash-high' })).not.toBeInTheDocument();
+
+      // Switching provider must also replace the list with Claude-only models.
+      const engineSelect = within(orderBlock).getByRole('combobox', { name: /^Thứ tự duyệt 1$/i }) as HTMLSelectElement;
+      fireEvent.change(engineSelect, { target: { value: 'claude' } });
+      expect(within(reviewerSelect).getByRole('option', { name: 'sonnet' })).toBeInTheDocument();
+      expect(within(reviewerSelect).queryByRole('option', { name: 'codex:custom-model-dynamic' })).not.toBeInTheDocument();
+      expect(within(reviewerSelect).queryByRole('option', { name: 'gemini-3.8-flash-high' })).not.toBeInTheDocument();
     });
 
     it('sends review order: null and fallback: null when user resets overrides to system default', async () => {

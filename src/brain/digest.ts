@@ -2,6 +2,7 @@ import { TaskRepo, ProjectRepo, ProfileRepo, QuotaMarkRepo, EventRepo, CiRepo, P
 import type { QuietHoursConfig } from '../config.js';
 import type { ChatService } from '../chat/service.js';
 import { projectSettings } from '../projects/settings.js';
+import { QuotaService } from '../quota/index.js';
 
 export interface PendingDecision {
   id: string;
@@ -316,6 +317,7 @@ export interface GenerateDigestOptions {
   projectRepo?: ProjectRepo;
   profileRepo?: ProfileRepo;
   quotaMarkRepo?: QuotaMarkRepo;
+  quotaService?: QuotaService;
   eventRepo?: EventRepo;
   decisionTracker?: DecisionTracker;
   ciRepo?: CiRepo;
@@ -431,6 +433,9 @@ export function generateDigest(opts: GenerateDigestOptions): DigestData {
 
   // 3. Quota summary
   const profiles = opts.profileRepo ? opts.profileRepo.getAll(true) : [];
+  const quotaService = opts.quotaService || (opts.profileRepo && opts.quotaMarkRepo ? new QuotaService(opts.quotaMarkRepo, opts.profileRepo) : undefined);
+  const runnable = quotaService?.runnableCapacity(undefined, Math.floor(nowMs / 1000)) || [];
+  const runnableProfiles = new Set(runnable.map((entry) => entry.profileName));
   const activeMarks = opts.quotaMarkRepo
     ? opts.quotaMarkRepo.getActive(Math.floor(nowMs / 1000)).filter((m) => m.until > Math.floor(nowMs / 1000))
     : [];
@@ -450,7 +455,7 @@ export function generateDigest(opts: GenerateDigestOptions): DigestData {
 
   for (const p of profiles) {
     const ex = exhaustedMap.get(p.name);
-    if (ex) {
+    if (ex && !runnableProfiles.has(p.name)) {
       exhaustedList.push({ profileName: p.name, ...ex });
     } else {
       availableList.push(p.name);
@@ -460,12 +465,12 @@ export function generateDigest(opts: GenerateDigestOptions): DigestData {
   let quotaSummary = '';
   if (profiles.length === 0) {
     quotaSummary = 'Không có tài khoản nào được cấu hình';
-  } else if (exhaustedList.length === 0) {
+  } else if (runnable.length > 0 && exhaustedList.length === 0) {
     quotaSummary = `Tất cả tài khoản đều sẵn sàng (${profiles.length}/${profiles.length})`;
-  } else if (availableList.length === 0) {
-    quotaSummary = `Mọi tài khoản đều hết quota (0/${profiles.length})`;
+  } else if (runnable.length === 0) {
+    quotaSummary = `Mọi tài khoản đều hết quota (0/${profiles.length}). Hệ thống tạm dừng thực thi task.`;
   } else {
-    quotaSummary = `${availableList.length}/${profiles.length} tài khoản sẵn sàng`;
+    quotaSummary = `${runnable.length} tổ hợp profile/model còn chạy được`;
   }
 
   // Helper to extract projectId

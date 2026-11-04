@@ -21,6 +21,29 @@ export const DEFAULT_CLAUDE_MODELS = ['sonnet', 'opus', 'haiku'];
 
 export const DEFAULT_CODEX_MODELS = ['gpt-5.6-luna', 'gpt-5.6-turbo'];
 
+export type ModelProvider = 'gemini' | 'claude' | 'codex';
+
+/**
+ * Model ids returned by /api/models use the same prefixes as the backend
+ * validator. Keep this classification in one place so a provider selector
+ * never presents models from another provider.
+ */
+export function getModelProvider(model: string): ModelProvider | null {
+  const trimmed = model.trim();
+  if (trimmed.startsWith('codex:')) {
+    const raw = trimmed.slice('codex:'.length);
+    return raw && !raw.startsWith('gpt-oss-') ? 'codex' : null;
+  }
+  if (trimmed.startsWith('gpt-') && !trimmed.startsWith('gpt-oss-')) return 'codex';
+  if (trimmed.startsWith('gemini-')) return 'gemini';
+  if (trimmed.startsWith('claude-') || DEFAULT_CLAUDE_MODELS.includes(trimmed)) return 'claude';
+  return null;
+}
+
+export function getModelsForProvider(models: string[], provider: ModelProvider): string[] {
+  return Array.from(new Set(models.filter((model) => getModelProvider(model) === provider)));
+}
+
 export const DEFAULT_COMMON_BRANCHES = ['integration', 'main', 'master', 'develop', 'staging'];
 
 export function validateModelSyntax(

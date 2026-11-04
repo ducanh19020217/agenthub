@@ -73,7 +73,7 @@ function ProjectSettingsForm({
   const codexProfileOptions = profiles.filter((p) => p.engine === 'codex').map((p) => p.name);
 
   const update = (section: keyof NonNullable<Project['settings']>, patch: object) =>
-    onChange({ ...value, [section]: { ...value[section], ...patch } });
+    onChange({ ...value, [section]: { ...((value[section] as object) || {}), ...patch } });
   const addReference = () =>
     onChange({
       ...value,
@@ -201,6 +201,7 @@ function ProjectSettingsForm({
           >
             <option value="auto">{t('projects.worktreeAuto')}</option>
             <option value="skip">{t('projects.worktreeSkip')}</option>
+            <option value="worker">{t('projects.worktreeWorker')}</option>
           </select>
         </label>
 

@@ -55,6 +55,7 @@ import {
   X,
   Edit3,
   Bell,
+  ExternalLink,
 } from 'lucide-react';
 
 const VALID_MODELS = [
@@ -475,6 +476,11 @@ export const TaskDetailPage: React.FC = () => {
           {task.reviewerEscalationReason ? ` (${task.reviewerEscalationReason})` : ''}.
         </div>
       ) : null}
+      {(task.status === 'review' || task.reviewMaxRounds) ? (
+        <div data-testid="task-review-round" className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] px-4 py-3 text-sm text-[var(--t-text)]">
+          {t('extra.reviewRound', { current: task.reviewRound ?? 1, max: task.reviewMaxRounds ?? 2 })}
+        </div>
+      ) : null}
       {task.reviewChain && task.reviewChain.length > 0 ? (
         <div className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] px-4 py-3 text-xs">
           <div className="font-semibold mb-2">{t('taskDetail.reviewChain')}</div>
@@ -533,16 +539,16 @@ export const TaskDetailPage: React.FC = () => {
                 <span
                   data-testid="task-paused-badge"
                   className={`inline-flex items-center rounded px-2 py-0.5 text-xs font-semibold border ${
-                    (task.pauseReason === 'load' || task.currentRun?.pauseReason === 'load')
+                    (task.pauseReason === 'load' || task.pauseReason === 'brain_load' || task.currentRun?.pauseReason === 'load' || task.currentRun?.pauseReason === 'brain_load')
                       ? 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)] border-[color-mix(in_srgb,var(--t-warn)_30%,transparent)]'
                       : 'bg-[var(--t-surface-2)] text-[var(--t-text-2)] border-[var(--t-border)]'
                   }`}
                 >
-                  {(task.pauseReason === 'load' || task.currentRun?.pauseReason === 'load')
+                  {(task.pauseReason === 'load' || task.pauseReason === 'brain_load' || task.currentRun?.pauseReason === 'load' || task.currentRun?.pauseReason === 'brain_load')
                     ? t('status.pausedOverload')
                     : (task.pauseReason === 'focus' || task.currentRun?.pauseReason === 'focus')
                       ? t('status.pausedFocus')
-                    : t('status.paused')}
+                    : t('status.pausedManual')}
                 </span>
               )}
               {task.status === 'running' && !task.paused && !task.currentRun?.paused && (
@@ -568,6 +574,7 @@ export const TaskDetailPage: React.FC = () => {
               </span>
             </div>
             <h1 className="text-xl md:text-2xl font-bold tracking-tight">{task.title}</h1>
+            {task.externalRef && <a href={task.externalRef} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-xs text-[var(--t-accent)] hover:underline" data-testid="openproject-ticket-link">{task.externalRef}<ExternalLink className="h-3 w-3" /></a>}
           </div>
         </div>
 

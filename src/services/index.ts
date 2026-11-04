@@ -34,6 +34,10 @@ import {
   CiRepo,
 } from '../db/index.js';
 import type { CiWatchService } from '../ci.js';
+import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
+import type { DailyReportService } from '../integrations/openproject/daily-report.js';
+import type { GiteaSyncService } from '../integrations/gitea/service.js';
+import { isGiteaTokenConfigured, saveGiteaToken } from '../integrations/gitea/secrets.js';
 import { BulletinService } from '../bulletin.js';
 import { parseCodexTokenItem, writeCodexAuthFile } from '../profiles/codexToken.js';
 import { defaultWakeupRunner, planWakeup, wakeupCommands, wakeupCwd, wakeupSucceeded, type WakeupRunner } from '../quota/wakeup.js';
@@ -69,7 +73,12 @@ import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, Re
 import { SetupManager } from '../tools/setup.js';
 import { createNewGitProject, inspectProject, readClaudeSessionExcerpt } from '../projects/inspect.js';
 import type { DeployService } from '../deploy.js';
+import type { RemoteDeployService, RemoteDeployStatus } from '../remote-deploy.js';
 import type { PerfCollector } from '../perf.js';
+import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../presets.js';
+import type { SetupTools } from '../setup-tools.js';
+import { computeEffectiveConfig } from '../effective-config.js';
+import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
 
 const execFileAsync = promisify(execFile);
 const CODEX_EMAIL_RECHECK_MS = 10 * 60 * 1000;
@@ -291,13 +300,13 @@ export const DepartmentInputSchema = z.object({
   maxParallel: z.number().int().nonnegative().default(0),
   claudeDailyTokenBudget: z.number().int().nonnegative().default(0),
   telegramTopicId: z.number().int().positive().nullable().default(null),
-  brainEngine: z.enum(['claude', 'codex']).default('claude'),
-  brainModel: z.string().min(1).default('sonnet'),
+  brainEngine: z.enum(['inherit', 'claude', 'codex']).nullable().transform((v) => v ?? 'inherit').default('inherit'),
+  brainModel: z.string().min(1).nullable().transform((v) => v ?? 'inherit').default('inherit'),
   brainCodexProfile: z.string().min(1).nullable().default(null),
-  brainMode: z.enum(['inherit', 'off', 'suggest', 'auto']).default('inherit'),
-  brainPermissions: z.enum(['inherit', 'standard', 'trusted', 'full']).default('full'),
-  brainDailyTokenBudget: z.number().int().nonnegative().default(0),
-  brainMaxTurnsPerHour: z.number().int().positive().default(20),
+  brainMode: z.enum(['inherit', 'off', 'suggest', 'auto']).nullable().transform((v) => v ?? 'inherit').default('inherit'),
+  brainPermissions: z.enum(['inherit', 'standard', 'trusted', 'full']).nullable().transform((v) => v ?? 'inherit').default('inherit'),
+  brainDailyTokenBudget: z.number().int().nonnegative().nullable().transform((v) => v ?? 0).default(0),
+  brainMaxTurnsPerHour: z.number().int().nonnegative().nullable().transform((v) => v ?? 0).default(0),
 });
 
 export const CreateProjectSchema = z.object({
@@ -399,6 +408,7 @@ export const ReviewTaskSchema = z.object({
   verdict: z.enum(['approved', 'changes_requested']),
   feedback: z.string().optional(),
   by: z.string().optional(),
+  source: z.enum(['content', 'operational']).optional().default('content'),
   merge: z.boolean().optional().default(false),
 }).refine(
   (d) => d.verdict !== 'changes_requested' || (typeof d.feedback === 'string' && d.feedback.trim().length > 0),
@@ -504,14 +514,10 @@ export const UpdateConfigSchema = z.object({
     .optional(),
   reviewer: z.object({
     enabled: z.boolean().optional(),
-    model: reviewerModelValidator.or(z.literal('')).optional(),
     timeoutSec: z.number().int().positive().optional(),
     failoverSec: z.number().int().positive().optional(),
     maxChangesRequested: z.number().int().positive().optional(),
-    claudeFallback: z.boolean().optional(),
     claudeProfiles: z.array(z.string().min(1)).max(20).optional(),
-    claudeModel: z.enum(['opus', 'sonnet', 'haiku']).optional(),
-    claudeFallbackAfterMin: z.number().int().min(1).max(1440).optional(),
     order: ReviewerOrderSchema.optional(),
     fallback: ReviewerFallbackSchema.partial().optional(),
     arbiter: ReviewerArbiterSchema.optional(),
@@ -766,6 +772,9 @@ export function formatEventSummary(
         ? `${taskLabel} tạm dừng do quá tải`
         : `${taskLabel} đã tạm dừng`;
 
+    case 'task.pause_reminder':
+      return `${taskLabel} đã tạm dừng hơn ${(p && p.pausedMinutes) || 30} phút`;
+
     case 'task.resumed':
       return `${taskLabel} tiếp tục chạy`;
 
@@ -926,8 +935,12 @@ export interface TokenImportResult {
 
 export class AppService {
   public deployService?: DeployService;
+  public remoteDeployService?: RemoteDeployService;
   public ciRepo?: CiRepo;
   public ciService?: CiWatchService;
+  public intakeService?: OpenProjectIntakeService;
+  public dailyReportService?: DailyReportService;
+  public giteaSyncService?: GiteaSyncService;
   private perfCollector?: PerfCollector;
   private profileChecks = new Set<string>();
   private reviewingTasks = new Set<string>();
@@ -963,7 +976,20 @@ export class AppService {
     public brainRunner?: BrainRunner,
     public directiveRepo?: BrainDirectiveRepo,
     public departmentRepo?: DepartmentRepo,
+    public setupTools?: SetupTools,
   ) {}
+
+  setSetupTools(tools: SetupTools): void { this.setupTools = tools; }
+  getSetupTools(): SetupTools { if (!this.setupTools) throw new HttpError(503, 'unavailable', 'Setup tools chưa sẵn sàng'); return this.setupTools; }
+
+  private validateOpenProjectBinding(projectId: string, settings: ReturnType<typeof projectSettings>): void {
+    if (!settings.openproject.enabled || !settings.openproject.sourceId || settings.openproject.role !== 'primary') return;
+    if (!this.config.integrations.openproject.sources.some((source) => source.id === settings.openproject.sourceId)) {
+      throw new HttpError(400, 'bad_request', `Nguồn OpenProject "${settings.openproject.sourceId}" không tồn tại`);
+    }
+    const duplicate = this.projectRepo.getAll().find((project) => project.id !== projectId && (() => { const value = projectSettings(project).openproject; return value.enabled && value.role === 'primary' && value.sourceId === settings.openproject.sourceId; })());
+    if (duplicate) throw new HttpError(400, 'bad_request', `Nguồn OpenProject "${settings.openproject.sourceId}" đã có project primary đang bật: ${duplicate.id}`);
+  }
 
   // --- Departments ---
   listDepartments() {
@@ -1014,6 +1040,23 @@ export class AppService {
     return this.getDepartment(id);
   }
 
+  updateDepartmentProjects(id: string, raw: unknown) {
+    if (!this.departmentRepo?.get(id)) throw new HttpError(404, 'not_found', `Department "${id}" không tồn tại`);
+    const schema = z.object({
+      projectIds: z.array(z.string().min(1)).optional(),
+      projectId: z.string().min(1).optional(),
+    }).refine((data) => data.projectIds !== undefined || data.projectId !== undefined, {
+      message: 'projectIds hoặc projectId là bắt buộc',
+    });
+    const parsed = schema.parse(raw);
+    const projectIds = parsed.projectIds ?? (parsed.projectId ? [parsed.projectId] : []);
+    for (const projectId of projectIds) {
+      if (!this.projectRepo.get(projectId)) throw new HttpError(404, 'not_found', `Project "${projectId}" không tồn tại`);
+      this.updateProject(projectId, { departmentId: id });
+    }
+    return this.getDepartment(id);
+  }
+
   setPerfCollector(collector: PerfCollector): void { this.perfCollector = collector; }
 
   shutdownForUser(): { queued: number; reviewers: number; childPids: number[] } {
@@ -1021,6 +1064,7 @@ export class AppService {
     const chatPids = this.chatService?.getRunningPids?.() || [];
     this.chatService?.stop();
     this.deployService?.stop();
+    this.remoteDeployService?.stop();
     this.ciService?.stop();
     void this.telegramBotService?.stop();
     return {
@@ -1106,6 +1150,20 @@ export class AppService {
     if (!session) throw new HttpError(404, 'not_found', `Claude session "${id}" không tồn tại`);
     return this.claudeSessionRepo.setAutoResume(id, enabled);
   }
+  dismissClaudeSessionLimit(id: string) {
+    if (!this.claudeSessionRepo) throw new HttpError(500, 'internal_error', 'Claude session service chưa sẵn sàng');
+    const session = this.claudeSessionRepo.get(id);
+    if (!session) throw new HttpError(404, 'not_found', `Claude session "${id}" không tồn tại`);
+    this.claudeSessionRepo.setLimit(id, null, null);
+    return { ok: true, sessionId: id };
+  }
+  cleanResetClaudeSessions() {
+    const db = this.scheduler.getDatabase();
+    if (!db) throw new HttpError(500, 'internal_error', 'Database chưa sẵn sàng');
+    const nowSec = Math.floor(Date.now() / 1000);
+    const result = db.prepare('UPDATE claude_sessions SET limitResetAt = NULL, limitHitAt = NULL WHERE limitResetAt IS NOT NULL AND limitResetAt <= ?').run(nowSec);
+    return { ok: true, cleared: result.changes };
+  }
   async rescanClaudeSessions() { await this.claudeScanner?.scan(); return { ok: true }; }
   getClaudeQuota() {
     const quota = this.claudeSessionRepo?.quota() || { status: null, resetsAt: null, rateLimitType: null, observedAt: null };
@@ -1173,13 +1231,69 @@ export class AppService {
     if (!db) return [];
 
     const limitedRows = db.prepare(`
-      SELECT sessionId, cwd, title, limitResetAt, autoResumeEnabled
+      SELECT sessionId, cwd, title, limitResetAt, autoResumeEnabled, isHubChat
       FROM claude_sessions
       WHERE limitResetAt IS NOT NULL
       ORDER BY limitResetAt ASC
-    `).all() as Array<{ sessionId: string; cwd: string; title: string | null; limitResetAt: number; autoResumeEnabled: number }>;
+    `).all() as Array<{ sessionId: string; cwd: string; title: string | null; limitResetAt: number; autoResumeEnabled: number; isHubChat: number }>;
 
     if (limitedRows.length === 0) return [];
+
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    const chatSessionIds = new Set<string>();
+    const chatRows = db.prepare('SELECT claudeSessionId FROM chat_sessions WHERE claudeSessionId IS NOT NULL').all() as Array<{ claudeSessionId: string }>;
+    for (const r of chatRows) chatSessionIds.add(r.claudeSessionId);
+
+    const taskUsageSessionIds = new Set<string>();
+    const taskUsageRows = db.prepare('SELECT DISTINCT sessionId FROM claude_task_usage').all() as Array<{ sessionId: string }>;
+    for (const r of taskUsageRows) taskUsageSessionIds.add(r.sessionId);
+
+    const taskCreationSessionIds = new Set<string>();
+    const taskCreationRows = db.prepare('SELECT DISTINCT creationSessionId FROM tasks WHERE creationSessionId IS NOT NULL').all() as Array<{ creationSessionId: string }>;
+    for (const r of taskCreationRows) taskCreationSessionIds.add(r.creationSessionId);
+
+    const worktreeRoots: string[] = [];
+    if (this.config?.worktreesDir) worktreeRoots.push(path.resolve(this.config.worktreesDir));
+    const projects = this.projectRepo?.getAll ? this.projectRepo.getAll() : [];
+    for (const project of projects) {
+      for (const root of projectWorktreeRoots(project, this.config?.hubHome, this.config?.worktreesDir)) {
+        if (root) worktreeRoots.push(path.resolve(root));
+      }
+    }
+
+    const taskWorktrees = (db.prepare('SELECT DISTINCT worktreePath FROM tasks WHERE worktreePath IS NOT NULL').all() as Array<{ worktreePath: string }>)
+      .map((r) => path.resolve(r.worktreePath));
+
+    const isWithin = (child: string, root: string): boolean => {
+      const relative = path.relative(root, path.resolve(child));
+      return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+    };
+
+    const isHubWorktree = (cwd: string | null) => {
+      if (!cwd) return false;
+      const resolved = path.resolve(cwd);
+      if (taskWorktrees.some((wt) => resolved === wt || isWithin(resolved, wt))) return true;
+      if (worktreeRoots.some((root) => isWithin(resolved, root) && resolved !== root)) return true;
+      return false;
+    };
+
+    const filteredRows = limitedRows.filter((row) => {
+      // Exclude hub one-off sessions (reviewer, worker, brain, hub chat)
+      if (row.isHubChat === 1) return false;
+      if (chatSessionIds.has(row.sessionId)) return false;
+      if (taskUsageSessionIds.has(row.sessionId)) return false;
+      if (taskCreationSessionIds.has(row.sessionId)) return false;
+      if (isHubWorktree(row.cwd)) return false;
+      if (row.title && (row.title.startsWith('Bạn là reviewer') || row.title.startsWith('Bạn là bộ não'))) return false;
+
+      // Keep only if limitResetAt is in future OR autoResumeEnabled is 1 (and not yet auto-resumed)
+      const inFuture = row.limitResetAt > nowSec;
+      const waitingAutoResume = row.autoResumeEnabled === 1;
+      return inFuture || waitingAutoResume;
+    });
+
+    if (filteredRows.length === 0) return [];
 
     const scanRows = db.prepare('SELECT path FROM claude_scan_state').all() as Array<{ path: string }>;
     const sessionConfigDirs = new Map<string, string>();
@@ -1194,7 +1308,7 @@ export class AppService {
     const profileHome = profile.home ? path.resolve(profile.home) : null;
     const profileClaudeDir = profileHome ? path.join(profileHome, '.claude') : null;
 
-    const matched = limitedRows.filter((row) => {
+    const matched = filteredRows.filter((row) => {
       const configDir = sessionConfigDirs.get(row.sessionId);
       if (isSystemProfile) {
         return !configDir || configDir === defaultClaudeConfigDir;
@@ -1241,6 +1355,7 @@ export class AppService {
     const tasks = this.taskRepo.getAll();
     const profiles = this.profileRepo.getAll();
     const quotaMarks = this.quotaMarkRepo.getActive();
+    const quotaCapacity = new QuotaService(this.quotaMarkRepo, this.profileRepo).capacitySnapshot(undefined, Math.floor(Date.now() / 1000));
     const dupes = this.coreProfileService.getDuplicateEmails();
     const runningMap = this.scheduler.getRunning();
     const projects = this.projectRepo.getAll();
@@ -1351,12 +1466,15 @@ export class AppService {
       const marks = quotaMarks.filter((m) => m.profileName === p.name);
       const isBusy = Array.from(runningMap.values()).some((r) => r.profileName === p.name);
       const slots = this.lockService.getSlotsSync(p);
+      const coolingUntil = p.coolingUntil && p.coolingUntil > Math.floor(now / 1000) ? p.coolingUntil : null;
       return {
         ...apiProfile(p),
         quotaMarks: marks,
         slotsUsed: Math.max(slots.slotsUsed, isBusy ? 1 : 0),
         slotsTotal: slots.slotsTotal,
         busy: slots.busy || isBusy,
+        crashCount: p.consecutiveCrashes || 0,
+        coolingUntil,
         usage: this.usageService.getForProfile(p.name),
         ...(p.engine === 'claude' ? {
           claudeTokens: this.getClaudeTokenTotals(),
@@ -1399,6 +1517,7 @@ export class AppService {
       tasks: byStatus,
       tasksByProject,
       profiles: profilesStatus,
+      quotaCapacity,
       running: runningTasks,
       overlaps,
       claudeFailover: this.chatService?.getClaudeFailover(),
@@ -1761,6 +1880,60 @@ export class AppService {
     };
   }
 
+  getGiteaStatus(id: string) {
+    this.getProject(id);
+    return this.giteaSyncService?.getStatus(id) || {
+      tokenConfigured: isGiteaTokenConfigured(this.config.hubHome, id),
+    };
+  }
+
+  saveGiteaToken(id: string, token: string) {
+    this.getProject(id);
+    if (!token || typeof token !== 'string' || !token.trim()) {
+      throw new HttpError(400, 'bad_request', 'Token không được để trống');
+    }
+    if (this.giteaSyncService) {
+      return this.giteaSyncService.saveToken(id, token);
+    }
+    saveGiteaToken(this.config.hubHome, id, token.trim());
+    return { configured: true };
+  }
+
+  async triggerGiteaSync(id: string) {
+    this.getProject(id);
+    if (!this.giteaSyncService) {
+      throw new HttpError(503, 'unavailable', 'Gitea sync service chưa sẵn sàng');
+    }
+    return this.giteaSyncService.syncProject(id);
+  }
+
+  getRemoteDeployStatus(id: string): RemoteDeployStatus | null {
+    this.getProject(id);
+    return this.remoteDeployService?.getStatus(id) || null;
+  }
+
+  triggerRemoteDeploy(id: string, options?: { trigger?: 'manual' | 'after-gitea-sync'; commit?: string }): RemoteDeployStatus {
+    this.getProject(id);
+    if (!this.remoteDeployService) throw new HttpError(503, 'unavailable', 'Remote deploy service chưa sẵn sàng');
+    return this.remoteDeployService.trigger(id, options);
+  }
+
+  saveRemoteDeployEnv(id: string, raw: unknown): string[] {
+    this.getProject(id);
+    if (!this.remoteDeployService) throw new HttpError(503, 'unavailable', 'Remote deploy service chưa sẵn sàng');
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new HttpError(400, 'bad_request', 'Body phải là map env dạng key-value');
+    }
+    const envMap: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof v !== 'string') {
+        throw new HttpError(400, 'bad_request', `Giá trị của key "${k}" phải là chuỗi`);
+      }
+      envMap[k] = v;
+    }
+    return this.remoteDeployService.saveSecrets(id, envMap);
+  }
+
   createProject(raw: unknown): ProjectRow {
     const parseResult = CreateProjectSchema.safeParse(raw);
     if (!parseResult.success) {
@@ -1786,6 +1959,7 @@ export class AppService {
     }
 
     const effectiveSettings = parsed.settings ? mergeProjectSettings(DEFAULT_PROJECT_SETTINGS, parsed.settings) : DEFAULT_PROJECT_SETTINGS;
+    this.validateOpenProjectBinding(id, effectiveSettings);
     if (effectiveSettings.worktree.root) {
       const worktreeRoot = path.resolve(effectiveSettings.worktree.root);
       const projectStorageRoot = path.join(path.dirname(resolvedPath), '.agenthub-worktrees');
@@ -1884,7 +2058,7 @@ export class AppService {
     if (effectiveSettings.integration.enabled) {
       const projLike = { id, path: resolvedPath, defaultBranch: parsed.defaultBranch, settings: JSON.stringify(effectiveSettings) };
       ensureIntegrationWorktree(projLike, this.config.hubHome);
-      if (effectiveSettings.worktree.install !== 'skip') {
+      if (effectiveSettings.worktree.install === 'auto') {
         void ensureIntegrationNodeModules(projLike, this.config.hubHome, {
           cacheDir: this.config.cacheDir,
           cacheMaxEntries: this.config.cacheMaxEntries,
@@ -1916,6 +2090,7 @@ export class AppService {
     const mergedSettings = parsed.settings === undefined
       ? projectSettings(current)
       : mergeProjectSettings(projectSettings(current), parsed.settings);
+    this.validateOpenProjectBinding(id, mergedSettings);
 
     if (mergedSettings.worktree.root) {
       try { validateProjectWorktreeRoot(mergedSettings.worktree.root, current.path, this.config.hubHome); }
@@ -1949,7 +2124,7 @@ export class AppService {
     if (mergedSettings.integration.enabled) {
       const updatedProject = this.projectRepo.get(id)!;
       ensureIntegrationWorktree(updatedProject, this.config.hubHome);
-      if (mergedSettings.worktree.install !== 'skip') {
+      if (mergedSettings.worktree.install === 'auto') {
         void ensureIntegrationNodeModules(updatedProject, this.config.hubHome, {
           cacheDir: this.config.cacheDir,
           cacheMaxEntries: this.config.cacheMaxEntries,
@@ -3095,9 +3270,13 @@ export class AppService {
       const reviewer = reviewerRun
         ? (reviewerRun.engine.id === 'claude' ? 'claude' : 'codex')
         : (isFallback ? fallbackReviewer : (reviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex'));
+      const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
+      const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
       return {
         ...apiTask(task),
         reviewChain,
+        reviewRound,
+        reviewMaxRounds,
         reviewer,
         checks: this.scheduler.getCheckResults(task.id),
         paused: Boolean(run?.paused),
@@ -3149,6 +3328,9 @@ export class AppService {
 
     if (task.doneReport !== null && task.doneReport !== undefined) {
       doneContent = task.doneReport;
+    }
+    if (task.blockedReport !== null && task.blockedReport !== undefined) {
+      blockedContent = task.blockedReport;
     } else if (task.worktreePath && fs.existsSync(task.worktreePath)) {
       const donePath = path.join(task.worktreePath, '.agenthub', 'DONE');
       const blockedPath = path.join(task.worktreePath, '.agenthub', 'BLOCKED');
@@ -3233,6 +3415,8 @@ export class AppService {
       ? (reviewerRun.engine.id === 'claude' ? 'claude' : 'codex')
       : (isFallback ? fallbackReviewer : (reviews.at(-1)?.actor === 'claude-reviewer' ? 'claude' : (activeReviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex')));
 
+    const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
+    const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
     return {
       ...apiTask(task),
       reviewer,
@@ -3258,7 +3442,8 @@ export class AppService {
       mergeAvailable: configuredMerge,
       mergeUnavailableReason: configuredMerge ? null : 'Project chưa cấu hình merge tự động. Mở Cài đặt dự án → Integration để bật.',
       reviewStep: task.reviewStep ?? 0,
-      reviewMaxRounds: reviewSettings?.maxRounds || 2,
+      reviewRound,
+      reviewMaxRounds,
       doneContent,
       blockedContent,
       modelWarnings,
@@ -3864,7 +4049,7 @@ export class AppService {
     return this.taskRepo.get(taskId)!;
   }
 
-  pauseTask(idParam: string): { ok: boolean; paused: boolean } {
+  pauseTask(idParam: string, reason: 'manual' | 'load' | 'brain_load' = 'manual'): { ok: boolean; paused: boolean } {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) {
@@ -3874,7 +4059,7 @@ export class AppService {
     if (!rt) {
       throw new HttpError(400, 'bad_request', `Task "${taskId}" không ở trạng thái running`);
     }
-    this.scheduler.pauseTask(taskId, 'manual');
+    this.scheduler.pauseTask(taskId, reason);
     return { ok: true, paused: true };
   }
 
@@ -3952,16 +4137,17 @@ export class AppService {
       }
     }
 
-    const reviewId = crypto.randomUUID();
-    this.reviewRepo.insert({
-      id: reviewId,
-      taskId,
-      verdict: parsed.verdict,
-      feedback: parsed.feedback || null,
-      actor: parsed.by || 'claude',
-    });
+    if (!['codex-reviewer', 'claude-reviewer', 'claude-review'].includes(parsed.by || '')) {
+      this.reviewRepo.insert({
+        id: crypto.randomUUID(),
+        taskId,
+        verdict: parsed.verdict,
+        feedback: parsed.feedback || null,
+        actor: parsed.by || 'claude',
+      });
+    }
 
-    this.scheduler.reviewTask(taskId, parsed.verdict, parsed.feedback, parsed.by);
+    this.scheduler.reviewTask(taskId, parsed.verdict, parsed.feedback, parsed.by, parsed.source);
     if (parsed.verdict === 'approved' && this.knowledgeRepo) {
       const completed = this.taskRepo.get(taskId);
       const donePath = completed?.worktreePath ? path.join(completed.worktreePath, '.agenthub', 'DONE') : null;
@@ -3994,8 +4180,13 @@ export class AppService {
     if (!project) return;
     const settings = projectSettings(project);
     if (!(settings.review.autoMerge || settings.integration.autoMerge)) return;
+    const chain = project.review
+      ? (() => { try { return (JSON.parse(project.review) as { chain?: Array<{ reviewer?: string }> }).chain || []; } catch { return []; } })()
+      : project.reviewChain
+        ? (() => { try { return JSON.parse(project.reviewChain) as Array<{ reviewer?: string }>; } catch { return []; } })()
+        : [];
     const last = this.reviewRepo.getByTask(taskId).at(-1);
-    if (!last || (last.actor !== 'codex-reviewer' && last.actor !== 'claude-reviewer') || last.verdict !== 'approved') return;
+    if (!chain.length || !chain.at(-1)?.reviewer?.startsWith('codex:') || !last || last.actor !== 'codex-reviewer' || last.verdict !== 'approved') return;
     const checks = this.scheduler.getCheckResults(taskId);
     if (checks.length === 0 || checks.some((c) => !c.ok)) return;
     if (this.failedAutoMerges.has(taskId)) return;
@@ -4021,10 +4212,30 @@ export class AppService {
         (error instanceof Error && /conflict/i.test(error.message));
       const isEnvironment = (error instanceof HttpError && (error.error === 'environment_error' || error.statusCode === 503)) ||
         (error instanceof MergeError && error.environment);
+      const conflictCount = isConflict
+        ? this.eventRepo.getByTask(taskId).filter((event) => event.type === 'merge.conflict').length + 1
+        : undefined;
+      if (isConflict && conflictCount !== undefined && conflictCount <= 3) {
+        const current = this.taskRepo.get(taskId);
+        const files = error instanceof Error ? error.message : String(error);
+        const note = `\n\n## Tự xử lý xung đột merge lần ${conflictCount}\n\nCác file/chi tiết xung đột: ${files}\nCác nhánh đã merge trước đó có thể cũng sửa các file này. Hãy chạy \`git merge <base>\`, giữ thay đổi của cả hai bên rồi chạy đầy đủ checks trước khi commit.`;
+        this.taskRepo.update(taskId, {
+          status: 'queued',
+          resume: 1,
+          body: `${current?.body || ''}${note}`,
+          notBefore: null,
+        });
+        this.scheduler.getEventBus().emit('task.queued', taskId, {
+          reason: 'merge_conflict_auto_retry',
+          conflictCount,
+          feedback: note.trim(),
+        });
+      }
       this.scheduler.getEventBus().emit(isConflict ? 'merge.conflict' : 'merge.failed', taskId, {
         actor: 'auto-merge',
         message: error instanceof Error ? error.message : String(error),
         environment: isEnvironment || undefined,
+        ...(conflictCount === undefined ? {} : { conflictCount }),
       });
     }
   }
@@ -4060,6 +4271,7 @@ export class AppService {
       await this.reviewTask(toRouteId(taskId), {
         verdict: 'changes_requested',
         by: 'auto-escalation',
+        source: 'operational',
         feedback: `${feedback}\n\n(Reviewer đã yêu cầu sửa quá số vòng cho phép; giao lại một lần với ${ESCALATION_MODEL}.)`,
       });
     } catch (error) {
@@ -4160,10 +4372,14 @@ export class AppService {
       transientRetries: 0,
       notBefore: null,
       body: newBody,
-      reviewerChangesRequested: 0,
       reviewerEscalated: 0,
       reviewerEscalatedAt: null,
       reviewerEscalationReason: null,
+      runCount: 0,
+      consecutiveCrashes: 0,
+    });
+    this.runRepo.getByTask(taskId).forEach((run) => {
+      if (run.profileName) this.profileRepo.resetCrashes(run.profileName);
     });
 
     // Retry reuses the existing worktree. Old worker markers must not be
@@ -4589,6 +4805,9 @@ export class AppService {
       brain: {
         engine: this.config.brain.engine || 'claude',
         mode: this.config.brain.mode,
+        permissions: this.config.brain.permissions,
+        maxTurnsPerHour: this.config.brain.maxTurnsPerHour,
+        dailyTokenBudget: this.config.brain.dailyTokenBudget,
         maxConcurrent: this.config.brain.maxConcurrent,
         digest: this.config.brain.digest,
         fallback: this.config.brain.fallback,
@@ -4657,7 +4876,11 @@ export class AppService {
         suggestions.add('codex:gpt-5.6-luna');
       }
     }
-    const configured = [...this.config.defaultModelChains.hard, ...this.config.defaultModelChains.easy, this.config.reviewer.model];
+    const configured = [
+      ...this.config.defaultModelChains.hard,
+      ...this.config.defaultModelChains.easy,
+      ...this.config.reviewer.order.map((item) => `${item.engine}:${item.model}`),
+    ];
     const configuredModels = [...new Set(configured.filter(Boolean))];
     return { suggestions: [...suggestions].sort(), configured: configuredModels };
   }
@@ -4699,5 +4922,18 @@ export class AppService {
     this.chatService.setClaudeApiKey(value);
     this.scheduler.getEventBus().emit('config.updated', undefined, { brain: { apiKey: 'configured' } });
     return this.getClaudeApiKeyStatus();
+  }
+
+  getPresets() {
+    return Object.values(PRESET_DEFINITIONS);
+  }
+
+  applyPreset(raw: unknown) {
+    const parsed = ApplyPresetInputSchema.parse(raw);
+    return applyPreset(this, parsed);
+  }
+
+  getEffectiveConfig(projectId: string) {
+    return computeEffectiveConfig(this, projectId);
   }
 }

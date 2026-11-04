@@ -825,7 +825,7 @@ describe('Codex reviewer failover lifecycle', () => {
 
   it('reuses the worker Codex profile when chain Claude fallback is disabled', () => {
     const { scheduler } = makeReviewer('reviewer-approved');
-    config.reviewer.claudeFallback = false;
+    config.reviewer.fallback.onUnavailable = false;
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
     db.prepare("INSERT INTO runs (id, taskId, engine, model, profileName, kind) VALUES ('chain-worker', 'test-project/review', 'codex', 'codex:gpt-5.6-luna', 'codex-1', 'worker')").run();
 
@@ -1066,6 +1066,143 @@ describe('Codex reviewer failover lifecycle', () => {
     recovery.stop();
   });
 
+  it('counts content feedback across reviewers and steps, but not operational returns', () => {
+    const { scheduler } = makeReviewer('reviewer-changes');
+    projectRepo.update('test-project', {
+      review: JSON.stringify({ maxRounds: 2, chain: [
+        { reviewer: 'codex:gpt-5.6-luna', mode: 'gate' },
+        { reviewer: 'claude:sonnet', mode: 'gate' },
+      ] }),
+    });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'merge failed is mentioned, but this is a real code defect', 'claude-review');
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(1);
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'Xung đột is mentioned in a code comment, still a content defect', 'claude-review');
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(2);
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'merge conflict: operational failure', 'claude-review', 'operational');
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(2);
+    expect(taskRepo.get('test-project/review')?.reviewerEscalated).toBe(0);
+    scheduler.stop();
+  });
+
+  it('escalation includes all open findings and the reviewer actor', () => {
+    const { scheduler } = makeReviewer('reviewer-changes');
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'first missing case', 'codex-reviewer');
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'second missing case', 'claude-reviewer');
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'third missing case', 'claude-reviewer');
+    const event = eventRepo.getRecent(30).find((entry) => entry.type === 'review.escalated');
+    expect(event?.payload).toContain('first missing case');
+    expect(event?.payload).toContain('second missing case');
+    expect(event?.payload).toContain('third missing case');
+    expect(event?.payload).toContain('claude-reviewer');
+    expect(event?.payload).toContain('Lịch sử các vòng review:');
+    scheduler.stop();
+  });
+
+  it('retains reviewerChangesRequested counter without reset or increase on reviewer crash', async () => {
+    const errorSetup = makeReviewer('reviewer-error');
+    taskRepo.update('test-project/review', { reviewerChangesRequested: 1 });
+    errorSetup.scheduler.tick();
+    await vi.waitFor(() => {
+      expect(errorSetup.scheduler.getReviewerStatus().running).toEqual([]);
+      expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).toBe('crashed');
+    });
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(1);
+    errorSetup.scheduler.stop();
+  });
+
+  it('retains reviewerChangesRequested counter without reset or increase on reviewer quota', async () => {
+    const quotaSetup = makeReviewer('reviewer-quota');
+    taskRepo.update('test-project/review', { reviewerChangesRequested: 1 });
+    quotaSetup.scheduler.tick();
+    await vi.waitFor(() => {
+      expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).toBe('quota');
+    });
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(1);
+    quotaSetup.scheduler.stop();
+  });
+
+  it('accumulates reviewerChangesRequested across advanceReviewStep chain steps', () => {
+    const { scheduler } = makeReviewer('reviewer-changes');
+    projectRepo.update('test-project', {
+      review: JSON.stringify({
+        maxRounds: 3,
+        chain: [
+          { reviewer: 'codex:gpt-5.6-luna', mode: 'gate' },
+          { reviewer: 'claude', mode: 'gate' },
+        ],
+      }),
+    });
+    expect(taskRepo.get('test-project/review')?.reviewStep).toBe(0);
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(0);
+
+    // Step 0 passes gate -> reviewStep advances to 1
+    scheduler.reviewTask('test-project/review', 'approved', 'step 0 ok', 'codex-reviewer');
+    expect(taskRepo.get('test-project/review')?.reviewStep).toBe(1);
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(0);
+
+    // Step 1 returns changes_requested -> counter increments to 1, reviewStep resets to 0
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'step 1 found defect', 'claude-reviewer');
+    expect(taskRepo.get('test-project/review')?.reviewStep).toBe(0);
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(1);
+    expect(taskRepo.get('test-project/review')?.status).toBe('queued');
+
+    // Simulate task re-entering review after worker fix
+    taskRepo.update('test-project/review', { status: 'review' });
+
+    // Step 0 passes gate again -> advances to step 1, counter stays 1
+    scheduler.reviewTask('test-project/review', 'approved', 'step 0 ok again', 'codex-reviewer');
+    expect(taskRepo.get('test-project/review')?.reviewStep).toBe(1);
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(1);
+
+    // Step 1 returns changes_requested again -> counter increments to 2
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'step 1 found another defect', 'claude-reviewer');
+    expect(taskRepo.get('test-project/review')?.reviewStep).toBe(0);
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(2);
+    scheduler.stop();
+  });
+
+  it('emits review.escalated only once when exceeding maxRounds and ignores subsequent calls', () => {
+    const { scheduler } = makeReviewer('reviewer-changes');
+    projectRepo.update('test-project', {
+      review: JSON.stringify({ maxRounds: 1 }),
+    });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'round 1 defect', 'codex-reviewer');
+    expect(taskRepo.get('test-project/review')?.reviewerChangesRequested).toBe(1);
+    expect(taskRepo.get('test-project/review')?.reviewerEscalated).toBe(0);
+
+    // Second changes_requested exceeds maxRounds 1
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'round 2 defect exceeds limit', 'codex-reviewer');
+    expect(taskRepo.get('test-project/review')?.reviewerEscalated).toBe(1);
+    const escalatedEvents = eventRepo.getRecent(30).filter((e) => e.type === 'review.escalated');
+    expect(escalatedEvents).toHaveLength(1);
+
+    // Calling again while reviewerEscalated is active does not emit another escalation event
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'round 3 after escalation', 'codex-reviewer');
+    const escalatedEventsAfter = eventRepo.getRecent(30).filter((e) => e.type === 'review.escalated');
+    expect(escalatedEventsAfter).toHaveLength(1);
+    scheduler.stop();
+  });
+
+  it('highlights missed-earlier findings distinctly in review.escalated open feedback', () => {
+    const { scheduler } = makeReviewer('reviewer-changes');
+    projectRepo.update('test-project', {
+      review: JSON.stringify({ maxRounds: 1 }),
+    });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'P1: missed-earlier - src/notify.ts:433 còn sót', 'codex-reviewer');
+    taskRepo.update('test-project/review', { status: 'review' });
+    scheduler.reviewTask('test-project/review', 'changes_requested', 'P2: lỗi mới vòng 2', 'claude-reviewer');
+    const event = eventRepo.getRecent(30).find((e) => e.type === 'review.escalated');
+    expect(event?.payload).toContain('[Lỗi vòng hiện tại] P2: lỗi mới vòng 2');
+    expect(event?.payload).toContain('[Lỗi bỏ sót ghi nhận từ vòng trước (missed-earlier - codex-reviewer)] P1: missed-earlier - src/notify.ts:433 còn sót');
+    expect(event?.payload).toContain('Lịch sử các vòng review:');
+    scheduler.stop();
+  });
+
   it('recovers a durable reviewer run without putting it in the worker map', () => {
     const { scheduler, failover } = makeReviewer('reviewer-approved');
     runRepo.insert({ id: 'old-review', taskId: 'test-project/review', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-1', kind: 'reviewer' });
@@ -1125,6 +1262,201 @@ describe('Quota → profile marked → task runs on another profile', () => {
     scheduler.stop();
   });
 
+  it('continues a running task after quota on the same worktree without increasing attempt', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: 'a@test.com', enabled: 1 });
+    profileRepo.upsert({ name: 'p2', engine: 'agy', kind: 'isolated', home: '/tmp/p2', email: 'b@test.com', enabled: 1 });
+    const worktreePath = path.join(tmpDir, 'worktree');
+    fs.mkdirSync(path.join(worktreePath, '.agenthub'), { recursive: true });
+    const logPath = path.join(tmpDir, 'run.log');
+    fs.writeFileSync(logPath, 'worker output');
+    taskRepo.insert({
+      id: 'test-project/live-quota', projectId: 'test-project', slug: 'live-quota', title: 'Live quota',
+      status: 'running', worktreePath,
+    });
+    taskRepo.update('test-project/live-quota', { attempt: 2 });
+    runRepo.insert({ id: 'quota-run', taskId: 'test-project/live-quota', engine: 'agy', model: 'gemini-3.8-flash-medium', profileName: 'p1', logPath });
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>());
+    const schedulerInternal = scheduler as unknown as {
+      handleRunCompletion: (taskId: string, rt: unknown) => Promise<void>;
+      running: Map<string, unknown>;
+    };
+    const rt = {
+      runId: 'quota-run', taskId: 'test-project/live-quota', pid: 999991, pidStart: null,
+      engine: { id: 'agy', detectQuota: () => ({ exhausted: true, resetSeconds: 3600 }), detectAuthError: () => ({ expired: false }), detectTransientError: () => false },
+      model: 'gemini-3.8-flash-medium', profileName: 'p1', projectId: 'test-project',
+      startTime: Date.now() - 10_000, timeoutMs: 60_000, timeoutAt: Date.now() + 60_000,
+      retryCount: 0, lastOutputAt: Date.now(), lastActivityAt: Date.now(), activitySource: 'terminal',
+      activityCheckedAt: Date.now(), cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+    };
+    schedulerInternal.running.set('test-project/live-quota', rt);
+
+    await schedulerInternal.handleRunCompletion('test-project/live-quota', rt);
+
+    const task = taskRepo.get('test-project/live-quota')!;
+    expect(task.status).toBe('queued');
+    expect(task.attempt).toBe(2);
+    expect(task.worktreePath).toBe(worktreePath);
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('Failover: p1/gemini-3.8-flash-medium → p2/gemini-3.8-flash-medium; reason');
+    const failover = eventRepo.getRecent(20).find((event) => event.type === 'task.failover');
+    expect(failover).toBeDefined();
+    const payload = JSON.parse(failover!.payload);
+    expect(payload.from).toEqual({ profile: 'p1', model: 'gemini-3.8-flash-medium', engine: 'agy' });
+    expect(payload.to).toEqual({ profile: 'p2', model: 'gemini-3.8-flash-medium', engine: 'agy' });
+    expect(payload.reason).toContain('quota exhausted on agy/gemini-3.8-flash-medium');
+    expect(payload.worktreePath).toBe(worktreePath);
+    expect(payload.runId).toBe('quota-run');
+    scheduler.stop();
+  });
+
+  it('fails over to another profile with the exact same model when profile A exhausts quota for model M', () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+
+    profileRepo.upsert({ name: 'prof-a', engine: 'agy', kind: 'isolated', home: '/tmp/prof-a', email: 'a@test.com', enabled: 1 });
+    profileRepo.upsert({ name: 'prof-b', engine: 'agy', kind: 'isolated', home: '/tmp/prof-b', email: 'b@test.com', enabled: 1 });
+
+    const quotaService = new QuotaService(quotaMarkRepo, profileRepo);
+    quotaService.mark('prof-a', 'claude', 3600, 'quota hit');
+
+    taskRepo.insert({
+      id: 'test-project/same-model-failover',
+      projectId: 'test-project',
+      slug: 'same-model-failover',
+      title: 'Same Model Failover',
+      status: 'queued',
+      modelChain: JSON.stringify(['claude-sonnet-4-6']),
+    });
+
+    const fakeEngine = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    const engines = new Map<string, Engine>([['agy', fakeEngine]]);
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines);
+
+    scheduler.tick();
+
+    const runs = runRepo.getByTask('test-project/same-model-failover');
+    expect(runs).toHaveLength(1);
+    expect(runs[0].profileName).toBe('prof-b');
+    expect(runs[0].model).toBe('claude-sonnet-4-6');
+
+    scheduler.stop();
+  });
+
+  it('continues a running task into waiting_quota on same worktree when all models/profiles are exhausted', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: 'a@test.com', enabled: 1 });
+    const worktreePath = path.join(tmpDir, 'worktree-all-exhausted');
+    fs.mkdirSync(path.join(worktreePath, '.agenthub'), { recursive: true });
+    const logPath = path.join(tmpDir, 'run-all-exhausted.log');
+    fs.writeFileSync(logPath, 'worker output before quota\n');
+    taskRepo.insert({
+      id: 'test-project/exhausted-quota', projectId: 'test-project', slug: 'exhausted-quota', title: 'Exhausted quota',
+      status: 'running', worktreePath,
+    });
+    taskRepo.update('test-project/exhausted-quota', { attempt: 3 });
+    runRepo.insert({ id: 'quota-run-exhausted', taskId: 'test-project/exhausted-quota', engine: 'agy', model: 'gemini-3.8-flash-medium', profileName: 'p1', logPath });
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>());
+    const schedulerInternal = scheduler as unknown as {
+      handleRunCompletion: (taskId: string, rt: unknown) => Promise<void>;
+      running: Map<string, unknown>;
+    };
+    const rt = {
+      runId: 'quota-run-exhausted', taskId: 'test-project/exhausted-quota', pid: 999992, pidStart: null,
+      engine: { id: 'agy', detectQuota: () => ({ exhausted: true, resetSeconds: 3600 }), detectAuthError: () => ({ expired: false }), detectTransientError: () => false },
+      model: 'gemini-3.8-flash-medium', profileName: 'p1', projectId: 'test-project',
+      startTime: Date.now() - 10_000, timeoutMs: 60_000, timeoutAt: Date.now() + 60_000,
+      retryCount: 0, lastOutputAt: Date.now(), lastActivityAt: Date.now(), activitySource: 'terminal',
+      activityCheckedAt: Date.now(), cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+    };
+    schedulerInternal.running.set('test-project/exhausted-quota', rt);
+
+    await schedulerInternal.handleRunCompletion('test-project/exhausted-quota', rt);
+
+    const task = taskRepo.get('test-project/exhausted-quota')!;
+    // handleRunCompletion triggers a tick; with all profiles exhausted the task is placed in waiting_quota
+    expect(task.status).toBe('waiting_quota');
+    expect(task.waitReason).toBe('quota');
+    expect(task.attempt).toBe(3);
+    expect(task.worktreePath).toBe(worktreePath);
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('Failover: p1/gemini-3.8-flash-medium → waiting_quota; reason');
+    const failover = eventRepo.getRecent(20).find((event) => event.type === 'task.failover');
+    expect(failover).toBeDefined();
+    const payload = JSON.parse(failover!.payload);
+    expect(payload.from).toEqual({ profile: 'p1', model: 'gemini-3.8-flash-medium', engine: 'agy' });
+    expect(payload.to).toBeNull();
+    expect(payload.reason).toContain('all models/profiles unavailable');
+    scheduler.stop();
+  });
+
+  it('dispatches queued task to waiting_quota when all models in chain are exhausted, and requeues on quota reset and claude.quota_available', () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'agy-p1', engine: 'agy', kind: 'isolated', home: '/tmp/agy-p1', email: null, enabled: 1 });
+    profileRepo.upsert({ name: 'codex-p1', engine: 'codex', kind: 'codex', home: '/tmp/codex-p1', email: null, enabled: 1 });
+
+    const now = Math.floor(Date.now() / 1000);
+    // Mark both models in chain as exhausted
+    quotaMarkRepo.mark('agy-p1', 'gemini', now + 10, 'gemini quota');
+    quotaMarkRepo.mark('codex-p1', 'codex', now + 10, 'codex quota');
+
+    taskRepo.insert({
+      id: 'test-project/chain-wait',
+      projectId: 'test-project',
+      slug: 'chain-wait',
+      title: 'Chain Wait Task',
+      status: 'queued',
+      modelChain: JSON.stringify(['gemini-3.8-flash-medium', 'codex:gpt-5.6-luna']),
+    });
+
+    const fakeAgent = path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs');
+    const scheduler = new Scheduler(
+      config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['agy', new FakeEngine(fakeAgent)], ['codex', new FakeEngine(fakeAgent)]]),
+    );
+
+    // 1. When findModelProfilePair returns null, dispatch puts task into waiting_quota
+    scheduler.tick();
+    let task = taskRepo.get('test-project/chain-wait')!;
+    expect(task.status).toBe('waiting_quota');
+    expect(task.waitReason).toBe('quota');
+    const waitEvents = eventRepo.getRecent(10).filter((e) => e.type === 'task.waiting_quota' && e.taskId === 'test-project/chain-wait');
+    expect(waitEvents.length).toBeGreaterThan(0);
+
+    // 2. Next dispatch tick while quota marks are expired moves waiting_quota tasks back to queued and runs them
+    // Simulate quota expiry by marking in the past
+    quotaMarkRepo.mark('agy-p1', 'gemini', now - 10, 'expired');
+    quotaMarkRepo.mark('codex-p1', 'codex', now - 10, 'expired');
+    scheduler.tick();
+    task = taskRepo.get('test-project/chain-wait')!;
+    expect(['queued', 'running']).toContain(task.status);
+    const allRecent = eventRepo.getRecent(50);
+    expect(allRecent.some((e) => e.type === 'task.queued' && e.taskId === 'test-project/chain-wait' && (e.payload?.includes('quota_cleared') || e.payload?.includes('quota_expired')))).toBe(true);
+
+    // 3. Re-exhaust and verify wake on claude.quota_available
+    quotaMarkRepo.mark('agy-p1', 'gemini', now + 3600, 'gemini quota again');
+    quotaMarkRepo.mark('codex-p1', 'codex', now + 3600, 'codex quota again');
+    taskRepo.updateStatus('test-project/chain-wait', 'waiting_quota', 'quota');
+
+    // Emitting claude.quota_available while marks remain leaves task in waiting_quota after recheck
+    scheduler.getEventBus().emit('claude.quota_available');
+    task = taskRepo.get('test-project/chain-wait')!;
+    expect(task.status).toBe('waiting_quota');
+
+    // Clear quota mark and emit claude.quota_available -> task requeues
+    quotaMarkRepo.clear('agy-p1', 'gemini');
+    scheduler.getEventBus().emit('claude.quota_available');
+    task = taskRepo.get('test-project/chain-wait')!;
+    expect(['queued', 'running']).toContain(task.status);
+    const availableEvents = eventRepo.getRecent(10).filter((e) => e.type === 'task.queued' && e.taskId === 'test-project/chain-wait');
+    expect(availableEvents.some((e) => e.payload && e.payload.includes('quota_available'))).toBe(true);
+
+    scheduler.stop();
+  });
+
   it('moves to waiting_quota when all profiles exhausted', () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
@@ -1150,6 +1482,29 @@ describe('Quota → profile marked → task runs on another profile', () => {
     const t = taskRepo.get('test-project/t1')!;
     expect(t.status).toBe('waiting_quota');
 
+    scheduler.stop();
+  });
+
+  it('falls through the task model chain when the first model family is exhausted', () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'agy-1', engine: 'agy', kind: 'isolated', home: '/tmp/agy-1', email: null, enabled: 1 });
+    profileRepo.upsert({ name: 'codeX1', engine: 'codex', kind: 'codex', home: '/tmp/codex', email: null, enabled: 1 });
+    new QuotaService(quotaMarkRepo, profileRepo).mark('agy-1', 'gemini', 3600, 'quota hit');
+    taskRepo.insert({
+      id: 'test-project/fallback', projectId: 'test-project', slug: 'fallback', title: 'Fallback',
+      status: 'queued', level: 'easy', modelChain: JSON.stringify(['gemini-3.8-flash-medium', 'codex:gpt-5.6-luna']),
+    });
+
+    const fakeAgent = path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs');
+    const scheduler = new Scheduler(
+      config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['agy', new FakeEngine(fakeAgent)], ['codex', new FakeEngine(fakeAgent)]]),
+    );
+    scheduler.tick();
+
+    expect(runRepo.getByTask('test-project/fallback')[0]).toMatchObject({ model: 'codex:gpt-5.6-luna', profileName: 'codeX1' });
+    expect(taskRepo.get('test-project/fallback')?.status).toBe('running');
     scheduler.stop();
   });
 
@@ -1237,7 +1592,7 @@ describe('Review: DONE → review, changes_requested → re-queue', () => {
     expect(task.resume).toBe(1);
     expect(task.body).toContain('Feedback review');
     expect(task.body).toContain('Fix the linting errors');
-    expect(task.reviewerChangesRequested).toBe(0);
+    expect(task.reviewerChangesRequested).toBe(2);
     expect(task.reviewerEscalated).toBe(0);
     expect(task.reviewerEscalatedAt).toBeNull();
     expect(task.reviewerEscalationReason).toBeNull();
@@ -2491,6 +2846,7 @@ describe('Env file generation', () => {
     createTestProject(projectPath);
 
     profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: null, enabled: 1 });
+    quotaMarkRepo.mark('p1', 'gemini', Math.floor(Date.now() / 1000) + 3600);
 
     taskRepo.insert({
       id: 'test-project/waiting-t1',
@@ -2508,7 +2864,10 @@ describe('Env file generation', () => {
 
     expect(taskRepo.get('test-project/waiting-t1')?.status).toBe('waiting_quota');
 
-    scheduler.getEventBus().emit('quota.cleared');
+    scheduler.getEventBus().emit('claude.quota_available');
+    expect(taskRepo.get('test-project/waiting-t1')?.status).toBe('waiting_quota');
+    quotaMarkRepo.clear('p1', 'gemini');
+    scheduler.getEventBus().emit('claude.quota_available');
     // Task woke up and was immediately scheduled to run because p1 is available
     expect(['queued', 'running']).toContain(taskRepo.get('test-project/waiting-t1')?.status);
 

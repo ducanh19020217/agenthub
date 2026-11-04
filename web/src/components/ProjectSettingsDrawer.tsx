@@ -34,6 +34,7 @@ import {
 import {
   DEFAULT_COMMON_BRANCHES,
   DEFAULT_CLAUDE_MODELS,
+  getModelsForProvider,
   validateBranchSyntax,
   validateReviewerModelSyntax,
   validateReviewChainReviewerSyntax,
@@ -41,7 +42,7 @@ import {
 import { useLocale } from '../context/LocaleContext';
 import { UI_Z_INDEX } from './ui/layers';
 import { InfoTooltip } from './tour/InfoTooltip';
-import { Department, Project, ProjectSettings, UpdateProjectInput } from '../types/api';
+import { Department, Project, ProjectSettings, UpdateProjectInput, PresetLevel } from '../types/api';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   updateProject,
@@ -55,7 +56,109 @@ import {
   createTask,
   inspectGitRepo,
   getProfiles,
+  getPresets,
+  applyPreset,
+  getEffectiveConfig,
+  getDepartments,
+  getOpenProjectSources, getGiteaStatus, syncGitea, saveGiteaToken, getRemoteDeployStatus, triggerRemoteDeploy, saveRemoteDeployEnv,
 } from '../api/client';
+
+export interface StructuredCheckItem {
+  name: string;
+  cmd: string;
+  timeoutSec?: number;
+}
+
+export function parseChecksToStructured(checksJsonOrArray: any): StructuredCheckItem[] {
+  let arr: any[] = [];
+  if (Array.isArray(checksJsonOrArray)) {
+    arr = checksJsonOrArray;
+  } else if (typeof checksJsonOrArray === 'string' && checksJsonOrArray.trim()) {
+    try {
+      const parsed = JSON.parse(checksJsonOrArray);
+      if (Array.isArray(parsed)) arr = parsed;
+    } catch {
+      return [];
+    }
+  }
+  return arr.map((item) => ({
+    name: typeof item.name === 'string' ? item.name : '',
+    cmd: Array.isArray(item.cmd) ? item.cmd.join(' ') : (typeof item.cmd === 'string' ? item.cmd : ''),
+    timeoutSec: typeof item.timeoutSec === 'number' ? item.timeoutSec : undefined,
+  }));
+}
+
+export function structuredToChecksArray(list: StructuredCheckItem[]): Array<{ name: string; cmd: string[]; timeoutSec?: number }> {
+  return list.map((item) => ({
+    name: item.name.trim(),
+    cmd: item.cmd.trim().split(/\s+/).filter(Boolean),
+    ...(item.timeoutSec ? { timeoutSec: item.timeoutSec } : {}),
+  }));
+}
+
+/** Split a command line without invoking a shell; supports quoted strings and backslash escapes. */
+export function parseArgv(input: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let quote = '';
+  let escaped = false;
+  let inToken = false;
+
+  for (const char of input.trim()) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      inToken = true;
+      continue;
+    }
+    if (char === '\\' && quote !== "'") {
+      escaped = true;
+      inToken = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        quote = '';
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      inToken = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (inToken) {
+        result.push(current);
+        current = '';
+        inToken = false;
+      }
+    } else {
+      current += char;
+      inToken = true;
+    }
+  }
+  if (escaped) current += '\\';
+  if (inToken) result.push(current);
+  return result;
+}
+
+/** Parse KEY=VALUE lines for deploy secrets, preserving any '=' in the value. */
+export function parseDeployEnv(input: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const line of input.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf('=');
+    if (idx <= 0) continue;
+    const key = trimmed.slice(0, idx).trim();
+    const val = trimmed.slice(idx + 1);
+    if (key) result[key] = val;
+  }
+  return result;
+}
 
 export interface ProjectSettingsDrawerProps {
   project: Project | null;
@@ -78,6 +181,9 @@ export const defaultProjectSettings = (): NonNullable<Project['settings']> => ({
   references: [],
   reviewChecklist: [],
   notifications: { telegramContent: 'full' },
+  openproject: { enabled: false, sourceId: null, role: 'primary' },
+  gitea: { enabled: false, schedule: ['12:00', '18:00'], weekdaysOnly: false, checks: [], unionMergeGlobs: [] },
+  remoteDeploy: { enabled: false, trigger: 'manual', steps: [], healthChecks: [], waitMinutes: 15 },
 });
 
 function normalizeProjectSettings(settings?: Partial<NonNullable<Project['settings']>>): NonNullable<Project['settings']> {
@@ -94,6 +200,9 @@ function normalizeProjectSettings(settings?: Partial<NonNullable<Project['settin
     brain: { ...defaults.brain, ...settings?.brain },
     worktree: { ...defaults.worktree, ...settings?.worktree },
     integration: { ...defaults.integration, ...settings?.integration },
+    openproject: { ...defaults.openproject, ...settings?.openproject, enabled: settings?.openproject?.enabled ?? false, sourceId: settings?.openproject?.sourceId ?? null, role: settings?.openproject?.role ?? 'primary' },
+    gitea: { ...defaults.gitea, ...settings?.gitea, enabled: settings?.gitea?.enabled ?? false, schedule: settings?.gitea?.schedule ?? defaults.gitea!.schedule, weekdaysOnly: settings?.gitea?.weekdaysOnly ?? false, checks: settings?.gitea?.checks ?? [], unionMergeGlobs: settings?.gitea?.unionMergeGlobs ?? [] },
+    remoteDeploy: { ...defaults.remoteDeploy, ...settings?.remoteDeploy, enabled: settings?.remoteDeploy?.enabled ?? false, trigger: settings?.remoteDeploy?.trigger ?? 'manual', steps: settings?.remoteDeploy?.steps ?? [], healthChecks: settings?.remoteDeploy?.healthChecks ?? [], waitMinutes: settings?.remoteDeploy?.waitMinutes ?? 15 },
     ci: { ...defaults.ci, ...settings?.ci },
     notifications: { ...defaults.notifications, ...settings?.notifications },
     references: settings?.references ?? defaults.references,
@@ -128,6 +237,9 @@ export function changedSettings(
     'brain',
     'worktree',
     'integration',
+    'openproject',
+    'gitea',
+    'remoteDeploy',
     'ci',
     'references',
     'reviewChecklist',
@@ -188,7 +300,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   onClose,
   onSaved,
 }) => {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const queryClient = useQueryClient();
   const { data: focus } = useQuery({ queryKey: ['focus'], queryFn: getFocus });
   const focusMutation = useMutation({
@@ -199,11 +311,31 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     },
   });
 
+  const { data: remoteDepartments = [] } = useQuery({
+    queryKey: ['departments'],
+    queryFn: getDepartments,
+    enabled: Boolean(isOpen && (!departments || departments.length === 0)),
+  });
+  const allDepartments = (departments && departments.length > 0) ? departments : remoteDepartments;
+
+  const { data: effectiveConfig } = useQuery({
+    queryKey: ['effective-config', project?.id],
+    queryFn: () => getEffectiveConfig(project!.id),
+    enabled: Boolean(isOpen && project?.id),
+  });
+
+  const { data: presets = [] } = useQuery({
+    queryKey: ['presets'],
+    queryFn: getPresets,
+    enabled: Boolean(isOpen),
+  });
+
   const { data: config } = useQuery({
     queryKey: ['config'],
     queryFn: getConfig,
     staleTime: 30_000,
   });
+  const { data: openProjectSources = [] } = useQuery({ queryKey: ['openproject-sources'], queryFn: getOpenProjectSources, enabled: Boolean(isOpen) });
 
   const { data: allProfiles = [] } = useQuery({
     queryKey: ['profiles'],
@@ -221,6 +353,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     defaultProjectSettings(),
   );
   const [draftChecks, setDraftChecks] = useState<string>('');
+  const [structuredChecks, setStructuredChecks] = useState<StructuredCheckItem[]>([]);
+  const [showRawJsonReview, setShowRawJsonReview] = useState(false);
   const [draftHooks, setDraftHooks] = useState<string>('');
   const [draftReview, setDraftReview] = useState<string>('');
   const [draftReviewerOrder, setDraftReviewerOrder] = useState<string>('');
@@ -265,6 +399,9 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     }
   };
   const [showCommitExample, setShowCommitExample] = useState(false);
+  const [giteaToken, setGiteaToken] = useState('');
+  const [deployEnv, setDeployEnv] = useState('');
+  const [savedDeployKeys, setSavedDeployKeys] = useState<string[]>([]);
 
   const [reviewerOrder, setReviewerOrder] = useState<
     Array<{ engine: 'codex' | 'claude'; model: string; profiles: string[] }>
@@ -287,25 +424,19 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const [hasReviewChainOverride, setHasReviewChainOverride] = useState<boolean>(false);
 
   const availableCodexReviewerModels = useMemo(() => {
-    const fromApi = (modelOptions?.suggestions || []).filter(
-      (m) => m.startsWith('codex:') || m.startsWith('gpt-'),
-    );
-    const fromConfigured = (modelOptions?.configured || []).filter(
-      (m) => m.startsWith('codex:') || m.startsWith('gpt-'),
-    );
+    const fromApi = modelOptions?.suggestions || [];
+    const fromConfigured = modelOptions?.configured || [];
     const fromConfigOrder = (config?.reviewer?.order || [])
       .filter((r) => r.engine === 'codex')
       .map((r) => r.model);
-    const fromConfigReviewer = config?.reviewer?.model
-      ? (config.reviewer.model.startsWith('codex:') || config.reviewer.model.startsWith('gpt-') ? [config.reviewer.model] : [])
-      : [];
+    const fromConfigReviewer = config?.reviewer?.model ? [config.reviewer.model] : [];
     const fromConfigArbiter = config?.reviewer?.arbiter?.engine === 'codex' && config.reviewer.arbiter.model
       ? [config.reviewer.arbiter.model]
       : [];
     const fromChains = [
       ...(config?.modelChainHard || []),
       ...(config?.modelChainEasy || []),
-    ].filter((m) => m.startsWith('codex:') || m.startsWith('gpt-'));
+    ];
     const fromCurrentOrder = reviewerOrder
       .filter((r) => r.engine === 'codex')
       .map((r) => r.model);
@@ -313,8 +444,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       .filter((r) => r.engine === 'codex')
       .map((r) => r.model);
 
-    return Array.from(
-      new Set([
+    return getModelsForProvider([
         ...fromApi,
         ...fromConfigured,
         ...fromConfigOrder,
@@ -323,8 +453,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
         ...fromChains,
         ...fromCurrentOrder,
         ...fromProjectOrder,
-      ]),
-    ).filter(Boolean);
+      ], 'codex');
   }, [modelOptions, config, reviewerOrder, project]);
 
   const availableClaudeReviewerModels = useMemo(() => {
@@ -337,12 +466,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     const fromConfigArbiter = config?.reviewer?.arbiter?.engine === 'claude' && config.reviewer.arbiter.model
       ? [config.reviewer.arbiter.model]
       : [];
-    const fromApi = (modelOptions?.suggestions || []).filter(
-      (m) => DEFAULT_CLAUDE_MODELS.includes(m) || m.startsWith('claude'),
-    );
-    const fromConfigured = (modelOptions?.configured || []).filter(
-      (m) => DEFAULT_CLAUDE_MODELS.includes(m) || m.startsWith('claude'),
-    );
+    const fromApi = modelOptions?.suggestions || [];
+    const fromConfigured = modelOptions?.configured || [];
     const fromCurrentOrder = reviewerOrder
       .filter((r) => r.engine === 'claude')
       .map((r) => r.model);
@@ -350,8 +475,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       .filter((r) => r.engine === 'claude')
       .map((r) => r.model);
 
-    return Array.from(
-      new Set([
+    return getModelsForProvider([
         ...DEFAULT_CLAUDE_MODELS,
         ...fromChat,
         ...fromChatModel,
@@ -362,8 +486,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
         ...fromConfigured,
         ...fromCurrentOrder,
         ...fromProjectOrder,
-      ]),
-    ).filter(Boolean);
+      ], 'claude');
   }, [modelOptions, config, reviewerOrder, project]);
 
   const availableReviewChainReviewers = useMemo(() => {
@@ -386,12 +509,15 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
         }
       }
     }
+    const chainReviewers = getModelsForProvider(
+      [...fromCurrentChain, ...fromProjectChain],
+      'codex',
+    ).map((model) => (model.startsWith('codex:') ? model : `codex:${model}`));
     return Array.from(
       new Set([
         'claude',
         ...codexModels,
-        ...fromCurrentChain,
-        ...fromProjectChain,
+        ...chainReviewers,
       ]),
     ).filter(Boolean);
   }, [availableCodexReviewerModels, reviewChain.chain, project]);
@@ -410,6 +536,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const resetDraftState = (targetProject: Project) => {
     setDraftSettings(normalizeProjectSettings(targetProject.settings));
     setChecklistDraft((targetProject.settings?.reviewChecklist || []).join('\n'));
+    setStructuredChecks(parseChecksToStructured(targetProject.checks));
+    setDraftDepartmentId(targetProject.departmentId || 'chung');
     setDraftChecks(
       typeof targetProject.checks === 'string'
         ? targetProject.checks
@@ -539,6 +667,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     setApiError(null);
     if (!val.trim()) {
       setChecksError(null);
+      setStructuredChecks([]);
       return;
     }
     try {
@@ -547,12 +676,106 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
         setChecksError('Checks must be a JSON array: [{ name, cmd }]');
       } else {
         setChecksError(null);
+        setStructuredChecks(parseChecksToStructured(parsed));
       }
     } catch (err: any) {
       setChecksError(err.message);
     }
   };
 
+  const updateStructuredCheck = (index: number, patch: Partial<StructuredCheckItem>) => {
+    const updated = structuredChecks.map((item, idx) => (idx === index ? { ...item, ...patch } : item));
+    setStructuredChecks(updated);
+    const arr = structuredToChecksArray(updated);
+    setDraftChecks(arr.length > 0 ? JSON.stringify(arr, null, 2) : '');
+    setChecksError(null);
+    setApiError(null);
+  };
+
+  const addStructuredCheck = () => {
+    const updated = [...structuredChecks, { name: 'lint', cmd: 'npm run lint', timeoutSec: 120 }];
+    setStructuredChecks(updated);
+    const arr = structuredToChecksArray(updated);
+    setDraftChecks(JSON.stringify(arr, null, 2));
+    setChecksError(null);
+    setApiError(null);
+  };
+
+  const removeStructuredCheck = (index: number) => {
+    const updated = structuredChecks.filter((_, idx) => idx !== index);
+    setStructuredChecks(updated);
+    const arr = structuredToChecksArray(updated);
+    setDraftChecks(arr.length > 0 ? JSON.stringify(arr, null, 2) : '');
+    setChecksError(null);
+    setApiError(null);
+  };
+
+  const applyPresetForProject = useMutation({
+    mutationFn: async (preset: PresetLevel) => {
+      return applyPreset({ scope: `project:${project!.id}`, preset, dryRun: false });
+    },
+    onSuccess: async (_result, preset) => {
+      queryClient.invalidateQueries({ queryKey: ['effective-config', project?.id] });
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      setDraftSettings((prev) => ({
+        ...prev,
+        preset,
+        review: { ...prev.review, autoMerge: preset === 'auto' },
+        integration: { ...prev.integration, autoMerge: preset === 'auto' },
+        autoFixOnFail: preset !== 'safe',
+      }));
+      if (preset === 'safe') {
+        updateReviewChainState({ chain: [], maxRounds: 2 }, true);
+      } else if (preset === 'balanced') {
+        const codexModel = availableCodexReviewerModels[0] || 'codex:gpt-5.6-luna';
+        const cleanCodex = codexModel.startsWith('codex:') ? codexModel : `codex:${codexModel}`;
+        updateReviewChainState({
+          chain: [
+            { reviewer: cleanCodex, mode: 'gate' },
+            { reviewer: 'claude', mode: 'final' },
+          ],
+          maxRounds: 2,
+        }, true);
+      } else if (preset === 'auto') {
+        const codexModel = availableCodexReviewerModels[0] || 'codex:gpt-5.6-luna';
+        const cleanCodex = codexModel.startsWith('codex:') ? codexModel : `codex:${codexModel}`;
+        updateReviewChainState({
+          chain: [{ reviewer: cleanCodex, mode: 'final' }],
+          maxRounds: 3,
+        }, true);
+      }
+      setToastMessage(t('settings.presetAppliedSuccess', { preset }));
+    },
+    onError: (err: any) => {
+      setApiError(err?.message || t('settings.saveError'));
+    },
+  });
+
+  const quickFixAutoMerge = () => {
+    setDraftSettings((prev) => ({
+      ...prev,
+      review: { ...prev.review, autoMerge: true },
+      integration: { ...prev.integration, autoMerge: true },
+    }));
+  };
+
+  const quickFixChecks = () => {
+    if (structuredChecks.length === 0) {
+      addStructuredCheck();
+    }
+  };
+
+  const quickFixChain = () => {
+    const codexModel = availableCodexReviewerModels[0] || 'codex:gpt-5.6-luna';
+    const cleanCodex = codexModel.startsWith('codex:') ? codexModel : `codex:${codexModel}`;
+    if (reviewChain.chain.length === 0) {
+      updateReviewChainState({ ...reviewChain, chain: [{ reviewer: cleanCodex, mode: 'final' }] }, true);
+    } else {
+      const updated = [...reviewChain.chain];
+      updated[updated.length - 1] = { reviewer: cleanCodex, mode: 'final' };
+      updateReviewChainState({ ...reviewChain, chain: updated }, true);
+    }
+  };
 
   const handleEnvChange = (val: string) => {
     setDraftEnvTemplate(val);
@@ -679,6 +902,24 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       JSON.stringify(origSettings.integration),
     [draftSettings.integration, origSettings.integration],
   );
+  const openprojectChanged = useMemo(
+    () =>
+      JSON.stringify(draftSettings.openproject) !==
+      JSON.stringify(origSettings.openproject),
+    [draftSettings.openproject, origSettings.openproject],
+  );
+  const giteaChanged = useMemo(
+    () =>
+      JSON.stringify(draftSettings.gitea) !==
+      JSON.stringify(origSettings.gitea),
+    [draftSettings.gitea, origSettings.gitea],
+  );
+  const remoteDeployChanged = useMemo(
+    () =>
+      JSON.stringify(draftSettings.remoteDeploy) !==
+      JSON.stringify(origSettings.remoteDeploy),
+    [draftSettings.remoteDeploy, origSettings.remoteDeploy],
+  );
   const referencesChanged = useMemo(
     () =>
       JSON.stringify(draftSettings.references) !==
@@ -755,6 +996,9 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     if (JSON.stringify(draftSettings.commitConvention) !== JSON.stringify(origSettings.commitConvention)) count++;
     if (worktreeChanged) count++;
     if (integrationChanged) count++;
+    if (openprojectChanged) count++;
+    if (giteaChanged) count++;
+    if (remoteDeployChanged) count++;
     if (referencesChanged) count++;
     if (checklistChanged) count++;
     if (notificationsChanged) count++;
@@ -772,6 +1016,9 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     origSettings.commitConvention,
     worktreeChanged,
     integrationChanged,
+    openprojectChanged,
+    giteaChanged,
+    remoteDeployChanged,
     referencesChanged,
     checklistChanged,
     notificationsChanged,
@@ -807,6 +1054,21 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       });
       setToastMessage(t('projects.saveSuccessToast'));
       setTimeout(() => setToastMessage(null), 3000);
+    },
+  });
+
+  const giteaStatus = useQuery({ queryKey: ['gitea-status', project?.id], queryFn: () => getGiteaStatus(project!.id), enabled: Boolean(isOpen && project?.id), refetchInterval: 10_000 });
+  const remoteDeployStatus = useQuery({ queryKey: ['remote-deploy-status', project?.id], queryFn: () => getRemoteDeployStatus(project!.id), enabled: Boolean(isOpen && project?.id), refetchInterval: 10_000 });
+  const giteaSyncMutation = useMutation({ mutationFn: () => syncGitea(project!.id), onSuccess: () => giteaStatus.refetch() });
+  const deployNowMutation = useMutation({ mutationFn: () => triggerRemoteDeploy(project!.id), onSuccess: () => remoteDeployStatus.refetch() });
+  const saveGiteaTokenMutation = useMutation({ mutationFn: () => saveGiteaToken(project!.id, giteaToken), onSuccess: () => setGiteaToken('') });
+  const saveDeployEnvMutation = useMutation({
+    mutationFn: () => saveRemoteDeployEnv(project!.id, parseDeployEnv(deployEnv)),
+    onSuccess: (res) => {
+      const parsedKeys = Object.keys(parseDeployEnv(deployEnv));
+      const keys = Array.isArray(res) ? res : (res as any)?.keys || parsedKeys;
+      setSavedDeployKeys(keys);
+      setDeployEnv('');
     },
   });
 
@@ -881,6 +1143,15 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
           setSectionErrors((prev) => ({ ...prev, integration: `${t('projects.integrationBaseRef')}: ${err}` }));
           return;
         }
+      }
+    }
+
+    if (draftSettings.gitea?.enabled && draftSettings.gitea.schedule) {
+      const timeRegex = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+      const invalid = draftSettings.gitea.schedule.some((slot) => !timeRegex.test(slot));
+      if (invalid) {
+        setSectionErrors((prev) => ({ ...prev, gitea: t('integrations.invalidScheduleTime') }));
+        return;
       }
     }
 
@@ -1203,20 +1474,408 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
             </div>
           </Card>
 
-          <Card className="p-5 space-y-2">
-            <label className="text-xs font-semibold text-[var(--t-text)]" htmlFor="project-department">
-              {t('departments.department')}
-            </label>
-            <select
-              id="project-department"
-              value={draftDepartmentId}
-              onChange={(event) => setDraftDepartmentId(event.target.value)}
-              className="w-full rounded-lg border border-[var(--t-border)] p-2.5 bg-[var(--t-surface-2)] text-sm"
-            >
-              {departments.map((department) => (
-                <option key={department.id} value={department.id}>{department.name}</option>
-              ))}
-            </select>
+          {/* Section 1: Preset & Phòng ban */}
+          <Card className="p-5 space-y-4" data-testid="project-preset-department">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-[var(--t-text)]">{t('projects.presetTitle')}</h3>
+                <p className="text-xs text-[var(--t-text-3)]">{t('projects.presetSubtitle')}</p>
+              </div>
+              <span className="text-xs px-2 py-0.5 rounded bg-[var(--t-surface-2)] border border-[var(--t-border)] font-mono text-[var(--t-text-2)]">
+                {t('projects.presetTitle')}: {draftSettings.preset || effectiveConfig?.preset || 'custom'}
+              </span>
+            </div>
+
+            {/* Presets Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5" data-testid="project-presets-list">
+              {(['safe', 'balanced', 'auto'] as const).map((level) => {
+                const pDef = presets.find((p) => p.id === level);
+                const title = pDef?.name?.[locale as 'vi' | 'en'] || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}`);
+                const desc = pDef?.description?.[locale as 'vi' | 'en'] || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}Desc`);
+                const isCurrent = (draftSettings.preset || effectiveConfig?.preset) === level;
+                return (
+                  <div
+                    key={level}
+                    data-testid={`project-preset-card-${level}`}
+                    className={`rounded-xl border p-3 space-y-2 transition-all flex flex-col justify-between ${
+                      isCurrent
+                        ? 'border-[var(--t-accent)] bg-[color-mix(in_srgb,var(--t-accent)_8%,transparent)] ring-1 ring-[var(--t-accent)]'
+                        : 'border-[var(--t-border)] bg-[var(--t-surface-2)]'
+                    }`}
+                  >
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-xs text-[var(--t-text)]">{title}</span>
+                        {isCurrent && (
+                          <span className="text-[10px] text-[var(--t-accent)] font-semibold uppercase">✓</span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-[var(--t-text-3)] line-clamp-2">{desc}</p>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={isCurrent ? 'secondary' : 'primary'}
+                      onClick={() => applyPresetForProject.mutate(level)}
+                      disabled={applyPresetForProject.isPending}
+                      className="w-full text-xs h-7 mt-1"
+                    >
+                      {applyPresetForProject.isPending && applyPresetForProject.variables === level
+                        ? t('settings.presetApplying')
+                        : isCurrent
+                        ? t('common.details')
+                        : t('settings.presetApplyBtn')}
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Department selector */}
+            <div className="pt-2 border-t border-[var(--t-border)] space-y-1.5">
+              <label className="text-xs font-semibold text-[var(--t-text)]" htmlFor="project-department">
+                {t('departments.department')}
+              </label>
+              <select
+                id="project-department"
+                data-testid="project-department-select"
+                value={draftDepartmentId}
+                onChange={(event) => setDraftDepartmentId(event.target.value)}
+                className="w-full rounded-lg border border-[var(--t-border)] p-2 bg-[var(--t-surface-2)] text-xs text-[var(--t-text)]"
+              >
+                {allDepartments.map((department) => (
+                  <option key={department.id} value={department.id}>{department.name}</option>
+                ))}
+              </select>
+            </div>
+          </Card>
+
+          {/* Section 2: Cấu hình hiệu lực */}
+          <Card className="p-5 space-y-3" data-testid="effective-config-section">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-[var(--t-text)] flex items-center gap-2">
+                  <Terminal className="w-4 h-4 text-[var(--t-accent)]" />
+                  <span>{t('projects.effectiveConfigTitle')}</span>
+                </h3>
+                <p className="text-xs text-[var(--t-text-3)]">
+                  {t('projects.presetSubtitle')}
+                </p>
+              </div>
+              <span className="text-xs px-2 py-0.5 rounded bg-[var(--t-surface-2)] text-[var(--t-text-2)] font-mono">
+                {effectiveConfig?.preset || 'custom'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+              {/* Brain Mode */}
+              <div className="p-2.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] flex items-center justify-between">
+                <div>
+                  <span className="text-[var(--t-text-3)] block">{t('projects.brainMode')}</span>
+                  <span className="font-medium text-[var(--t-text)]">
+                    {effectiveConfig?.brain?.mode?.value || draftSettings.brain.mode || 'inherit'}
+                  </span>
+                </div>
+                <span
+                  data-testid="effective-source-brainMode"
+                  className={`text-[10px] px-2 py-0.5 rounded font-medium ${
+                    effectiveConfig?.brain?.mode?.source === 'project'
+                      ? 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
+                      : effectiveConfig?.brain?.mode?.source === 'department'
+                      ? 'bg-[var(--t-surface)] text-[var(--t-accent)] border border-[var(--t-border)]'
+                      : 'bg-[var(--t-border)] text-[var(--t-text-2)]'
+                  }`}
+                >
+                  {effectiveConfig?.brain?.mode?.source
+                    ? t(`projects.source${effectiveConfig.brain.mode.source.charAt(0).toUpperCase() + effectiveConfig.brain.mode.source.slice(1)}`)
+                    : t('projects.sourceGlobal')}
+                </span>
+              </div>
+
+              {/* Brain Permissions */}
+              <div className="p-2.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] flex items-center justify-between">
+                <div>
+                  <span className="text-[var(--t-text-3)] block">{t('projects.brainPermissions')}</span>
+                  <span className="font-medium text-[var(--t-text)]">
+                    {effectiveConfig?.brain?.permissions?.value || draftSettings.brain.permissions || 'standard'}
+                  </span>
+                </div>
+                <span
+                  data-testid="effective-source-permissions"
+                  className={`text-[10px] px-2 py-0.5 rounded font-medium ${
+                    effectiveConfig?.brain?.permissions?.source === 'project'
+                      ? 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
+                      : effectiveConfig?.brain?.permissions?.source === 'department'
+                      ? 'bg-[var(--t-surface)] text-[var(--t-accent)] border border-[var(--t-border)]'
+                      : 'bg-[var(--t-border)] text-[var(--t-text-2)]'
+                  }`}
+                >
+                  {effectiveConfig?.brain?.permissions?.source
+                    ? t(`projects.source${effectiveConfig.brain.permissions.source.charAt(0).toUpperCase() + effectiveConfig.brain.permissions.source.slice(1)}`)
+                    : t('projects.sourceGlobal')}
+                </span>
+              </div>
+
+              {/* Brain Engine & Model */}
+              <div className="p-2.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] flex items-center justify-between">
+                <div>
+                  <span className="text-[var(--t-text-3)] block">{t('projects.brainEngine')}</span>
+                  <span className="font-medium text-[var(--t-text)]">
+                    {effectiveConfig?.brain?.engine?.value || 'claude'} ({effectiveConfig?.brain?.model?.value || 'sonnet'})
+                  </span>
+                </div>
+                <span
+                  data-testid="effective-source-engine"
+                  className={`text-[10px] px-2 py-0.5 rounded font-medium ${
+                    effectiveConfig?.brain?.engine?.source === 'project'
+                      ? 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
+                      : effectiveConfig?.brain?.engine?.source === 'department'
+                      ? 'bg-[var(--t-surface)] text-[var(--t-accent)] border border-[var(--t-border)]'
+                      : 'bg-[var(--t-border)] text-[var(--t-text-2)]'
+                  }`}
+                >
+                  {effectiveConfig?.brain?.engine?.source
+                    ? t(`projects.source${effectiveConfig.brain.engine.source.charAt(0).toUpperCase() + effectiveConfig.brain.engine.source.slice(1)}`)
+                    : t('projects.sourceGlobal')}
+                </span>
+              </div>
+
+              {/* Review Chain */}
+              <div className="p-2.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] flex items-center justify-between">
+                <div>
+                  <span className="text-[var(--t-text-3)] block">{t('settings.reviewChainTitle')}</span>
+                  <span className="font-medium text-[var(--t-text)]">
+                    {(effectiveConfig?.review?.chain?.value || reviewChain.chain).length} {t('projects.reviewStepsCount')}
+                  </span>
+                </div>
+                <span
+                  data-testid="effective-source-chain"
+                  className={`text-[10px] px-2 py-0.5 rounded font-medium ${
+                    effectiveConfig?.review?.chain?.source === 'project'
+                      ? 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
+                      : 'bg-[var(--t-border)] text-[var(--t-text-2)]'
+                  }`}
+                >
+                  {effectiveConfig?.review?.chain?.source
+                    ? t(`projects.source${effectiveConfig.review.chain.source.charAt(0).toUpperCase() + effectiveConfig.review.chain.source.slice(1)}`)
+                    : t('projects.sourceGlobal')}
+                </span>
+              </div>
+            </div>
+          </Card>
+
+          {/* Section 3: Review & Tự động merge */}
+          <Card className="p-5 space-y-5" data-testid="project-review-automerge-section">
+            {/* Khối Tự động merge & Checklist autoMergeReadiness */}
+            <div className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface-2)] p-4 space-y-3" data-testid="automerge-checklist">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <h4 className="text-sm font-bold text-[var(--t-text)]">{t('projects.autoMergeSectionTitle')}</h4>
+                  <span
+                    data-testid="automerge-readiness-badge"
+                    className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
+                      effectiveConfig?.autoMergeReadiness?.ready
+                        ? 'bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)] text-[var(--t-ok)] border border-[var(--t-ok)]/30'
+                        : 'bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)] border border-[var(--t-crit)]/30'
+                    }`}
+                  >
+                    {effectiveConfig?.autoMergeReadiness?.ready
+                      ? t('projects.autoMergeReady')
+                      : t('projects.autoMergeNotReady')}
+                  </span>
+                </div>
+                <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    data-testid="automerge-toggle-checkbox"
+                    checked={Boolean(draftSettings.review?.autoMerge || draftSettings.integration?.autoMerge)}
+                    onChange={(e) => {
+                      setDraftSettings((prev) => ({
+                        ...prev,
+                        review: { ...prev.review, autoMerge: e.target.checked },
+                        integration: { ...prev.integration, autoMerge: e.target.checked },
+                      }));
+                    }}
+                  />
+                  <span>{t('projects.reviewAutoMerge')}</span>
+                </label>
+              </div>
+
+              {/* Checklist autoMergeReadiness */}
+              <div className="space-y-2 pt-2 border-t border-[var(--t-border)]">
+                <span className="text-xs font-semibold text-[var(--t-text-2)]">{t('projects.autoMergeReadinessTitle')}</span>
+
+                {/* 1. Chain */}
+                <div className="flex items-center justify-between text-xs p-2 rounded bg-[var(--t-surface)] border border-[var(--t-border)]">
+                  <div className="flex items-center gap-2">
+                    {reviewChain.chain.length > 0 && reviewChain.chain[reviewChain.chain.length - 1].reviewer.startsWith('codex:') ? (
+                      <CheckCircle2 className="w-4 h-4 text-[var(--t-ok)] shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-[var(--t-crit)] shrink-0" />
+                    )}
+                    <span>{t('projects.autoMergeRuleChain')}</span>
+                  </div>
+                  {(!reviewChain.chain.length || !reviewChain.chain[reviewChain.chain.length - 1].reviewer.startsWith('codex:')) && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      data-testid="automerge-fix-chain"
+                      onClick={quickFixChain}
+                      className="text-xs text-[var(--t-accent)] h-6 px-2"
+                    >
+                      {t('projects.autoMergeFixBtn')}
+                    </Button>
+                  )}
+                </div>
+
+                {/* 2. Checks */}
+                <div className="flex items-center justify-between text-xs p-2 rounded bg-[var(--t-surface)] border border-[var(--t-border)]">
+                  <div className="flex items-center gap-2">
+                    {structuredChecks.length > 0 ? (
+                      <CheckCircle2 className="w-4 h-4 text-[var(--t-ok)] shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-[var(--t-crit)] shrink-0" />
+                    )}
+                    <span>{t('projects.autoMergeRuleChecks')}</span>
+                  </div>
+                  {structuredChecks.length === 0 && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      data-testid="automerge-fix-checks"
+                      onClick={quickFixChecks}
+                      className="text-xs text-[var(--t-accent)] h-6 px-2"
+                    >
+                      {t('projects.autoMergeFixBtn')}
+                    </Button>
+                  )}
+                </div>
+
+                {/* 3. AutoMerge enabled */}
+                <div className="flex items-center justify-between text-xs p-2 rounded bg-[var(--t-surface)] border border-[var(--t-border)]">
+                  <div className="flex items-center gap-2">
+                    {Boolean(draftSettings.review?.autoMerge || draftSettings.integration?.autoMerge) ? (
+                      <CheckCircle2 className="w-4 h-4 text-[var(--t-ok)] shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-[var(--t-crit)] shrink-0" />
+                    )}
+                    <span>{t('projects.autoMergeRuleEnabled')}</span>
+                  </div>
+                  {!Boolean(draftSettings.review?.autoMerge || draftSettings.integration?.autoMerge) && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      data-testid="automerge-fix-automerge"
+                      onClick={quickFixAutoMerge}
+                      className="text-xs text-[var(--t-accent)] h-6 px-2"
+                    >
+                      {t('projects.autoMergeFixBtn')}
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {effectiveConfig?.autoMergeReadiness?.missing && effectiveConfig.autoMergeReadiness.missing.length > 0 && (
+                <div className="p-2 rounded bg-[color-mix(in_srgb,var(--t-crit)_8%,transparent)] text-[11px] text-[var(--t-crit)] space-y-0.5">
+                  {effectiveConfig.autoMergeReadiness.missing.map((msg: string, i: number) => (
+                    <div key={i}>• {msg}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Form Checks có cấu trúc */}
+            <div className="space-y-3" data-testid="structured-checks-form">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-sm font-bold text-[var(--t-text)]">{t('projects.structuredChecksTitle')}</h4>
+                  <p className="text-xs text-[var(--t-text-3)]">{t('projects.checksInfo')}</p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  data-testid="add-check-row-btn"
+                  onClick={addStructuredCheck}
+                  className="text-xs h-7 gap-1"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  {t('projects.addCheckBtn')}
+                </Button>
+              </div>
+
+              {structuredChecks.length === 0 ? (
+                <p className="text-xs text-[var(--t-text-3)] italic py-2">
+                  {t('projects.noChecksConfigured')}
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {structuredChecks.map((item, idx) => (
+                    <div
+                      key={idx}
+                      data-testid={`check-row-${idx}`}
+                      className="p-3 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] space-y-2"
+                    >
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                        <div className="sm:col-span-4 space-y-1">
+                          <label className="text-[10px] uppercase font-semibold text-[var(--t-text-3)]">
+                            {t('projects.checkNameLabel')}
+                          </label>
+                          <input
+                            type="text"
+                            data-testid={`check-name-${idx}`}
+                            value={item.name}
+                            onChange={(e) => updateStructuredCheck(idx, { name: e.target.value })}
+                            placeholder="lint / test"
+                            className="w-full text-xs rounded border border-[var(--t-border)] bg-[var(--t-surface)] px-2.5 py-1.5 text-[var(--t-text)]"
+                          />
+                        </div>
+                        <div className="sm:col-span-5 space-y-1">
+                          <label className="text-[10px] uppercase font-semibold text-[var(--t-text-3)]">
+                            {t('projects.checkCmdLabel')}
+                          </label>
+                          <input
+                            type="text"
+                            data-testid={`check-cmd-${idx}`}
+                            value={item.cmd}
+                            onChange={(e) => updateStructuredCheck(idx, { cmd: e.target.value })}
+                            placeholder="npm run lint"
+                            className="w-full text-xs font-mono rounded border border-[var(--t-border)] bg-[var(--t-surface)] px-2.5 py-1.5 text-[var(--t-text)]"
+                          />
+                        </div>
+                        <div className="sm:col-span-2 space-y-1">
+                          <label className="text-[10px] uppercase font-semibold text-[var(--t-text-3)]">
+                            {t('projects.checkTimeoutLabel')}
+                          </label>
+                          <input
+                            type="number"
+                            data-testid={`check-timeout-${idx}`}
+                            value={item.timeoutSec ?? 120}
+                            onChange={(e) => updateStructuredCheck(idx, { timeoutSec: Number(e.target.value) || undefined })}
+                            className="w-full text-xs rounded border border-[var(--t-border)] bg-[var(--t-surface)] px-2 py-1.5 text-[var(--t-text)] font-mono"
+                          />
+                        </div>
+                        <div className="sm:col-span-1 flex justify-end pt-4 sm:pt-0">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            data-testid={`delete-check-${idx}`}
+                            onClick={() => removeStructuredCheck(idx)}
+                            className="h-7 w-7 p-0 text-[var(--t-crit)] hover:bg-[color-mix(in_srgb,var(--t-crit)_10%,transparent)]"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </Card>
 
           {/* Section 1: Bộ não (Brain) */}
@@ -1550,6 +2209,22 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                     >
                       {t('projects.worktreeSkip')}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDraftSettings((prev) => ({
+                          ...prev,
+                          worktree: { ...prev.worktree, install: 'worker' },
+                        }))
+                      }
+                      className={`px-3 py-1 text-xs font-medium rounded-md cursor-pointer transition-colors ${
+                        draftSettings.worktree.install === 'worker'
+                          ? 'bg-[var(--t-accent)] text-[var(--t-on-accent)] shadow-xs'
+                          : 'text-[var(--t-text-2)] hover:text-[var(--t-text)]'
+                      }`}
+                    >
+                      {t('projects.worktreeWorker')}
+                    </button>
                   </div>
                 </div>
                 <p className="text-[11px] text-[var(--t-text-3)] leading-relaxed">
@@ -1801,6 +2476,83 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 </div>
               )}
             </div>
+          </Card>
+
+          <Card className="p-5 space-y-4" data-testid="project-openproject-section">
+            <h3 className="text-sm font-bold">{t('integrations.projectOpenProject')}</h3>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(draftSettings.openproject?.enabled)} onChange={(e) => setDraftSettings((p) => ({ ...p, openproject: { ...p.openproject!, enabled: e.target.checked } }))} />{t('integrations.enabled')}</label>
+            <div className="grid gap-3 sm:grid-cols-2"><label className="text-xs space-y-1"><span>{t('integrations.source')}</span><select value={draftSettings.openproject?.sourceId || ''} onChange={(e) => setDraftSettings((p) => ({ ...p, openproject: { ...p.openproject!, sourceId: e.target.value || null } }))} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2"><option value="">—</option>{openProjectSources.map((s) => <option key={s.id} value={s.id}>{s.id}</option>)}</select></label><label className="text-xs space-y-1"><span>{t('integrations.role')}</span><select value={draftSettings.openproject?.role || 'primary'} onChange={(e) => setDraftSettings((p) => ({ ...p, openproject: { ...p.openproject!, role: e.target.value as 'primary' | 'secondary' } }))} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2"><option value="primary">primary</option><option value="secondary">secondary</option></select></label></div>
+          </Card>
+
+          <Card className="p-5 space-y-4" data-testid="project-gitea-section">
+            <h3 className="text-sm font-bold">Gitea</h3>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(draftSettings.gitea?.enabled)} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, enabled: e.target.checked } }))} />{t('integrations.enabled')}</label>
+            {sectionErrors.gitea && (
+              <div className="rounded border border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_10%,transparent)] p-2 text-xs text-[var(--t-crit)]">
+                {sectionErrors.gitea}
+              </div>
+            )}
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Input ariaLabel="Gitea URL" value={draftSettings.gitea?.url || ''} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, url: e.target.value } }))} placeholder="https://gitea.example" />
+              <Input ariaLabel={t('integrations.sourceBranch')} value={draftSettings.gitea?.sourceBranch || ''} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, sourceBranch: e.target.value } }))} />
+              <Input ariaLabel={t('integrations.targetBranch')} value={draftSettings.gitea?.targetBranch || ''} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, targetBranch: e.target.value } }))} />
+            </div>
+            <div className="space-y-2 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-3" data-testid="gitea-schedule-section">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-[var(--t-text)]">{t('integrations.schedule')}</span>
+                <button
+                  type="button"
+                  data-testid="add-gitea-schedule-slot"
+                  onClick={() => {
+                    const next = [...(draftSettings.gitea?.schedule || []), '12:00'];
+                    setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, schedule: next } }));
+                  }}
+                  className="inline-flex items-center gap-1 rounded border border-dashed border-[var(--t-border)] px-2 py-0.5 text-xs text-[var(--t-accent)] hover:border-[var(--t-accent)] cursor-pointer"
+                >
+                  <Plus className="h-3 w-3" /> {t('integrations.addScheduleTime')}
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2" data-testid="gitea-schedule-list">
+                {(draftSettings.gitea?.schedule || []).map((slot, idx) => (
+                  <div key={idx} className="flex items-center gap-1 rounded border border-[var(--t-border)] bg-[var(--t-surface)] px-2 py-1">
+                    <input
+                      type="time"
+                      aria-label={`${t('integrations.schedule')} ${idx + 1}`}
+                      value={slot}
+                      onChange={(e) => {
+                        const next = [...(draftSettings.gitea?.schedule || [])];
+                        next[idx] = e.target.value;
+                        setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, schedule: next } }));
+                      }}
+                      className="bg-transparent text-xs font-mono text-[var(--t-text)] focus:outline-hidden"
+                    />
+                    <button
+                      type="button"
+                      aria-label={`${t('integrations.removeScheduleTime')} ${idx + 1}`}
+                      onClick={() => {
+                        const next = (draftSettings.gitea?.schedule || []).filter((_, i) => i !== idx);
+                        setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, schedule: next } }));
+                      }}
+                      className="p-0.5 text-[var(--t-text-3)] hover:text-[var(--t-crit)] cursor-pointer"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <label className="flex gap-2 text-xs"><input type="checkbox" checked={Boolean(draftSettings.gitea?.weekdaysOnly)} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, weekdaysOnly: e.target.checked } }))} />{t('integrations.weekdaysOnly')}</label>
+            <label className="text-xs space-y-1 block"><span>{t('integrations.checks')}</span><textarea value={(draftSettings.gitea?.checks || []).map((argv) => argv.map((arg) => /\s/.test(arg) ? JSON.stringify(arg) : arg).join(' ')).join('\n')} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, checks: e.target.value.split('\n').map(parseArgv).filter((v) => v.length) } }))} rows={3} placeholder="npm test -- --run" className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2 font-mono" /></label>
+            <Input ariaLabel={t('integrations.unionMergeGlobs')} value={(draftSettings.gitea?.unionMergeGlobs || []).join(', ')} onChange={(e) => setDraftSettings((p) => ({ ...p, gitea: { ...p.gitea!, unionMergeGlobs: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) } }))} placeholder="src/**, docs/**" />
+            <div className="flex gap-2"><Input type="password" ariaLabel={t('integrations.token')} value={giteaToken} onChange={(e) => setGiteaToken(e.target.value)} placeholder={t('integrations.writeOnly')} /><Button type="button" size="sm" variant="secondary" data-testid="save-gitea-token-button" onClick={() => saveGiteaTokenMutation.mutate()} disabled={!giteaToken}>{t('integrations.saveSecret')}</Button><Button type="button" size="sm" variant="secondary" data-testid="sync-gitea-button" onClick={() => giteaSyncMutation.mutate()}>{t('integrations.syncNow')}</Button></div><p className="text-xs text-[var(--t-text-3)]">{t('integrations.lastSync')}: {giteaStatus.data?.status || '—'}</p>
+          </Card>
+
+          <Card className="p-5 space-y-4" data-testid="project-remote-deploy-section">
+            <h3 className="text-sm font-bold">{t('integrations.remoteDeploy')}</h3><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(draftSettings.remoteDeploy?.enabled)} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, enabled: e.target.checked } }))} />{t('integrations.enabled')}</label>
+            <div className="grid gap-3 sm:grid-cols-2"><label className="text-xs space-y-1"><span>{t('integrations.trigger')}</span><select value={draftSettings.remoteDeploy?.trigger || 'manual'} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, trigger: e.target.value as 'manual' | 'after-gitea-sync' } }))} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2"><option value="manual">manual</option><option value="after-gitea-sync">after-gitea-sync</option></select></label><Input type="number" ariaLabel={t('integrations.waitMinutes')} value={draftSettings.remoteDeploy?.waitMinutes ?? 15} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, waitMinutes: Number(e.target.value) } }))} /></div>
+            <label className="text-xs space-y-1 block"><span>{t('integrations.steps')}</span><textarea value={(draftSettings.remoteDeploy?.steps || []).map((argv) => argv.map((arg) => /\s/.test(arg) ? JSON.stringify(arg) : arg).join(' ')).join('\n')} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, steps: e.target.value.split('\n').map(parseArgv).filter((v) => v.length) } }))} rows={3} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2 font-mono" /></label>
+            <label className="text-xs space-y-1 block"><span>{t('integrations.healthChecks')}</span><textarea value={(draftSettings.remoteDeploy?.healthChecks || []).map((h) => `${h.url} ${h.expectStatusBelow}${h.contains ? ` ${JSON.stringify(h.contains)}` : ''}`).join('\n')} onChange={(e) => setDraftSettings((p) => ({ ...p, remoteDeploy: { ...p.remoteDeploy!, healthChecks: e.target.value.split('\n').filter(Boolean).map((line) => { const a = parseArgv(line); return { url: a[0] || '', expectStatusBelow: Number(a[1]) || 500, ...(a[2] ? { contains: a[2] } : {}) }; }) } }))} rows={2} className="w-full rounded-lg border bg-[var(--t-surface-2)] p-2 font-mono" /></label>
+            <div className="flex gap-2"><Input type="password" ariaLabel={t('integrations.deploySecrets')} value={deployEnv} onChange={(e) => setDeployEnv(e.target.value)} placeholder="KEY=VALUE" /><Button type="button" size="sm" variant="secondary" data-testid="save-deploy-env-button" onClick={() => saveDeployEnvMutation.mutate()} disabled={!deployEnv.trim()}>{t('integrations.saveSecret')}</Button><Button type="button" size="sm" variant="secondary" data-testid="deploy-now-button" onClick={() => deployNowMutation.mutate()}>{t('integrations.deployNow')}</Button></div>{savedDeployKeys.length > 0 && <p className="text-xs text-[var(--t-text-3)]" data-testid="saved-deploy-keys">{t('integrations.savedKeys')}: {savedDeployKeys.join(', ')}</p>}<p className="text-xs text-[var(--t-text-3)]">{t('integrations.lastDeploy')}: {remoteDeployStatus.data?.status || '—'}</p>
           </Card>
 
           {/* Section 4: Tham chiếu chỉ đọc (Read-only References) */}
@@ -2056,6 +2808,49 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                   >
                     <AlertCircle className="w-3.5 h-3.5 shrink-0" />
                     <span>{checksError}</span>
+                  </p>
+                )}
+              </div>
+
+              {/* Raw JSON Review Chain (toggled) */}
+              <div className="space-y-1.5 pt-2 border-t border-[var(--t-border)]">
+                <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showRawJsonReview}
+                    onChange={(e) => setShowRawJsonReview(e.target.checked)}
+                  />
+                  <span>{t('projects.rawJsonMode')} (Review Chain)</span>
+                </label>
+                {showRawJsonReview && (
+                  <textarea
+                    data-testid="review-chain-textarea"
+                    rows={4}
+                    value={draftReview}
+                    onChange={(e) => {
+                      setDraftReview(e.target.value);
+                      try {
+                        const parsed = JSON.parse(e.target.value);
+                        if (parsed && typeof parsed === 'object') {
+                          setReviewChain({
+                            chain: Array.isArray(parsed.chain) ? parsed.chain : [],
+                            maxRounds: typeof parsed.maxRounds === 'number' ? parsed.maxRounds : 2,
+                          });
+                          setHasReviewChainOverride(true);
+                          setReviewError(null);
+                        }
+                      } catch (err: any) {
+                        setReviewError(err.message);
+                      }
+                    }}
+                    placeholder={'{"chain":[{"reviewer":"codex:gpt-5.6-luna","mode":"final"}],"maxRounds":2}'}
+                    className="w-full text-xs font-mono rounded-lg border p-2.5 bg-[var(--t-surface-2)] text-[var(--t-text)] border-[var(--t-border)]"
+                  />
+                )}
+                {reviewError && (
+                  <p className="text-xs text-[var(--t-crit)] flex items-center gap-1 mt-1">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{reviewError}</span>
                   </p>
                 )}
               </div>
@@ -2747,6 +3542,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 type="button"
                 variant="primary"
                 size="sm"
+                data-testid="save-changes-button"
                 onClick={handleSave}
                 loading={saveMutation.isPending}
                 disabled={hasValidationError || saveMutation.isPending}

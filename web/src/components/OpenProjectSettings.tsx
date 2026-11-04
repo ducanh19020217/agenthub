@@ -84,6 +84,7 @@ export const OpenProjectSettings: React.FC = () => {
   const {
     data: statuses,
     isLoading: isStatusesLoading,
+    isFetching: isStatusesFetching,
     isError: isStatusesError,
     refetch: refetchStatuses,
   } = useQuery({
@@ -102,9 +103,8 @@ export const OpenProjectSettings: React.FC = () => {
   });
 
   const saveMutation = useMutation({
-    mutationFn: async () => {
-      if (!draft) throw new Error('missing');
-      let toSave: OpenProjectSourceInput = { ...draft };
+    mutationFn: async (sourceDraft: OpenProjectSourceInput) => {
+      let toSave: OpenProjectSourceInput = { ...sourceDraft };
       for (const field of ['watchStatusIds', 'reopenedStatusIds', 'openStatusIds'] as const) {
         if (manualInputs[field] !== undefined) {
           toSave = { ...toSave, [field]: parseIdList(manualInputs[field]!) };
@@ -188,6 +188,19 @@ export const OpenProjectSettings: React.FC = () => {
           type: 'ok',
           text: t('integrations.syncBaselineSuccess', { count: res.baseline }),
         });
+      } else if (res && typeof res.watched === 'number') {
+        const count = res?.imported ?? 0;
+        if (typeof res.baseline === 'number') {
+          setMessage({
+            type: 'ok',
+            text: t('integrations.syncDetailsSuccess', { count, watched: res.watched, baseline: res.baseline }),
+          });
+        } else {
+          setMessage({
+            type: 'ok',
+            text: t('integrations.syncWatchedSuccess', { count, watched: res.watched }),
+          });
+        }
       } else {
         const count = res?.imported ?? 0;
         setMessage({
@@ -328,7 +341,7 @@ export const OpenProjectSettings: React.FC = () => {
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--t-border)] pb-2">
               <div>
                 <strong className="text-xs font-semibold">{t('integrations.statusMappingTitle')}</strong>
-                {!hasValidStatuses && !isStatusesLoading && (
+                {!hasValidStatuses && !isStatusesFetching && (
                   <p className="text-xs text-[var(--t-text-3)]" data-testid="status-picker-hint">
                     {t('integrations.saveUrlAndKeyFirst')}
                   </p>
@@ -338,17 +351,17 @@ export const OpenProjectSettings: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => refetchStatuses()}
-                  disabled={isStatusesLoading}
-                  aria-busy={isStatusesLoading ? true : undefined}
+                  disabled={isStatusesFetching}
+                  aria-busy={isStatusesFetching ? true : undefined}
                   className="rounded-lg border border-[var(--t-border)] px-2.5 py-1.5 text-xs hover:bg-[var(--t-surface-2)] disabled:opacity-50 disabled:cursor-not-allowed"
                   data-testid="reload-statuses-button"
                 >
-                  {isStatusesLoading ? (
+                  {isStatusesFetching ? (
                     <Loader2 className="inline h-3 w-3 mr-1 animate-spin" />
                   ) : (
                     <RotateCw className="inline h-3 w-3 mr-1" />
                   )}
-                  {isStatusesLoading ? t('integrations.loadingStatuses') : t('integrations.reloadStatuses')}
+                  {isStatusesFetching ? t('integrations.loadingStatuses') : t('integrations.reloadStatuses')}
                 </button>
                 {hasValidStatuses && (
                   <button
@@ -649,8 +662,10 @@ export const OpenProjectSettings: React.FC = () => {
           <div className="sm:col-span-2 flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => saveMutation.mutate()}
-              disabled={saveMutation.isPending || removeMutation.isPending}
+              onClick={() => {
+                if (draft) saveMutation.mutate(draft);
+              }}
+              disabled={saveMutation.isPending || removeMutation.isPending || !draft}
               aria-busy={saveMutation.isPending ? true : undefined}
               className="rounded-lg bg-[var(--t-accent)] px-3 py-2 text-xs text-[var(--t-on-accent)] disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
             >

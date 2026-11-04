@@ -3695,7 +3695,11 @@ export class Scheduler {
           try {
             process.kill(-reviewerRun.pid, 'SIGKILL');
           } catch {
-            try { process.kill(reviewerRun.pid, 'SIGKILL'); } catch {}
+            try {
+              process.kill(reviewerRun.pid, 'SIGKILL');
+            } catch {
+              // ignore
+            }
           }
         }
         if (reviewerRun.lockFile) {
@@ -4252,8 +4256,14 @@ export class Scheduler {
         clearTimeout(reviewerRun.timeout);
         if (reviewerRun.exitTimeout) clearTimeout(reviewerRun.exitTimeout);
         if (reviewerRun.pid) {
-          try { process.kill(-reviewerRun.pid, 'SIGKILL'); } catch {
-            try { process.kill(reviewerRun.pid, 'SIGKILL'); } catch {}
+          try {
+            process.kill(-reviewerRun.pid, 'SIGKILL');
+          } catch {
+            try {
+              process.kill(reviewerRun.pid, 'SIGKILL');
+            } catch {
+              // ignore
+            }
           }
         }
         if (reviewerRun.lockFile) {

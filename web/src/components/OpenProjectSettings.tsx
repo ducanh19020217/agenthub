@@ -6,6 +6,7 @@ import {
   deleteOpenProjectSource,
   getOpenProjectSources,
   getOpenProjectStatuses,
+  getOpenProjectTypes,
   saveOpenProjectKey,
   saveOpenProjectSource,
   syncOpenProject,
@@ -21,6 +22,8 @@ const blank = (id: string): OpenProjectSourceInput => ({
   pollIntervalSec: 120,
   watchStatusIds: [],
   reopenedStatusIds: [],
+  createTypeId: null,
+  createStatusId: null,
   resolvedStatusId: null,
   reviewStatusId: null,
   openStatusIds: [],
@@ -89,6 +92,12 @@ export const OpenProjectSettings: React.FC = () => {
   });
 
   const hasValidStatuses = Boolean(!isStatusesError && statuses && statuses.length > 0);
+  const { data: types = [] } = useQuery({
+    queryKey: ['openproject-types', draft?.id],
+    queryFn: () => getOpenProjectTypes(draft!.id),
+    enabled: canFetchStatuses,
+    retry: false,
+  });
 
   const save = useMutation({
     mutationFn: async () => {
@@ -294,6 +303,23 @@ export const OpenProjectSettings: React.FC = () => {
 
             {hasValidStatuses && statuses ? (
               <div className="space-y-3">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {(['createTypeId', 'createStatusId'] as const).map((field) => (
+                    <label key={field} className="space-y-1 text-xs">
+                      <span className="font-medium text-[var(--t-text-2)]">{t(`integrations.${field}`)}</span>
+                      <select
+                        value={draft[field] ?? ''}
+                        onChange={(e) => set({ [field]: e.target.value === '' ? null : Number(e.target.value) })}
+                        className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-xs"
+                      >
+                        <option value="">{t('integrations.noChange')}</option>
+                        {(field === 'createTypeId' ? types : statuses).map((item) => (
+                          <option key={item.id} value={item.id}>{item.name} ({item.id})</option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
                 {(['watchStatusIds', 'reopenedStatusIds', 'openStatusIds'] as const).map((field) => {
                   const knownIds = new Set(statuses.map((s) => s.id));
                   const extraIds = draft[field].filter((id) => !knownIds.has(id));

@@ -45,9 +45,11 @@ import { AppService } from '../src/services/index.js';
 
 describe('OpenProject Integration', () => {
   let tmpDir: string;
+  let prevHome: string | undefined;
   let config: AgentHubConfig;
 
   beforeEach(() => {
+    prevHome = process.env.AGENTHUB_HOME;
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-op-test-'));
     process.env.AGENTHUB_HOME = tmpDir;
     config = loadConfig(tmpDir);
@@ -55,6 +57,8 @@ describe('OpenProject Integration', () => {
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (prevHome !== undefined) process.env.AGENTHUB_HOME = prevHome;
+    else delete process.env.AGENTHUB_HOME;
     vi.restoreAllMocks();
   });
 

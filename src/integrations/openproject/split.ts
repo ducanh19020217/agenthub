@@ -17,7 +17,7 @@ export interface SplitPlanResult {
   errors: string[];
 }
 
-const PART_RE = /^###\s+(\d+)\.\s+(.+?)\s*$/;
+const PART_RE = /^###\s+(\d+)\.\s*(.+?)\s*$/;
 
 function field(lines: string[], name: string): string | undefined {
   const line = lines.find((item) => new RegExp(`^-\\s*${name}:`, 'i').test(item.trim()));
@@ -25,14 +25,19 @@ function field(lines: string[], name: string): string | undefined {
 }
 
 /** Parse the worker-facing ## Chia việc section without throwing on bad reports. */
-export function parseSplitPlan(report: string | null | undefined, maxParts = 5, defaultProject = 'primary'): SplitPlanResult {
+export function parseSplitPlan(
+  report: string | null | undefined,
+  maxParts = 5,
+  defaultProject = 'primary',
+  sourceKind: 'done' | 'blocked' = 'done',
+): SplitPlanResult {
   if (!report) return { errors: ['Thiếu báo cáo để đọc ## Chia việc'] };
   const heading = /^##\s+Chia việc\s*$/im.exec(report);
   if (!heading) return { errors: ['Thiếu mục ## Chia việc'] };
   const section = report.slice(heading.index + heading[0].length).split(/^##\s/m)[0];
   const lines = section.split(/\r?\n/);
   const starts = lines.map((line, index) => ({ line, index })).filter(({ line }) => PART_RE.test(line.trim()));
-  if (starts.length < 2) return { errors: ['## Chia việc phải có ít nhất 2 việc con'] };
+  if (starts.length < 1) return { errors: ['## Chia việc phải có ít nhất 1 việc con'] };
   if (starts.length > maxParts) return { errors: [`Kế hoạch có ${starts.length} phần; hãy gộp lại tối đa ${maxParts} phần`] };
   const errors: string[] = [];
   const parts: SplitPart[] = [];
@@ -61,7 +66,7 @@ export function parseSplitPlan(report: string | null | undefined, maxParts = 5, 
   }
   const known = new Set(parts.map((part) => part.index));
   for (const part of parts) for (const dep of part.dependsOn) if (!known.has(dep)) errors.push(`Việc ${part.index} phụ thuộc vào số không tồn tại: ${dep}`);
-  return errors.length ? { errors } : { plan: { parts, source: /^##\s+Chia việc\s*$/im.test(report.slice(0, heading.index)) ? 'blocked' : 'done' }, errors: [] };
+  return errors.length ? { errors } : { plan: { parts, source: sourceKind }, errors: [] };
 }
 
 export function splitSection(report: string | null | undefined): string | null {

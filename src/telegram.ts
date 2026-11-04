@@ -310,6 +310,7 @@ export class TelegramBotService {
   private brainWaitingNotified = new Set<string>();
   private focusDigest = new Map<string, number>();
   private reviewFallbackNotified = new Set<string>();
+  private mergeConflictNotified = new Set<string>();
 
   // Bound handler for EventBus
   private boundEventHandler: ((type: string, taskId?: string, payload?: unknown) => void) | null = null;
@@ -3587,6 +3588,34 @@ export class TelegramBotService {
     }
     if ((type === 'quota.cleared' || type === 'task.queued') && this.taskRepo) this.queueWaitingQuotaCheck(notifyAllExhausted);
 
+    if (type === 'merge.conflict') {
+      const isAutoRetried = p.autoRetried === true || (
+        p.autoRetried === undefined &&
+        typeof p.conflictCount === 'number' &&
+        p.conflictCount <= 3 &&
+        (() => {
+          if (!taskId || !this.taskRepo) return true;
+          const task = this.taskRepo.get(taskId);
+          return task && task.status !== 'cancelled';
+        })()
+      );
+      if (isAutoRetried) return;
+    }
+
+    if (type === 'merge.failed') {
+      if (p.autoFixCreated === true) return;
+      if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+        /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+      )) {
+        return;
+      }
+    }
+
+    if (taskId && /-fix-merge(?:-\d+)?$/.test(taskId)) {
+      const task = this.taskRepo?.get(taskId);
+      if (!task || task.status === 'draft') return;
+    }
+
     const projectId = taskId?.includes('/') ? taskId.slice(0, taskId.indexOf('/')) : typeof p.projectId === 'string' ? p.projectId : null;
     if (!this.eventDeduper.shouldSend(type, taskId, payload)) return;
 
@@ -4012,13 +4041,23 @@ export class TelegramBotService {
       }
 
       case 'merge.conflict': {
-        const message = typeof p.message === 'string' ? p.message : 'Xung đột khi merge tự động';
-        const taskLabel = taskId || 'Task';
-        this.broadcastMessage(`${prefix}⚠️ <b>Xung đột tự động gộp: ${this.escapeHtml(taskLabel)}</b>\n${this.escapeHtml(message)}`);
+        if (!taskId) return;
+        if (this.mergeConflictNotified.has(taskId)) return;
+        this.mergeConflictNotified.add(taskId);
+
+        const count = typeof p.conflictCount === 'number' ? p.conflictCount : 1;
+        const filesText = this.extractConflictFiles(p);
+        this.broadcastMessage(`${prefix}⚠️ ${this.escapeHtml(taskId)} xung đột merge lần thứ ${count}, cần xem: ${this.escapeHtml(filesText)}`);
         break;
       }
 
       case 'merge.failed': {
+        if (p.autoFixCreated === true) return;
+        if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+          /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+        )) {
+          return;
+        }
         const message = typeof p.message === 'string' ? p.message : 'Lỗi khi merge tự động';
         const taskLabel = taskId || 'Task';
         const title = p.environment ? 'Lỗi môi trường khi tự động gộp' : 'Lỗi tự động gộp';
@@ -4608,8 +4647,11 @@ export class TelegramBotService {
         return `${prefix}Đồng bộ Gitea thất bại: ${p?.error || ''}`;
       case 'gitea.sync.conflict':
         return `${prefix}Xung đột khi đồng bộ Gitea`;
-      case 'merge.conflict':
-        return `${prefix}Xung đột khi merge tự động (${taskId || 'task'})`;
+      case 'merge.conflict': {
+        const count = typeof p?.conflictCount === 'number' ? p.conflictCount : 1;
+        const filesText = this.extractConflictFiles((p && typeof p === 'object' ? p : {}) as Record<string, unknown>);
+        return `${prefix}⚠️ ${taskId || 'task'} xung đột merge lần thứ ${count}, cần xem: ${filesText}`;
+      }
       case 'merge.failed':
         return `${prefix}Lỗi khi merge tự động (${taskId || 'task'})`;
       case 'review.fallback':
@@ -4619,6 +4661,17 @@ export class TelegramBotService {
       default:
         return taskId ? `${prefix}${type} (${taskId})` : type;
     }
+  }
+
+  private extractConflictFiles(p: Record<string, unknown>): string {
+    if (typeof p.files === 'string' && p.files.trim()) return p.files.trim();
+    if (Array.isArray(p.files) && p.files.length > 0) return p.files.join(', ');
+    if (typeof p.message === 'string') {
+      const match = p.message.match(/Xung đột merge ở:\s*(.+)/i);
+      if (match && match[1].trim()) return match[1].trim();
+      return p.message.trim();
+    }
+    return '(không rõ file)';
   }
 
   private renderHelp(): string {

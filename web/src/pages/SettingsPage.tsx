@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getProfiles, getModelOptions, getPresets, applyPreset } from '../api/client';
 import type { ReviewerFallback, ReviewerOrderItem, PresetLevel, ApplyPresetResult } from '../types/api';
@@ -10,6 +10,7 @@ import { deletePermissionRule, getPermissionRules } from '../api/chat';
 import { useTour } from '../components/tour/TourContext';
 import { InfoTooltip } from '../components/tour/InfoTooltip';
 import { SetupChatButton } from '../components/SetupChatButton';
+import { ToastViewport, useToasts } from '../components/ui/Toast';
 import { DataTable, SelectOrCustomInput, SortableModelList } from '../components/ui';
 import {
   DEFAULT_CLAUDE_MODELS,
@@ -65,6 +66,7 @@ export const SettingsPage: React.FC = () => {
   const [desktopNotify, setDesktopNotify] = useState<boolean>(true);
   const [brainEngine, setBrainEngine] = useState<'claude' | 'codex'>('claude');
   const [codexProfile, setCodexProfile] = useState<string>('');
+  const [defaultClaudeProfile, setDefaultClaudeProfile] = useState<string>('');
   const [desktopNotifyLevel, setDesktopNotifyLevel] = useState<'all' | 'important' | 'critical' | 'off'>('important');
   const [brainMode, setBrainMode] = useState<'off' | 'suggest' | 'auto'>('suggest');
   const [brainPermissions, setBrainPermissions] = useState<'standard' | 'trusted' | 'full'>('standard');
@@ -82,8 +84,8 @@ export const SettingsPage: React.FC = () => {
   // 'none' | 'large' | 'all': how much of Claude's plan the user must approve
   const [approvalMode, setApprovalMode] = useState<'none' | 'large' | 'all'>('none');
   const [approvalMinTasks, setApprovalMinTasks] = useState<number>(5);
-  const [saveSuccess, setSaveSuccess] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const { toasts, push: pushToast, update: updateToast, dismiss: dismissToast } = useToasts();
+  const saveToastId = useRef<number | null>(null);
   const [brandingName, setBrandingName] = useState('AgentHub');
   const [brandingShortName, setBrandingShortName] = useState('AH');
   const [brandingTagline, setBrandingTagline] = useState('');
@@ -153,6 +155,9 @@ export const SettingsPage: React.FC = () => {
     () => allProfiles.filter((p) => p.engine === 'claude'),
     [allProfiles],
   );
+
+  const systemClaudeProfile = availableClaudeProfiles.find((p) => p.kind === 'system');
+  const enabledClaudeProfiles = availableClaudeProfiles.filter((p) => Boolean(p.enabled));
 
   const allClaudeOptions = useMemo(() => {
     const fromProfiles = availableClaudeProfiles.map((p) => p.name);
@@ -280,6 +285,7 @@ export const SettingsPage: React.FC = () => {
       setDesktopNotify(config.notifications?.desktop ?? true);
       setBrainEngine(config.brain?.engine || 'claude');
       setCodexProfile(config.brain?.codexProfile || '');
+      setDefaultClaudeProfile(config.brain?.claudeProfile || config.chat?.claudeProfile || '');
       setDesktopNotifyLevel(config.notifications?.desktopLevel ?? 'important');
       setBrainMode(config.brain?.mode ?? 'suggest');
       setBrainPermissions(config.brain?.permissions ?? 'standard');
@@ -310,20 +316,25 @@ export const SettingsPage: React.FC = () => {
         setApiKey('');
         setApiKeyConfigured(true);
       }
-      setSaveSuccess(true);
-      setSaveError(null);
-      setTimeout(() => setSaveSuccess(false), 3000);
+      const toast = { kind: 'success' as const, title: t('settings.saveSuccess') };
+      if (saveToastId.current !== null) updateToast(saveToastId.current, toast);
+      else pushToast(toast);
+      saveToastId.current = null;
     },
     onError: (err: any) => {
-      setSaveError(typeof err?.message === 'string' && err.message.trim() ? err.message : t('settings.saveError'));
-      setSaveSuccess(false);
+      const message = typeof err?.message === 'string' && err.message.trim() ? err.message : t('settings.saveError');
+      const toast = { kind: 'error' as const, title: t('settings.saveError'), message: message === t('settings.saveError') ? undefined : message };
+      if (saveToastId.current !== null) updateToast(saveToastId.current, toast);
+      else pushToast(toast);
+      saveToastId.current = null;
     },
   });
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    setSaveSuccess(false);
-    setSaveError(null);
+    const failValidation = (message: string) => {
+      pushToast({ kind: 'error', title: t('settings.saveError'), message });
+    };
 
     const hardModels = hardChainModels
       .map((s) => s.trim())
@@ -334,28 +345,28 @@ export const SettingsPage: React.FC = () => {
       .filter(Boolean);
 
     if (hardModels.length === 0) {
-      setSaveError(t('settings.hardChainRequired'));
+      failValidation(t('settings.hardChainRequired'));
       return;
     }
     if (easyModels.length === 0) {
-      setSaveError(t('settings.easyChainRequired'));
+      failValidation(t('settings.easyChainRequired'));
       return;
     }
 
     const invalidHard = hardModels.find((m) => validateModelSyntax(m, t));
     if (invalidHard) {
-      setSaveError(`${t('settings.hardChainLabel')}: ${validateModelSyntax(invalidHard, t)} ("${invalidHard}")`);
+      failValidation(`${t('settings.hardChainLabel')}: ${validateModelSyntax(invalidHard, t)} ("${invalidHard}")`);
       return;
     }
     const invalidEasy = easyModels.find((m) => validateModelSyntax(m, t));
     if (invalidEasy) {
-      setSaveError(`${t('settings.easyChainLabel')}: ${validateModelSyntax(invalidEasy, t)} ("${invalidEasy}")`);
+      failValidation(`${t('settings.easyChainLabel')}: ${validateModelSyntax(invalidEasy, t)} ("${invalidEasy}")`);
       return;
     }
 
     const invalidChat = validateChatModelSyntax(chatModel, t);
     if (invalidChat) {
-      setSaveError(`${t('extra.chatModel')}: ${invalidChat} ("${chatModel}")`);
+      failValidation(`${t('extra.chatModel')}: ${invalidChat} ("${chatModel}")`);
       return;
     }
 
@@ -363,27 +374,29 @@ export const SettingsPage: React.FC = () => {
       ? validateReviewerModelSyntax(reviewerModel, reviewerModel.startsWith('claude') ? 'claude' : 'codex', t)
       : null;
     if (invalidReviewer) {
-      setSaveError(`${t('extra.reviewerModel')}: ${invalidReviewer} ("${reviewerModel}")`);
+      failValidation(`${t('extra.reviewerModel')}: ${invalidReviewer} ("${reviewerModel}")`);
       return;
     }
 
     for (let i = 0; i < reviewOrder.length; i++) {
       const err = validateReviewerModelSyntax(reviewOrder[i].model, reviewOrder[i].engine, t);
       if (err) {
-        setSaveError(`${t('settings.reviewerOrder')} ${i + 1}: ${err} ("${reviewOrder[i].model}")`);
+        failValidation(`${t('settings.reviewerOrder')} ${i + 1}: ${err} ("${reviewOrder[i].model}")`);
         return;
       }
     }
 
     const invalidArbiter = validateReviewerModelSyntax(arbiter.model, arbiter.engine, t);
     if (invalidArbiter) {
-      setSaveError(`${t('settings.arbiter')}: ${invalidArbiter} ("${arbiter.model}")`);
+      failValidation(`${t('settings.arbiter')}: ${invalidArbiter} ("${arbiter.model}")`);
       return;
     }
 
     const hours = Number(timeoutHours) || 3;
     const defaultTimeout = hours * 3600;
 
+    if (saveToastId.current !== null) dismissToast(saveToastId.current);
+    saveToastId.current = pushToast({ kind: 'loading', title: t('settings.savingConfigBtn') });
     mutation.mutate({
       modelChainHard: hardModels,
       modelChainEasy: easyModels,
@@ -401,6 +414,7 @@ export const SettingsPage: React.FC = () => {
         model: chatModel,
         autoCompactPercent: Number(autoCompactPercent) || 85,
         models: chatModels,
+        claudeProfile: defaultClaudeProfile,
       },
       reviewer: {
         model: reviewerModel.trim() || undefined,
@@ -421,6 +435,7 @@ export const SettingsPage: React.FC = () => {
       },
       brain: {
         engine: brainEngine,
+        claudeProfile: defaultClaudeProfile,
         codexProfile: codexProfile.trim() || undefined,
         mode: brainMode,
         permissions: brainPermissions,
@@ -640,20 +655,6 @@ export const SettingsPage: React.FC = () => {
       </section>
 
       <OpenProjectSettings />
-
-      {saveSuccess && (
-        <div role="status" aria-live="polite" className="p-4 rounded-xl bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)] border border-[var(--t-ok)] text-[var(--t-ok)] text-sm flex items-center gap-2">
-          <CheckCircle2 className="w-5 h-5 text-[var(--t-ok)] shrink-0" />
-          <span>{t('settings.saveSuccess')}</span>
-        </div>
-      )}
-
-      {saveError && (
-        <div role="alert" aria-live="assertive" className="p-4 rounded-xl bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] border border-[var(--t-crit)] text-[var(--t-crit)] text-sm flex items-center gap-2">
-          <AlertCircle className="w-5 h-5 text-[var(--t-crit)] shrink-0" />
-          <span>{saveError}</span>
-        </div>
-      )}
 
       {isLoading ? (
         <div className="flex items-center justify-center p-12">
@@ -1497,6 +1498,35 @@ export const SettingsPage: React.FC = () => {
               )}
             </div>
 
+            <div className="py-2 border-b border-[var(--t-border)] space-y-2" data-testid="default-claude-profile">
+              <div>
+                <label htmlFor="default-claude-profile" className="text-sm font-semibold text-[var(--t-text)]">
+                  {t('settings.defaultClaudeProfileLabel')}
+                </label>
+                <p className="text-xs text-[var(--t-text-3)]">
+                  {t('settings.defaultClaudeProfileHint')}
+                </p>
+              </div>
+              <select
+                id="default-claude-profile"
+                value={defaultClaudeProfile}
+                onChange={(e) => setDefaultClaudeProfile(e.target.value)}
+                className="w-full max-w-xs rounded border border-[var(--t-border)] bg-[var(--t-surface-2)] p-2 text-xs"
+              >
+                <option value="">
+                  {systemClaudeProfile
+                    ? t('settings.defaultClaudeProfileSystem', { name: systemClaudeProfile.name })
+                    : t('settings.defaultClaudeProfileAuto')}
+                </option>
+                {enabledClaudeProfiles.map((p) => (
+                  <option key={p.name} value={p.name}>{p.name} {p.email ? `(${p.email})` : ''}</option>
+                ))}
+                {Boolean(defaultClaudeProfile) && !enabledClaudeProfiles.some((p) => p.name === defaultClaudeProfile) && (
+                  <option value={defaultClaudeProfile}>{`${defaultClaudeProfile} (${t('settings.inactiveOrOld')})`}</option>
+                )}
+              </select>
+            </div>
+
             <div className="py-2 border-b border-[var(--t-border)] space-y-2">
               <div>
                 <label className="text-sm font-semibold text-[var(--t-text)]">
@@ -1717,6 +1747,7 @@ export const SettingsPage: React.FC = () => {
           <div className="flex justify-end gap-2"><button type="button" onClick={() => setShutdownOpen(false)} className="rounded-lg border px-3 py-2 text-xs">{t('common.cancel')}</button><button type="button" onClick={() => shutdownMutation.mutate()} className="rounded-lg bg-[var(--t-crit)] px-3 py-2 text-xs text-[var(--t-on-accent)]">{t('settings.shutdownButton')}</button></div>
         </div>
       </div>}
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} closeLabel={t('common.close')} />
     </div>
   );
 };

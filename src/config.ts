@@ -765,13 +765,22 @@ export function updateConfigInMemory(
     if (patch.chat.model !== undefined) config.chat.model = patch.chat.model;
     if (patch.chat.models !== undefined) config.chat.models = [...patch.chat.models];
     if (patch.chat.permissionTimeoutSec !== undefined) config.chat.permissionTimeoutSec = patch.chat.permissionTimeoutSec;
-    if (patch.chat.claudeProfile !== undefined) config.chat.claudeProfile = patch.chat.claudeProfile;
+    if (patch.chat.claudeProfile !== undefined) {
+      // Chuỗi rỗng = quay về hồ sơ Claude hệ thống; có tên thì áp dụng ngay, không cần khởi động lại.
+      config.chat.claudeProfile = patch.chat.claudeProfile.trim();
+      config.chat.claudeProfileExplicit = config.chat.claudeProfile.length > 0;
+    }
     if (patch.chat.autoCompactPercent !== undefined) config.chat.autoCompactPercent = patch.chat.autoCompactPercent;
   }
   if (patch.brain) {
     if (patch.brain.fallback) config.brain.fallback = normalizeFallbackSteps(patch.brain.fallback);
     if (patch.brain.policy) config.brain.policy = [...patch.brain.policy];
-    if (patch.brain.claudeProfile !== undefined) config.brain.claudeProfile = patch.brain.claudeProfile;
+    if (patch.brain.claudeProfile !== undefined) {
+      // Giống lúc đọc config.json: brain để trống thì theo hồ sơ của chat.
+      const brainProfile = patch.brain.claudeProfile.trim();
+      config.brain.claudeProfile = brainProfile || config.chat.claudeProfile || 'claude-default';
+      config.brain.claudeProfileExplicit = brainProfile.length > 0 || config.chat.claudeProfileExplicit === true;
+    }
     if (patch.brain.model !== undefined) config.brain.model = patch.brain.model;
     if (patch.brain.engine !== undefined) config.brain.engine = patch.brain.engine;
     if (patch.brain.codexProfile !== undefined) config.brain.codexProfile = patch.brain.codexProfile;

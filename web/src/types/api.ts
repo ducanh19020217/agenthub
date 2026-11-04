@@ -759,6 +759,8 @@ export interface SystemConfig {
   };
   brain?: {
     engine?: 'claude' | 'codex';
+    /** Hồ sơ Claude mặc định cho brain; rỗng = hồ sơ hệ thống. */
+    claudeProfile?: string;
     codexProfile?: string;
     codexModel?: string;
     mode?: 'off' | 'suggest' | 'auto';

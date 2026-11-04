@@ -539,7 +539,7 @@ export const UpdateConfigSchema = z.object({
       z.object({ type: z.literal('wait') }),
     ])).max(10).optional(),
     policy: z.array(z.string().min(1)).max(100).optional(),
-    claudeProfile: z.string().min(1).optional(),
+    claudeProfile: z.string().optional(),
     codexProfile: z.string().min(1).optional(),
     codexModel: z.string().trim().min(1).optional(),
     model: z.enum(['', 'opus', 'sonnet', 'haiku']).optional(),
@@ -4878,7 +4878,8 @@ export class AppService {
         model: this.config.chat.model,
         autoCompactPercent: this.config.chat.autoCompactPercent ?? 85,
         models: this.config.chat.models,
-        claudeProfile: this.config.chat.claudeProfile,
+        // Chỉ trả tên khi người dùng đã chọn; rỗng nghĩa là dùng hồ sơ Claude hệ thống.
+        claudeProfile: this.config.chat.claudeProfileExplicit ? this.config.chat.claudeProfile : '',
       },
       brain: {
         engine: this.config.brain.engine || 'claude',
@@ -4890,6 +4891,7 @@ export class AppService {
         digest: this.config.brain.digest,
         fallback: this.config.brain.fallback,
         policy: this.config.brain.policy,
+        claudeProfile: this.config.brain.claudeProfileExplicit ? this.config.brain.claudeProfile : '',
         codexProfile: this.config.brain.codexProfile,
         codexModel: this.config.brain.codexModel,
         turnTimeoutSec: this.config.brain.turnTimeoutSec,

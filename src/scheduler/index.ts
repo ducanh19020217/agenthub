@@ -2523,20 +2523,29 @@ export class Scheduler {
       const model = reviewerModel(step || { reviewer: defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna', mode: 'gate' }) || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna');
       const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
       // Same model as the worker: still review, but from another Codex account in a fresh session.
+      const isPlan = task.slug.endsWith('-plan');
+      const preferDifferentEngine = isPlan ? lastWorker?.engine : undefined;
       const picked = chain.length > 0
         ? this.pickChainReviewer(task, step, model, lastWorker?.profileName)
-        : this.pickReviewer(task, lastWorker?.model === model ? lastWorker.profileName : undefined);
+        : this.pickReviewer(task, lastWorker?.model === model ? lastWorker.profileName : undefined, preferDifferentEngine);
       if ('wait' in picked) continue;
       this.startReview(task, picked.profile.name, picked.engine, picked.model, picked.engine.id === 'claude' ? 'claude-reviewer' : 'codex-reviewer');
     }
   }
 
   /** Pick the first reviewer that can run, applying project overrides and fallback policy. */
-  private pickReviewer(task: TaskRow, avoidProfile?: string): ReviewerPick {
+  private pickReviewer(task: TaskRow, avoidProfile?: string, preferDifferentEngine?: string): ReviewerPick {
     const project = this.projectRepo.get(task.projectId);
     const settings = projectSettings(project);
     const legacy = reviewerSettingsFromLegacy(this.config.reviewer as unknown as Record<string, unknown>);
-    const order: ReviewerOrderItem[] = settings.review?.order ?? legacy.order;
+    let order: ReviewerOrderItem[] = settings.review?.order ?? legacy.order;
+    if (preferDifferentEngine && order.length > 1) {
+      order = [...order].sort((a, b) => {
+        const aDiff = a.engine !== preferDifferentEngine ? 1 : 0;
+        const bDiff = b.engine !== preferDifferentEngine ? 1 : 0;
+        return bDiff - aDiff;
+      });
+    }
     const fallback: ReviewerFallback = {
       ...legacy.fallback,
       ...(settings.review?.fallback || {}),
@@ -2951,7 +2960,15 @@ export class Scheduler {
         profile,
         model: reviewerModel,
         cwd: task.worktreePath,
-        prompt: buildReviewerPrompt(task.body || task.title, task.worktreePath, checks, project ? projectSettings(project).reviewChecklist : [], project?.path, previousReviews),
+        prompt: buildReviewerPrompt(
+          task.body || task.title,
+          task.worktreePath,
+          checks,
+          project ? projectSettings(project).reviewChecklist : [],
+          project?.path,
+          previousReviews,
+          task.slug.endsWith('-plan'),
+        ),
         logPath,
         outputPath,
         readOnly: true,

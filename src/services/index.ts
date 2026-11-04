@@ -4009,7 +4009,26 @@ export class AppService {
     try {
 
     let mergeResult: { mergeCommit: string; checks: string[] } | undefined;
-    if (parsed.verdict === 'approved' && parsed.merge) {
+    const isPlan = task.slug.endsWith('-plan');
+    let shouldMerge = parsed.verdict === 'approved' && Boolean(parsed.merge) && !isPlan;
+    if (shouldMerge && task.worktreePath) {
+      const project = this.projectRepo.get(task.projectId);
+      if (project) {
+        let hasDiff = Boolean(task.diffStat && task.diffStat.trim());
+        if (!hasDiff) {
+          try {
+            const base = task.baseRef || project.defaultBranch || 'main';
+            const branch = task.branch || `agenthub/${task.slug}`;
+            execFileSync('git', ['diff', '--quiet', `${base}...${branch}`], { cwd: task.worktreePath, stdio: 'pipe' });
+            hasDiff = false;
+          } catch {
+            hasDiff = true;
+          }
+        }
+        if (!hasDiff) shouldMerge = false;
+      }
+    }
+    if (shouldMerge) {
       const project = this.projectRepo.get(task.projectId);
       if (!project) throw new HttpError(404, 'not_found', `Project "${task.projectId}" không tồn tại`);
       this.scheduler.setTaskMerging(taskId, true);

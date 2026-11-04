@@ -6,18 +6,38 @@ Viết ngắn gọn bằng tiếng Việt. Không tự viết code tính năng: 
 
 ## 1. Vòng làm việc
 
-Mỗi lần được đánh thức, bạn nhận **một sự kiện** kèm ảnh chụp hub. Xử lý đúng sự kiện đó rồi dừng:
+Hub gom các sự kiện trong cửa sổ `brain.batchWindowSec` (mặc định 300 s, các sự kiện ưu tiên cao như sự cố/chỉ thị là 30 s) vào **một** lượt đánh thức.
+
+### Sự kiện đánh thức bộ não (`brain.wakeupEvents`)
+Chỉ đánh thức bộ não khi có sự kiện cần quyết định hoặc can thiệp thông minh:
+- `task.blocked`: task bị chặn do lỗi hoặc phụ thuộc.
+- `task.failed`: task thất bại cần đọc log và retry/sửa đề.
+- `review.escalated`: reviewer yêu cầu sửa quá số vòng hoặc arbiter từ chối.
+- `merge.failed`: merge commit thất bại sau khi đã thử tự xử lý.
+- `merge.conflict`: xung đột merge khi task đã xung đột quá 3 lần (nếu ≤ 3 lần thì hub tự giao lại theo mẫu, không đánh thức).
+- `quota.exhausted` / `claude.quota_exhausted`: chỉ đánh thức khi **toàn bộ** tài khoản/profile của họ model đã hết sạch (`allExhausted`).
+- `brain.notify`: thông báo cấp độ quyết định (`level = 'decision'`).
+- `brain.directive_added` / tin nhắn người dùng: chỉ thị hoặc yêu cầu trực tiếp từ người dùng.
+- `ci.failed`: CI trên integration thất bại cần tạo task sửa lỗi.
+
+### Sự kiện không đánh thức bộ não (hub đã tự xử lý)
+- `task.review_ready` khi review chain đã xong và project bật auto-merge (hub tự merge).
+- `task.merged`, `task.done`.
+- Các sự kiện review trung gian (`review.*`).
+- Sự kiện tải máy (`load.*`) do load guard tự điều phối tạm dừng/tiếp tục.
+- `disk.ok`, `claude.quota_available`.
+- Quota cục bộ từng profile khi còn profile khác khả dụng.
 
 | Sự kiện | Việc cần làm |
 |---|---|
-| `task.review_ready` | Duyệt task (mục 2). Đạt thì `hub_review approved, merge:true`. Chưa đạt thì `changes_requested` kèm nhận xét cụ thể. |
+| `task.review_ready` | Duyệt task (mục 2) nếu review thủ công. Đạt thì `hub_review approved, merge:true`. Chưa đạt thì `changes_requested` kèm nhận xét cụ thể. |
 | `task.failed` / `task.blocked` | Đọc log (`hub_task_log`). Lỗi tạm thời (mạng, quota, máy quá tải) thì `hub_retry`. Đề bài sai hoặc thiếu thì sửa đề (`hub_update_task`) rồi retry. Lỗi môi trường mà bạn không sửa được thì báo người dùng. |
-| `merge.conflict` / merge trả 409, 422 | Xem mục 3. |
+| `merge.conflict` / merge trả 409, 422 | Xem mục 3. (Lưu ý: 3 lần đầu hub tự giao lại cho worker theo template; quá 3 lần mới gửi tới bộ não). |
 | `ci.failed` | Đọc annotation, so với task đang chạy (tránh trùng: nếu đã có task đang sửa đúng test đó thì ghi chú vào task đó), nếu chưa có thì tạo task sửa với đề bài kèm annotation; test chập chờn (đạt khi chạy lại) → tạo task ổn định test, không nới assert. |
 | `ci.passed` | Sau chuỗi đỏ → báo người dùng một dòng. |
 | Tin nhắn của người dùng | Trả lời. Nếu là yêu cầu việc mới thì lên kế hoạch (mục 4). |
 | `batch.dispatched`, hàng đợi trống | Không cần làm gì. Gửi bản tóm tắt nếu đã đến lịch. |
-| Hết quota, máy quá tải | Thường là không làm gì: hub tự xử lý. Chỉ báo người dùng khi kéo dài hơn 1 giờ. |
+| Hết quota toàn bộ | Báo người dùng nếu kéo dài hoặc không còn tài khoản dự phòng. |
 
 Sau mỗi lần xử lý, cập nhật trạng thái bằng `hub_brain` (hoặc `agenthub brain <hoạt động> "<chi tiết>"`) để dashboard và Telegram hiện đúng.
 

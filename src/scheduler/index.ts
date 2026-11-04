@@ -28,7 +28,7 @@ import { Engine, AgyEngine, CodexEngine } from '../engines/index.js';
 import { getModelFamily, getModelEngine, isKnownModel, QuotaService } from '../quota/index.js';
 import { DependencyContext, isDeletableWorktreePath, WorktreeService } from '../worktrees/index.js';
 import { ensureWorktreeNodeModules, nodeModulesCacheSummary, pruneNodeModulesCache } from '../cache.js';
-import { AgentHubConfig } from '../config.js';
+import { AgentHubConfig, DEFAULT_SCHEDULER_LIMITS } from '../config.js';
 import { ProfileLockService } from '../profiles/locks.js';
 import { sameAccount } from '../profiles/account.js';
 import { QuotaUsageService } from '../quota/usage.js';
@@ -49,6 +49,7 @@ import { measureProcessTree } from '../process-tree.js';
 import { ReferenceSnapshot, takeReferenceSnapshots, detectReferenceModifications, ReferenceModification } from '../references.js';
 import { normalizeReviewerModel, reviewerSettingsFromLegacy, type ReviewerOrderItem, type ReviewerFallback } from '../reviewer-config.js';
 import { cleanupTaskRunArtifacts } from '../temp-cleanup.js';
+import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
 
 type ActivitySource = 'log' | 'conversation' | 'worktree';
 
@@ -194,8 +195,9 @@ interface RunningTask {
   lastTicks?: number;
   lastTicksAt?: number;
   paused?: boolean;
-  pauseReason?: 'manual' | 'load' | 'focus' | null;
+  pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
   pausedAt?: number | null;
+  pauseReminded?: boolean;
   referenceSnapshots?: ReferenceSnapshot[];
 }
 
@@ -209,6 +211,12 @@ type ReviewerActor = 'codex-reviewer' | 'claude-reviewer';
 /** Automated reviewers whose verdicts drive gates, round limits and auto-merge. */
 function isAutoReviewer(by: string | undefined): by is ReviewerActor {
   return by === 'codex-reviewer' || by === 'claude-reviewer';
+}
+
+type ReviewSource = 'content' | 'operational';
+
+function isContentReview(by: string | undefined, source: ReviewSource): boolean {
+  return source === 'content' && (isAutoReviewer(by) || by === 'claude-review');
 }
 
 /** Times an arbiter rejection sends a task back before it is blocked for a person. */
@@ -257,6 +265,7 @@ export class Scheduler {
   private starting: Map<string, StartingTask> = new Map();
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
+  private inTick = false;
   private skipSchedulingOnce = false;
   private diskLow = false;
   private dockerDiskLow = false;
@@ -367,6 +376,23 @@ export class Scheduler {
     this.eventBus.on('department.changed', () => this.wakeWaitingQuotaTasks('department_changed'));
     this.eventBus.on('quota.cleared', () => this.wakeWaitingQuotaTasks('quota_cleared'));
     this.eventBus.on('claude.quota_available', () => this.wakeWaitingQuotaTasks('quota_available'));
+    this.eventBus.on('load.ok', () => {
+      if (!this.inTick) {
+        if (!this.loadGuard.isOverloaded()) {
+          const autoPaused = Array.from(this.running.values())
+            .filter((rt) => rt.paused && (rt.pauseReason === 'load' || rt.pauseReason === 'brain_load'))
+            .sort((a, b) => (a.pausedAt || 0) - (b.pausedAt || 0));
+          if (autoPaused.length > 0) {
+            const nextToResume = autoPaused[0];
+            this.resumeTask(nextToResume.taskId);
+            this.eventBus.emit('load.task_resumed', nextToResume.taskId, { reason: 'recovered' });
+          }
+        }
+        if (!this.stopped) {
+          this.triggerTick();
+        }
+      }
+    });
     this.eventBus.on('task.done', (taskId) => this.onTaskDoneOrCancelled(taskId));
     this.eventBus.on('task.cancelled', (taskId) => this.onTaskDoneOrCancelled(taskId));
     this.eventBus.on('task.queued', (taskId) => this.invalidateChecks(taskId));
@@ -571,7 +597,7 @@ export class Scheduler {
     return this.paused;
   }
 
-  pauseTask(taskId: string, reason: 'manual' | 'load' | 'focus' = 'manual'): boolean {
+  pauseTask(taskId: string, reason: 'manual' | 'load' | 'brain_load' | 'focus' = 'manual'): boolean {
     const rt = this.running.get(taskId);
     if (!rt) return false;
     if (rt.paused) return true;
@@ -589,6 +615,7 @@ export class Scheduler {
     rt.paused = true;
     rt.pauseReason = reason;
     rt.pausedAt = Date.now();
+    rt.pauseReminded = false;
 
     this.eventBus.emit('task.paused', taskId, { reason, runId: rt.runId });
     return true;
@@ -617,6 +644,7 @@ export class Scheduler {
     rt.paused = false;
     rt.pauseReason = null;
     rt.pausedAt = null;
+    rt.pauseReminded = false;
     rt.lastActivityAt = Date.now();
     rt.lastOutputAt = Date.now();
     if (rt.lastCommitCheckAt) {
@@ -1155,34 +1183,36 @@ export class Scheduler {
    * Main scheduler tick
    */
   tick(): void {
-    this.loadGuard.setConfig(this.config.load);
-    const load = this.loadGuard.update();
-    const now = Date.now();
-    if (load.overloaded !== this.lastLoadOverloaded) {
-      this.lastLoadOverloaded = load.overloaded;
-      this.eventBus.emit(load.overloaded ? 'load.high' : 'load.ok', undefined, load);
-      if (load.overloaded) {
+    if (this.inTick) return;
+    this.inTick = true;
+    try {
+      this.loadGuard.setConfig(this.config.load);
+      const load = this.loadGuard.update();
+      const now = Date.now();
+      if (load.overloaded !== this.lastLoadOverloaded) {
+        this.lastLoadOverloaded = load.overloaded;
+        this.eventBus.emit(load.overloaded ? 'load.high' : 'load.ok', undefined, load);
+        if (load.overloaded) {
+          this.lastLoadHighEventAt = now;
+          this.lastLoadHighEventSnapshot = load;
+        } else {
+          this.lastLoadHighEventAt = null;
+          this.lastLoadHighEventSnapshot = null;
+        }
+      } else if (load.overloaded && this.lastLoadHighEventAt !== null && this.lastLoadHighEventSnapshot !== null
+        && now - this.lastLoadHighEventAt >= 30 * 60 * 1000
+        && ((load.load1 > this.lastLoadHighEventSnapshot.load1
+          && load.load1 >= this.lastLoadHighEventSnapshot.load1 * 1.3)
+          || this.lastLoadHighEventSnapshot.freeMemGB - load.freeMemGB > 1)) {
+        this.eventBus.emit('load.high', undefined, load);
         this.lastLoadHighEventAt = now;
         this.lastLoadHighEventSnapshot = load;
-      } else {
-        this.lastLoadHighEventAt = null;
-        this.lastLoadHighEventSnapshot = null;
       }
-    } else if (load.overloaded && this.lastLoadHighEventAt !== null && this.lastLoadHighEventSnapshot !== null
-      && now - this.lastLoadHighEventAt >= 30 * 60 * 1000
-      && ((load.load1 > this.lastLoadHighEventSnapshot.load1
-        && load.load1 >= this.lastLoadHighEventSnapshot.load1 * 1.3)
-        || this.lastLoadHighEventSnapshot.freeMemGB - load.freeMemGB > 1)) {
-      this.eventBus.emit('load.high', undefined, load);
-      this.lastLoadHighEventAt = now;
-      this.lastLoadHighEventSnapshot = load;
-    }
 
-    // Auto-pause / resume by load guard
-    if (this.config.load.enabled) {
-      if (this.loadGuard.isAutoPauseTriggered()) {
+      // Auto-pause / resume by load guard
+      if (this.config.load.enabled && this.loadGuard.isAutoPauseTriggered()) {
         const maxAutoPaused = this.config.load.maxAutoPaused ?? 2;
-        const autoPausedCount = Array.from(this.running.values()).filter((rt) => rt.paused && rt.pauseReason === 'load').length;
+        const autoPausedCount = Array.from(this.running.values()).filter((rt) => rt.paused && (rt.pauseReason === 'load' || rt.pauseReason === 'brain_load')).length;
         if (autoPausedCount < maxAutoPaused) {
           const candidates = Array.from(this.running.values()).filter((rt) => !rt.paused);
           if (candidates.length > 0) {
@@ -1204,7 +1234,7 @@ export class Scheduler {
         }
       } else if (!this.loadGuard.isOverloaded()) {
         const autoPaused = Array.from(this.running.values())
-          .filter((rt) => rt.paused && rt.pauseReason === 'load')
+          .filter((rt) => rt.paused && (rt.pauseReason === 'load' || rt.pauseReason === 'brain_load'))
           .sort((a, b) => (a.pausedAt || 0) - (b.pausedAt || 0));
 
         if (autoPaused.length > 0) {
@@ -1213,7 +1243,30 @@ export class Scheduler {
           this.eventBus.emit('load.task_resumed', nextToResume.taskId, { reason: 'recovered' });
         }
       }
-    }
+
+      // Safety net: check tasks that have been paused longer than scheduler.maxPausedMin
+      if (!this.loadGuard.isOverloaded()) {
+        const maxPausedMin = this.config.scheduler?.maxPausedMin ?? DEFAULT_SCHEDULER_LIMITS.maxPausedMin ?? 30;
+        const maxPausedMs = maxPausedMin * 60 * 1000;
+        for (const rt of this.running.values()) {
+          if (!rt.paused || !rt.pausedAt) continue;
+          const pausedMs = now - rt.pausedAt;
+          if (pausedMs >= maxPausedMs) {
+            if (rt.pauseReason === 'load' || rt.pauseReason === 'brain_load') {
+              this.resumeTask(rt.taskId);
+              this.eventBus.emit('load.task_resumed', rt.taskId, { reason: 'recovered' });
+            } else if (!rt.pauseReminded) {
+              rt.pauseReminded = true;
+              const pausedMinutes = Math.floor(pausedMs / 60000);
+              this.eventBus.emit('task.pause_reminder', rt.taskId, {
+                pausedMinutes,
+                pausedMin: pausedMinutes,
+                reason: rt.pauseReason,
+              });
+            }
+          }
+        }
+      }
     // 0. Check disk space: if sufficient, resume any tasks waiting for disk
     const disks = this.getMonitoredDisks();
     const blockedDisk = disks.find((disk) => disk.low);
@@ -1349,6 +1402,9 @@ export class Scheduler {
       this.lastOrphanScan = Date.now();
       this.scanOrphanWorktrees();
       this.reapOrphans();
+    }
+    } finally {
+      this.inTick = false;
     }
   }
 
@@ -1979,7 +2035,7 @@ export class Scheduler {
       await this.runChecksForTask(taskId, rt.runId);
     } else if (marker === 'blocked') {
       this.runRepo.finish(rt.runId, 'blocked');
-      this.taskRepo.update(taskId, { status: 'blocked', transientRetries: 0, notBefore: null });
+      this.taskRepo.update(taskId, { status: 'blocked', blockedReport: markers.blockedContent || currentTask.blockedReport, transientRetries: 0, notBefore: null });
       this.eventBus.emit('task.blocked', taskId);
     } else if (this.hasCommitAfter(currentTask, rt.startTime)) {
       if (this.recordWorkerCrash(taskId, rt, 'resume_after_progress')) return;
@@ -2522,22 +2578,11 @@ export class Scheduler {
     return parseReviewChain(project.reviewChain);
   }
 
-  private reviewMaxRoundsForTask(task: TaskRow): number {
-    const project = this.projectRepo.get(task.projectId);
-    if (project?.review) {
-      try {
-        const value = JSON.parse(project.review) as { maxRounds?: unknown };
-        return typeof value.maxRounds === 'number' && value.maxRounds > 0 ? value.maxRounds : 2;
-      } catch {
-        return 2;
-      }
-    }
-    return this.config.reviewer?.maxChangesRequested || 2;
-  }
-
   private advanceReviewStep(task: TaskRow, chain: ReviewChainStep[], reason: string): void {
     const nextStep = (task.reviewStep ?? 0) + 1;
-    this.taskRepo.update(task.id, { reviewStep: nextStep, reviewerChangesRequested: 0 });
+    // This counter is task-scoped. Keep it across chain steps so alternating
+    // reviewers cannot reset the content-review limit.
+    this.taskRepo.update(task.id, { reviewStep: nextStep });
     if (nextStep >= chain.length || chain[nextStep]?.mode === 'final') {
       this.emitReviewReadyIfReview(task.id, { reviewChainComplete: true, reviewStep: nextStep, reason });
     } else {
@@ -2757,11 +2802,17 @@ export class Scheduler {
         runStartedAt: check.runStartedAt || 'unknown',
       }));
       const project = this.projectRepo.get(task.projectId);
+      const previousReviews = this.reviewRepo?.getByTask(task.id).map((review) => ({
+        actor: review.actor,
+        verdict: review.verdict as ReviewerVerdict,
+        feedback: review.feedback,
+        createdAt: review.createdAt,
+      })) || [];
       child = engine.spawn({
         profile,
         model: reviewerModel,
         cwd: task.worktreePath,
-        prompt: buildReviewerPrompt(task.body || task.title, task.worktreePath, checks, project ? projectSettings(project).reviewChecklist : [], project?.path),
+        prompt: buildReviewerPrompt(task.body || task.title, task.worktreePath, checks, project ? projectSettings(project).reviewChecklist : [], project?.path, previousReviews),
         logPath,
         outputPath,
         readOnly: true,
@@ -2890,16 +2941,40 @@ export class Scheduler {
     return remaining.length <= 80;
   }
 
-  private escalateReview(taskId: string, reason: string, feedback: string): void {
+  private escalateReview(taskId: string, reason: string, feedback: string, actor?: string): void {
     const task = this.taskRepo.get(taskId);
     if (!task || task.reviewerEscalated) return;
+    const allChanges = this.reviewRepo?.getByTask(taskId)
+      .filter((review) => review.verdict === 'changes_requested' && review.feedback) || [];
+    const openSections: string[] = [];
+    if (feedback) {
+      openSections.push(`[Lỗi vòng hiện tại] ${feedback}`);
+    }
+    const priorMissed = allChanges.slice(0, -1).filter((r) => r.feedback && /missed-earlier/i.test(r.feedback));
+    for (const item of priorMissed) {
+      if (item.feedback && item.feedback !== feedback) {
+        openSections.push(`[Lỗi bỏ sót ghi nhận từ vòng trước (missed-earlier - ${item.actor || 'reviewer'})] ${item.feedback}`);
+      }
+    }
+    const historyList = allChanges
+      .map((review, index) => `${index + 1}. [Lịch sử vòng ${index + 1} - ${review.actor || 'reviewer'}] ${review.feedback}`);
+    const openFeedback = [
+      ...openSections,
+      ...(historyList.length > 0 ? ['Lịch sử các vòng review:', ...historyList] : []),
+    ].join('\n\n') || feedback;
     this.taskRepo.update(taskId, {
       status: 'review',
       reviewerEscalated: 1,
       reviewerEscalatedAt: new Date().toISOString(),
       reviewerEscalationReason: reason,
     });
-    this.eventBus.emit('review.escalated', taskId, { actor: 'codex-reviewer', reason, feedback, title: task.title });
+    this.eventBus.emit('review.escalated', taskId, {
+      actor: actor || 'codex-reviewer',
+      reason,
+      feedback: openFeedback,
+      openFeedback,
+      title: task.title,
+    });
   }
 
   private areDependenciesMet(task: TaskRow): boolean {
@@ -3609,7 +3684,7 @@ export class Scheduler {
   /**
    * Review a task
    */
-  reviewTask(taskId: string, verdict: 'approved' | 'changes_requested', feedback?: string, by?: string): void {
+  reviewTask(taskId: string, verdict: 'approved' | 'changes_requested', feedback?: string, by?: string, source: ReviewSource = 'content'): void {
     const task = this.taskRepo.get(taskId);
     if (!task || task.status !== 'review') return;
     this.reviewNotified.delete(taskId);
@@ -3618,7 +3693,9 @@ export class Scheduler {
 
     if (verdict === 'approved') {
       if (isAutoReviewer(by) && (!feedback || feedback.trim() === '')) return;
-      if (isAutoReviewer(by) && this.reviewRepo) this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback: feedback || null, actor: by });
+      if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
+        this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback: feedback || null, actor: by || 'reviewer' });
+      }
       if ((isAutoReviewer(by) || by === 'claude-review') && step?.mode === 'gate') {
         this.advanceReviewStep(task, chain, 'approved');
         return;
@@ -3648,16 +3725,20 @@ export class Scheduler {
       if (!feedback || feedback.trim() === '') {
         throw new Error('Feedback is required when requesting changes');
       }
-      if (isAutoReviewer(by) && this.reviewRepo) this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback, actor: by });
-      if (((isAutoReviewer(by) || by === 'claude-review') && step?.mode === 'gate') || (isAutoReviewer(by) && chain.length === 0)) {
+      if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
+        this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback, actor: by || 'reviewer' });
+      }
+      if (isContentReview(by, source)) {
         const count = (task.reviewerChangesRequested || 0) + 1;
-        const max = this.reviewMaxRoundsForTask(task);
+        const max = reviewMaxRoundsFor(this.projectRepo.get(task.projectId), this.config);
         if (count > max) {
-          this.escalateReview(taskId, 'reviewer_changes_limit', feedback);
+          this.escalateReview(taskId, 'reviewer_changes_limit', feedback, by);
           return;
         }
         this.taskRepo.update(taskId, { reviewerChangesRequested: count });
       } else {
+        // A non-automated return may be a merge conflict or another operational
+        // issue. It must not erase the durable content-review count.
         this.resetReviewerEscalation(taskId);
       }
       // Append feedback to task body
@@ -3688,7 +3769,6 @@ export class Scheduler {
 
   private resetReviewerEscalation(taskId: string): void {
     this.taskRepo.update(taskId, {
-      reviewerChangesRequested: 0,
       reviewerEscalated: 0,
       reviewerEscalatedAt: null,
       reviewerEscalationReason: null,

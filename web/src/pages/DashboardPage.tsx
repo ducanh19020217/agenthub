@@ -335,7 +335,7 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
         <h2 className="text-base font-semibold">{t('dashboard.brains')}</h2>
         {brainOverview.brains.map((brain: ProjectBrain) => <div key={brain.projectId || 'system'} className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--t-border)] pt-3 first:border-0 first:pt-0" data-testid={`brain-row-${brain.projectId || 'system'}`}>
           <div><div className="font-medium text-sm">{brain.projectName}</div><div className="text-xs text-[var(--t-text-2)]">{t('dashboard.brainMode')}: {t(`dashboard.brainMode_${brain.mode}`)} · {t('dashboard.brainEngine')}: {brain.engine || 'claude'} · {t('projects.brainPermissions')}: {brain.permissions} · {t('dashboard.brainSessionMode')}: {brain.sessionMode || 'safe'} · {t(`dashboard.brainState${brain.state}`)}{brain.queued ? ` · ${t('dashboard.brainQueued')}` : ''}</div>{brain.directives?.length ? <div className="mt-1 text-xs text-[var(--t-text-2)]">📌 {brain.directives.map((directive) => directive.text).join(' · ')}</div> : null}</div>
-          <div className="flex items-center gap-3 text-xs"><span>{t('dashboard.brainTokens')}: {brain.tokensToday.toLocaleString()}</span></div>
+          <div className="flex items-center gap-3 text-xs"><span>{t('dashboard.brainTokens')}: {brain.tokensToday.toLocaleString()}</span><span>{brain.turnsToday || 0} {t('dashboard.brainTurns')}</span><span>{t('dashboard.brainRotations')} {brain.rotationsToday || 0}</span><span>{t('dashboard.brainSkipped')} {brain.eventsSkippedToday || 0}</span></div>
         </div>)}
         {brainOverview.assistants?.map((assistant) => <div key={`assistant-${assistant.projectId || 'system'}`} className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--t-border)] pt-3" data-testid={`assistant-row-${assistant.projectId || 'system'}`}>
           <div><div className="font-medium text-sm">{t('dashboard.assistant')} · {assistant.projectName}</div><div className="text-xs text-[var(--t-text-2)]">{assistant.busy ? t('dashboard.assistantWorking') : t('dashboard.assistantReady')}</div></div>
@@ -508,16 +508,16 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
                             <span
                               data-testid={`worker-paused-${worker.taskId}`}
                               className={`inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium border ${
-                                worker.pauseReason === 'load'
+                                worker.pauseReason === 'load' || worker.pauseReason === 'brain_load'
                                   ? 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)] border-[color-mix(in_srgb,var(--t-warn)_30%,transparent)]'
                                   : 'bg-[var(--t-surface-2)] text-[var(--t-text-2)] border-[var(--t-border)]'
                               }`}
                             >
-                              {worker.pauseReason === 'load'
+                              {worker.pauseReason === 'load' || worker.pauseReason === 'brain_load'
                                 ? t('status.pausedOverload')
                                 : worker.pauseReason === 'focus'
                                   ? t('status.pausedFocus')
-                                  : t('status.paused')}
+                                  : t('status.pausedManual')}
                             </span>
                           </div>
                         )}

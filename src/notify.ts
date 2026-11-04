@@ -224,10 +224,13 @@ export class NotificationService {
         type === 'disk.docker_low' ||
         type === 'claude.quota_exhausted' ||
         type === 'hub.restart_failed' ||
+        type.startsWith('deploy.') ||
+        type.startsWith('gitea.sync.') ||
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||
         type.startsWith('remote_deploy.') ||
+        type.startsWith('tracker.') ||
         allExhausted ||
         (type === 'task.waiting_quota' && p.reason === 'no_department_profile');
 
@@ -321,9 +324,76 @@ export class NotificationService {
         break;
       }
 
+      case 'tracker.resolved': {
+        this.notify(`${this.appName}: OpenProject ticket đã được resolve`, 'normal');
+        break;
+      }
+
+      case 'tracker.review_requested': {
+        this.notify(`${this.appName}: OpenProject ticket cần quyết định`, 'normal');
+        break;
+      }
+
+      case 'tracker.writeback_failed': {
+        const error = typeof p.error === 'string' ? `: ${p.error}` : '';
+        this.notify(`${this.appName}: ghi ngược OpenProject thất bại${error}`, 'critical');
+        break;
+      }
+
+      case 'daily_report.created': {
+        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        this.notify(`${this.appName}: đã tạo báo cáo ngày (${source})`, 'normal');
+        break;
+      }
+
+      case 'daily_report.failed': {
+        const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
+        this.notify(`${this.appName}: tạo báo cáo ngày (${source}) thất bại`, 'critical');
+        break;
+      }
+
+      case 'gitea.sync.started': {
+        const source = typeof p.sourceBranch === 'string' ? p.sourceBranch : '';
+        const target = typeof p.targetBranch === 'string' ? p.targetBranch : '';
+        this.notify(`${this.appName}: bắt đầu đồng bộ Gitea ${source} → ${target}`, 'normal');
+        break;
+      }
+
+      case 'gitea.sync.skipped': {
+        const reason = typeof p.reason === 'string' ? p.reason : 'Không có commit mới';
+        this.notify(`${this.appName}: bỏ qua đồng bộ Gitea: ${reason}`, 'normal');
+        break;
+      }
+
+      case 'gitea.sync.succeeded': {
+        const prNum = typeof p.prNumber === 'number' ? `PR #${p.prNumber}` : 'PR';
+        const commit = typeof p.commit === 'string' ? ` (${p.commit.slice(0, 7)})` : '';
+        this.notify(`${this.appName}: đồng bộ Gitea thành công: ${prNum}${commit}`, 'normal');
+        break;
+      }
+
+      case 'gitea.sync.failed': {
+        const err = typeof p.error === 'string' ? `: ${p.error}` : '';
+        this.notify(`${this.appName}: đồng bộ Gitea thất bại${err}`, 'critical');
+        break;
+      }
+
+      case 'gitea.sync.conflict': {
+        const count = Array.isArray(p.conflictingFiles) ? ` (${p.conflictingFiles.length} file)` : '';
+        this.notify(`${this.appName}: xung đột đồng bộ Gitea${count}: đã tạo task gỡ xung đột`, 'critical');
+        break;
+      }
+
       case 'task.paused':
       case 'load.task_paused': {
         this.notifyLoadSummary(now, p.reason === 'load' ? 'quá tải hệ thống' : 'yêu cầu tạm dừng');
+        break;
+      }
+
+      case 'task.pause_reminder': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const minutes = typeof p.pausedMinutes === 'number' ? p.pausedMinutes : 30;
+        this.notify(`Nhắc nhở: Task ${title} đã tạm dừng hơn ${minutes} phút (máy không quá tải)`, 'normal');
         break;
       }
 

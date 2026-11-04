@@ -293,6 +293,12 @@ export function registerBrainRoutes(
         queued: usage?.queued || false,
         lastTurnAt: usage?.lastTurnAt || session?.lastMessageAt || null,
         tokensToday: usage?.tokensToday || 0,
+        turnsToday: usage?.turnsToday || 0,
+        inputTokensToday: usage?.inputTokensToday || 0,
+        outputTokensToday: usage?.outputTokensToday || 0,
+        rotationsToday: usage?.rotationsToday || 0,
+        eventsSkippedToday: usage?.eventsSkippedToday || 0,
+        eventsBatchedToday: usage?.eventsBatchedToday || 0,
         directives: appService.directiveRepo?.list(projectId) || [],
       };
     });

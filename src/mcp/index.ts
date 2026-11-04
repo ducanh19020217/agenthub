@@ -155,9 +155,12 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   const scopedProject = (): string | undefined => options?.projectId || process.env.AGENTHUB_MCP_PROJECT || undefined;
   const assistantSession = (): boolean => (process.env.AGENTHUB_CHAT_KIND || '') === 'assistant';
   const assertAssistantAllowed = (toolName: string): void => {
-    if (assistantSession() && ['hub_review', 'hub_dispatch_batch'].includes(toolName)) {
+    if (assistantSession() && ['hub_review', 'hub_dispatch_batch', 'hub_request_secret'].includes(toolName)) {
       throw new Error(`Trợ lý không được gọi ${toolName}; việc này thuộc về bộ não`);
     }
+  };
+  const assertSetupWriteAllowed = (toolName: string, dryRun: boolean | undefined): void => {
+    if (assistantSession() && dryRun === false) throw new Error(`Trợ lý guarded chỉ được dryRun với ${toolName}`);
   };
   const assertProject = (projectId: string | undefined, action: string): void => {
     const scope = scopedProject();
@@ -590,6 +593,34 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   );
 
   server.tool(
+    'hub_daily_report',
+    'Tạo ngay báo cáo ngày OpenProject cho một nguồn',
+    {
+      sourceId: z.string().min(1).describe('ID của nguồn OpenProject'),
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Ngày báo cáo dạng YYYY-MM-DD (mặc định hôm nay)'),
+    },
+    async (args) => {
+      try {
+        const query = args.date ? `?date=${encodeURIComponent(args.date)}` : '';
+        const result = await callApi<{ ok: boolean; path: string; content: string }>(
+          'POST',
+          `/api/integrations/openproject/sources/${encodeURIComponent(args.sourceId)}/daily-report${query}`,
+        );
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `✓ Đã tạo báo cáo ngày cho nguồn ${args.sourceId} (${result.path}):\n\n${result.content}`,
+            },
+          ],
+        };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
+  server.tool(
     'hub_create_task',
     'Tạo task mới trong AgentHub. Nếu start=true thì đưa thẳng vào hàng đợi (queued)',
     {
@@ -825,6 +856,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             level: string;
             attempt: number;
             reviewerEscalated?: number;
+            reviewRound?: number;
+            reviewMaxRounds?: number;
           }>
         >('GET', `/api/tasks${query}`);
 
@@ -835,7 +868,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         }
         const lines = [`Tasks (${tasks.length}):`];
         for (const t of tasks) {
-          lines.push(`- [${t.status}] ${t.id} - ${t.title} (level: ${t.level}, attempt: ${t.attempt})`);
+          const round = t.reviewRound && t.reviewMaxRounds ? `, Vòng duyệt ${t.reviewRound}/${t.reviewMaxRounds}` : '';
+          lines.push(`- [${t.status}] ${t.id} - ${t.title} (level: ${t.level}, attempt: ${t.attempt}${round})`);
         }
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       } catch (err: unknown) {
@@ -866,6 +900,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             worktreePath?: string | null;
             baseRef?: string | null;
             dependsOn?: string[];
+            reviewRound?: number;
+            reviewMaxRounds?: number;
           };
           runs: Array<{
             id: string;
@@ -898,6 +934,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           `Task: ${t.id} [${t.status}]`,
           `Tiêu đề: ${t.title}`,
           `Level: ${t.level} | Lượt chạy: ${t.attempt}`,
+          ...(typeof t.reviewRound === 'number' && typeof t.reviewMaxRounds === 'number' ? [`Vòng duyệt: ${t.reviewRound}/${t.reviewMaxRounds}`] : []),
           `Branch: ${t.branch || '(chưa tạo)'}`,
           `Worktree: ${t.worktreePath || '(chưa tạo)'}`,
           `Base ref: ${t.baseRef || '(mặc định)'}`,
@@ -984,6 +1021,10 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
       verdict: z.enum(['approved', 'changes_requested']).describe('Kết quả review'),
       feedback: z.string().optional().describe('Góp ý hoặc yêu cầu sửa (bắt buộc khi verdict là changes_requested)'),
       merge: z.boolean().optional().describe('Khi approved, merge vào worktree tích hợp đã cấu hình'),
+      source: z
+        .enum(['content', 'operational'])
+        .optional()
+        .describe('Phân loại review: "content" (mặc định) cho đánh giá chất lượng mã nguồn; "operational" cho yêu cầu gỡ xung đột merge conflict hoặc các vấn đề vận hành/hạ tầng (không tính vào giới hạn vòng review)'),
     },
     async (args) => {
       try {
@@ -994,6 +1035,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           verdict: args.verdict,
           feedback: args.feedback,
           merge: args.merge,
+          source: args.source,
           by: 'claude-review',
         });
         try {
@@ -1482,9 +1524,16 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   server.tool(
     'hub_pause',
     'Tạm dừng một task',
-    { id: z.string() },
-    async ({ id }) => {
-      try { assertTaskId(id, 'Tạm dừng task'); await callApi('POST', `/api/tasks/${toRouteId(id)}/pause`); return { content: [{ type: 'text', text: `✓ Đã tạm dừng ${id}` }] }; }
+    {
+      id: z.string().describe('ID của task cần tạm dừng'),
+      reason: z.enum(['manual', 'load', 'brain_load']).optional().describe('Lý do tạm dừng: load (khi máy quá tải để tự tiếp tục khi hạ tải) hoặc manual (tạm dừng thủ công)'),
+    },
+    async ({ id, reason }) => {
+      try {
+        assertTaskId(id, 'Tạm dừng task');
+        await callApi('POST', `/api/tasks/${toRouteId(id)}/pause`, { reason });
+        return { content: [{ type: 'text', text: `✓ Đã tạm dừng ${id}` }] };
+      }
       catch (err: unknown) { return handleError(err); }
     },
   );
@@ -1496,6 +1545,21 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     async ({ id }) => {
       try { assertTaskId(id, 'Tiếp tục task'); await callApi('POST', `/api/tasks/${toRouteId(id)}/resume`); return { content: [{ type: 'text', text: `✓ Đã tiếp tục ${id}` }] }; }
       catch (err: unknown) { return handleError(err); }
+    },
+  );
+
+  server.tool(
+    'hub_gitea_sync',
+    'Đồng bộ mã nguồn với Gitea theo cấu hình project (tạo PR, merge)',
+    { projectId: z.string().optional() },
+    async (args) => {
+      try {
+        const targetProject = args.projectId ?? scopedProject();
+        if (!targetProject) throw new Error('projectId là bắt buộc');
+        assertProject(targetProject, 'Đồng bộ Gitea');
+        const result = await callApi<Record<string, unknown>>('POST', `/api/projects/${encodeURIComponent(targetProject)}/gitea/sync`);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err: unknown) { return handleError(err); }
     },
   );
 
@@ -1514,6 +1578,43 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
       }
     },
   );
+
+  server.tool('hub_effective_config', 'Đọc cấu hình hiệu lực của project', { project: z.string() }, async ({ project }) => {
+    try { assertProject(project, 'Đọc cấu hình'); return { content: [{ type: 'text', text: JSON.stringify(await callApi('GET', `/api/setup/effective-config/${encodeURIComponent(project)}`)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_presets', 'Liệt kê các preset cấu hình', {}, async () => {
+    try { return { content: [{ type: 'text', text: JSON.stringify(await callApi('GET', '/api/setup/presets')) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_departments', 'Liệt kê phòng ban', {}, async () => {
+    try { return { content: [{ type: 'text', text: JSON.stringify(await callApi('GET', '/api/setup/departments')) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_preset_apply', 'Xem hoặc áp dụng preset cấu hình', { scope: z.string(), preset: z.string(), dryRun: z.boolean().default(true) }, async (args) => {
+    try { assertSetupWriteAllowed('hub_preset_apply', args.dryRun); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/preset-apply', args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_project_settings', 'Xem hoặc cập nhật settings project', { project: z.string(), patch: z.record(z.unknown()), dryRun: z.boolean().default(true) }, async (args) => {
+    try { assertProject(args.project, 'Cấu hình project'); assertSetupWriteAllowed('hub_project_settings', args.dryRun); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', `/api/setup/project-settings/${encodeURIComponent(args.project)}`, args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_department', 'Xem hoặc cập nhật phòng ban và gán project', { id: z.string().optional(), patch: z.record(z.unknown()), assignProjects: z.array(z.string()).optional(), dryRun: z.boolean().default(true) }, async (args) => {
+    try { assertSetupWriteAllowed('hub_department', args.dryRun); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/department', args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_config_set', 'Xem hoặc cập nhật một key config an toàn', { path: z.string(), value: z.unknown(), dryRun: z.boolean().default(true) }, async (args) => {
+    try { assertSetupWriteAllowed('hub_config_set', args.dryRun); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/config-set', args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_integration_discover', 'Dò thông tin tích hợp chỉ đọc', { kind: z.enum(['openproject', 'gitea', 'checks']), sourceId: z.string().optional(), url: z.string().optional(), project: z.string().optional() }, async (args) => {
+    try { if (args.project) assertProject(args.project, 'Dò tích hợp'); return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/setup/integration-discover', args)) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_request_secret', 'Yêu cầu người dùng nhập bí mật qua giao diện an toàn', { kind: z.enum(['openproject-key', 'gitea-token', 'deploy-env', 'telegram-token']), target: z.string(), label: z.string() }, async (args) => {
+    try { const result = await callApi<{ configured: boolean; reason?: string; url?: string }>('POST', '/api/secrets/requests', args, 10 * 60 * 1000 + 30_000); return { content: [{ type: 'text', text: JSON.stringify(result) }] }; }
+    catch (err: unknown) { return handleError(err); }
+  });
 
   return server;
 }

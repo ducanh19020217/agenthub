@@ -31,6 +31,8 @@ Mọi tính năng **tắt mặc định** và cấu hình theo nguồn hoặc th
   "pollIntervalSec": 120,
   "watchStatusIds": [1, 100],         // ticket giao cho "me" ở các trạng thái này → tạo task
   "reopenedStatusIds": [100],         // chuyển sang các trạng thái này = REOPENED
+  "createTypeId": null,                // loại mặc định khi hub tạo ticket
+  "createStatusId": null,              // trạng thái mặc định khi hub tạo ticket
   "resolvedStatusId": 95,             // null = không đổi trạng thái khi xong
   "reviewStatusId": 94,               // cần quyết định → trạng thái này (null = không đổi)
   "openStatusIds": [1, 100, 7, 94],   // dùng cho báo cáo ngày
@@ -56,6 +58,16 @@ Mọi tính năng **tắt mặc định** và cấu hình theo nguồn hoặc th
 - **Link ticket**: `{url}/work_packages/{id}`.
 
 ## 4. Luồng ticket → task → ghi ngược
+
+### 4.0 Tạo task kèm ticket
+
+API `POST /api/tasks` và MCP `hub_create_task` có thể nhận `createTicket: { sourceId? }`. Nếu không truyền `sourceId`, hub dùng nguồn OpenProject `primary` đã gắn với project của task. Tùy chọn này tắt mặc định.
+
+Hub tạo work package trước bằng tiêu đề task và mô tả Markdown (rút gọn khi quá dài), sau đó ghi ngay một hàng `tracker_items` đang tạo trước mọi lần đọc/ghi tiếp theo; intake bỏ qua hàng này nên không thể tạo task trùng trong lúc request đang hoàn tất. Hub tiếp tục tạo task với tiêu đề `[<displayId>] <tiêu đề>` và `externalRef = <displayId>`, cập nhật `task_ids`, rồi chép `ticket.md`/ảnh vào `tracker/<sourceId>/<wpId>/`. Các đầu vào project/slug/tracker được kiểm tra trước khi gọi OpenProject; nếu OpenProject từ chối tạo ticket thì task không được tạo.
+
+Nguồn có thêm `createTypeId` và `createStatusId` để chọn mặc định khi tạo ticket. Danh sách loại được lấy từ `GET /api/integrations/openproject/sources/:id/types`.
+
+Nếu OpenProject đã tạo work package nhưng một bước đọc ticket, chép context hoặc tạo task tiếp theo thất bại, AgentHub xóa dòng `createPending` để ticket không bị bỏ qua vĩnh viễn ở các vòng intake sau. Lỗi trả về vẫn nêu display ID của ticket đã tạo để người dùng có thể xử lý ticket mồ côi. Trong khoảng thời gian hoàn tất request, dòng `createPending` được ghi ngay sau POST tạo work package; intake bỏ qua dòng này để tránh tạo task trùng.
 
 ### 4.1 Intake
 

@@ -16,6 +16,12 @@ export interface OpenProjectStatus {
   position?: number;
 }
 
+export interface OpenProjectType {
+  id: number;
+  name: string;
+  position?: number;
+}
+
 export interface OpenProjectWorkPackage {
   id: number;
   displayId?: string;
@@ -96,7 +102,18 @@ export class OpenProjectClient {
     const targetUrl = new URL(url, this.options.baseUrl).toString();
     const response = await this.fetcher(targetUrl, { ...init, headers });
     if (!response.ok) {
-      throw new OpenProjectError(response.status, `OpenProject request failed (${response.status})`);
+      let message = `OpenProject request failed (${response.status})`;
+      try {
+        const payload = await response.json() as { message?: unknown; _embedded?: { errors?: Array<{ message?: unknown }> } };
+        const messages = [
+          typeof payload.message === 'string' ? payload.message : null,
+          ...(payload._embedded?.errors || []).map((item) => typeof item.message === 'string' ? item.message : null),
+        ].filter((item): item is string => Boolean(item));
+        if (messages.length) message = messages.join('; ');
+      } catch {
+        // Some OpenProject proxies return an empty/non-JSON error body.
+      }
+      throw new OpenProjectError(response.status, message);
     }
     return (await response.json()) as T;
   }
@@ -111,6 +128,11 @@ export class OpenProjectClient {
 
   async listStatuses(): Promise<OpenProjectCollection<OpenProjectStatus>> {
     return this.request<OpenProjectCollection<OpenProjectStatus>>('/api/v3/statuses?pageSize=100');
+  }
+
+  async listTypes(): Promise<OpenProjectCollection<OpenProjectType>> {
+    if (!this.options.project) throw new Error('OpenProject project is required');
+    return this.request<OpenProjectCollection<OpenProjectType>>(`/api/v3/projects/${encodeURIComponent(this.options.project)}/types`);
   }
 
   private async listWorkPackagesWithFilters(filtersJson: string, sortBy = '[["id","asc"]]'): Promise<OpenProjectWorkPackage[]> {
@@ -198,15 +220,36 @@ export class OpenProjectClient {
     );
   }
 
-  async createWorkPackage(input: { project: string; subject: string; description: string }): Promise<OpenProjectWorkPackage> {
-    return this.request<OpenProjectWorkPackage>('/api/v3/work_packages', {
+  async createWorkPackage(input: {
+    subject: string;
+    descriptionMarkdown: string;
+    typeId?: number;
+    parentId?: number;
+    assigneeMe?: boolean;
+    statusId?: number;
+  }): Promise<{ id: number; displayId: string; url: string }> {
+    if (!this.options.project) throw new Error('OpenProject project is required');
+    const links: Record<string, { href: string }> = {};
+    if (input.typeId !== undefined) links.type = { href: `/api/v3/types/${input.typeId}` };
+    if (input.assigneeMe !== false) {
+      const me = await this.me();
+      links.assignee = { href: `/api/v3/users/${me.id}` };
+    }
+    if (input.parentId !== undefined) links.parent = { href: `/api/v3/work_packages/${input.parentId}` };
+    if (input.statusId !== undefined) links.status = { href: `/api/v3/statuses/${input.statusId}` };
+    const created = await this.request<OpenProjectWorkPackage>('/api/v3/projects/' + encodeURIComponent(this.options.project) + '/work_packages', {
       method: 'POST',
       body: JSON.stringify({
         subject: input.subject,
-        description: { raw: input.description },
-        _links: { project: { href: `/api/v3/projects/${encodeURIComponent(input.project)}` } },
+        description: { format: 'markdown', raw: input.descriptionMarkdown },
+        _links: links,
       }),
     });
+    return {
+      id: created.id,
+      displayId: created.displayId || String(created.id),
+      url: `${this.options.baseUrl.replace(/\/+$/, '')}/work_packages/${created.id}`,
+    };
   }
 
   async setStatus(id: number | string, statusId: number | string): Promise<OpenProjectWorkPackage> {

@@ -285,6 +285,7 @@ export const vi = {
     daysAgo: '{count} ngày trước',
   },
   createTask: {
+    createOpenProjectTicket: 'Tạo ticket trên OpenProject',
     title: 'Tạo task mới',
     subtitle: 'Khai báo đề bài cho AI worker thực thi và tự động quản lý vòng đời.',
     projectLabel: 'Project *',
@@ -316,6 +317,7 @@ export const vi = {
     externalRefPlaceholder: 'vd: PROJ-45, OP-123',
   },
   taskDetail: {
+    openTicket: 'Mở ticket',
     notFound: 'Không tìm thấy task hoặc xảy ra lỗi khi tải dữ liệu.',
     tabLog: 'Log trực tiếp',
     tabBody: 'Đề bài',
@@ -1653,6 +1655,7 @@ export const vi = {
     exit: "Tiến trình kết thúc",
   },
   integrations: {
+    createTypeId: 'Loại ticket khi tạo', createStatusId: 'Trạng thái khi tạo',
     openProjectTitle: 'Tích hợp → OpenProject', openProjectDescription: 'Quản lý nguồn OpenProject và các thao tác đồng bộ.', addSource: 'Thêm nguồn', saved: 'Đã lưu', saveSecret: 'Lưu bí mật', id: 'Mã nguồn', url: 'URL', project: 'Project', language: 'Ngôn ngữ', watchStatusIds: 'Trạng thái theo dõi', reopenedStatusIds: 'Trạng thái mở lại', openStatusIds: 'Trạng thái mở', pollInterval: 'Chu kỳ (giây)', minTicket: 'Số ticket tối thiểu', resolvedStatusId: 'ID trạng thái đã xử lý', reviewStatusId: 'ID trạng thái review', autoStart: 'Tự tạo task', autoResolve: 'Tự resolve', dailyReportConfig: 'Cấu hình báo cáo ngày', reportTime: 'Giờ báo cáo', reportDirectory: 'Thư mục báo cáo', maxReportItems: 'Số mục tối đa', apiKey: 'API key', configured: 'Đã cấu hình', testConnection: 'Kiểm tra kết nối', testOk: 'Kết nối OK', testOkWithName: 'Kết nối OK: {name}', syncNow: 'Đồng bộ ngay', syncSuccess: 'Đã nhập {count} ticket', dailyReport: 'Tạo báo cáo ngày', dailyReportSuccess: 'Đã tạo báo cáo ngày', projectOpenProject: 'OpenProject', enabled: 'Bật', source: 'Nguồn', role: 'Vai trò', sourceBranch: 'Nhánh nguồn', targetBranch: 'Nhánh đích', schedule: 'Lịch (HH:MM)', addScheduleTime: 'Mốc giờ mới', removeScheduleTime: 'Xóa mốc giờ', invalidScheduleTime: 'Định dạng giờ không hợp lệ (HH:MM)', weekdaysOnly: 'Chỉ ngày làm việc', checks: 'Checks (mỗi dòng một lệnh)', unionMergeGlobs: 'Union merge globs', token: 'Token', writeOnly: 'Chỉ ghi', lastSync: 'Lượt sync gần nhất', remoteDeploy: 'Deploy từ xa', trigger: 'Trigger', waitMinutes: 'Chờ (phút)', steps: 'Steps (mỗi dòng một lệnh)', healthChecks: 'Health checks', deploySecrets: 'Bí mật env (KEY=VALUE)', savedKeys: 'Key bí mật đã lưu', deployNow: 'Deploy ngay', lastDeploy: 'Lượt deploy gần nhất', reloadStatuses: 'Tải lại trạng thái', suggestByName: 'Gợi ý theo tên', saveUrlAndKeyFirst: 'Lưu URL + API key rồi bấm Tải lại', noChange: '— không đổi —', unknownStatus: 'không rõ', loadingStatuses: 'Đang tải trạng thái...', statusMappingTitle: 'Trạng thái OpenProject',
   },
 };

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import Markdown from 'react-markdown';
-import { createTask, getProjects, getTasks, getConfig, getModelOptions } from '../api/client';
+import { createTask, getProjects, getTasks, getConfig, getModelOptions, getOpenProjectSources } from '../api/client';
 import { TaskLevel } from '../types/api';
 import { ArrowLeft, Eye, Edit3, Plus } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
@@ -23,6 +23,7 @@ export const CreateTaskPage: React.FC = () => {
   const [selectedDeps, setSelectedDeps] = useState<string[]>([]);
   const [startImmediately, setStartImmediately] = useState(false);
   const [modelChain, setModelChain] = useState<string[]>([]);
+  const [createTicket, setCreateTicket] = useState(false);
   const [activeTab, setActiveTab] = useState<'edit' | 'preview'>('edit');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   React.useEffect(() => {
@@ -40,11 +41,19 @@ export const CreateTaskPage: React.FC = () => {
   });
   const { data: config } = useQuery({ queryKey: ['config'], queryFn: getConfig });
   const { data: modelOptions } = useQuery({ queryKey: ['model-options'], queryFn: getModelOptions });
+  const { data: openProjectSources = [] } = useQuery({ queryKey: ['openproject-sources'], queryFn: getOpenProjectSources });
+  const selectedProject = projects.find((project) => project.id === projectId);
+  const openProject = selectedProject?.settings?.openproject;
+  const openProjectSource = openProject?.sourceId ? openProjectSources.find((source) => source.id === openProject.sourceId) : undefined;
   const modelSuggestions = modelOptions?.suggestions?.length
     ? modelOptions.suggestions
     : [...new Set([...(config?.modelChainHard || []), ...(config?.modelChainEasy || [])])];
 
   // Set default project when loaded
+  React.useEffect(() => {
+    setCreateTicket(false);
+  }, [projectId]);
+
   React.useEffect(() => {
     if (projects.length > 0 && !projectId) {
       setProjectId(projects[0].id);
@@ -90,6 +99,7 @@ export const CreateTaskPage: React.FC = () => {
       dependsOn: selectedDeps,
       modelChain: modelChain.length > 0 ? modelChain : undefined,
       start: startImmediately,
+      createTicket: createTicket ? (openProject?.sourceId ? { sourceId: openProject.sourceId } : {}) : undefined,
     });
   };
 
@@ -331,6 +341,12 @@ export const CreateTaskPage: React.FC = () => {
               </span>
             </label>
           </div>
+          {openProject?.enabled && openProjectSource && (
+            <label className="flex items-center gap-2 cursor-pointer text-sm">
+              <input type="checkbox" checked={createTicket} onChange={(e) => setCreateTicket(e.target.checked)} className="rounded text-[var(--t-accent)] focus:ring-[var(--t-accent)]" />
+              <span className="font-medium text-[var(--t-text)]">{t('createTask.createOpenProjectTicket')} ({openProjectSource.id})</span>
+            </label>
+          )}
         </div>
 
         {/* Action Buttons */}

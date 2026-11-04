@@ -243,6 +243,7 @@ export interface OpenProjectSource {
   id: string; url: string; project: string; keyConfigured?: boolean;
   pollIntervalSec: number; watchStatusIds: number[]; reopenedStatusIds: number[];
   resolvedStatusId: number | null; reviewStatusId: number | null; openStatusIds: number[];
+  createTypeId?: number | null; createStatusId?: number | null;
   minTicketNumber: number; autoStart: boolean; autoResolve: boolean; language: string;
   dailyReport?: { time: string; weekdaysOnly: boolean; dir?: string; maxItems: number; telegram: boolean };
 }
@@ -253,6 +254,7 @@ export interface OpenProjectStatusDto {
   isClosed: boolean;
   position: number;
 }
+export interface OpenProjectTypeDto { id: number; name: string; position: number; }
 export interface OpenProjectSyncResult { imported: number; comments: number; baseline: number; watched: number; }
 export interface GiteaStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
 export interface RemoteDeployStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
@@ -320,6 +322,7 @@ export interface Task {
   slug: string;
   title: string;
   externalRef?: string | null;
+  externalUrl?: string | null;
   body?: string;
   level: TaskLevel;
   modelChain?: string | string[] | null;
@@ -977,6 +980,7 @@ export interface CreateTaskInput {
   branch?: string;
   modelChain?: string[];
   start?: boolean;
+  createTicket?: { sourceId?: string };
 }
 
 export interface CaptureTaskInput {

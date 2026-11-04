@@ -2573,6 +2573,10 @@ export class TelegramBotService {
               { text: '💾 Lưu nháp', callback_data: 'newtask:confirm:draft' },
               { text: '❌ Huỷ', callback_data: 'newtask:confirm:cancel' },
             ],
+            [
+              { text: '🎫 Giao + ticket OP', callback_data: 'newtask:confirm:queued_ticket' },
+              { text: '🎫 Nháp + ticket OP', callback_data: 'newtask:confirm:draft_ticket' },
+            ],
           ];
 
           const summaryText =
@@ -2604,9 +2608,10 @@ export class TelegramBotService {
             return;
           }
 
-          const start = choice === 'queued';
+          const withTicket = choice.endsWith('_ticket');
+          const start = choice === 'queued' || choice === 'queued_ticket';
           try {
-            const task = this.service.createTask({
+            const taskInput = {
               project: state.projectId,
               slug: state.slug,
               title: state.title,
@@ -2614,7 +2619,9 @@ export class TelegramBotService {
               level: state.level,
               modelChain: state.modelChain,
               start,
-            });
+              ...(withTicket ? { createTicket: {} } : {}),
+            };
+            const task = withTicket ? await this.service.createTaskWithTicket(taskInput) : this.service.createTask(taskInput);
             this.chatStates.delete(chatId);
             if (start) {
               await this.answerCallbackQuery(query.id, 'Đã giao việc!');

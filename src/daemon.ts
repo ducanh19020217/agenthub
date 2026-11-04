@@ -381,6 +381,7 @@ export function createContext(
     eventBus: scheduler.getEventBus(),
   });
   service.intakeService = intakeService;
+  service.setTrackerRepo(trackerRepo);
   const writebackService = new OpenProjectWritebackService({
     config,
     projectRepo,

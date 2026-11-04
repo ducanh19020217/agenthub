@@ -1192,6 +1192,17 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
 
       currentTime += 15_000;
       ctx.scheduler.getEventBus().emit('tracker.triage_ready', undefined, {
+        sourceId: 'customer:prod', wpId: 44, displayId: 'OP-44',
+        analysis: { conclusion: 'việc thủ công', size: 'vừa', summary: 'Cần thao tác ngoài repo' }, autoDispatch: false,
+      });
+      await bot.flushQueue(CHAT_ID);
+      call = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1)!;
+      const manualCallbacks = ((call.body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data?: string }>> }).inline_keyboard).flat();
+      expect(manualCallbacks[0].text).toContain('Tôi tự làm');
+      expect(manualCallbacks.some((button) => button.text.includes('Làm + chia'))).toBe(false);
+
+      currentTime += 15_000;
+      ctx.scheduler.getEventBus().emit('tracker.triage_ready', undefined, {
         sourceId: 'customer:prod', wpId: 43, displayId: 'OP-43',
         analysis: { conclusion: 'lỗi', size: 'nhỏ', summary: 'Đã giao' }, autoDispatch: true,
       });

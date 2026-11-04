@@ -7,7 +7,7 @@ import { saveOpenProjectKey } from '../src/integrations/openproject/secrets.js';
 
 type TestTask = Record<string, unknown> & { id: string; projectId: string; externalRef: string };
 
-function harness(input: { tasks: TestTask[]; autoResolve?: boolean; autoStart?: boolean; pushProjects?: string[]; targetProject?: string; rowWriteback?: string; extraProjects?: string[]; fetchFn?: typeof fetch; git?: (cwd: string, args: string[]) => Promise<{ code: number; output: string }> }) {
+function harness(input: { tasks: TestTask[]; autoResolve?: boolean; autoStart?: boolean; triage?: 'off' | 'approve' | 'auto'; pushProjects?: string[]; targetProject?: string; rowWriteback?: string; extraProjects?: string[]; fetchFn?: typeof fetch; git?: (cwd: string, args: string[]) => Promise<{ code: number; output: string }> }) {
   const hubHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-writeback-'));
   saveOpenProjectKey(hubHome, 'op', 'key');
   const tasks = new Map(input.tasks.map((task) => [task.id, task]));
@@ -21,7 +21,7 @@ function harness(input: { tasks: TestTask[]; autoResolve?: boolean; autoStart?: 
   }
   const created: unknown[] = [];
   const service = new OpenProjectWritebackService({
-    config: { hubHome, integrations: { openproject: { sources: [{ id: 'op', url: 'https://op.test', project: 'main', autoResolve: input.autoResolve !== false, resolvedStatusId: 5, reviewStatusId: 6, watchStatusIds: [], reopenedStatusIds: [], openStatusIds: [], minTicketNumber: 0, pollIntervalSec: 60, autoStart: input.autoStart !== false, language: 'vi' }] } }, deploy: {} } as never,
+    config: { hubHome, integrations: { openproject: { sources: [{ id: 'op', url: 'https://op.test', project: 'main', triage: input.triage || 'off', autoResolve: input.autoResolve !== false, resolvedStatusId: 5, reviewStatusId: 6, watchStatusIds: [], reopenedStatusIds: [], openStatusIds: [], minTicketNumber: 0, pollIntervalSec: 60, autoStart: input.autoStart !== false, language: 'vi' }] } }, deploy: {} } as never,
     projectRepo: { get: (id: string) => projects.get(id), getAll: () => [...projects.values()] } as never,
     taskRepo: { get: (id: string) => tasks.get(id) } as never,
     trackerRepo: { listAll: () => [row], get: () => row, upsert: (next: any) => { Object.assign(row, next); return row; } } as never,
@@ -142,6 +142,46 @@ describe('OpenProjectWritebackService', () => {
     expect(fs.readFileSync(path.join(h.hubHome, 'tracker', 'op', '10', 'user-input-1.md'), 'utf8')).toBe('log từ server khách hàng');
     expect(h.created).toHaveLength(1);
     h.cleanup();
+  });
+
+  it('skips without creating a task and comments only when a reason is supplied', async () => {
+    const analysis = { conclusion: 'không phải lỗi', size: 'nhỏ', repo: ['app'], summary: 'Không lỗi', evidence: 'Đã kiểm tra', cause: 'Hành vi đúng', proposal: 'Không sửa', risks: 'Không có', questions: 'Không có' };
+    const triage = { id: 'app/op-op-1-triage', projectId: 'app', slug: 'op-op-1-triage', title: 'Triage', externalRef: 'OP-1', status: 'done' } as TestTask;
+    const bodies: string[] = [];
+    const fetchFn = (async (_url: string | URL, init?: RequestInit) => { if (init?.body) bodies.push(String(init.body)); return new Response(JSON.stringify({ id: 11, lockVersion: 1 }), { status: 200 }); }) as typeof fetch;
+    const h = harness({ tasks: [triage], rowWriteback: JSON.stringify({ triage: { taskId: triage.id, analysis, readyAt: 'now' } }), fetchFn });
+    const result = await h.service.decide(h.row, 'skip', 'Đã xác nhận là hành vi đúng');
+    expect(result.action).toBe('skip');
+    expect(h.created).toHaveLength(0);
+    expect(bodies.some((body) => body.includes('**[AgentHub] Không xử lý**: Đã xác nhận là hành vi đúng'))).toBe(true);
+    h.cleanup();
+  });
+
+  it('marks a manual ticket without creating a repair task', async () => {
+    const analysis = { conclusion: 'việc thủ công', size: 'vừa', repo: ['app'], summary: 'Cần thao tác server', evidence: 'Cần kiểm tra máy khách', cause: 'Ngoài phạm vi repo', proposal: 'Người dùng xử lý', risks: 'Có thể gián đoạn dịch vụ', questions: 'Không có' };
+    const triage = { id: 'app/op-op-1-triage', projectId: 'app', slug: 'op-op-1-triage', title: 'Triage', externalRef: 'OP-1', status: 'done' } as TestTask;
+    const h = harness({ tasks: [triage], rowWriteback: JSON.stringify({ triage: { taskId: triage.id, analysis, readyAt: 'now' } }) });
+    const result = await h.service.decide(h.row, 'manual');
+    expect(result.action).toBe('manual');
+    expect(h.created).toHaveLength(0);
+    expect(JSON.parse(h.row.writeback).decision.action).toBe('manual');
+    h.cleanup();
+  });
+
+  it('auto-dispatches a small bug and leaves a non-bug waiting for a decision', async () => {
+    const triage = { id: 'app/op-op-1-triage', projectId: 'app', slug: 'op-op-1-triage', title: 'Triage', externalRef: 'OP-1', status: 'done', doneReport: `Kết luận: lỗi\nĐộ lớn: nhỏ\nRepo: app\n\n### Tóm tắt yêu cầu\nBug\n\n### Bằng chứng\nTest\n\n### Nguyên nhân dự kiến\nCause\n\n### Hướng sửa đề xuất (và phương án nếu có nhiều)\nFix\n\n### Rủi ro / ảnh hưởng\nRisk\n\n### Câu hỏi cho tester (nếu thiếu thông tin)\nNone` } as TestTask;
+    const h = harness({ tasks: [triage], triage: 'auto' });
+    await h.emit('task.done', triage.id);
+    expect(h.created).toHaveLength(1);
+    expect(h.created[0]).toMatchObject({ slug: 'op-op-1', start: true });
+    h.cleanup();
+
+    const waiting = { ...triage, id: 'app/op-op-2-triage', slug: 'op-op-2-triage', doneReport: triage.doneReport!.replace('Kết luận: lỗi', 'Kết luận: không phải lỗi') };
+    const w = harness({ tasks: [waiting], triage: 'auto' });
+    await w.emit('task.done', waiting.id);
+    expect(w.created).toHaveLength(0);
+    expect(w.events.some((event) => event.type === 'tracker.triage_ready' && (event.payload as any)?.autoDispatch === false)).toBe(true);
+    w.cleanup();
   });
 
   it('creates multi-repo repair tasks with an API provider dependency and ignores triage in resolve checks', async () => {

@@ -130,6 +130,24 @@ Mô tả đầy đủ công việc.
     expect(parseSplitPlan(null).errors).toEqual(['Thiếu báo cáo để đọc ## Chia việc']);
     expect(parseSplitPlan('## DONE\nKhông có chia việc').errors).toEqual(['Thiếu mục ## Chia việc']);
   });
+
+  it('rejects invalid explicitly supplied fields instead of silently defaulting', () => {
+    const res = parseSplitPlan(`## Chia việc
+### 1. Phần một
+- project: ???
+- level: medium
+- phụ thuộc: 2, nope
+Mô tả phần một.
+
+### 2. Phần hai
+Mô tả phần hai.`, 5, 'primary');
+    expect(res.plan).toBeUndefined();
+    expect(res.errors).toEqual(expect.arrayContaining([
+      expect.stringContaining('project không hợp lệ'),
+      expect.stringContaining('level không hợp lệ'),
+      expect.stringContaining('phụ thuộc không hợp lệ'),
+    ]));
+  });
 });
 
 describe('OpenProject intake with split configuration', () => {
@@ -436,6 +454,11 @@ function splitHarness(input: {
         batches.set(batchId, batchObj);
         return batchObj;
       },
+      dispatchBatch: (batchId: string) => {
+        const batch = batches.get(batchId);
+        if (batch) batch.status = 'dispatched';
+        listener?.('batch.dispatched', undefined, { batchId });
+      },
     },
     taskService: {
       createTask: (raw: any) => {
@@ -659,6 +682,31 @@ Sửa hàm xử lý validation trong form.
     expect(child1.externalRef).not.toBe('100'); // updated to child ticket displayId
     expect(child2.externalRef).not.toBe('100');
 
+    h.cleanup();
+  });
+
+  it('saves parent split state before auto-dispatch creates child tickets', async () => {
+    const planTask = {
+      id: 'primary/op-100-plan',
+      projectId: 'primary',
+      slug: 'op-100-plan',
+      title: 'Lập kế hoạch chia việc',
+      externalRef: '100',
+      doneReport: `## Chia việc
+### 1. Phần 1
+Mô tả 1.
+
+### 2. Phần 2
+Mô tả 2.`,
+      blockedReport: null,
+      status: 'done',
+    };
+    const h = splitHarness({ tasks: [planTask], autoStart: true });
+    await h.emit('task.done', planTask.id);
+
+    const childCreates = h.apiCalls.filter((call) => call.url.includes('/work_packages') && call.method === 'POST');
+    expect(childCreates.length).toBeGreaterThanOrEqual(2);
+    expect(JSON.parse(h.trackerRows.get('op:100').writeback).split.children).toHaveLength(2);
     h.cleanup();
   });
 

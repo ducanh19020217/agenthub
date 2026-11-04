@@ -94,6 +94,7 @@ export interface TelegramUpdate {
     message_thread_id?: number;
     date: number;
     text?: string;
+    reply_to_message?: { message_id: number; text?: string };
   };
   callback_query?: {
     id: string;
@@ -290,6 +291,7 @@ export class TelegramBotService {
 
   // Pending user input state per chat (e.g. entering feedback for reject)
   private chatStates = new Map<number, PendingChatState>();
+  private triageReplies = new Map<string, { sourceId: string; wpId: number }>();
 
   // Anti-flood: message queue per chat and last send timestamp
   private chatQueues = new Map<number, SendQueueItem[]>();
@@ -1124,6 +1126,19 @@ export class TelegramBotService {
     }
 
     // 2. Allowed chat - check if user has a pending state (e.g. entering feedback for reject)
+    if (msg.reply_to_message?.text && rawText) {
+      const displayId = msg.reply_to_message.text.match(/\[([^\]]+)\]/)?.[1];
+      const target = displayId ? this.triageReplies.get(displayId) : undefined;
+      if (target) {
+        try {
+          const result = await this.service.submitOpenProjectTriageInput(target.sourceId, target.wpId, rawText);
+          await this.sendMessage(chatId, `✅ Đã tạo lượt triage bổ sung: <code>${this.escapeHtml(result.taskId)}</code>`);
+        } catch (error) {
+          await this.sendMessage(chatId, `❌ Không thể gửi thêm thông tin: ${this.escapeHtml(error instanceof Error ? error.message : String(error))}`);
+        }
+        return;
+      }
+    }
     const pendingState = this.chatStates.get(chatId);
     if (pendingState) {
       if (rawText.toLowerCase() === '/cancel') {
@@ -2344,8 +2359,14 @@ export class TelegramBotService {
           await this.answerCallbackQuery(query.id, 'Lựa chọn không hợp lệ.');
           return;
         }
-        const [sourceId, wpIdText] = taskIdOrParam.split(':');
+        const parts = taskIdOrParam.split(':');
+        const sourceId = parts.slice(0, -1).join(':');
+        const wpIdText = parts.at(-1) || '';
         const wpId = Number(wpIdText);
+        if (!sourceId || !Number.isSafeInteger(wpId) || wpId <= 0) {
+          await this.answerCallbackQuery(query.id, 'Mã ticket không hợp lệ.');
+          return;
+        }
         try {
           const result = await this.service.decideOpenProjectTicket(sourceId, wpId, action as 'do' | 'split' | 'ask' | 'skip' | 'manual');
           await this.answerCallbackQuery(query.id, `Đã chọn: ${action}`);
@@ -4046,7 +4067,9 @@ export class TelegramBotService {
         const summary = String(analysis.summary || '').slice(0, 900);
         const ticketUrl = typeof p.ticketUrl === 'string' ? `\n<a href="${this.escapeHtml(p.ticketUrl)}">Mở ticket</a>` : '';
         const dashboardUrl = typeof p.taskId === 'string' ? `\n<a href="${this.escapeHtml(this.getDashboardUrl(`#/tasks/${toRouteId(p.taskId)}`))}">Mở trên hub</a>` : '';
-        this.broadcastMessage(`${prefix}🔎 <b>[${this.escapeHtml(String(p.displayId || 'ticket'))}] Phân tích xong</b>\nKết luận: ${this.escapeHtml(String(analysis.conclusion || ''))}\nĐộ lớn: ${this.escapeHtml(String(analysis.size || ''))}\n${this.escapeHtml(summary)}${ticketUrl}${dashboardUrl}`, { inline_keyboard: rows });
+        const displayId = String(p.displayId || 'ticket');
+        if (sourceId && Number.isSafeInteger(wpId) && wpId > 0) this.triageReplies.set(displayId, { sourceId, wpId });
+        this.broadcastMessage(`${prefix}🔎 <b>[${this.escapeHtml(displayId)}] Phân tích xong</b>\nKết luận: ${this.escapeHtml(String(analysis.conclusion || ''))}\nĐộ lớn: ${this.escapeHtml(String(analysis.size || ''))}\n${this.escapeHtml(summary)}\n<i>Trả lời tin nhắn này để gửi thêm thông tin</i>${ticketUrl}${dashboardUrl}`, { inline_keyboard: rows });
         break;
       }
 

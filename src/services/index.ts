@@ -3039,12 +3039,25 @@ export class AppService {
   }
 
   listTasks(filter?: { project?: string; status?: string }): TaskRow[] {
-    return this.decorateTasks(this.taskRepo.list(filter));
+    return this.decorateTriageTasks(this.decorateTasks(this.taskRepo.list(filter)));
   }
 
   listTasksPage(filter?: { project?: string; status?: string; search?: string; limit?: string | number; cursor?: string; offset?: string | number; sort?: string; order?: string }): PageResult<TaskRow> {
     const page = this.taskRepo.page(filter);
-    return { ...page, items: this.decorateTasks(page.items) };
+    return { ...page, items: this.decorateTriageTasks(this.decorateTasks(page.items)) };
+  }
+
+  private decorateTriageTasks(tasks: TaskRow[]): TaskRow[] {
+    if (!this.trackerRepo) return tasks;
+    return tasks.map((task) => {
+      const row = this.trackerRepo!.listForTask(task.id).find((item) => item.display_id === task.externalRef);
+      if (!row) return task;
+      try {
+        const writeback = JSON.parse(row.writeback) as { triage?: unknown; decision?: unknown };
+        if (!writeback.triage) return task;
+        return { ...task, triage: { sourceId: row.source_id, wpId: row.wp_id, displayId: row.display_id, analysis: (writeback.triage as { analysis?: unknown }).analysis, decision: writeback.decision || null } } as TaskRow;
+      } catch { return task; }
+    });
   }
 
   getTasksGraph(options?: { project?: string; includeDone?: string | boolean }) {

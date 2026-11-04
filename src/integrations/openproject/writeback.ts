@@ -9,6 +9,11 @@ import { OpenProjectClient, OpenProjectError } from './client.js';
 import { readOpenProjectKey } from './secrets.js';
 import { analysisMarkdown, isTriageTaskSlug, parseTriageAnalysis, shouldAutoDispatch, type TriageAnalysis } from './triage.js';
 
+/** Stable hand-off point for the split workflow used by f-op-split. */
+export function startSplit(analysis: TriageAnalysis, projectId: string, note?: string): string {
+  return `${note ? `## Chỉ đạo người dùng (ưu tiên cao nhất)\n${note}\n\n` : ''}## Phân tích triage\n\n${analysisMarkdown(analysis)}\n\n## Phần việc của repo ${projectId}\n${analysis.perRepo || analysis.proposal}\n\nSửa theo đề xuất và ghi ## Comment cho tester trong DONE.${analysis.manualAlongside ? `\n\n## Việc thủ công kèm theo\n${analysis.manualAlongside}` : ''}`;
+}
+
 type GitRunner = (cwd: string, args: string[]) => Promise<{ code: number; output: string }>;
 type WritebackState = {
   linked?: Record<string, string>;
@@ -235,7 +240,7 @@ export class OpenProjectWritebackService {
       const dependsOn = providerTaskId && /api|hợp đồng|contract/i.test(triage.perRepo || '') ? [providerTaskId] : undefined;
       const task = this.taskService.createTask({
         project: project.id, slug, title: `[${row.display_id}] ${triage.summary.slice(0, 100)}`,
-        body: `${note ? `## Chỉ đạo người dùng (ưu tiên cao nhất)\n${note}\n\n` : ''}## Phân tích triage\n\n${analysisMarkdown(triage)}\n\n## Phần việc của repo ${project.id}\n${triage.perRepo || triage.proposal}\n\nSửa theo đề xuất và ghi ## Comment cho tester trong DONE.${triage.manualAlongside ? `\n\n## Việc thủ công kèm theo\n${triage.manualAlongside}` : ''}`,
+        body: startSplit(triage, project.id, note),
         level: triage.size === 'lớn' || triage.size === 'lớn (cần chia)' || action === 'split' ? 'hard' : 'easy', externalRef: row.display_id,
         dependsOn, start: source.autoStart,
       });

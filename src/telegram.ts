@@ -4082,7 +4082,7 @@ export class TelegramBotService {
         }
         const rows: InlineKeyboardButton[][] = [[
           { text: analysis.conclusion === 'việc thủ công' ? '🙋 Tôi tự làm' : '✅ Làm', callback_data: `triage:${analysis.conclusion === 'việc thủ công' ? 'manual' : 'do'}:${sourceId}:${wpId}` },
-          ...(analysis.size === 'lớn (cần chia)' ? [{ text: '🧩 Làm + chia', callback_data: `triage:split:${sourceId}:${wpId}` }] : []),
+          ...((analysis.size === 'lớn' || analysis.size === 'lớn (cần chia)') ? [{ text: '🧩 Làm + chia', callback_data: `triage:split:${sourceId}:${wpId}` }] : []),
         ], [
           { text: '❓ Hỏi tester', callback_data: `triage:ask:${sourceId}:${wpId}` },
           { text: '🚫 Không làm', callback_data: `triage:skip:${sourceId}:${wpId}` },

@@ -689,7 +689,7 @@ export const TaskDetailPage: React.FC = () => {
               <button type="button" onClick={() => triageInputMutation.mutate()} className="px-3 py-1.5 rounded-lg border text-xs">{t('taskDetail.triageInputSubmit')}</button>
               <div className="flex flex-wrap gap-2">
                 <button type="button" onClick={() => triageMutation.mutate(task.triage?.analysis?.conclusion?.startsWith('vi') ? 'manual' : 'do')} className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] text-xs">{task.triage.analysis.conclusion?.startsWith('vi') ? t('taskDetail.triageManual') : t('taskDetail.triageDo')}</button>
-                {task.triage.analysis.size?.includes('(') && <button type="button" onClick={() => triageMutation.mutate('split')} className="px-3 py-1.5 rounded-lg border text-xs">{t('taskDetail.triageSplit')}</button>}
+                {(task.triage.analysis.size === 'lớn' || task.triage.analysis.size?.includes('(')) && <button type="button" onClick={() => triageMutation.mutate('split')} className="px-3 py-1.5 rounded-lg border text-xs">{t('taskDetail.triageSplit')}</button>}
                 <button type="button" onClick={() => triageMutation.mutate('ask')} className="px-3 py-1.5 rounded-lg border text-xs">{t('taskDetail.triageAsk')}</button>
                 <button type="button" onClick={() => triageMutation.mutate('skip')} className="px-3 py-1.5 rounded-lg border text-xs">{t('taskDetail.triageSkip')}</button>
               </div>

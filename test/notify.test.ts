@@ -992,4 +992,81 @@ describe('NotificationService (Desktop Notifications)', () => {
 
     notifier.stop();
   });
+
+  it('suppresses routine merge conflict and auto-fix notifications on desktop', () => {
+    config.notifications.desktopLevel = 'important';
+    const notifier = new NotificationService({
+      eventBus,
+      config,
+      taskRepo,
+      profileRepo,
+      quotaMarkRepo,
+      projectRepo,
+      exec: fakeExec,
+    });
+    notifier.start();
+
+    // 1. Conflict 1 to 3 auto-reassigned: no desktop notification
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 1, autoRetried: true, message: 'Xung đột merge ở: a.ts' });
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 2, autoRetried: true, message: 'Xung đột merge ở: a.ts' });
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 3, autoRetried: true, message: 'Xung đột merge ở: a.ts' });
+    expect(execCalls).toHaveLength(0);
+
+    // 2. Conflict 4: sends exactly one notification
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 4, autoRetried: false, files: 'a.ts, b.ts' });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('⚠️ proj/task-1 xung đột merge lần thứ 4, cần xem: a.ts, b.ts');
+
+    // Duplicate event on same task: no second notification
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 5, autoRetried: false, files: 'a.ts, b.ts' });
+    expect(execCalls).toHaveLength(1);
+
+    // Contradictory payload: conflictCount > 3 but autoRetried is true must still notify
+    eventBus.emit('merge.conflict', 'proj/task-contradictory', { conflictCount: 4, autoRetried: true, files: 'c.ts' });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('⚠️ proj/task-contradictory xung đột merge lần thứ 4, cần xem: c.ts');
+
+    // 3. Cannot auto-reassign: sends notification
+    eventBus.emit('merge.conflict', 'proj/task-cancelled', { conflictCount: 1, autoRetried: false, message: 'Xung đột merge ở: bad.ts' });
+    expect(execCalls).toHaveLength(3);
+    expect(execCalls[2].args.at(-1)).toContain('⚠️ proj/task-cancelled xung đột merge lần thứ 1, cần xem: bad.ts');
+
+    // 4. merge.failed with fix task: no notification
+    eventBus.emit('merge.failed', 'proj/task-postcheck', { autoFixCreated: true, message: 'Checks sau merge thất bại' });
+    expect(execCalls).toHaveLength(3);
+
+    // 5. merge.failed due to environment error: sends notification
+    eventBus.emit('merge.failed', 'proj/task-env', { environment: true, message: 'Thiếu dependency' });
+    expect(execCalls).toHaveLength(4);
+    expect(execCalls[3].args.at(-1)).toContain('Lỗi môi trường khi tự động gộp: proj/task-env');
+
+    // 6. -fix-merge draft task: no notification
+    taskRepo.insert({
+      id: 'proj/task-postcheck-fix-merge',
+      projectId: 'proj',
+      slug: 'task-postcheck-fix-merge',
+      title: 'Fix merge',
+      status: 'draft',
+      sourceRef: JSON.stringify({ checkName: 'merge' }),
+    });
+    eventBus.emit('task.queued', 'proj/task-postcheck-fix-merge');
+    expect(execCalls).toHaveLength(4);
+
+    // 7. Restart persistence: a new NotificationService instance with the same taskRepo does not re-notify already alerted tasks
+    const restartedNotifier = new NotificationService({
+      eventBus,
+      config,
+      taskRepo,
+      profileRepo,
+      quotaMarkRepo,
+      projectRepo,
+      exec: fakeExec,
+    });
+    restartedNotifier.start();
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 6, autoRetried: false, files: 'a.ts' });
+    expect(execCalls).toHaveLength(4);
+    restartedNotifier.stop();
+
+    notifier.stop();
+  });
 });

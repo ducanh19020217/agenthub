@@ -53,6 +53,7 @@ export class NotificationService {
   private boundHandler: ((type: string, taskId?: string, payload?: unknown) => void) | null = null;
   private quietHoursQueue: Array<{ type: string; taskId?: string; payload?: unknown; timestamp: number }> = [];
   private focusDigest = new Map<string, number>();
+  private mergeConflictNotified = new Set<string>();
   private get appName(): string { return this.config.branding?.name || 'AgentHub'; }
   private checkTimer?: NodeJS.Timeout;
 
@@ -178,9 +179,39 @@ export class NotificationService {
       'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
       'disk.low', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed', 'task.waiting_quota',
       'quota.cleared', 'remote_deploy.failed', 'remote_deploy.health_timeout',
+      'merge.conflict', 'merge.failed',
     ]).has(type)) return;
 
     const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+
+    if (type === 'merge.conflict') {
+      const conflictCount = typeof p.conflictCount === 'number' ? p.conflictCount : undefined;
+      const isRoutine = (conflictCount === undefined || conflictCount <= 3) && (
+        p.autoRetried === true || (
+          p.autoRetried === undefined &&
+          (() => {
+            if (!taskId || !this.taskRepo) return true;
+            const task = this.taskRepo.get(taskId);
+            return task && task.status !== 'cancelled';
+          })()
+        )
+      );
+      if (isRoutine) return;
+    }
+
+    if (type === 'merge.failed') {
+      if (p.autoFixCreated === true) return;
+      if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+        /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+      )) {
+        return;
+      }
+    }
+
+    if (taskId && /-fix-merge(?:-\d+)?$/.test(taskId)) {
+      const task = this.taskRepo?.get(taskId);
+      if (!task || task.status === 'draft') return;
+    }
     const notifyConfig = this.config.telegram?.notify;
     const notifyAllExhausted = notifyConfig?.quotaAllExhausted !== false;
     if (type === 'quota.cleared') {
@@ -243,6 +274,8 @@ export class NotificationService {
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||
+        type === 'merge.conflict' ||
+        type === 'merge.failed' ||
         type.startsWith('remote_deploy.') ||
         type.startsWith('tracker.') ||
         type === 'quota.exhausted' ||
@@ -260,6 +293,10 @@ export class NotificationService {
     if (isQuietHours(this.config.notifications?.quietHours, new Date(now))) {
       const isIncident = isSystemIncident(type, payload, this.profileRepo, this.quotaMarkRepo, now);
       if (!isIncident) {
+        if (type === 'merge.conflict') {
+          if (!taskId || this.isMergeConflictNotified(taskId)) return;
+          this.markMergeConflictNotified(taskId);
+        }
         if (this.quietHoursQueue.length >= 200) {
           this.quietHoursQueue.shift();
         }
@@ -421,6 +458,31 @@ export class NotificationService {
       case 'review.escalated': {
         const title = this.resolveTaskTitle(taskId, p);
         this.notify(`Cần người duyệt: ${title}`, 'normal');
+        break;
+      }
+
+      case 'merge.conflict': {
+        if (!taskId) break;
+        if (this.isMergeConflictNotified(taskId)) break;
+        this.markMergeConflictNotified(taskId);
+
+        const count = typeof p.conflictCount === 'number' ? p.conflictCount : 1;
+        const filesText = this.extractConflictFiles(p);
+        this.notify(`⚠️ ${taskId} xung đột merge lần thứ ${count}, cần xem: ${filesText}`, 'critical');
+        break;
+      }
+
+      case 'merge.failed': {
+        if (p.autoFixCreated === true) break;
+        if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+          /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+        )) {
+          break;
+        }
+        const message = typeof p.message === 'string' ? p.message : 'Lỗi khi merge tự động';
+        const taskLabel = taskId || 'Task';
+        const title = p.environment ? 'Lỗi môi trường khi tự động gộp' : 'Lỗi tự động gộp';
+        this.notify(`${this.appName}: ${title}: ${taskLabel} - ${message}`, 'critical');
         break;
       }
 
@@ -603,6 +665,30 @@ export class NotificationService {
     return 'Task';
   }
 
+  private extractConflictFiles(p: Record<string, unknown>): string {
+    if (typeof p.files === 'string' && p.files.trim()) return p.files.trim();
+    if (Array.isArray(p.files) && p.files.length > 0) return p.files.join(', ');
+    if (typeof p.message === 'string') {
+      const match = p.message.match(/Xung đột merge ở:\s*(.+)/i);
+      if (match && match[1].trim()) return match[1].trim();
+      return p.message.trim();
+    }
+    return '(không rõ file)';
+  }
+
+  private isMergeConflictNotified(taskId: string): boolean {
+    if (this.mergeConflictNotified.has(taskId)) return true;
+    if (this.taskRepo?.isNotificationSent('desktop', 'merge.conflict', taskId)) {
+      this.mergeConflictNotified.add(taskId);
+      return true;
+    }
+    return false;
+  }
+
+  private markMergeConflictNotified(taskId: string): void {
+    this.mergeConflictNotified.add(taskId);
+    this.taskRepo?.markNotificationSent('desktop', 'merge.conflict', taskId);
+  }
   private notify(message: string, urgency: 'normal' | 'warning' | 'critical' = 'normal'): void {
     const level = this.config.notifications?.desktopLevel || 'all';
     if (level === 'off') return;

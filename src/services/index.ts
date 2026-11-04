@@ -3931,27 +3931,62 @@ export class AppService {
       const conflictCount = isConflict
         ? this.eventRepo.getByTask(taskId).filter((event) => event.type === 'merge.conflict').length + 1
         : undefined;
-      if (isConflict && conflictCount !== undefined && conflictCount <= 3) {
+      const rawMessage = error instanceof Error ? error.message : String(error);
+
+      let autoRetried = false;
+      let filesText = rawMessage;
+      if (isConflict) {
+        const match = rawMessage.match(/Xung đột merge ở:\s*(.+)/i);
+        if (match && match[1].trim()) {
+          filesText = match[1].trim();
+        }
         const current = this.taskRepo.get(taskId);
-        const files = error instanceof Error ? error.message : String(error);
-        const note = `\n\n## Tự xử lý xung đột merge lần ${conflictCount}\n\nCác file/chi tiết xung đột: ${files}\nCác nhánh đã merge trước đó có thể cũng sửa các file này. Hãy chạy \`git merge <base>\`, giữ thay đổi của cả hai bên rồi chạy đầy đủ checks trước khi commit.`;
-        this.taskRepo.update(taskId, {
-          status: 'queued',
-          resume: 1,
-          body: `${current?.body || ''}${note}`,
-          notBefore: null,
-        });
-        this.scheduler.getEventBus().emit('task.queued', taskId, {
-          reason: 'merge_conflict_auto_retry',
-          conflictCount,
-          feedback: note.trim(),
-        });
+        let baseBranchExists = true;
+        const baseBranch = current?.baseRef || project?.defaultBranch;
+        if (project?.path && baseBranch && fs.existsSync(project.path)) {
+          try {
+            execFileSync('git', ['-C', project.path, 'rev-parse', '--verify', '--quiet', baseBranch], { stdio: 'ignore' });
+          } catch {
+            baseBranchExists = false;
+          }
+        }
+        const canAutoRetry = Boolean(
+          current &&
+          current.status !== 'cancelled' &&
+          baseBranchExists &&
+          conflictCount !== undefined &&
+          conflictCount <= 3
+        );
+        if (canAutoRetry && current) {
+          const note = `\n\n## Tự xử lý xung đột merge lần ${conflictCount}\n\nCác file/chi tiết xung đột: ${filesText}\nCác nhánh đã merge trước đó có thể cũng sửa các file này. Hãy chạy \`git merge <base>\`, giữ thay đổi của cả hai bên rồi chạy đầy đủ checks trước khi commit.`;
+          this.taskRepo.update(taskId, {
+            status: 'queued',
+            resume: 1,
+            body: `${current.body || ''}${note}`,
+            notBefore: null,
+          });
+          this.scheduler.getEventBus().emit('task.queued', taskId, {
+            reason: 'merge_conflict_auto_retry',
+            conflictCount,
+            feedback: note.trim(),
+          });
+          autoRetried = true;
+        }
       }
+
+      const fixTask = !isConflict
+        ? this.taskRepo.getDerivedFrom(taskId).find((t) =>
+            /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+          )
+        : null;
+      const autoFixCreated = Boolean(fixTask);
+
       this.scheduler.getEventBus().emit(isConflict ? 'merge.conflict' : 'merge.failed', taskId, {
         actor: 'auto-merge',
-        message: error instanceof Error ? error.message : String(error),
+        message: rawMessage,
         environment: isEnvironment || undefined,
         ...(conflictCount === undefined ? {} : { conflictCount }),
+        ...(isConflict ? { autoRetried, files: filesText } : { autoFixCreated }),
       });
     }
   }

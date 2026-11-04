@@ -1862,6 +1862,18 @@ export class TaskRepo {
   delete(id: string): void {
     this.db.prepare('DELETE FROM task_deps WHERE taskId = ? OR dependsOnId = ?').run(id, id);
     this.db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
+    this.db.prepare("DELETE FROM meta WHERE key LIKE 'notified:%:' || ?").run(id);
+  }
+
+  isNotificationSent(channel: string, type: string, taskId: string): boolean {
+    const key = `notified:${channel}:${type}:${taskId}`;
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value?: string } | undefined;
+    return row?.value === '1';
+  }
+
+  markNotificationSent(channel: string, type: string, taskId: string): void {
+    const key = `notified:${channel}:${type}:${taskId}`;
+    this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')").run(key);
   }
 
   setBatchId(id: string, batchId: string | null): void {

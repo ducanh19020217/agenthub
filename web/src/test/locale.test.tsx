@@ -87,7 +87,7 @@ describe('i18n & LocaleContext', () => {
     expect(screen.getByText('Running')).toBeInTheDocument();
     expect(screen.getByText('In Review')).toBeInTheDocument();
     expect(screen.getByText('Done')).toBeInTheDocument();
-    expect(screen.getByText('Waiting Quota')).toBeInTheDocument();
+    expect(screen.getByText('Waiting')).toBeInTheDocument();
     expect(screen.getByText('Blocked')).toBeInTheDocument();
     expect(screen.getByText('Failed')).toBeInTheDocument();
   });
@@ -115,7 +115,7 @@ describe('i18n & LocaleContext', () => {
       draft: 'Nháp',
       queued: 'Chờ chạy',
       running: 'Đang chạy',
-      waiting_quota: 'Chờ quota',
+      waiting_quota: 'Đang chờ',
       review: 'Chờ duyệt',
       blocked: 'Bị chặn',
       failed: 'Lỗi',
@@ -127,7 +127,7 @@ describe('i18n & LocaleContext', () => {
       draft: 'Draft',
       queued: 'Queued',
       running: 'Running',
-      waiting_quota: 'Waiting Quota',
+      waiting_quota: 'Waiting',
       review: 'In Review',
       blocked: 'Blocked',
       failed: 'Failed',

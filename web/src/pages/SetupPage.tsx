@@ -26,6 +26,7 @@ import { StatTile } from '../components/ui/StatTile';
 import { StatusBadge } from '../components/StatusBadge';
 import { Profile } from '../types/api';
 import { UsageModes } from '../components/UsageModes';
+import { SetupChatButton } from '../components/SetupChatButton';
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -476,6 +477,7 @@ export const SetupPage: React.FC = () => {
             {t('setup.subtitle')}
           </p>
         </div>
+        <SetupChatButton />
       </div>
 
       {/* Readiness Progress Summary */}

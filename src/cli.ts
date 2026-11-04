@@ -413,6 +413,23 @@ export async function cmdRollback(extraArgs: string[] = [], projectRootOverride?
 }
 
 export async function cmdSetup(config: AgentHubConfig, extraArgs: string[] = []): Promise<void> {
+  if (extraArgs[0] === 'export') {
+    const output = getArg(extraArgs.slice(1), '--out') || 'agenthub-setup.json';
+    const response = await hubRequest(config, 'GET', '/api/setup/export');
+    if (!response.ok) throw new Error(`Không thể export setup (HTTP ${response.status})`);
+    fs.writeFileSync(path.resolve(output), `${JSON.stringify(await response.json(), null, 2)}\n`, { mode: 0o600 });
+    console.log(`✓ Đã xuất cấu hình setup: ${path.resolve(output)}`);
+    return;
+  }
+  if (extraArgs[0] === 'import') {
+    const file = extraArgs[1];
+    if (!file) throw new Error('Cách dùng: agenthub setup import <file> [--dry-run]');
+    const dryRun = extraArgs.includes('--dry-run');
+    const response = await hubRequest(config, 'POST', '/api/setup/import', { file: path.resolve(file), dryRun });
+    if (!response.ok) throw new Error(`Không thể import setup (HTTP ${response.status}): ${await response.text()}`);
+    console.log(JSON.stringify(await response.json(), null, 2));
+    return;
+  }
   console.log('==> Thiết lập AgentHub lần đầu');
   const setup = new SetupManager(config);
   const installArg = extraArgs.find((arg) => arg.startsWith('--install='))?.slice('--install='.length) || (extraArgs.includes('--install') ? extraArgs[extraArgs.indexOf('--install') + 1] : undefined);
@@ -592,6 +609,8 @@ Cách dùng:
   agenthub mcp                        Chạy MCP server (stdio transport)
   agenthub open                       Mở giao diện web trong trình duyệt
   agenthub setup [--no-browser]       Thiết lập lần đầu, service và dashboard
+  agenthub setup export [--out file]  Xuất agenthub-setup.json không kèm bí mật
+  agenthub setup import <file> [--dry-run]  Đối chiếu/nhập cấu hình máy mới
   agenthub rollback [version]         Quay lại bản release trước đó
   agenthub update                     Cập nhật AgentHub lên phiên bản mới nhất
   agenthub version [--check]          Xem phiên bản và kiểm tra cập nhật mới

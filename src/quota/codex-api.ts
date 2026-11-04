@@ -8,7 +8,7 @@ export const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 export type CodexTokenSkip = 'no_auth_file' | 'unreadable' | 'no_access_token';
 
 /**
- * Ngoại lệ DEC-013: chỉ lấy access_token và account_id trong auth.json của CODEX_HOME riêng.
+ * Ngoại lệ DEC-014: chỉ lấy access_token và account_id trong auth.json của CODEX_HOME riêng.
  * Không đọc refresh_token/id_token, không ghi lại file, không log token.
  */
 export function readCodexAccessToken(codexHome: string): { accessToken: string; accountId: string | null } | { skip: CodexTokenSkip } {

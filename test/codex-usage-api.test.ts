@@ -6,7 +6,7 @@ import { loadConfig } from '../src/config.js';
 import { createContext } from '../src/daemon.js';
 import { parseCodexUsage, readCodexAccessToken } from '../src/quota/codex-api.js';
 
-describe('Codex quota and plan from wham/usage (DEC-013)', () => {
+describe('Codex quota and plan from wham/usage (DEC-014)', () => {
   let tmpDir: string;
   let ctx: ReturnType<typeof createContext>;
   let originalFetch: typeof globalThis.fetch;

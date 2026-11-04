@@ -949,7 +949,6 @@ export interface TelegramStatus {
     reviewReady: boolean;
     failed: boolean;
     blocked: boolean;
-    quotaPerModel: boolean;
     quotaAllExhausted: boolean;
     fallback: boolean;
   };

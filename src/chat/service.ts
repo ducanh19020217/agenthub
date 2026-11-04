@@ -42,6 +42,7 @@ import { findClaudeBin,
   FORK_SUMMARY_PROMPT,
   buildAssistantPrompt,
   buildBrainPrompt,
+  buildSetupPrompt,
 } from './claude.js';
 import { findProjectRoot } from '../cli.js';
 import { readCodexRateLimits } from '../quota/codex-usage.js';
@@ -233,6 +234,12 @@ export class ChatService {
       ? buildProjectKnowledgeContext(this.knowledgeRepo.getByProject(project.id), projectSettings(project).references, undefined, project.path).text
       : undefined;
     return buildAssistantPrompt(context);
+  }
+
+  private sessionPrompt(session: ChatSessionRow): string | undefined {
+    if (session.kind === 'setup') return buildSetupPrompt();
+    if (session.kind === 'assistant') return this.assistantPrompt(session);
+    return undefined;
   }
 
   private hubSnapshot(session: ChatSessionRow, refresh = false): string {
@@ -712,7 +719,7 @@ export class ChatService {
     mode?: 'safe' | 'full';
     model?: string;
     profileName?: string | null;
-    kind?: 'chat' | 'brain' | 'assistant';
+    kind?: 'chat' | 'brain' | 'assistant' | 'setup';
   }): ChatSessionRow {
     const { mode, model } = this.validateSessionOptions(body);
 
@@ -747,7 +754,7 @@ export class ChatService {
     mode?: 'safe' | 'full';
     model?: string;
     profileName?: string | null;
-    kind?: 'chat' | 'brain' | 'assistant';
+    kind?: 'chat' | 'brain' | 'assistant' | 'setup';
   }): ChatSessionRow {
     const existing = this.chatSessionRepo.get(id);
     if (existing) return existing;
@@ -784,7 +791,7 @@ export class ChatService {
   private validateSessionOptions(body: {
     mode?: 'safe' | 'full';
     model?: string;
-    kind?: 'chat' | 'brain' | 'assistant';
+    kind?: 'chat' | 'brain' | 'assistant' | 'setup';
   }): { mode: 'safe' | 'full'; model: string } {
     const mode = body.mode || 'safe';
     const fullAllowed = body.kind === 'brain' || (body.kind === 'assistant' && this.config.assistant?.permissions === 'full') || this.config.chat?.allowFullMode === true;
@@ -1224,7 +1231,8 @@ export class ChatService {
           mode: session.mode,
           mcpConfigPath,
           model: session.model,
-          systemPrompt: session.kind === 'assistant' ? this.assistantPrompt(session) : undefined,
+          systemPrompt: this.sessionPrompt(session),
+          kind: session.kind,
         });
 
         let child: ChildProcess;
@@ -1410,7 +1418,8 @@ export class ChatService {
           mode: session.mode,
           mcpConfigPath,
           model: session.model,
-          systemPrompt: session.kind === 'assistant' ? this.assistantPrompt(session) : undefined,
+          systemPrompt: this.sessionPrompt(session),
+          kind: session.kind,
         });
 
         let child: ChildProcess;
@@ -1574,8 +1583,9 @@ export class ChatService {
       mcpConfigPath,
       supportsPartial,
       model: execution.model,
-      systemPrompt: session?.kind === 'assistant' ? this.assistantPrompt(session) : undefined,
+      systemPrompt: session ? this.sessionPrompt(session) : undefined,
       hubSnapshot: session ? this.hubSnapshot(session) : undefined,
+      kind: session?.kind,
     });
 
     setBrainActivity('talking').catch(() => {});
@@ -1907,7 +1917,9 @@ export class ChatService {
     const projectKnowledge = project && this.knowledgeRepo
       ? buildProjectKnowledgeContext(this.knowledgeRepo.getByProject(project.id), projectSettings(project).references, undefined, project.path).text
       : undefined;
-    const systemPrompt = session.kind === 'assistant'
+    const systemPrompt = session.kind === 'setup'
+      ? buildSetupPrompt()
+      : session.kind === 'assistant'
       ? this.assistantPrompt(session)
       : (buildBrainPrompt(this.config.planning) + (projectKnowledge ? `\n\n[Kiến thức dự án]\n${projectKnowledge}` : ''));
     const snapshot = this.hubSnapshot(session);
@@ -2161,7 +2173,8 @@ export class ChatService {
       persistent: true,
       model: execution.model,
       hubSnapshot: this.hubSnapshot(session, (this.snapshotAt.get(session.id) || 0) > 0 && Date.now() - (this.snapshotAt.get(session.id) || 0) > 10 * 60 * 1000),
-      systemPrompt: session.kind === 'assistant' ? this.assistantPrompt(session) : undefined,
+      systemPrompt: this.sessionPrompt(session),
+      kind: session.kind,
     }), cwd, undefined, { disableToolSearch: this.config.chat.disableToolSearch, chatSessionId: session.id, chatKind: session.kind, port: this.config.port, claudeConfigDir: profile?.kind === 'isolated' ? profile.home || undefined : undefined, env: execution.env });
     const state: PersistentProcess = { sessionId: session.id, child: proc, parser: new StreamChunkParser(), lastUsedAt: Date.now(), model: session.model, profileName: session.profileName, stderrOutput: '' };
     this.persistentProcesses.set(session.id, state);
@@ -2648,6 +2661,7 @@ export function registerChatRoutes(fastify: FastifyInstance, chatService: ChatSe
       ...(body.mode === 'safe' || body.mode === 'full' ? { mode: body.mode } : {}),
       ...(typeof body.model === 'string' ? { model: body.model } : {}),
       ...(typeof body.profileName === 'string' || body.profileName === null ? { profileName: body.profileName } : {}),
+      ...(body.kind === 'setup' ? { kind: body.kind } : {}),
     });
     return reply.status(201).send(session);
   });

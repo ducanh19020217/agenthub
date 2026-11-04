@@ -142,6 +142,30 @@ describe('AgentHub MCP Server Tools', () => {
     expect(exhausted.content[0].text).toContain('Hệ thống tạm dừng thực thi task');
   });
 
+  it('hub_status reports actual wait reason when tasks are waiting for disk', async () => {
+    ctx.projectRepo.insert({
+      id: 'proj-disk',
+      name: 'Project Disk',
+      path: tmpDir,
+      defaultBranch: 'main',
+      envTemplate: null,
+      maxParallel: 2,
+    });
+    ctx.taskRepo.insert({
+      id: 'proj-disk/task-disk-wait',
+      projectId: 'proj-disk',
+      slug: 'task-disk-wait',
+      title: 'Task waiting for disk',
+      status: 'waiting_quota',
+      waitReason: 'disk',
+    });
+
+    const res = (await client.callTool({ name: 'hub_status', arguments: {} })) as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(res.content[0].text).toContain('chờ đĩa 1');
+  });
+
   it('hub_status displays task title on the running worker line', async () => {
     ctx.projectRepo.insert({
       id: 'proj',

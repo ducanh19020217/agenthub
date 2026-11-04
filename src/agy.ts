@@ -54,7 +54,7 @@ export function agyInstallHint(): string {
  * session is saved to `<HOME>/.gemini/antigravity-cli/antigravity-oauth-token`.
  * Linux: a dead DBus address hides the Secret Service. macOS: the fake HOME has no
  * login keychain, so saving pops "A keychain cannot be found"; agy skips the
- * keychain when it detects an SSH session (DEC-013).
+ * keychain when it detects an SSH session (DEC-015).
  */
 export function applyIsolatedAgyEnv(env: Record<string, string>, home: string, platform: NodeJS.Platform = process.platform): void {
   env.HOME = home;

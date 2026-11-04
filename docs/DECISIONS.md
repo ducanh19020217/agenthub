@@ -144,7 +144,31 @@
   - Project được tôn trọng các thiết lập `maxTurnsPerHour`, `dailyTokenBudget`, `permissions`, `engine`, `model`.
   - Cấu hình phòng ban chỉ ghi đè khi được người dùng chủ động cấu hình khác `'inherit'`.
 
-## DEC-013: Ngoại lệ hẹp — đọc `access_token` Codex để lấy quota và gói qua API
+## DEC-013: Giữ trạng thái waiting_quota và phân biệt lý do chờ bằng waitReason
+
+- **Bối cảnh**:
+  - Sự cố ngày 2026-11-03: Ổ `/home` chỉ còn 0,5 GB trống khiến scheduler chuyển các task sang trạng thái `waiting_quota` và hiển thị trên cột Kanban "Chờ quota", dù nguyên nhân thực tế là chờ dung lượng đĩa.
+  - Ngoài ra, project agenthub có worktree root nằm trên ổ `/media/veracrypt8` còn 13 GB trống, nhưng cơ chế kiểm tra đĩa cũ quét mọi thư mục worktree (bao gồm `~/.agenthub/worktrees` trên `/home`) và chặn toàn bộ các project như nhau.
+- **Quyết định**:
+  1. **Giữ nguyên trạng thái `status = 'waiting_quota'`**: Nhằm giảm thiểu tối đa tác động lên schema cơ sở dữ liệu, các truy vấn SQL, REST API, SSE event stream và công cụ MCP hiện hữu.
+  2. **Dùng `waitReason` để phân biệt 5 nhóm lý do chờ**:
+     - `quota`: Chờ quota model / tài khoản (kèm `no_department_profile`, `no_matching_profile`).
+     - `disk`: Chờ dung lượng ổ đĩa (ổ worktree của chính project hoặc ổ dữ liệu hub home).
+     - `slot`: Chờ slot song song / tài khoản rảnh (`slot`, `parallel`, `department_parallel`, `profile_busy`).
+     - `load`: Chờ tải máy (CPU/RAM/I/O pressure) phục hồi sau khi quá tải.
+     - `dependency`: Chờ các task phụ thuộc (`dependsOn`) hoàn thành.
+  3. **Đổi tên cột Kanban và nhãn trạng thái**:
+     - Cột Kanban cho trạng thái `waiting_quota` đổi tên hiển thị thành "Đang chờ" ("Waiting" trên bản tiếng Anh) thay vì "Chờ quota".
+     - Badge trên từng task hiển thị chi tiết theo `waitReason` tương ứng (ví dụ "Chờ ổ đĩa", "Chờ quota model", "Chờ slot song song", "Chờ tải máy giảm", "Chờ task phụ thuộc").
+  4. **Kiểm tra đĩa theo từng project**:
+     - Khi dispatch, chỉ kiểm tra ổ chứa worktree root của chính project đó cộng các `extraPaths`.
+     - Tách riêng việc kiểm tra ổ chứa dữ liệu hub (`~/.agenthub` chứa DB, log, cache) với ngưỡng riêng `disk.hubHomeMinFreeGB` (mặc định 1 GB). Nếu ổ này dưới ngưỡng thì chặn mọi project và thông báo rõ "Ổ chứa dữ liệu hub (~/.agenthub) sắp đầy".
+  5. **Telegram và `hub_status`**: Báo cáo chính xác nguyên nhân chờ (ví dụ "đang chờ 3 (3 chờ đĩa)") thay vì hiển thị "chờ quota".
+- **Hệ quả**:
+  - Đảm bảo tính nhất quán và tương thích ngược của hệ thống.
+  - Thông tin hiển thị trên Web, Telegram và MCP phản ánh đúng bản chất lý do chờ của task.
+
+## DEC-014: Ngoại lệ hẹp — đọc `access_token` Codex để lấy quota và gói qua API
 
 - **Bối cảnh**: Quota Codex trước đây chỉ đọc từ log phiên của Codex CLI, nên hồ sơ mới nhập chưa có quota, và hồ sơ đăng nhập qua terminal không có gói. Cockpit tools lấy cả hai qua `GET https://chatgpt.com/backend-api/wham/usage`. Người dùng đồng ý làm giống (2026-10-22).
 - **Quyết định**: `readCodexAccessToken()` (`src/quota/codex-api.ts`) được đọc `auth.json`, với giới hạn:
@@ -154,7 +178,7 @@
   - Token chỉ gửi tới endpoint trên (kèm header `ChatGPT-Account-Id`), không log, không lưu DB, không trả qua API. Chỉ lưu quota và `plan_type` đã chuẩn hoá.
 - **Hệ quả**: Hồ sơ Codex có quota 5h/tuần và tag gói ngay sau lần Làm mới đầu tiên. Access token hết hạn thì báo HTTP 401 và để Codex tự làm mới khi chạy task. Quota từ log phiên không còn đè lên số mới hơn lấy từ API.
 
-## DEC-013: macOS — hồ sơ agy isolated giả lập phiên SSH để bỏ qua Keychain
+## DEC-015: macOS — hồ sơ agy isolated giả lập phiên SSH để bỏ qua Keychain
 
 - **Bối cảnh**: Mục 2.1 của PLAN chỉ chặn keyring trên Linux, bằng cách đặt `DBUS_SESSION_BUS_ADDRESS` tới một địa chỉ không tồn tại. macOS không dùng DBus. Khi `HOME` của hồ sơ không có `Library/Keychains`, mỗi lần agy lưu phiên thì macOS bật hộp thoại "A keychain cannot be found to store "antigravity"". Nếu người dùng bấm "Reset To Defaults", login keychain thật bị thay bằng một keychain trống.
 - **Quyết định**: Gom môi trường của hồ sơ isolated vào `applyIsolatedAgyEnv()` (`src/agy.ts`). Hàm này dùng cho worker, đăng nhập (CLI và PTY), đọc quota và wakeup. Trên `darwin`, hàm đặt thêm `SSH_CONNECTION=127.0.0.1 0 127.0.0.1 0` nếu biến này chưa có. agy 1.4.11 phát hiện phiên SSH và ghi log `Using file-based token storage because SSH session detected` (đã kiểm chứng với HOME tạm, không có token).

@@ -58,6 +58,29 @@ function isComment(activity: OpenProjectActivity): boolean {
   return Boolean(activity.comment?.raw);
 }
 
+function isBaselineRow(row: TrackerItemRow | undefined): boolean {
+  if (!row) return false;
+  try {
+    const parsed = JSON.parse(row.writeback);
+    return Boolean(parsed && typeof parsed === 'object' && parsed.baseline === true);
+  } catch {
+    return false;
+  }
+}
+
+function clearBaseline(writebackJson: string): string {
+  try {
+    const parsed = JSON.parse(writebackJson);
+    if (parsed && typeof parsed === 'object') {
+      delete parsed.baseline;
+      return JSON.stringify(parsed);
+    }
+    return '{}';
+  } catch {
+    return '{}';
+  }
+}
+
 export class OpenProjectIntakeService {
   private readonly config: AgentHubConfig;
   private readonly projectRepo: ProjectRepo;
@@ -154,7 +177,16 @@ export class OpenProjectIntakeService {
       const currentStatus = statusId(wp);
       const lastComment = activities.reduce((max, item) => Math.max(max, item.id || 0), 0) || null;
       if (!previous && firstPoll) {
-        this.trackerRepo.upsert({ source_id: source.id, wp_id: wp.id, display_id: displayId(wp), status_id: currentStatus, updated_at: wp.updatedAt || new Date(this.now()).toISOString(), last_comment_id: lastComment, task_ids: '[]', writeback: '{}' });
+        this.trackerRepo.upsert({
+          source_id: source.id,
+          wp_id: wp.id,
+          display_id: displayId(wp),
+          status_id: currentStatus,
+          updated_at: wp.updatedAt || new Date(this.now()).toISOString(),
+          last_comment_id: lastComment,
+          task_ids: '[]',
+          writeback: JSON.stringify({ baseline: true }),
+        });
         continue;
       }
 
@@ -191,7 +223,8 @@ export class OpenProjectIntakeService {
 
       let row = previous;
       const hasTasks = taskIds(previous).length > 0;
-      const isNew = !hasTasks && !changed;
+      const isBaseline = isBaselineRow(previous);
+      const isNew = !hasTasks && !isBaseline;
       if (reopened || (changed && freshComments.length > 0) || isNew) {
         const event = reopened ? 'reopened' : isNew ? 'new' : 'comment';
         const importedResult = await this.handleTicket(source, attached.primary, client, wp, activities, row, event);
@@ -199,7 +232,7 @@ export class OpenProjectIntakeService {
         comments += importedResult.comments;
         row = importedResult.row;
       }
-      this.trackerRepo.upsert({ ...row, display_id: displayId(wp), status_id: currentStatus, updated_at: wp.updatedAt || row.updated_at, last_comment_id: lastComment, task_ids: row.task_ids });
+      this.trackerRepo.upsert({ ...row, display_id: displayId(wp), status_id: currentStatus, updated_at: wp.updatedAt || row.updated_at, last_comment_id: lastComment, task_ids: row.task_ids, writeback: row.writeback });
     }
     this.initializedSources.add(source.id);
     return { imported, comments };
@@ -232,6 +265,14 @@ export class OpenProjectIntakeService {
         this.eventBus.emit('tracker.comment', openTasks[0].id, { sourceId: source.id, wpId: wp.id, displayId: displayId(wp), comment: activities.at(-1)?.comment?.raw || '' });
       }
     }
-    return { row: { ...previous, task_ids: JSON.stringify(ids) }, imported, comments };
+    return {
+      row: {
+        ...previous,
+        task_ids: JSON.stringify(ids),
+        writeback: imported > 0 ? clearBaseline(previous.writeback) : previous.writeback,
+      },
+      imported,
+      comments,
+    };
   }
 }

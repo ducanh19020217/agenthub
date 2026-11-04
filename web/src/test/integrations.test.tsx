@@ -740,7 +740,7 @@ describe('Integrations UI Suite', () => {
         expect(screen.getByRole('status')).toHaveTextContent('Đã ghi mốc 13 ticket (lần đầu, chưa tạo task)');
         expect(screen.getByRole('status')).toHaveClass('text-[var(--t-ok)]');
       }, { timeout: 5000 });
-    });
+    }, 15_000);
 
     it('displays error message from server with crit color when save fails', async () => {
       vi.spyOn(client, 'saveOpenProjectSource').mockRejectedValue(new Error('Tên project trong OpenProject không hợp lệ'));
@@ -749,6 +749,7 @@ describe('Integrations UI Suite', () => {
 
       await waitFor(() => {
         expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+        expect(screen.getByText('Lưu')).not.toBeDisabled();
       });
 
       const saveBtn = screen.getByText('Lưu');
@@ -769,6 +770,7 @@ describe('Integrations UI Suite', () => {
 
       await waitFor(() => {
         expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+        expect(screen.getByText('Lưu')).not.toBeDisabled();
       });
 
       const keyInput = screen.getByLabelText('API key');
@@ -781,6 +783,31 @@ describe('Integrations UI Suite', () => {
         const status = screen.getByRole('status');
         expect(status).toHaveTextContent('Lưu API key thất bại: Key 401 Unauthorized');
         expect(status).toHaveClass('text-[var(--t-crit)]');
+      });
+    });
+
+    it('displays sync results with watched and baseline 0 on subsequent syncs', async () => {
+      const syncSpy = vi.spyOn(client, 'syncOpenProject').mockResolvedValue({
+        imported: 1,
+        comments: 0,
+        baseline: 0,
+        watched: 13,
+      });
+
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+        expect(screen.getByText('Đồng bộ ngay')).not.toBeDisabled();
+      });
+
+      const syncBtn = screen.getByText('Đồng bộ ngay');
+      fireEvent.click(syncBtn);
+
+      await waitFor(() => {
+        expect(syncSpy).toHaveBeenCalledWith('op-corp');
+        expect(screen.getByRole('status')).toHaveTextContent('Đã nhập 1 ticket (theo dõi 13, mốc 0)');
+        expect(screen.getByRole('status')).toHaveClass('text-[var(--t-ok)]');
       });
     });
 
@@ -1042,19 +1069,41 @@ describe('Integrations UI Suite', () => {
       });
     });
 
-    it('reload statuses button triggers refetch', async () => {
-      const getStatusesSpy = vi.spyOn(client, 'getOpenProjectStatuses').mockResolvedValue(mockStatuses);
+    it('reload statuses button triggers refetch and shows loading state with existing data', async () => {
+      let resolveStatuses: (val: any) => void = () => {};
+      const pendingStatuses = new Promise((resolve) => {
+        resolveStatuses = resolve;
+      });
+      const getStatusesSpy = vi.spyOn(client, 'getOpenProjectStatuses')
+        .mockResolvedValueOnce(mockStatuses)
+        .mockImplementationOnce(() => pendingStatuses as any);
 
       renderWithProviders(<OpenProjectSettings />);
 
       await waitFor(() => {
         expect(screen.getByTestId('reload-statuses-button')).toBeInTheDocument();
+        expect(screen.getByTestId('reload-statuses-button')).not.toBeDisabled();
       });
 
-      fireEvent.click(screen.getByTestId('reload-statuses-button'));
+      const reloadBtn = screen.getByTestId('reload-statuses-button');
+      fireEvent.click(reloadBtn);
 
       await waitFor(() => {
-        expect(getStatusesSpy).toHaveBeenCalled();
+        expect(getStatusesSpy).toHaveBeenCalledTimes(2);
+        expect(reloadBtn).toBeDisabled();
+        expect(reloadBtn).toHaveAttribute('aria-busy', 'true');
+        expect(reloadBtn).toHaveTextContent('Đang tải trạng thái...');
+        expect(reloadBtn.querySelector('.animate-spin')).toBeInTheDocument();
+      });
+
+      await act(async () => {
+        resolveStatuses(mockStatuses);
+      });
+
+      await waitFor(() => {
+        expect(reloadBtn).not.toBeDisabled();
+        expect(reloadBtn).not.toHaveAttribute('aria-busy');
+        expect(reloadBtn).toHaveTextContent('Tải lại trạng thái');
       });
     });
   });

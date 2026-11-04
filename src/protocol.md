@@ -4,27 +4,6 @@ Bạn là một AI worker trong hệ thống AgentHub.
 
 ## Quy tắc
 
-## Phân tích triage OpenProject
-
-Task có hậu tố `-triage` chỉ phân tích, không sửa code và không commit. Báo cáo DONE phải có đúng các trường sau:
-
-```text
-Kết luận: lỗi | không phải lỗi | thiếu thông tin | yêu cầu tính năng | việc thủ công
-Độ lớn: nhỏ | vừa | lớn | lớn (cần chia)
-Repo: <projectId>[, <projectId>]
-### Tóm tắt yêu cầu
-### Bằng chứng
-### Nguyên nhân dự kiến
-### Hướng sửa đề xuất (và phương án nếu có nhiều)
-### Rủi ro / ảnh hưởng
-### Câu hỏi cho tester (nếu thiếu thông tin)
-```
-
-Với `việc thủ công`, thêm `### Nhận định ban đầu`, `### Checklist kiểm tra trên server` và/hoặc `### Nháp tin nhắn/trả lời`. Với nhiều repo, thêm `### Phần việc theo repo`.
-
-`### Việc thủ công kèm theo` liệt kê các bước ngoài repo cần người dùng thực hiện sau khi code được merge; nội dung này được đưa vào comment ghi ngược cho tester.
-
-Không ghi các số liệu dễ thay đổi (ví dụ thời gian build hoặc số test chính xác) vào tài liệu đã commit; chỉ ghi các số liệu đó trong `.agenthub/DONE`.
 1. Đọc `.agenthub/task.md` để biết đề bài.
 2. Đọc thêm AGENTS.md / CLAUDE.md / GEMINI.md của project nếu có.
 3. Làm trên nhánh hiện tại, commit nhỏ theo Conventional Commits.
@@ -44,6 +23,49 @@ Không ghi các số liệu dễ thay đổi (ví dụ thời gian build hoặc 
 11. Đọc `.agenthub/context/knowledge.md` (nếu có) trước khi bắt đầu: kiến thức chung của dự án từ các task trước.
 12. Đọc `.agenthub/context/references.md` (nếu có): danh sách tài liệu tham chiếu CHỈ ĐỌC (không sửa, không commit).
 13. Đọc `.agenthub/context/review-checklist.md` (nếu có): checklist bắt buộc đối chiếu khi duyệt thay đổi.
+
+Không ghi các số liệu dễ thay đổi (ví dụ thời gian build hoặc số test chính xác) vào tài liệu đã commit; chỉ ghi các số liệu đó trong `.agenthub/DONE`.
+
+## Chia việc OpenProject
+
+Khi task được yêu cầu lập kế hoạch chia ticket, không sửa code và ghi `DONE` với mục
+`## Chia việc`. Chỉ chia từ 2 đến tối đa 5 phần; mỗi phần phải là một thay đổi trọn
+vẹn, có thể kiểm thử độc lập. Không tách riêng test, lint, tài liệu hay dịch chuỗi.
+
+Định dạng mỗi phần:
+
+```text
+### 1. Tiêu đề phần
+- project: <projectId hub>
+- level: easy|hard
+- phụ thuộc: 2, 3
+Mô tả phạm vi, tiêu chí hoàn thành và cách kiểm thử.
+```
+
+`project`, `level` và `phụ thuộc` có thể bỏ qua; khi đó project mặc định là project
+primary, level là `easy`, và không có phụ thuộc. Sai định dạng hoặc vượt giới hạn
+phải được báo rõ để worker gộp lại, không được làm hub crash. Một kế hoạch chỉ có
+1 phần được coi là không cần chia và xử lý như task ticket thường.
+
+## Phân tích triage OpenProject
+
+Task có hậu tố `-triage` chỉ phân tích, không sửa code và không commit. Báo cáo DONE phải có đúng các trường sau:
+
+```text
+Kết luận: lỗi | không phải lỗi | thiếu thông tin | yêu cầu tính năng | việc thủ công
+Độ lớn: nhỏ | vừa | lớn | lớn (cần chia)
+Repo: <projectId>[, <projectId>]
+### Tóm tắt yêu cầu
+### Bằng chứng
+### Nguyên nhân dự kiến
+### Hướng sửa đề xuất (và phương án nếu có nhiều)
+### Rủi ro / ảnh hưởng
+### Câu hỏi cho tester (nếu thiếu thông tin)
+```
+
+Với `việc thủ công`, thêm `### Nhận định ban đầu`, `### Checklist kiểm tra trên server` và/hoặc `### Nháp tin nhắn/trả lời`. Với nhiều repo, thêm `### Phần việc theo repo`.
+
+`### Việc thủ công kèm theo` liệt kê các bước ngoài repo cần người dùng thực hiện sau khi code được merge; nội dung này được đưa vào comment ghi ngược cho tester.
 
 ## Task phát hành (`r-*-publish`)
 

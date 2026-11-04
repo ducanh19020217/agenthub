@@ -46,6 +46,12 @@ Mọi tính năng **tắt mặc định** và cấu hình theo nguồn hoặc th
 } ] } }
 ```
 
+Nguồn có thể cấu hình `split: { typeIds, keyword, workerMayRequest, maxParts,
+createChildTickets }`. Kế hoạch hợp lệ có 2–5 phần theo `src/protocol.md`; task
+`-plan` đi qua reviewer rồi mới tạo batch. Ticket con chỉ được tạo khi batch được
+giao (`dispatched`), với `parent` trỏ về ticket cha, nên huỷ batch nháp không tạo
+ticket rác.
+
 ## 3. OpenProject API v3 (đã kiểm chứng ở công cụ tham khảo)
 
 - **Auth**: `Authorization: Basic base64("apikey:" + key)` và `Accept: application/hal+json`. Khi ghi thì thêm `Content-Type: application/json`.

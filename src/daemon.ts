@@ -389,6 +389,9 @@ export function createContext(
     taskRepo,
     trackerRepo,
     taskService: service,
+    batchService: service,
+    taskBatchRepo,
+    reviewRepo,
     eventBus: scheduler.getEventBus(),
   });
   service.setTriageDecisionHandler(async (sourceId, wpId, action, note) => {

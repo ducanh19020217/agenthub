@@ -38,6 +38,16 @@ function statusId(workPackage: OpenProjectWorkPackage): number | null {
   return Number.isInteger(value) ? value : null;
 }
 
+function typeId(workPackage: OpenProjectWorkPackage): number | null {
+  const href = workPackage._links?.type?.href || '';
+  const value = Number(href.split('/').at(-1));
+  return Number.isInteger(value) ? value : null;
+}
+
+function splitConfig(source: OpenProjectSource): NonNullable<OpenProjectSource['split']> {
+  return source.split || { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true };
+}
+
 function displayId(workPackage: OpenProjectWorkPackage): string {
   return workPackage.displayId || String(workPackage.id);
 }
@@ -299,17 +309,23 @@ export class OpenProjectIntakeService {
     if ((isNewTaskEvent || canTriageComment) && number !== null && number >= source.minTicketNumber && openTasks.length === 0) {
       await writeTicketDirectory(client, wp, activities, dir, source.url);
       const triage = source.triage !== 'off';
-      const base = `op-${slugPart(displayId(wp))}${triage ? '-triage' : ''}`;
+      const split = splitConfig(source);
+      const splitByType = split.typeIds.includes(typeId(wp) || -1);
+      const splitByKeyword = Boolean(split.keyword && (wp.subject || '').toLocaleLowerCase().includes(split.keyword.toLocaleLowerCase()));
+      const plan = !triage && (splitByType || splitByKeyword);
+      const base = `op-${slugPart(displayId(wp))}${triage ? '-triage' : plan ? '-plan' : ''}`;
       let slug = base;
       let revision = 1;
       while (this.taskRepo.get(`${primary.id}/${slug}`)) slug = `${base}-r${++revision}`;
       const title = `[${displayId(wp)}] ${wp.subject || ''}`.trim();
-      const body = `Ticket: [${displayId(wp)}] ${wp.subject || ''} — ${source.url.replace(/\/+$/, '')}/work_packages/${wp.id}\nTrạng thái: ${wp.status?.title || wp._links?.status?.title || statusId(wp) || ''} · Ưu tiên: ${wp.priority?.title || wp._links?.priority?.title || ''} · Người tạo: ${wp.author?.title || wp._links?.author?.title || ''}\n\nĐọc toàn bộ \`.agenthub/context/ticket/ticket.md\` (mô tả + lịch sử comment) và ảnh trong\n\`.agenthub/context/ticket/images/\`. Với ticket Reopened, comment mới nhất của tester là yêu cầu chính.\nNếu có comment [Cần duyệt] và sau đó có quyết định, làm đúng theo quyết định đó.\n\nYêu cầu: tìm nguyên nhân gốc, sửa tối thiểu, chạy build/test của repo, commit với message\n\`fix(${displayId(wp)}): <tóm tắt>\`.\n\n- Xong: .agenthub/DONE có mục ## Comment cho tester, viết bằng ngôn ngữ của người dùng cuối, không có tên file hay tên hàm.\n- Cần người quyết định: .agenthub/BLOCKED có mục ## Cần quyết định, liệt kê các phương án có đánh số.\n- Cần sửa repo khác: DONE có mục ## Cần sửa ở project <projectId> kèm mô tả.\n`;
+      const body = `Ticket: [${displayId(wp)}] ${wp.subject || ''} — ${source.url.replace(/\/+$/, '')}/work_packages/${wp.id}\nTrạng thái: ${wp.status?.title || wp._links?.status?.title || statusId(wp) || ''} · Ưu tiên: ${wp.priority?.title || wp._links?.priority?.title || ''} · Người tạo: ${wp.author?.title || wp._links?.author?.title || ''}\n\nĐọc toàn bộ \`.agenthub/context/ticket/ticket.md\` (mô tả + lịch sử comment) và ảnh trong\n\`.agenthub/context/ticket/images/\`. Với ticket Reopened, comment mới nhất của tester là yêu cầu chính.\nNếu có comment [Cần duyệt] và sau đó có quyết định, làm đúng theo quyết định đó.\n\nBước đầu: ước lượng phạm vi. Việc vừa sức một task thì làm luôn. Nếu việc quá lớn cho một task (nhiều phần độc lập, nhiều repo), đừng sửa, hãy viết ## Chia việc theo src/protocol.md.\n\nYêu cầu: tìm nguyên nhân gốc, sửa tối thiểu, chạy build/test của repo, commit với message\n\`fix(${displayId(wp)}): <tóm tắt>\`.\n\n- Xong: .agenthub/DONE có mục ## Comment cho tester, viết bằng ngôn ngữ của người dùng cuối, không có tên file hay tên hàm.\n- Cần người quyết định: .agenthub/BLOCKED có mục ## Cần quyết định, liệt kê các phương án có đánh số.\n- Cần sửa repo khác: DONE có mục ## Cần sửa ở project <projectId> kèm mô tả.\n`;
       const projects = (this.attached(source.id)?.projects || [primary]).map((project) => `- ${project.id}: ${project.path} (${projectSettings(project).openproject.role})`).join('\n');
       const taskBody = triage
         ? `Ticket: [${displayId(wp)}] ${wp.subject || ''} — ${source.url.replace(/\/+$/, '')}/work_packages/${wp.id}\n\nTRIAGE: Không sửa code, không commit. Đọc ticket, comment, ảnh và code liên quan của các project:\n${projects}\nKhi xong tạo .agenthub/DONE có mục ## Phân tích đúng định dạng trong src/protocol.md. Nếu có nhiều repo, ghi thêm ### Phần việc theo repo.\n`
+        : plan
+          ? `${body}\n\nĐây là task lập kế hoạch chia việc. Không sửa code, không commit. Đọc ticket và code liên quan, sau đó ghi .agenthub/DONE có mục ## Chia việc theo định dạng trong src/protocol.md. Tối đa ${split.maxParts} việc con, tối thiểu 2; mỗi việc phải trọn vẹn và kiểm thử độc lập.`
         : body;
-      const task = this.taskService.createTask({ project: primary.id, slug, title, body: taskBody, level: 'easy', modelChain: triage ? source.triageModelChain : undefined, externalRef: displayId(wp), start: triage ? true : source.autoStart });
+      const task = this.taskService.createTask({ project: primary.id, slug, title, body: taskBody, level: plan ? 'hard' : 'easy', modelChain: triage ? source.triageModelChain : undefined, externalRef: displayId(wp), start: triage ? true : source.autoStart });
       ids.push(task.id);
       imported = 1;
       if (triage) {
@@ -318,7 +334,7 @@ export class OpenProjectIntakeService {
         delete state.triage;
         previous.writeback = JSON.stringify(state);
       }
-      this.eventBus.emit(triage ? 'tracker.triage_started' : 'tracker.ticket_imported', task.id, { sourceId: source.id, wpId: wp.id, displayId: displayId(wp), triage });
+      this.eventBus.emit(triage ? 'tracker.triage_started' : plan ? 'tracker.split_plan_started' : 'tracker.ticket_imported', task.id, { sourceId: source.id, wpId: wp.id, displayId: displayId(wp), triage, plan });
     } else if (openTasks.length > 0) {
       await writeTicketDirectory(client, wp, activities, dir, source.url);
       if (event === 'comment') {

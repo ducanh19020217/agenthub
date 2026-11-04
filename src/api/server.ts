@@ -604,6 +604,11 @@ export async function createServer(
     return service.cancelTask(id);
   });
 
+  fastify.post('/api/tasks/:id/split', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.splitTask(id);
+  });
+
   fastify.post('/api/tasks/:id/pause', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
     const body = (req.body || {}) as { reason?: 'manual' | 'load' | 'brain_load' };

@@ -365,6 +365,7 @@ export const CreateTaskSchema = z.object({
 });
 
 export const BatchTaskInputSchema = z.object({
+  project: z.string().optional(),
   slug: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/),
   title: z.string().min(1),
   body: z.string().optional(),
@@ -3670,11 +3671,17 @@ export class AppService {
 
     const slugs = new Set<string>();
     for (const t of parsed.tasks) {
-      if (slugs.has(t.slug)) {
-        throw new HttpError(400, 'bad_request', `Trùng slug "${t.slug}" trong cùng đợt`);
+      const taskProject = t.project || parsed.project;
+      const targetProject = this.projectRepo.get(taskProject);
+      if (!targetProject) {
+        throw new HttpError(404, 'not_found', `Project "${taskProject}" không tồn tại`);
       }
-      slugs.add(t.slug);
-      const taskId = `${parsed.project}/${t.slug}`;
+      const slugKey = `${taskProject}/${t.slug}`;
+      if (slugs.has(slugKey)) {
+        throw new HttpError(400, 'bad_request', `Trùng slug "${t.slug}" trong cùng đợt và project "${taskProject}"`);
+      }
+      slugs.add(slugKey);
+      const taskId = slugKey;
       if (this.taskRepo.get(taskId)) {
         throw new HttpError(409, 'conflict', `Task "${taskId}" đã tồn tại`);
       }
@@ -3695,17 +3702,18 @@ export class AppService {
     const taskDepsToPopulate: Array<{ taskId: string; deps: string[] }> = [];
 
     for (const t of parsed.tasks) {
-      const taskId = `${parsed.project}/${t.slug}`;
+      const taskProject = t.project || parsed.project;
+      const taskId = `${taskProject}/${t.slug}`;
       const normalizedDeps: string[] = (t.dependsOn || []).map((dep) => {
         if (!dep.includes('/') && !dep.includes('~')) {
-          return `${parsed.project}/${dep}`;
+          return `${taskProject}/${dep}`;
         }
         return toTaskId(dep);
       });
 
       this.taskRepo.insert({
         id: taskId,
-        projectId: parsed.project,
+        projectId: taskProject,
         slug: t.slug,
         title: t.title,
         body: t.body,
@@ -3956,6 +3964,67 @@ export class AppService {
     return this.taskRepo.get(taskId)!;
   }
 
+  async splitTask(idParam: string): Promise<{ ok: boolean; taskId: string; task: TaskRow }> {
+    const taskId = toTaskId(idParam);
+    const task = this.taskRepo.get(taskId);
+    if (!task) {
+      throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    }
+    if (!task.externalRef) {
+      throw new HttpError(400, 'bad_request', 'Task không gắn với ticket tracker ngoài');
+    }
+    if (task.status !== 'queued' && task.status !== 'blocked') {
+      throw new HttpError(400, 'bad_request', `Chỉ có thể chia việc khi task chưa chạy hoặc bị chặn (hiện tại: ${task.status})`);
+    }
+    if (task.slug.endsWith('-plan')) {
+      throw new HttpError(400, 'bad_request', 'Task đã là task lập kế hoạch chia việc');
+    }
+    const tracker = this.trackerRepo?.listAll().find((r) => r.display_id === task.externalRef);
+    if (!tracker) {
+      throw new HttpError(404, 'not_found', `Không tìm thấy tracker ticket cho ${task.externalRef}`);
+    }
+    const source = this.config.integrations?.openproject?.sources?.find((s) => s.id === tracker.source_id);
+    const splitConf = source?.split || { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true };
+
+    this.cancelTask(toRouteId(task.id));
+
+    const primary = this.projectRepo.getAll().find((p) => {
+      const settings = projectSettings(p).openproject;
+      return settings.enabled && settings.role === 'primary' && settings.sourceId === tracker.source_id;
+    }) || this.projectRepo.get(task.projectId);
+    if (!primary) {
+      throw new HttpError(404, 'not_found', 'Không tìm thấy project cho task kế hoạch');
+    }
+
+    const base = `op-${tracker.display_id.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-plan`;
+    let slug = base;
+    let n = 1;
+    while (this.taskRepo.get(`${primary.id}/${slug}`)) slug = `${base}-r${++n}`;
+
+    const planTask = this.createTask({
+      project: primary.id,
+      slug,
+      title: `[${tracker.display_id}] Lập kế hoạch chia việc`,
+      level: 'hard',
+      externalRef: tracker.display_id,
+      start: true,
+      body: `Ticket: [${tracker.display_id}]\n\nKhông sửa code, không commit. Đọc toàn bộ ticket trong .agenthub/context/ticket/ và code repo. Viết .agenthub/DONE có mục ## Chia việc theo src/protocol.md. Tối đa ${splitConf.maxParts} phần, tối thiểu 2.`,
+    });
+
+    let currentIds: string[] = [];
+    try {
+      const parsed = JSON.parse(tracker.task_ids);
+      if (Array.isArray(parsed)) currentIds = parsed.filter((x): x is string => typeof x === 'string');
+    } catch { currentIds = []; }
+
+    this.trackerRepo?.upsert({
+      ...tracker,
+      task_ids: JSON.stringify([...new Set([...currentIds, planTask.id])]),
+    });
+
+    return { ok: true, taskId: planTask.id, task: planTask };
+  }
+
   pauseTask(idParam: string, reason: 'manual' | 'load' | 'brain_load' = 'manual'): { ok: boolean; paused: boolean } {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
@@ -4002,7 +4071,26 @@ export class AppService {
     try {
 
     let mergeResult: { mergeCommit: string; checks: string[] } | undefined;
-    if (parsed.verdict === 'approved' && parsed.merge) {
+    const isPlan = task.slug.endsWith('-plan');
+    let shouldMerge = parsed.verdict === 'approved' && Boolean(parsed.merge) && !isPlan;
+    if (shouldMerge && task.worktreePath) {
+      const project = this.projectRepo.get(task.projectId);
+      if (project) {
+        let hasDiff = Boolean(task.diffStat && task.diffStat.trim());
+        if (!hasDiff) {
+          try {
+            const base = task.baseRef || project.defaultBranch || 'main';
+            const branch = task.branch || `agenthub/${task.slug}`;
+            execFileSync('git', ['diff', '--quiet', `${base}...${branch}`], { cwd: task.worktreePath, stdio: 'pipe' });
+            hasDiff = false;
+          } catch {
+            hasDiff = true;
+          }
+        }
+        if (!hasDiff) shouldMerge = false;
+      }
+    }
+    if (shouldMerge) {
       const project = this.projectRepo.get(task.projectId);
       if (!project) throw new HttpError(404, 'not_found', `Project "${task.projectId}" không tồn tại`);
       this.scheduler.setTaskMerging(taskId, true);

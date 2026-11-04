@@ -2514,6 +2514,19 @@ export class BrainTurnRepo {
     return (row as { total: number }).total;
   }
 
+  tokensBreakdownSince(isoDate: string, projectId?: string | null): { inputTokens: number; outputTokens: number; total: number; count: number } {
+    const query = projectId === undefined
+      ? 'SELECT COALESCE(SUM(inputTokens), 0) AS inputTokens, COALESCE(SUM(outputTokens), 0) AS outputTokens, COUNT(*) AS count FROM brain_turns WHERE startedAt >= ?'
+      : 'SELECT COALESCE(SUM(inputTokens), 0) AS inputTokens, COALESCE(SUM(outputTokens), 0) AS outputTokens, COUNT(*) AS count FROM brain_turns WHERE startedAt >= ? AND projectId IS ?';
+    const row = (projectId === undefined ? this.db.prepare(query).get(isoDate) : this.db.prepare(query).get(isoDate, projectId)) as { inputTokens: number; outputTokens: number; count: number };
+    return {
+      inputTokens: row.inputTokens,
+      outputTokens: row.outputTokens,
+      total: row.inputTokens + row.outputTokens,
+      count: row.count,
+    };
+  }
+
   countSinceDepartment(epochMs: number, departmentId: string): number {
     const row = this.db.prepare("SELECT COUNT(*) AS count FROM brain_turns WHERE startedAt >= datetime(?, 'unixepoch') AND departmentId = ?")
       .get(Math.floor(epochMs / 1000), departmentId) as { count: number };
@@ -2524,6 +2537,17 @@ export class BrainTurnRepo {
     const row = this.db.prepare('SELECT COALESCE(SUM(inputTokens + outputTokens), 0) AS total FROM brain_turns WHERE startedAt >= ? AND departmentId = ?')
       .get(isoDate, departmentId) as { total: number };
     return row.total;
+  }
+
+  tokensBreakdownSinceDepartment(isoDate: string, departmentId: string): { inputTokens: number; outputTokens: number; total: number; count: number } {
+    const row = this.db.prepare('SELECT COALESCE(SUM(inputTokens), 0) AS inputTokens, COALESCE(SUM(outputTokens), 0) AS outputTokens, COUNT(*) AS count FROM brain_turns WHERE startedAt >= ? AND departmentId = ?')
+      .get(isoDate, departmentId) as { inputTokens: number; outputTokens: number; count: number };
+    return {
+      inputTokens: row.inputTokens,
+      outputTokens: row.outputTokens,
+      total: row.inputTokens + row.outputTokens,
+      count: row.count,
+    };
   }
 }
 

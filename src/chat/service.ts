@@ -187,6 +187,7 @@ export class ChatService {
   private codexBinOverride?: string;
   private persistentProcesses = new Map<string, PersistentProcess>();
   private snapshotAt = new Map<string, number>();
+  private snapshotContent = new Map<string, string>();
   private snapshotEventAt = new Map<string, number>();
   private retryTimers = new Map<string, NodeJS.Timeout>();
   private telegramChatBySession = new Map<string, number>();
@@ -244,7 +245,7 @@ export class ChatService {
     const files = project ? readHubSnapshotFiles(project.path) : {};
     this.snapshotAt.set(session.id, now);
     if (this.eventRepo) this.snapshotEventAt.set(session.id, this.eventRepo.getRecent(1)[0]?.id || previousEvent);
-    return buildHubSnapshot({
+    const fullSnapshot = buildHubSnapshot({
       projects: this.projectRepo.getAll().map(({ id, name, path: projectPath, defaultBranch }) => ({ id, name, path: projectPath, defaultBranch })),
       tasks: this.taskRepo?.getAll().map(({ id, projectId, title, status }) => ({ id, projectId, title, status })) || [],
       runs: this.runRepo?.getRunning().map(({ taskId, model, outcome }) => ({ taskId, model, outcome })) || [],
@@ -256,6 +257,12 @@ export class ChatService {
       capturedAt: new Date(now).toISOString(),
       eventUpdate: updates,
     });
+    const previous = this.snapshotContent.get(session.id);
+    this.snapshotContent.set(session.id, fullSnapshot);
+    if (!previous) return fullSnapshot;
+    const oldLines = new Set(previous.split('\n'));
+    const changed = fullSnapshot.split('\n').filter((line) => !oldLines.has(line));
+    return `ẢNH CHỤP HUB — PHẦN THAY ĐỔI\nChụp lúc: ${new Date(now).toISOString()}\n${changed.join('\n') || 'Không có thay đổi.'}`.slice(0, 3000);
   }
 
   getClaudeFailover(): ReturnType<ClaudeFailoverState['snapshot']> {
@@ -1802,6 +1809,10 @@ export class ChatService {
       if (running && !running.cancelled) {
         const quota = this.recordClaudeQuota(accumulatedText, stderrOutput, code);
         if (!quota.exhausted && limitResetSeconds) { quota.exhausted = true; quota.resetSeconds = limitResetSeconds; }
+        if (quota.exhausted && this.forceClaude.has(turn.sessionId)) {
+          this.forceClaude.delete(turn.sessionId);
+          this.failoverState.clear();
+        }
         const fallback = this.failoverState.snapshot();
         if (this.chatSessionRepo.get(turn.sessionId)?.kind === 'brain' && quota.exhausted && fallback.step && fallback.step.type !== 'wait') {
           this.runningTurns.delete(turn.sessionId);
@@ -2212,6 +2223,10 @@ export class ChatService {
     this.runningTurns.delete(proc.sessionId);
     const quota = this.recordClaudeQuota(ev.result || '', proc.stderrOutput, 0);
     if (!quota.exhausted && proc.limitResetSeconds) { quota.exhausted = true; quota.resetSeconds = proc.limitResetSeconds; }
+    if (quota.exhausted && this.forceClaude.has(proc.sessionId)) {
+      this.forceClaude.delete(proc.sessionId);
+      this.failoverState.clear();
+    }
     if (ev.costUsd !== undefined) this.failoverState.recordCost(ev.costUsd);
     this.chatSessionRepo.setBusy(proc.sessionId, 0);
     let contextTokens = 0;
@@ -2232,7 +2247,7 @@ export class ChatService {
     if (ev.isError) {
       const session = this.chatSessionRepo.get(proc.sessionId);
       const retryTurn = this.persistentTurn(running, session);
-      if (quota.exhausted && session?.kind === 'brain' && this.failoverPersistentTurn(proc, running, retryTurn, 'claude_quota_exhausted')) {
+      if (quota.exhausted && session?.kind === 'brain' && !this.forceClaude.has(proc.sessionId) && this.failoverPersistentTurn(proc, running, retryTurn, 'claude_quota_exhausted')) {
         return;
       }
       if (quota.exhausted && retryTurn.text && this.scheduleLimitRetry(retryTurn, quota.resetSeconds, ev.result)) {
@@ -2384,10 +2399,14 @@ export class ChatService {
       this.runningTurns.delete(proc.sessionId);
       const quota = this.recordClaudeQuota('', proc.stderrOutput, null);
       if (!quota.exhausted && proc.limitResetSeconds) { quota.exhausted = true; quota.resetSeconds = proc.limitResetSeconds; }
+      if (quota.exhausted && this.forceClaude.has(proc.sessionId)) {
+        this.forceClaude.delete(proc.sessionId);
+        this.failoverState.clear();
+      }
       this.chatSessionRepo.setBusy(proc.sessionId, 0);
       const session = this.chatSessionRepo.get(proc.sessionId);
       const retryTurn = this.persistentTurn(active, session);
-      if (!active.cancelled && quota.exhausted && session?.kind === 'brain' && this.failoverPersistentTurn(proc, active, retryTurn, 'claude_quota_exhausted')) {
+      if (!active.cancelled && quota.exhausted && session?.kind === 'brain' && !this.forceClaude.has(proc.sessionId) && this.failoverPersistentTurn(proc, active, retryTurn, 'claude_quota_exhausted')) {
         return;
       }
       this.setSessionState(proc.sessionId, 'error');

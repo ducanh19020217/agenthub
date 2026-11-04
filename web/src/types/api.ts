@@ -481,6 +481,12 @@ export interface ProjectBrain {
   queued: boolean;
   lastTurnAt: string | null;
   tokensToday: number;
+  turnsToday?: number;
+  inputTokensToday?: number;
+  outputTokensToday?: number;
+  rotationsToday?: number;
+  eventsSkippedToday?: number;
+  eventsBatchedToday?: number;
   directives?: Array<{ id: string; text: string; createdAt: string }>;
 }
 

@@ -3850,10 +3850,30 @@ export class AppService {
         (error instanceof Error && /conflict/i.test(error.message));
       const isEnvironment = (error instanceof HttpError && (error.error === 'environment_error' || error.statusCode === 503)) ||
         (error instanceof MergeError && error.environment);
+      const conflictCount = isConflict
+        ? this.eventRepo.getByTask(taskId).filter((event) => event.type === 'merge.conflict').length + 1
+        : undefined;
+      if (isConflict && conflictCount !== undefined && conflictCount <= 3) {
+        const current = this.taskRepo.get(taskId);
+        const files = error instanceof Error ? error.message : String(error);
+        const note = `\n\n## Tự xử lý xung đột merge lần ${conflictCount}\n\nCác file/chi tiết xung đột: ${files}\nCác nhánh đã merge trước đó có thể cũng sửa các file này. Hãy chạy \`git merge <base>\`, giữ thay đổi của cả hai bên rồi chạy đầy đủ checks trước khi commit.`;
+        this.taskRepo.update(taskId, {
+          status: 'queued',
+          resume: 1,
+          body: `${current?.body || ''}${note}`,
+          notBefore: null,
+        });
+        this.scheduler.getEventBus().emit('task.queued', taskId, {
+          reason: 'merge_conflict_auto_retry',
+          conflictCount,
+          feedback: note.trim(),
+        });
+      }
       this.scheduler.getEventBus().emit(isConflict ? 'merge.conflict' : 'merge.failed', taskId, {
         actor: 'auto-merge',
         message: error instanceof Error ? error.message : String(error),
         environment: isEnvironment || undefined,
+        ...(conflictCount === undefined ? {} : { conflictCount }),
       });
     }
   }

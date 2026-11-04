@@ -143,3 +143,28 @@
 - **Hệ quả**:
   - Project được tôn trọng các thiết lập `maxTurnsPerHour`, `dailyTokenBudget`, `permissions`, `engine`, `model`.
   - Cấu hình phòng ban chỉ ghi đè khi được người dùng chủ động cấu hình khác `'inherit'`.
+
+## DEC-013: Giữ trạng thái waiting_quota và phân biệt lý do chờ bằng waitReason
+
+- **Bối cảnh**:
+  - Sự cố ngày 2026-11-03: Ổ `/home` chỉ còn 0,5 GB trống khiến scheduler chuyển các task sang trạng thái `waiting_quota` và hiển thị trên cột Kanban "Chờ quota", dù nguyên nhân thực tế là chờ dung lượng đĩa.
+  - Ngoài ra, project agenthub có worktree root nằm trên ổ `/media/veracrypt8` còn 13 GB trống, nhưng cơ chế kiểm tra đĩa cũ quét mọi thư mục worktree (bao gồm `~/.agenthub/worktrees` trên `/home`) và chặn toàn bộ các project như nhau.
+- **Quyết định**:
+  1. **Giữ nguyên trạng thái `status = 'waiting_quota'`**: Nhằm giảm thiểu tối đa tác động lên schema cơ sở dữ liệu, các truy vấn SQL, REST API, SSE event stream và công cụ MCP hiện hữu.
+  2. **Dùng `waitReason` để phân biệt 5 nhóm lý do chờ**:
+     - `quota`: Chờ quota model / tài khoản (kèm `no_department_profile`, `no_matching_profile`).
+     - `disk`: Chờ dung lượng ổ đĩa (ổ worktree của chính project hoặc ổ dữ liệu hub home).
+     - `slot`: Chờ slot song song / tài khoản rảnh (`slot`, `parallel`, `department_parallel`, `profile_busy`).
+     - `load`: Chờ tải máy (CPU/RAM/I/O pressure) phục hồi sau khi quá tải.
+     - `dependency`: Chờ các task phụ thuộc (`dependsOn`) hoàn thành.
+  3. **Đổi tên cột Kanban và nhãn trạng thái**:
+     - Cột Kanban cho trạng thái `waiting_quota` đổi tên hiển thị thành "Đang chờ" ("Waiting" trên bản tiếng Anh) thay vì "Chờ quota".
+     - Badge trên từng task hiển thị chi tiết theo `waitReason` tương ứng (ví dụ "Chờ ổ đĩa", "Chờ quota model", "Chờ slot song song", "Chờ tải máy giảm", "Chờ task phụ thuộc").
+  4. **Kiểm tra đĩa theo từng project**:
+     - Khi dispatch, chỉ kiểm tra ổ chứa worktree root của chính project đó cộng các `extraPaths`.
+     - Tách riêng việc kiểm tra ổ chứa dữ liệu hub (`~/.agenthub` chứa DB, log, cache) với ngưỡng riêng `disk.hubHomeMinFreeGB` (mặc định 1 GB). Nếu ổ này dưới ngưỡng thì chặn mọi project và thông báo rõ "Ổ chứa dữ liệu hub (~/.agenthub) sắp đầy".
+  5. **Telegram và `hub_status`**: Báo cáo chính xác nguyên nhân chờ (ví dụ "đang chờ 3 (3 chờ đĩa)") thay vì hiển thị "chờ quota".
+- **Hệ quả**:
+  - Đảm bảo tính nhất quán và tương thích ngược của hệ thống.
+  - Thông tin hiển thị trên Web, Telegram và MCP phản ánh đúng bản chất lý do chờ của task.
+

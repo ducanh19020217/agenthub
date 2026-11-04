@@ -520,8 +520,11 @@ export const TaskDetailPage: React.FC = () => {
               <StatusBadge
                 status={task.status}
                 waitReason={task.waitReason}
-                diskFreeGB={hubStatus?.disk?.freeGB}
-                diskMinFreeGB={hubStatus?.disk?.minFreeGB}
+                blockingDisk={task.blockingDisk}
+                diskFreeGB={task.blockingDisk?.freeGB ?? hubStatus?.disk?.freeGB}
+                diskMinFreeGB={task.blockingDisk?.minFreeGB ?? hubStatus?.disk?.minFreeGB}
+                diskLabel={task.blockingDisk?.label}
+                projectId={task.projectId}
                 size="sm"
               />
               {(task.status === 'review' || (task.reviews && task.reviews.length > 0) || task.reviewChain?.length) && (

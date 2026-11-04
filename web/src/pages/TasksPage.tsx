@@ -151,8 +151,11 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
                   <StatusBadge
                     status={task.status}
                     waitReason={task.waitReason}
-                    diskFreeGB={hubStatus?.disk?.freeGB}
-                    diskMinFreeGB={hubStatus?.disk?.minFreeGB}
+                    blockingDisk={task.blockingDisk}
+                    diskFreeGB={task.blockingDisk?.freeGB ?? hubStatus?.disk?.freeGB}
+                    diskMinFreeGB={task.blockingDisk?.minFreeGB ?? hubStatus?.disk?.minFreeGB}
+                    diskLabel={task.blockingDisk?.label}
+                    projectId={task.projectId}
                     size="sm"
                   />
                 </div>
@@ -269,7 +272,16 @@ const ProjectTaskGroup: React.FC<{ project: { id: string; name: string }; tasks:
               </a>
             )}
             <div className="mt-2">
-              <StatusBadge status={task.status} size="sm" />
+              <StatusBadge
+                status={task.status}
+                waitReason={task.waitReason}
+                blockingDisk={task.blockingDisk}
+                diskFreeGB={task.blockingDisk?.freeGB}
+                diskMinFreeGB={task.blockingDisk?.minFreeGB}
+                diskLabel={task.blockingDisk?.label}
+                projectId={task.projectId}
+                size="sm"
+              />
             </div>
           </div>
         ))}</div> : <div className="rounded-lg border border-dashed border-[var(--t-border)] p-5 text-center text-xs italic text-[var(--t-text-3)]">{t('common.empty')}</div>}
@@ -551,7 +563,22 @@ export const TasksPage: React.FC = () => {
                 )}
               </div>
             ) },
-            { key: 'status', title: t('tasks.status'), render: (task) => <StatusBadge status={task.status} size="sm" /> },
+            {
+              key: 'status',
+              title: t('tasks.status'),
+              render: (task) => (
+                <StatusBadge
+                  status={task.status}
+                  waitReason={task.waitReason}
+                  blockingDisk={task.blockingDisk}
+                  diskFreeGB={task.blockingDisk?.freeGB}
+                  diskMinFreeGB={task.blockingDisk?.minFreeGB}
+                  diskLabel={task.blockingDisk?.label}
+                  projectId={task.projectId}
+                  size="sm"
+                />
+              ),
+            },
             { key: 'project', title: t('tasks.project'), render: (task) => <span>{task.projectId}</span> },
           ]}
           page={page}

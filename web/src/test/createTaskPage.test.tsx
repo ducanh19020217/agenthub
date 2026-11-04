@@ -65,6 +65,7 @@ describe('CreateTaskPage', () => {
 
     vi.spyOn(client, 'getProjects').mockResolvedValue(mockProjects);
     vi.spyOn(client, 'getTasks').mockResolvedValue(mockTasks);
+    vi.spyOn(client, 'getOpenProjectSources').mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -142,6 +143,26 @@ describe('CreateTaskPage', () => {
     fireEvent.click(authCheckbox);
     expect(authCheckbox).not.toBeChecked();
     expect(dbCheckbox).toBeChecked();
+  });
+
+  it('hiển thị checkbox tạo ticket khi project đã bật OpenProject', async () => {
+    vi.mocked(client.getProjects).mockResolvedValueOnce([
+      { ...mockProjects[0], settings: { openproject: { enabled: true, sourceId: 'demo', role: 'primary' } } as any },
+      mockProjects[1],
+    ]);
+    vi.mocked(client.getOpenProjectSources).mockResolvedValueOnce([{
+      id: 'demo', url: 'https://op.example.test', project: 'demo', pollIntervalSec: 60,
+      watchStatusIds: [], reopenedStatusIds: [], resolvedStatusId: null, reviewStatusId: null, openStatusIds: [],
+      minTicketNumber: 0, autoStart: true, autoResolve: true, language: 'vi',
+    }]);
+    renderPage();
+    expect(await screen.findByText(/Tạo ticket trên OpenProject/)).toBeInTheDocument();
+  });
+
+  it('không hiển thị checkbox tạo ticket khi project chưa bật OpenProject', async () => {
+    renderPage();
+    await screen.findByText('Tạo task mới');
+    expect(screen.queryByText(/Tạo ticket trên OpenProject/)).not.toBeInTheDocument();
   });
 
   it('4. Xem trước markdown trong tab Preview và quay lại tab Soạn thảo', async () => {

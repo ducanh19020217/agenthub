@@ -63,7 +63,7 @@ Mọi tính năng **tắt mặc định** và cấu hình theo nguồn hoặc th
 
 API `POST /api/tasks` và MCP `hub_create_task` có thể nhận `createTicket: { sourceId? }`. Nếu không truyền `sourceId`, hub dùng nguồn OpenProject `primary` đã gắn với project của task. Tùy chọn này tắt mặc định.
 
-Hub tạo work package trước bằng tiêu đề task và mô tả Markdown (rút gọn khi quá dài), sau đó mới tạo task với tiêu đề `[<displayId>] <tiêu đề>` và `externalRef = <displayId>`. Ngay sau khi task được tạo, hub ghi `tracker_items.task_ids` và chép `ticket.md`/ảnh vào `tracker/<sourceId>/<wpId>/`; vì vậy poll intake không tạo task trùng. Nếu OpenProject lỗi, task không được tạo.
+Hub tạo work package trước bằng tiêu đề task và mô tả Markdown (rút gọn khi quá dài), sau đó ghi ngay một hàng `tracker_items` đang tạo trước mọi lần đọc/ghi tiếp theo; intake bỏ qua hàng này nên không thể tạo task trùng trong lúc request đang hoàn tất. Hub tiếp tục tạo task với tiêu đề `[<displayId>] <tiêu đề>` và `externalRef = <displayId>`, cập nhật `task_ids`, rồi chép `ticket.md`/ảnh vào `tracker/<sourceId>/<wpId>/`. Các đầu vào project/slug/tracker được kiểm tra trước khi gọi OpenProject; nếu OpenProject từ chối tạo ticket thì task không được tạo.
 
 Nguồn có thêm `createTypeId` và `createStatusId` để chọn mặc định khi tạo ticket. Danh sách loại được lấy từ `GET /api/integrations/openproject/sources/:id/types`.
 

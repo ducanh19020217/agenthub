@@ -263,6 +263,35 @@ describe('OpenProject Integration', () => {
       expect(comment.id).toBe(99);
       expect(JSON.parse(postedBody)).toEqual({ comment: { raw: 'Testing 1 2 3' } });
     });
+
+    it('listStatuses calls /api/v3/statuses?pageSize=100 with auth headers', async () => {
+      let requestedUrl = '';
+      const fakeFetch = vi.fn().mockImplementation(async (url: string | URL) => {
+        requestedUrl = url.toString();
+        return new Response(
+          JSON.stringify({
+            _embedded: {
+              elements: [
+                { id: 2, name: 'Closed', isClosed: true, position: 2 },
+                { id: 1, name: 'New', isClosed: false, position: 1 },
+              ],
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/hal+json' } },
+        );
+      });
+
+      const client = new OpenProjectClient({
+        baseUrl: 'https://op.example.com',
+        apiKey: 'secret-key',
+        fetch: fakeFetch as unknown as typeof globalThis.fetch,
+      });
+
+      const res = await client.listStatuses();
+      expect(requestedUrl).toBe('https://op.example.com/api/v3/statuses?pageSize=100');
+      expect(res._embedded?.elements).toHaveLength(2);
+      expect(res._embedded?.elements?.[0].name).toBe('Closed');
+    });
   });
 
   describe('Ticket rendering and directory writing', () => {
@@ -769,6 +798,70 @@ describe('OpenProject Integration', () => {
       });
       expect(failRes.statusCode).toBe(502);
       expect(failRes.body).not.toContain('my-api-key');
+    });
+
+    it('GET /api/integrations/openproject/sources/:id/statuses returns sorted statuses and handles missing key / errors', async () => {
+      config.integrations.openproject.sources = [
+        OpenProjectSourceSchema.parse({
+          id: 'src-status',
+          url: 'https://op.example.com',
+          project: '123',
+        }),
+      ];
+
+      // Missing key -> 400
+      const noKeyRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/openproject/sources/src-status/statuses',
+      });
+      expect(noKeyRes.statusCode).toBe(400);
+
+      // Nonexistent source -> 404
+      const notFoundRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/openproject/sources/nonexistent/statuses',
+      });
+      expect(notFoundRes.statusCode).toBe(404);
+
+      // Save key
+      saveOpenProjectKey(tmpDir, 'src-status', 'status-api-key');
+
+      // Mock fetch success: unsorted elements
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            _embedded: {
+              elements: [
+                { id: 12, name: 'Closed', isClosed: true, position: 3 },
+                { id: 1, name: 'New', isClosed: false, position: 1 },
+                { id: 7, name: 'In progress', isClosed: false, position: 2 },
+              ],
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/hal+json' } },
+        ),
+      );
+
+      const successRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/openproject/sources/src-status/statuses',
+      });
+      expect(successRes.statusCode).toBe(200);
+      const statuses = JSON.parse(successRes.body);
+      expect(statuses).toEqual([
+        { id: 1, name: 'New', isClosed: false, position: 1 },
+        { id: 7, name: 'In progress', isClosed: false, position: 2 },
+        { id: 12, name: 'Closed', isClosed: true, position: 3 },
+      ]);
+
+      // Mock fetch failure -> 502 without leaking key
+      fetchSpy.mockResolvedValue(new Response('Server error', { status: 500 }));
+      const failRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/openproject/sources/src-status/statuses',
+      });
+      expect(failRes.statusCode).toBe(502);
+      expect(failRes.body).not.toContain('status-api-key');
     });
   });
 

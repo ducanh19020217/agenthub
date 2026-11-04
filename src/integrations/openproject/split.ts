@@ -17,7 +17,7 @@ export interface SplitPlanResult {
   errors: string[];
 }
 
-const PART_RE = /^###\s+(\d+)\.\s*(.+?)\s*$/;
+const PART_RE = /^###\s+(\d+)\.(?:\s*(.*))?$/;
 
 function field(lines: string[], name: string): string | undefined {
   const line = lines.find((item) => new RegExp(`^-\\s*${name}:`, 'i').test(item.trim()));
@@ -48,7 +48,7 @@ export function parseSplitPlan(
     if (!match) continue;
     const body = lines.slice(current.index + 1, next);
     const index = Number(match[1]);
-    const title = match[2].trim();
+    const title = (match[2] || '').trim();
     const project = field(body, 'project') || defaultProject;
     const rawLevel = (field(body, 'level') || 'easy').toLowerCase();
     const level = rawLevel === 'hard' ? 'hard' : 'easy';
@@ -73,5 +73,8 @@ export function splitSection(report: string | null | undefined): string | null {
   if (!report) return null;
   const match = /^##\s+Chia việc\s*$/im.exec(report);
   if (!match) return null;
-  return report.slice(match.index).split(/^##\s/m)[0].trim();
+  const afterHeader = report.slice(match.index + match[0].length);
+  const nextHeading = afterHeader.search(/^##\s/m);
+  const sectionContent = nextHeading === -1 ? afterHeader : afterHeader.slice(0, nextHeading);
+  return (match[0] + sectionContent).trim();
 }

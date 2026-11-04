@@ -316,7 +316,7 @@ export class OpenProjectWritebackService {
           meta.wpId,
           `**[AgentHub] Kế hoạch**\n${meta.plan.parts.map((part) => `- ${part.title}`).join('\n')}${links ? `\n\nTicket con:\n${links}` : ''}`
         );
-        state.split.planCommented = true;
+        state.split = { ...(state.split || {}), planCommented: true };
         this.save(parent, state);
       }
     } catch (error) {

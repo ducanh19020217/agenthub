@@ -144,6 +144,18 @@ describe('OpenProjectIntakeService', () => {
     expect(created).toHaveLength(0);
   });
 
+  it('does not import a ticket claimed by createTaskWithTicket while it is in flight', async () => {
+    trackerRepo.upsert({
+      source_id: 'demo', wp_id: 42, display_id: 'OP-123', status_id: 1,
+      updated_at: '2026-11-03T10:00:00Z', last_comment_id: null, task_ids: '[]',
+      writeback: JSON.stringify({ createPending: true }),
+    });
+    const result = await service().sync('demo');
+    expect(result.imported).toBe(0);
+    expect(created).toHaveLength(0);
+    expect(JSON.parse(trackerRepo.get('demo', 42)!.writeback)).toEqual({ createPending: true });
+  });
+
   it('baseline ticket transitioning to Reopened creates 1 task, while comments without open task are ignored', async () => {
     workPackages.clear();
     workPackages.set(101, {

@@ -52,6 +52,8 @@ export class NotificationService {
   private lastSentSummary = new Map<string, number>();
   private lastSentDisk = new Map<'low' | 'ok', number>();
   private diskState: 'low' | 'ok' | undefined;
+  private diskBlockedNotified = false;
+  private lastSentDiskBlocked = 0;
   private readonly eventDeduper: NotificationDeduper;
   private boundHandler: ((type: string, taskId?: string, payload?: unknown) => void) | null = null;
   private quietHoursQueue: Array<{ type: string; taskId?: string; payload?: unknown; timestamp: number }> = [];
@@ -411,10 +413,47 @@ export class NotificationService {
       }
 
       case 'disk.low': {
-        if (!this.shouldSendDisk('low', now)) break;
         this.diskState = 'low';
         const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
         const minFreeGB = typeof p.minFreeGB === 'number' ? p.minFreeGB : 0;
+        const isHubHomeLow = p.source === 'hub_home'
+          || p.label === 'Ổ chứa dữ liệu hub (~/.agenthub)'
+          || p.label === 'Dữ liệu hub (~/.agenthub)';
+
+        let waitingTasks: Array<{ id: string; slug?: string; title?: string }> = [];
+        if (Array.isArray(p.tasks)) {
+          waitingTasks = p.tasks.map((item) => typeof item === 'string' ? { id: item, slug: item, title: item } : item as { id: string; slug?: string; title?: string });
+        } else if (this.taskRepo) {
+          waitingTasks = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
+        }
+
+        const isBlocking = isHubHomeLow || waitingTasks.length > 0 || p.isBlocking === true;
+
+        if (isBlocking) {
+          if (this.diskBlockedNotified && now - this.lastSentDiskBlocked < 60 * 60_000) break;
+          this.diskBlockedNotified = true;
+          this.lastSentDiskBlocked = now;
+          this.lastSentDisk.set('low', now);
+
+          const label = typeof p.label === 'string' && p.label ? p.label : 'Ổ đĩa';
+          const pathStr = typeof p.path === 'string' && p.path ? ` (${p.path})` : '';
+          const taskNames = waitingTasks.map((t) => t.slug || t.title || t.id).filter(Boolean);
+          const taskListStr = taskNames.length > 0 ? ` ${taskNames.length} task đang phải chờ: ${taskNames.join(', ')}.` : '';
+
+          const cacheDir = typeof p.cacheDir === 'string' && p.cacheDir ? p.cacheDir : this.config.cacheDir;
+          const cacheBytes = typeof p.cacheBytes === 'number' ? p.cacheBytes : 0;
+          const cacheGB = cacheBytes > 0
+            ? `${(cacheBytes / (1024 ** 3)).toFixed(1)} GB`
+            : typeof p.cacheGB === 'number' ? `${p.cacheGB} GB` : '';
+          const cacheSuggestion = cacheDir
+            ? ` Gợi ý: dọn thùng rác hoặc cache node_modules (${cacheDir}${cacheGB ? `, ${cacheGB}` : ''}).`
+            : ' Gợi ý: dọn thùng rác hoặc cache node_modules.';
+
+          this.notify(`💾 Hết dung lượng: ${label}${pathStr} còn ${freeGB} GB, cần ${minFreeGB} GB.${taskListStr}${cacheSuggestion}`, 'critical');
+          break;
+        }
+
+        if (!this.shouldSendDisk('low', now)) break;
         const cacheDir = typeof p.cacheDir === 'string' ? ` Cache node_modules: ${p.cacheDir}.` : '';
         const largest = typeof p.largestCacheEntry === 'string'
           ? ` Bản lớn nhất: ${p.largestCacheEntry}${typeof p.largestCacheEntryBytes === 'number' ? ` (${(p.largestCacheEntryBytes / 1024 ** 3).toFixed(2)} GB)` : ''}.`
@@ -426,10 +465,26 @@ export class NotificationService {
       case 'disk.ok': {
         const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
         const minFreeGB = typeof p.minFreeGB === 'number' ? p.minFreeGB : 0;
-        if (freeGB < minFreeGB + 1 || this.diskState !== 'low') break;
-        if (!this.shouldSendDisk('ok', now)) break;
-        this.diskState = 'ok';
-        this.notify(`Ổ đĩa đã đủ chỗ (${freeGB} GB): tiếp tục chạy task`, 'normal');
+        const resumedCount = typeof p.resumedCount === 'number'
+          ? p.resumedCount
+          : Array.isArray(p.tasks)
+          ? p.tasks.length
+          : 0;
+
+        if (this.diskBlockedNotified && resumedCount > 0) {
+          this.diskBlockedNotified = false;
+          this.diskState = 'ok';
+          this.lastSentDisk.set('ok', now);
+          this.notify(`✅ Đã đủ dung lượng, ${resumedCount} task tiếp tục chạy`, 'normal');
+          break;
+        }
+
+        if (!this.diskBlockedNotified && resumedCount === 0) {
+          if (freeGB < minFreeGB + 1 || this.diskState !== 'low') break;
+          if (!this.shouldSendDisk('ok', now)) break;
+          this.diskState = 'ok';
+          this.notify(`Ổ đĩa đã đủ chỗ (${freeGB} GB): tiếp tục chạy task`, 'normal');
+        }
         break;
       }
 

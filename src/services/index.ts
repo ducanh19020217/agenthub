@@ -69,6 +69,7 @@ import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } fr
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
 import { ReviewChainSchema, parseReviewChain, type ReviewChainStep } from '../review-chain.js';
+import { isAutoReviewer } from '../reviewer.js';
 import { isKnownModel } from '../quota/index.js';
 import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, ReviewerOrderSchema, reviewerSettingsFromLegacy } from '../reviewer-config.js';
 import { SetupManager } from '../tools/setup.js';
@@ -4045,7 +4046,7 @@ export class AppService {
   }
 
   /**
-   * Merges a task whose review chain finished on a Codex approval, when the project opted in with
+   * Merges a task whose review chain finished on an automated gate approval, when the project opted in with
    * `integration.autoMerge` or `review.autoMerge`. A merged task then self-deploys through the usual task.merged hook.
    */
   async autoMergeReviewedTask(taskId: string): Promise<void> {
@@ -4055,13 +4056,31 @@ export class AppService {
     if (!project) return;
     const settings = projectSettings(project);
     if (!(settings.review.autoMerge || settings.integration.autoMerge)) return;
-    const chain = project.review
-      ? (() => { try { return (JSON.parse(project.review) as { chain?: Array<{ reviewer?: string }> }).chain || []; } catch { return []; } })()
-      : project.reviewChain
-        ? (() => { try { return JSON.parse(project.reviewChain) as Array<{ reviewer?: string }>; } catch { return []; } })()
+    const rawChain = project.review
+      ? (() => {
+          try {
+            const val = JSON.parse(project.review) as { chain?: unknown };
+            return val.chain;
+          } catch {
+            return [];
+          }
+        })()
+      : project.reviewChain;
+    const chain: ReviewChainStep[] = Array.isArray(rawChain)
+      ? (() => {
+          const res = ReviewChainSchema.safeParse(rawChain);
+          return res.success ? res.data : [];
+        })()
+      : typeof rawChain === 'string'
+        ? parseReviewChain(rawChain)
         : [];
+    if (!chain.length) return;
+    const lastStep = chain.at(-1);
+    if (!lastStep || lastStep.mode !== 'gate') return;
+    if ((task.reviewStep ?? 0) < chain.length) return;
+    if (task.reviewerEscalated) return;
     const last = this.reviewRepo.getByTask(taskId).at(-1);
-    if (!chain.length || !chain.at(-1)?.reviewer?.startsWith('codex:') || !last || last.actor !== 'codex-reviewer' || last.verdict !== 'approved') return;
+    if (!last || !isAutoReviewer(last.actor) || last.verdict !== 'approved') return;
     const checks = this.scheduler.getCheckResults(taskId);
     if (checks.length === 0 || checks.some((c) => !c.ok)) return;
     if (this.failedAutoMerges.has(taskId)) return;
@@ -4077,7 +4096,7 @@ export class AppService {
         verdict: 'approved',
         merge: true,
         by: 'auto-merge',
-        feedback: 'Tự merge sau khi Codex reviewer chấp thuận.',
+        feedback: `Tự merge sau khi reviewer tự động (${last.actor}) chấp thuận.`,
       });
       this.failedAutoMerges.delete(taskId);
     } catch (error) {

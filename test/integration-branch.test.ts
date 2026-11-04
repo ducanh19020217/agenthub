@@ -325,7 +325,7 @@ describe('Integration branch and cross-project dependencies', () => {
       path: repo,
       defaultBranch: 'main',
       settings: { integration: { enabled: true, branch: 'agenthub/integration', autoMerge: true }, review: { autoMerge: true } },
-      reviewChain: [{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }],
+      reviewChain: [{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }],
       merge: { enabled: true, worktrees: {}, checks: ['node -e "process.exit(0)"'], timeoutSec: 30 },
     });
     const intPath = path.join(tmpDir, 'integration', 'auto-proj');
@@ -335,7 +335,7 @@ describe('Integration branch and cross-project dependencies', () => {
     fs.writeFileSync(path.join(task.worktreePath!, 'auto.txt'), 'auto\n');
     execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
     execFileSync('git', ['-C', task.worktreePath!, 'commit', '-m', 'feat: auto']);
-    ctx.taskRepo.update(task.id, { status: 'review' });
+    ctx.taskRepo.update(task.id, { status: 'review', reviewStep: 1 });
     persistPassedCheck(task.id, 'auto');
 
     // No Codex approval yet: nothing merges.
@@ -357,7 +357,7 @@ describe('Integration branch and cross-project dependencies', () => {
       path: repo,
       defaultBranch: 'main',
       settings: { integration: { enabled: true, branch: 'agenthub/integration' }, review: { autoMerge: false } },
-      reviewChain: [{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }],
+      reviewChain: [{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }],
       merge: { enabled: true, worktrees: {}, checks: [], timeoutSec: 30 },
     });
     ctx.service.createTask({ project: 'rev-proj', slug: 'feat1', title: 'Feature 1', body: 'Do it', level: 'easy', start: true });
@@ -366,7 +366,7 @@ describe('Integration branch and cross-project dependencies', () => {
     fs.writeFileSync(path.join(task1.worktreePath!, 'file1.txt'), 'content 1\n');
     execFileSync('git', ['-C', task1.worktreePath!, 'add', '.']);
     execFileSync('git', ['-C', task1.worktreePath!, 'commit', '-m', 'feat: 1']);
-    ctx.taskRepo.update(task1.id, { status: 'review' });
+    ctx.taskRepo.update(task1.id, { status: 'review', reviewStep: 1 });
     persistPassedCheck(task1.id, 'review-1');
     ctx.reviewRepo.insert({ id: 'codex-ok-1', taskId: task1.id, verdict: 'approved', feedback: 'ok', actor: 'codex-reviewer' });
 
@@ -392,7 +392,7 @@ describe('Integration branch and cross-project dependencies', () => {
     fs.writeFileSync(path.join(task2.worktreePath!, 'file1.txt'), 'conflict from branch\n');
     execFileSync('git', ['-C', task2.worktreePath!, 'add', '.']);
     execFileSync('git', ['-C', task2.worktreePath!, 'commit', '-m', 'feat: conflict']);
-    ctx.taskRepo.update(task2.id, { status: 'review' });
+    ctx.taskRepo.update(task2.id, { status: 'review', reviewStep: 1 });
     persistPassedCheck(task2.id, 'review-2');
     ctx.reviewRepo.insert({ id: 'codex-ok-2', taskId: task2.id, verdict: 'approved', feedback: 'ok', actor: 'codex-reviewer' });
 
@@ -416,7 +416,7 @@ describe('Integration branch and cross-project dependencies', () => {
     fs.writeFileSync(path.join(task3.worktreePath!, 'file3.txt'), 'content 3\n');
     execFileSync('git', ['-C', task3.worktreePath!, 'add', '.']);
     execFileSync('git', ['-C', task3.worktreePath!, 'commit', '-m', 'feat: 3']);
-    ctx.taskRepo.update(task3.id, { status: 'review' });
+    ctx.taskRepo.update(task3.id, { status: 'review', reviewStep: 1 });
     ctx.reviewRepo.insert({ id: 'codex-ok-3', taskId: task3.id, verdict: 'approved', feedback: 'ok', actor: 'codex-reviewer' });
     ctx.runRepo.insert({ id: 'r-fake', taskId: task3.id, engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-1' });
     ctx.db.prepare("INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, 'r-fake', 'lint', 0, 1, 100, 'lint error')").run(task3.id);
@@ -433,7 +433,7 @@ describe('Integration branch and cross-project dependencies', () => {
       path: repo,
       defaultBranch: 'main',
       settings: { integration: { enabled: true, branch: 'agenthub/integration' }, review: { autoMerge: true } },
-      reviewChain: [{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }],
+      reviewChain: [{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }],
       merge: { enabled: true, worktrees: {}, checks: [], timeoutSec: 30 },
     });
     ctx.service.createTask({ project: 'conflict-lim-proj', slug: 'feat', title: 'Feature', body: 'Do it', level: 'easy', start: true });
@@ -460,7 +460,7 @@ describe('Integration branch and cross-project dependencies', () => {
       if (id === task.id) emittedPayload = p as Record<string, unknown>;
     });
 
-    ctx.taskRepo.update(task.id, { status: 'review' });
+    ctx.taskRepo.update(task.id, { status: 'review', reviewStep: 1 });
     await ctx.service.autoMergeReviewedTask(task.id);
 
     // Stays in review (not queued) because conflictCount = 4 > 3

@@ -781,6 +781,12 @@ export async function submitOpenProjectTriageInput(sourceId: string, wpId: numbe
   return apiFetch(`/api/tracker/${encodeURIComponent(sourceId)}/${wpId}/input`, { method: 'POST', body: JSON.stringify({ content }) });
 }
 
+export async function splitTask(id: string): Promise<{ ok: boolean; taskId: string; task: Task }> {
+  return apiFetch<{ ok: boolean; taskId: string; task: Task }>(`/api/tasks/${encodeURIComponent(id)}/split`, {
+    method: 'POST',
+  });
+}
+
 export async function retryTask(id: string, data?: RetryTaskInput): Promise<Task> {
   return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/retry`, {
     method: 'POST',

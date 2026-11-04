@@ -3963,6 +3963,67 @@ export class AppService {
     return this.taskRepo.get(taskId)!;
   }
 
+  async splitTask(idParam: string): Promise<{ ok: boolean; taskId: string; task: TaskRow }> {
+    const taskId = toTaskId(idParam);
+    const task = this.taskRepo.get(taskId);
+    if (!task) {
+      throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    }
+    if (!task.externalRef) {
+      throw new HttpError(400, 'bad_request', 'Task không gắn với ticket tracker ngoài');
+    }
+    if (task.status !== 'queued' && task.status !== 'blocked') {
+      throw new HttpError(400, 'bad_request', `Chỉ có thể chia việc khi task chưa chạy hoặc bị chặn (hiện tại: ${task.status})`);
+    }
+    if (task.slug.endsWith('-plan')) {
+      throw new HttpError(400, 'bad_request', 'Task đã là task lập kế hoạch chia việc');
+    }
+    const tracker = this.trackerRepo?.listAll().find((r) => r.display_id === task.externalRef);
+    if (!tracker) {
+      throw new HttpError(404, 'not_found', `Không tìm thấy tracker ticket cho ${task.externalRef}`);
+    }
+    const source = this.config.integrations?.openproject?.sources?.find((s) => s.id === tracker.source_id);
+    const splitConf = source?.split || { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true };
+
+    this.cancelTask(toRouteId(task.id));
+
+    const primary = this.projectRepo.getAll().find((p) => {
+      const settings = projectSettings(p).openproject;
+      return settings.enabled && settings.role === 'primary' && settings.sourceId === tracker.source_id;
+    }) || this.projectRepo.get(task.projectId);
+    if (!primary) {
+      throw new HttpError(404, 'not_found', 'Không tìm thấy project cho task kế hoạch');
+    }
+
+    const base = `op-${tracker.display_id.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-plan`;
+    let slug = base;
+    let n = 1;
+    while (this.taskRepo.get(`${primary.id}/${slug}`)) slug = `${base}-r${++n}`;
+
+    const planTask = this.createTask({
+      project: primary.id,
+      slug,
+      title: `[${tracker.display_id}] Lập kế hoạch chia việc`,
+      level: 'hard',
+      externalRef: tracker.display_id,
+      start: true,
+      body: `Ticket: [${tracker.display_id}]\n\nKhông sửa code, không commit. Đọc toàn bộ ticket trong .agenthub/context/ticket/ và code repo. Viết .agenthub/DONE có mục ## Chia việc theo src/protocol.md. Tối đa ${splitConf.maxParts} phần, tối thiểu 2.`,
+    });
+
+    let currentIds: string[] = [];
+    try {
+      const parsed = JSON.parse(tracker.task_ids);
+      if (Array.isArray(parsed)) currentIds = parsed.filter((x): x is string => typeof x === 'string');
+    } catch { currentIds = []; }
+
+    this.trackerRepo?.upsert({
+      ...tracker,
+      task_ids: JSON.stringify([...new Set([...currentIds, planTask.id])]),
+    });
+
+    return { ok: true, taskId: planTask.id, task: planTask };
+  }
+
   pauseTask(idParam: string, reason: 'manual' | 'load' | 'brain_load' = 'manual'): { ok: boolean; paused: boolean } {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);

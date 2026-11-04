@@ -33,7 +33,7 @@ import { CollapsibleList } from '../components/CollapsibleList';
 import { Pagination } from '../components/ui/Pagination';
 import { QuotaUsage } from '../components/QuotaUsage';
 import { Profile, QuotaUsageItem, ProjectBrain } from '../types/api';
-import { formatReset, formatTimeTitle } from '../lib/time';
+import { ClaudeQuotaCard } from '../components/ClaudeQuotaCard';
 import { GettingStartedChecklist } from '../components/GettingStartedChecklist';
 
 export type DashboardPollingProfile = 'optimized' | 'baseline';
@@ -661,10 +661,7 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
           );
         })}
       </div>
-      {claudeQuota && <div className="order-3 rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-4 flex items-center justify-between">
-        <span className="font-semibold text-sm">{t('extra.claudeQuota')}</span>
-        <span className="text-sm">{claudeQuota.profiles?.length ? claudeQuota.profiles.map((p, index) => <React.Fragment key={p.profileName}><span title={formatTimeTitle(p.resetsAt, locale, p.source, p.observedAt)}>{p.profileName}: {p.status === 'allowed' ? t('extra.claudeQuotaAvailable') : p.status === 'allowed_warning' ? t('extra.claudeQuotaWarning') : p.limited ? t('extra.claudeQuotaRejected') : (p.status || t('extra.unknown'))}{p.resetsAt ? ` · ${formatReset(p.resetsAt, Date.now(), locale)}` : ''} · {t('extra.updatedAt')} {new Date(p.observedAt).toLocaleTimeString(locale === 'vi' ? 'vi-VN' : 'en-US')}</span>{index < claudeQuota.profiles!.length - 1 ? ' · ' : ''}</React.Fragment>) : <span title={formatTimeTitle(claudeQuota.resetsAt, locale, '/usage', claudeQuota.observedAt || null)}>{claudeQuota.status === 'allowed' ? t('extra.claudeQuotaAvailable') : claudeQuota.status === 'allowed_warning' ? t('extra.claudeQuotaWarning') : claudeQuota.limited ? t('extra.claudeQuotaRejected') : (claudeQuota.status || t('extra.unknown'))}{claudeQuota.resetsAt ? ` · ${formatReset(claudeQuota.resetsAt, Date.now(), locale)}` : ''} · {t('extra.updatedAt')} {claudeQuota.observedAt ? new Date(claudeQuota.observedAt).toLocaleTimeString(locale === 'vi' ? 'vi-VN' : 'en-US') : t('extra.unknown')}</span>}</span>
-      </div>}
+      {claudeQuota && <ClaudeQuotaCard quota={claudeQuota} className="order-3" />}
       {claudeFailover?.active && <div data-testid="claude-failover" className="order-1 rounded-xl border border-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_10%,transparent)] p-4">
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">

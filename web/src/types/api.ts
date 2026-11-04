@@ -246,9 +246,11 @@ export interface OpenProjectSource {
   createTypeId?: number | null; createStatusId?: number | null;
   minTicketNumber: number; autoStart: boolean; autoResolve: boolean; language: string;
   triage?: 'off' | 'approve' | 'auto'; triageModelChain?: string[]; feedbackStatusId?: number | null;
+  split?: OpenProjectSplitConfig;
   dailyReport?: { time: string; weekdaysOnly: boolean; dir?: string; maxItems: number; telegram: boolean };
 }
-export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured'> { key?: string; }
+export interface OpenProjectSplitConfig { typeIds: number[]; keyword: string | null; workerMayRequest: boolean; maxParts: number; createChildTickets: boolean; }
+export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured' | 'split'> { split: OpenProjectSplitConfig; key?: string; }
 export interface OpenProjectStatusDto {
   id: number;
   name: string;

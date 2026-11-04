@@ -13,7 +13,7 @@ import {
   testOpenProjectConnection,
   createOpenProjectDailyReport,
 } from '../api/client';
-import type { OpenProjectSourceInput, OpenProjectStatusDto } from '../types/api';
+import type { OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto } from '../types/api';
 
 const blank = (id: string): OpenProjectSourceInput => ({
   id,
@@ -34,6 +34,7 @@ const blank = (id: string): OpenProjectSourceInput => ({
   triageModelChain: [],
   feedbackStatusId: null,
   language: 'vi',
+  split: { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true },
   dailyReport: { time: '18:00', weekdaysOnly: true, maxItems: 10, telegram: false },
 });
 
@@ -59,6 +60,11 @@ export const matchStatusIds = (statuses: OpenProjectStatusDto[], targetNames: st
     .map((s) => s.id);
 };
 
+const normalizeSplit = (source: OpenProjectSource | OpenProjectSourceInput): OpenProjectSourceInput => ({
+  ...source,
+  split: source.split || { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true },
+});
+
 export const OpenProjectSettings: React.FC = () => {
   const { t } = useLocale();
   const qc = useQueryClient();
@@ -74,7 +80,7 @@ export const OpenProjectSettings: React.FC = () => {
 
   useEffect(() => {
     if (!draft && sources[0]) {
-      setDraft({ ...sources[0] });
+      setDraft(normalizeSplit(sources[0]));
       setManualInputs({});
     }
   }, [sources, draft]);
@@ -170,8 +176,8 @@ export const OpenProjectSettings: React.FC = () => {
   const set = (patch: Partial<OpenProjectSourceInput>) =>
     setDraft((d) => (d ? { ...d, ...patch } : d));
 
-  const selectSource = (source: OpenProjectSourceInput) => {
-    setDraft({ ...source });
+  const selectSource = (source: OpenProjectSource | OpenProjectSourceInput) => {
+    setDraft(normalizeSplit(source));
     setManualInputs({});
     setKey('');
   };
@@ -258,6 +264,24 @@ export const OpenProjectSettings: React.FC = () => {
               className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2"
             />
           </label>
+          <div className="sm:col-span-2 rounded-lg border border-[var(--t-border)] p-3 space-y-3">
+            <strong className="text-xs">{t('integrations.splitTitle')}</strong>
+            <label className="block space-y-1 text-xs">
+              <span>{t('integrations.splitTypeIds')}</span>
+              <div className="flex flex-wrap gap-2">
+                {(types || []).map((item) => (
+                  <label key={item.id} className="inline-flex items-center gap-1">
+                    <input type="checkbox" checked={draft.split.typeIds.includes(item.id)} onChange={(e) => set({ split: { ...draft.split, typeIds: e.target.checked ? [...draft.split.typeIds, item.id] : draft.split.typeIds.filter((id) => id !== item.id) } })} />
+                    {item.name} ({item.id})
+                  </label>
+                ))}
+              </div>
+            </label>
+            <label className="block space-y-1 text-xs"><span>{t('integrations.splitKeyword')}</span><input value={draft.split.keyword || ''} onChange={(e) => set({ split: { ...draft.split, keyword: e.target.value || null } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label>
+            <label className="block space-y-1 text-xs"><span>{t('integrations.splitMaxParts')}</span><input type="number" min={2} max={5} value={draft.split.maxParts} onChange={(e) => set({ split: { ...draft.split, maxParts: Math.min(5, Math.max(2, Number(e.target.value))) } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label>
+            <label className="flex gap-2 items-center text-xs"><input type="checkbox" checked={draft.split.workerMayRequest} onChange={(e) => set({ split: { ...draft.split, workerMayRequest: e.target.checked } })} />{t('integrations.splitWorkerMayRequest')}</label>
+            <label className="flex gap-2 items-center text-xs"><input type="checkbox" checked={draft.split.createChildTickets} onChange={(e) => set({ split: { ...draft.split, createChildTickets: e.target.checked } })} />{t('integrations.splitCreateChildren')}</label>
+          </div>
 
           <label className="space-y-1">
             <span>{t('integrations.minTicket')}</span>

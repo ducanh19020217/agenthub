@@ -3589,17 +3589,18 @@ export class TelegramBotService {
     if ((type === 'quota.cleared' || type === 'task.queued') && this.taskRepo) this.queueWaitingQuotaCheck(notifyAllExhausted);
 
     if (type === 'merge.conflict') {
-      const isAutoRetried = p.autoRetried === true || (
-        p.autoRetried === undefined &&
-        typeof p.conflictCount === 'number' &&
-        p.conflictCount <= 3 &&
-        (() => {
-          if (!taskId || !this.taskRepo) return true;
-          const task = this.taskRepo.get(taskId);
-          return task && task.status !== 'cancelled';
-        })()
+      const conflictCount = typeof p.conflictCount === 'number' ? p.conflictCount : undefined;
+      const isRoutine = (conflictCount === undefined || conflictCount <= 3) && (
+        p.autoRetried === true || (
+          p.autoRetried === undefined &&
+          (() => {
+            if (!taskId || !this.taskRepo) return true;
+            const task = this.taskRepo.get(taskId);
+            return task && task.status !== 'cancelled';
+          })()
+        )
       );
-      if (isAutoRetried) return;
+      if (isRoutine) return;
     }
 
     if (type === 'merge.failed') {

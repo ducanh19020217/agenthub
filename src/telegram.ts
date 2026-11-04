@@ -4139,18 +4139,21 @@ export class TelegramBotService {
           this.lastSentDiskBlocked = now;
           this.lastSentDisk.set('low', now);
 
-          const label = typeof p.label === 'string' && p.label ? p.label : 'Ổ đĩa';
-          const pathStr = typeof p.path === 'string' && p.path ? ` (${p.path})` : '';
+          const label = typeof p.label === 'string' && p.label ? this.escapeHtml(p.label) : 'Ổ đĩa';
+          const pathStr = typeof p.path === 'string' && p.path ? ` (${this.escapeHtml(p.path)})` : '';
           const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
           const minFreeGB = typeof p.minFreeGB === 'number' ? p.minFreeGB : 0;
           const taskNames = waitingTasks.map((t) => t.slug || t.title || t.id).filter(Boolean);
-          const taskListStr = taskNames.length > 0 ? ` ${taskNames.length} task đang phải chờ: ${taskNames.join(', ')}.` : '';
+          const taskListStr = taskNames.length > 0
+            ? ` ${taskNames.length} task đang phải chờ: ${taskNames.map((name) => this.escapeHtml(name)).join(', ')}.`
+            : '';
 
-          const cacheDir = typeof p.cacheDir === 'string' && p.cacheDir ? p.cacheDir : this.config.cacheDir;
+          const rawCacheDir = typeof p.cacheDir === 'string' && p.cacheDir ? p.cacheDir : this.config.cacheDir;
           const cacheBytes = typeof p.cacheBytes === 'number' ? p.cacheBytes : 0;
           const cacheGB = cacheBytes > 0
             ? `${(cacheBytes / (1024 ** 3)).toFixed(1)} GB`
             : typeof p.cacheGB === 'number' ? `${p.cacheGB} GB` : '';
+          const cacheDir = rawCacheDir ? this.escapeHtml(rawCacheDir) : '';
           const cacheSuggestion = cacheDir
             ? ` Gợi ý: dọn thùng rác hoặc cache node_modules (${cacheDir}${cacheGB ? `, ${cacheGB}` : ''}).`
             : ' Gợi ý: dọn thùng rác hoặc cache node_modules.';

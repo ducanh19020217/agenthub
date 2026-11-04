@@ -1338,6 +1338,53 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
     });
 
+    it('escapes HTML special characters in disk alert messages to prevent Telegram 400 errors', async () => {
+      config.telegram.notify.disk = true;
+
+      ctx.projectRepo.insert({
+        id: 'p-html',
+        name: 'Project HTML',
+        path: tmpDir,
+        defaultBranch: 'main',
+        envTemplate: null,
+        maxParallel: 2,
+        merge: JSON.stringify({ enabled: false }),
+      });
+
+      ctx.taskRepo.insert({
+        id: 'p-html/t-html',
+        projectId: 'p-html',
+        slug: '<t-html>&bad',
+        title: 'Task <HTML> & Special',
+        status: 'waiting_quota',
+        waitReason: 'disk',
+        level: 'easy',
+      });
+
+      recordedCalls = [];
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, {
+        label: 'Worktrees <SSD> & Storage',
+        path: '/mnt/<data>&storage',
+        freeGB: 1.2,
+        minFreeGB: 2.0,
+        cacheDir: '/var/<cache>&npm',
+        cacheBytes: 3 * 1024 ** 3,
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      const calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      const text = calls[0].body?.text as string;
+      expect(text).toContain('Worktrees &lt;SSD&gt; &amp; Storage');
+      expect(text).toContain('(/mnt/&lt;data&gt;&amp;storage)');
+      expect(text).toContain('&lt;t-html&gt;&amp;bad');
+      expect(text).toContain('(/var/&lt;cache&gt;&amp;npm, 3.0 GB)');
+      expect(text).not.toContain('<SSD>');
+      expect(text).not.toContain('<data>');
+      expect(text).not.toContain('<t-html>');
+      expect(text).not.toContain('<cache>');
+    });
+
     it('reproduces 2026-11-03 incident: claude/gpt exhausted on all 4 agy profiles, gemini and codex remain -> only 1 info, no critical', async () => {
       // Setup 4 agy profiles and 1 codex profile
       for (const name of ['g3', 'g4', 'pa-gemini', 'g2']) {

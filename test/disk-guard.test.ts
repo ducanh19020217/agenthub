@@ -659,8 +659,22 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
 
     const okEvents = emittedEvents.filter((e) => e.type === 'disk.ok');
     expect(okEvents).toHaveLength(1);
+    expect(okEvents[0].payload?.path).toBe(driveA);
     expect(okEvents[0].payload?.resumedCount).toBe(1);
     expect(okEvents[0].payload?.tasks).toEqual(['t1']);
     expect(okEvents[0].payload?.remainingCount).toBe(1);
+
+    // Drive A becomes low again within 60 minutes: emits new blocking incident without throttling
+    driveAFree = 0.5;
+    emittedEvents.length = 0;
+    ctx.taskRepo.insert({ id: 'p-rec-a/t3', projectId: 'p-rec-a', slug: 't3', title: 'Task 3', status: 'queued', level: 'easy' });
+    ctx.scheduler.tick();
+
+    expect(ctx.taskRepo.get('p-rec-a/t3')?.status).toBe('waiting_quota');
+    const lowEvents = emittedEvents.filter((e) => e.type === 'disk.low');
+    const driveAIncident = lowEvents.find((e) => e.payload?.path === driveA);
+    expect(driveAIncident).toBeDefined();
+    expect(driveAIncident?.payload?.isBlocking).toBe(true);
+    expect(driveAIncident?.payload?.tasks).toEqual(['t3']);
   });
 });

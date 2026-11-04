@@ -1294,10 +1294,11 @@ export class Scheduler {
       }
     }
 
-    // Clean up incident tracking for disks that are no longer low
+    // Collect incident keys for disks that were low and are now recovered
+    const recoveredDiskKeys: string[] = [];
     for (const [key] of this.diskIncidents) {
       if (!lowDisks.some((d) => this.getDiskIncidentKey(d.path) === key)) {
-        this.diskIncidents.delete(key);
+        recoveredDiskKeys.push(key);
       }
     }
 
@@ -1312,21 +1313,54 @@ export class Scheduler {
       this.diskIncidents.clear();
       const remainingDiskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk').length;
       this.eventBus.emit('disk.ok', undefined, {
+        label: defaultDisk?.label ?? 'Worktrees',
+        path: defaultDisk?.path ?? this.config.worktreesDir,
         freeGB: defaultDisk?.freeGB ?? 0,
         minFreeGB: this.config.disk.minFreeGB,
         resumedCount: resumedTasks.length,
         remainingCount: remainingDiskWaiters,
         tasks: resumedTasks.map((t) => t.slug || t.title || t.id),
       });
-    } else if (resumedTasks.length > 0) {
+    } else {
+      const getTaskDiskKey = (t: TaskRow): string => {
+        return this.getDiskIncidentKey(this.getTaskDiskPath(t));
+      };
+
+      const affectedKeys = new Set<string>([
+        ...recoveredDiskKeys,
+        ...resumedTasks.map(getTaskDiskKey),
+      ]);
+
       const remainingDiskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk').length;
-      this.eventBus.emit('disk.ok', undefined, {
-        freeGB: defaultDisk?.freeGB ?? 0,
-        minFreeGB: this.config.disk.minFreeGB,
-        resumedCount: resumedTasks.length,
-        remainingCount: remainingDiskWaiters,
-        tasks: resumedTasks.map((t) => t.slug || t.title || t.id),
-      });
+
+      for (const diskKey of affectedKeys) {
+        const disk = disks.find((d) => this.getDiskIncidentKey(d.path) === diskKey)
+          ?? disks.find((d) => d.path === diskKey);
+        const diskPath = disk?.path ?? diskKey;
+        const diskLabel = disk?.label ?? 'Worktrees';
+        const diskFreeGB = disk?.freeGB ?? defaultDisk?.freeGB ?? 0;
+        const diskMinFreeGB = disk?.minFreeGB ?? this.config.disk.minFreeGB;
+
+        const tasksForThisDisk = resumedTasks.filter((t) => {
+          const tKey = getTaskDiskKey(t);
+          if (disk?.source === 'hub_home') {
+            return tKey === diskKey || !affectedKeys.has(tKey);
+          }
+          return tKey === diskKey;
+        });
+
+        this.diskIncidents.delete(diskKey);
+
+        this.eventBus.emit('disk.ok', undefined, {
+          label: diskLabel,
+          path: diskPath,
+          freeGB: diskFreeGB,
+          minFreeGB: diskMinFreeGB,
+          resumedCount: tasksForThisDisk.length,
+          remainingCount: remainingDiskWaiters,
+          tasks: tasksForThisDisk.map((t) => t.slug || t.title || t.id),
+        });
+      }
     }
 
     if (allDisksOk && this.recheckWaitingOnDiskOk) {
@@ -3932,6 +3966,11 @@ export class Scheduler {
 
   getDiskReader(): (p: string) => DiskSpace {
     return this.diskReader;
+  }
+
+  private getTaskDiskPath(task: TaskRow): string {
+    const project = this.projectRepo.get(task.projectId);
+    return project ? projectWorktreeRoot(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir;
   }
 
   private getDiskIncidentKey(diskPath: string): string {

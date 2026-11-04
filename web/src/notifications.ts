@@ -2,7 +2,11 @@ import { EventItem } from './types/api';
 import { getActiveLocale } from './utils/apiError';
 import { formatEventType } from './utils/events';
 
-const IMPORTANT = new Set(['brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.pause_reminder']);
+const IMPORTANT = new Set([
+  'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
+  'disk.low', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed', 'task.pause_reminder',
+  'merge.conflict', 'merge.failed',
+]);
 const DESKTOP_EVENTS = new Set([
   ...IMPORTANT,
   'batch.created', 'task.paused', 'load.task_paused', 'load.high', 'task.resumed', 'task.pause_reminder',
@@ -12,6 +16,7 @@ const DESKTOP_EVENTS = new Set([
 const WINDOW_MS = 30 * 60 * 1000;
 const DISK_WINDOW_MS = 60 * 60 * 1000;
 const LOAD_WINDOW_MS = 15 * 60 * 1000;
+const mergeConflictNotifiedTasks = new Set<string>();
 
 export interface BrowserNotificationOptions {
   quietHours?: { enabled?: boolean; start?: string; end?: string };
@@ -22,44 +27,89 @@ export interface BrowserQuotaProfile {
   name?: string;
   engine?: string;
   enabled?: boolean | number;
+  authState?: string | null;
   quotaMarks?: Array<{ family?: string; until?: number }>;
 }
+
+export interface RunnableCapacityEntry {
+  profileName: string;
+  engine: string;
+  family: string;
+  model: string;
+}
+
+export const KNOWN_RUNNABLE_MODELS = [
+  'gemini-3.8-flash-high',
+  'gemini-3.8-flash-medium',
+  'gemini-3.8-flash-low',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6-thinking',
+  'gpt-oss-120b-medium',
+  'codex:gpt-5.6-luna',
+];
+
+export function getModelFamily(model: string): string {
+  if (model.startsWith('codex:')) return 'codex';
+  const idx = model.indexOf('-');
+  return idx > 0 ? model.substring(0, idx) : model;
+}
+
+export function getModelEngine(model: string): 'agy' | 'codex' {
+  return model.startsWith('codex:') ? 'codex' : 'agy';
+}
+
 function normalizeQuotaFamily(family: unknown): string | undefined {
   if (typeof family !== 'string' || !family) return undefined;
   if (family.startsWith('codex')) return 'codex';
   if (family.startsWith('gemini')) return 'gemini';
   if (family.startsWith('claude')) return 'claude';
+  if (family.startsWith('gpt')) return 'gpt';
   return family;
 }
+
+export function runnableCapacity(
+  profiles: BrowserQuotaProfile[] = [],
+  models: string[] = KNOWN_RUNNABLE_MODELS,
+  now = Math.floor(Date.now() / 1000),
+): RunnableCapacityEntry[] {
+  const eligible = profiles.filter(
+    (profile) => profile.enabled !== false && profile.enabled !== 0 && (!profile.authState || profile.authState === 'ok'),
+  );
+  return models.flatMap((model) => {
+    const rawFamily = getModelFamily(model);
+    const family = normalizeQuotaFamily(rawFamily) || rawFamily;
+    const engine = getModelEngine(model);
+    return eligible
+      .filter((profile) => (profile.engine || 'agy') === engine && !profile.quotaMarks?.some((mark) => {
+        const markFamily = normalizeQuotaFamily(mark.family);
+        return markFamily === family && typeof mark.until === 'number' && mark.until > now;
+      }))
+      .map((profile) => ({
+        profileName: profile.name || '',
+        engine,
+        family,
+        model,
+      }));
+  });
+}
+
+export function isQuotaExhausted(
+  event: EventItem,
+  profiles: BrowserQuotaProfile[] = [],
+  now = Math.floor(Date.now() / 1000),
+): boolean {
+  if (profiles.length > 0) {
+    return runnableCapacity(profiles, undefined, now).length === 0;
+  }
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
+  return Boolean(payload.allExhausted === true);
+}
+
 export function isEngineWideQuotaExhausted(
   event: EventItem,
   profiles: BrowserQuotaProfile[] = [],
 ): boolean {
-  const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
-  let engine = typeof payload.engine === 'string' ? payload.engine : undefined;
-  const family = normalizeQuotaFamily(payload.family ?? payload.model);
-  if (!engine) {
-    const profileName = typeof payload.profile === 'string' ? payload.profile
-      : typeof payload.profileName === 'string' ? payload.profileName
-      : typeof payload.worker === 'string' ? payload.worker : undefined;
-    if (profileName) {
-      const match = profiles.find((p) => p.name === profileName);
-      engine = match?.engine;
-    }
-  }
-  if (!engine && family) {
-    if (family === 'gemini' || family === 'claude') engine = 'agy';
-    else if (family === 'codex') engine = 'codex';
-  }
-  const active = profiles.filter((profile) => profile.enabled !== false && profile.enabled !== 0 && (!engine || profile.engine === engine));
-  if (active.length === 0) {
-    return Boolean(payload.allExhausted === true && engine && family);
-  }
-  const now = Date.now() / 1000;
-  if (family) {
-    return active.every((profile) => profile.quotaMarks?.some((mark) => normalizeQuotaFamily(mark.family) === family && typeof mark.until === 'number' && mark.until > now));
-  }
-  return active.every((profile) => profile.quotaMarks?.some((mark) => typeof mark.until === 'number' && mark.until > now));
+  return isQuotaExhausted(event, profiles);
 }
 
 export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 'vi'): string {
@@ -106,7 +156,7 @@ export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 
       ? `Docker disk space low: ${freeGB} GB (< ${minFreeGB} GB): skipping docker build/pull/compose up`
       : `Ổ đĩa Docker còn ${freeGB} GB (< ${minFreeGB} GB): không chạy docker build/pull/compose up`;
   }
-  if (event.type === 'quota.exhausted') {
+  if (event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted') {
     return isEn
       ? `${appName}: All accounts have exhausted quota`
       : `${appName}: Mọi tài khoản đều đã hết quota`;
@@ -197,6 +247,21 @@ export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 
       ? `CI passed: [${projId}] ${workflow}${sha ? ` @ ${sha}` : ''}`
       : `CI đã xanh: [${projId}] ${workflow}${sha ? ` @ ${sha}` : ''}`;
   }
+  if (event.type === 'merge.conflict') {
+    const count = typeof payload.conflictCount === 'number' ? payload.conflictCount : 1;
+    let files = '';
+    if (typeof payload.files === 'string') files = payload.files;
+    else if (Array.isArray(payload.files)) files = payload.files.join(', ');
+    else if (typeof payload.message === 'string') {
+      const match = payload.message.match(/Xung đột merge ở:\s*(.+)/i);
+      files = match ? match[1].trim() : payload.message;
+    }
+    return `⚠️ ${event.taskId || 'Task'} xung đột merge lần thứ ${count}, cần xem: ${files || '(không rõ file)'}`;
+  }
+  if (event.type === 'merge.failed') {
+    const title = payload.environment ? 'Lỗi môi trường khi tự động gộp' : 'Lỗi tự động gộp';
+    return `${appName}: ${title}: ${event.taskId || 'Task'}`;
+  }
   return isEn ? `${appName} has an update requiring attention` : `${appName} có cập nhật cần chú ý`;
 }
 
@@ -209,11 +274,27 @@ export function shouldNotifyBrowserEvent(
   if (level === 'off' || !DESKTOP_EVENTS.has(event.type)) return false;
   if (level === 'important' && !IMPORTANT.has(event.type)) return false;
   const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
+  if (event.type === 'merge.conflict') {
+    const conflictCount = typeof payload.conflictCount === 'number' ? payload.conflictCount : undefined;
+    const isRoutine = (conflictCount === undefined || conflictCount <= 3) && payload.autoRetried !== false;
+    if (isRoutine) return false;
+  }
+  if (event.type === 'merge.failed') {
+    if (payload.autoFixCreated === true) return false;
+  }
+  if (event.taskId && /-fix-merge(?:-\d+)?$/.test(event.taskId)) {
+    return false;
+  }
   if (options.brainMode === 'auto' && !new Set([
-    'brain.notify', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'ci.failed',
+    'brain.notify', 'disk.low', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed',
+    'merge.conflict', 'merge.failed',
   ]).has(event.type)) return false;
-  if (isBrowserQuietHours(options.quietHours, event.ts) && event.type !== 'disk.low' && event.type !== 'disk.docker_low' && event.type !== 'quota.exhausted') return false;
-  if (event.type === 'quota.exhausted') {
+  if (isBrowserQuietHours(options.quietHours, event.ts) && event.type !== 'disk.low' && event.type !== 'disk.docker_low' && event.type !== 'quota.exhausted' && event.type !== 'claude.quota_exhausted' && event.type !== 'claude.fallback_changed') return false;
+  if (event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted' || event.type === 'claude.fallback_changed') {
+    if (event.type === 'claude.fallback_changed') {
+      const step = payload.step && typeof payload.step === 'object' ? payload.step as Record<string, unknown> : null;
+      if (payload.fallbackAvailable === true || (step && step.type !== 'wait')) return false;
+    }
     return isEngineWideQuotaExhausted(event, profiles);
   }
   // The scheduler emits disk.ok only after the hysteresis margin is crossed.
@@ -226,7 +307,7 @@ export function shouldNotifyBrowserEvent(
     if (!Number.isFinite(freeGB) || !Number.isFinite(minFreeGB) || !valid) return false;
   }
   if (level !== 'critical') return true;
-  return event.type === 'task.failed' || event.type === 'disk.docker_low' || (event.type === 'quota.exhausted' && isEngineWideQuotaExhausted(event, profiles));
+  return event.type === 'task.failed' || event.type === 'disk.docker_low' || ((event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted' || event.type === 'claude.fallback_changed') && isEngineWideQuotaExhausted(event, profiles));
 }
 
 export function notifyBrowserEvent(
@@ -237,7 +318,7 @@ export function notifyBrowserEvent(
 ): void {
   if (typeof window === 'undefined' || !shouldNotifyBrowserEvent(event, level, profiles, options) || !('Notification' in window) || Notification.permission !== 'granted') return;
   const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
-  if (event.type === 'quota.exhausted' && !shouldNotifyBrowserEvent(event, level, profiles)) return;
+  if ((event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted' || event.type === 'claude.fallback_changed') && !shouldNotifyBrowserEvent(event, level, profiles, options)) return;
 
   // State transition guard for disk.ok: only allowed if disk was previously in 'low' state.
   if (event.type === 'disk.ok') {
@@ -252,27 +333,36 @@ export function notifyBrowserEvent(
     ? LOAD_WINDOW_MS
     : WINDOW_MS;
 
-  let engine = typeof payload.engine === 'string' ? payload.engine : undefined;
-  const family = normalizeQuotaFamily(payload.family ?? payload.model);
-  if (!engine && typeof (payload.profile || payload.worker || payload.profileName) === 'string') {
-    const pName = (payload.profile || payload.worker || payload.profileName) as string;
-    engine = profiles.find((p) => p.name === pName)?.engine;
-  }
-
   const identity = event.type === 'disk.low' || event.type === 'disk.ok'
     ? event.type
-    : event.type === 'quota.exhausted'
-    ? `quota:${engine || 'unknown'}:${family || 'unknown'}`
+    : (event.type === 'quota.exhausted' || event.type === 'claude.quota_exhausted' || event.type === 'claude.fallback_changed')
+    ? 'quota:all'
     : event.type === 'task.paused' || event.type === 'load.task_paused' || event.type === 'load.high'
     ? 'load:summary'
+    : event.type === 'merge.conflict'
+    ? `merge.conflict:${event.taskId || ''}`
     : `${event.type}:${event.taskId || ''}:${JSON.stringify(payload)}`;
 
   const key = `agenthub:notification:${identity}`;
   const now = Date.now();
+  if (event.type === 'merge.conflict' && event.taskId && mergeConflictNotifiedTasks.has(event.taskId)) {
+    return;
+  }
   try {
-    const previous = Number(localStorage.getItem(key) || 0);
-    if (previous && now - previous < throttleWindow) return;
+    const previous = localStorage.getItem(key);
+    if (event.type === 'merge.conflict') {
+      if (previous !== null) {
+        if (event.taskId) mergeConflictNotifiedTasks.add(event.taskId);
+        return;
+      }
+    } else {
+      const prevTs = Number(previous || 0);
+      if (prevTs && now - prevTs < throttleWindow) return;
+    }
     localStorage.setItem(key, String(now));
+    if (event.type === 'merge.conflict' && event.taskId) {
+      mergeConflictNotifiedTasks.add(event.taskId);
+    }
     new Notification(formatEventType(event.type, getActiveLocale()), { body: browserNotificationBody(event, getActiveLocale()) });
   } catch {
     // Browser notification APIs may be unavailable or blocked by policy.

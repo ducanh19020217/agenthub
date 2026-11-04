@@ -247,6 +247,13 @@ export interface OpenProjectSource {
   dailyReport?: { time: string; weekdaysOnly: boolean; dir?: string; maxItems: number; telegram: boolean };
 }
 export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured'> { key?: string; }
+export interface OpenProjectStatusDto {
+  id: number;
+  name: string;
+  isClosed: boolean;
+  position: number;
+}
+export interface OpenProjectSyncResult { imported: number; comments: number; baseline: number; watched: number; }
 export interface GiteaStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
 export interface RemoteDeployStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
 
@@ -817,7 +824,7 @@ export interface ChatSession {
   outputTokens?: number;
   contextTokens?: number;
   createdAt?: string;
-  kind?: 'chat' | 'brain' | 'assistant';
+  kind?: 'chat' | 'brain' | 'assistant' | 'setup';
 }
 
 export type ChatMessageRole = 'user' | 'assistant' | 'tool' | 'error' | 'system';
@@ -865,6 +872,7 @@ export interface CreateChatSessionInput {
   mode?: ChatMode;
   model?: string;
   profileName?: string | null;
+  kind?: 'chat' | 'brain' | 'assistant' | 'setup';
 }
 
 export interface UpdateChatSessionInput {

@@ -18,6 +18,25 @@ AgentHub chạy trên máy của bạn. Nó chia việc lập trình cho các wo
 
 > **Chọn cách dùng:** Xem [Hai cách dùng AgentHub](USAGE-MODES.md) để chọn hub độc lập qua Web/Telegram hoặc Claude Code qua MCP. Tài liệu đó cũng nêu điều kiện, thiết lập `brain.mode` và vòng làm việc hoàn chỉnh.
 
+## Thiết lập nhanh bằng chat
+
+Mở Dashboard, bấm **Thiết lập bằng chat** ở checklist, trang Thiết lập hoặc Cài đặt. Claude sẽ hỏi từng câu theo [SETUP-PLAYBOOK](setup/SETUP-PLAYBOOK.md), kiểm tra cấu hình hiệu lực, luôn cho xem dry-run diff trước khi ghi và dùng trang nhập bí mật an toàn cho key/token. Bạn có thể dừng bất kỳ lúc nào rồi mở lại phiên setup để tiếp tục.
+
+## Chuyển sang máy mới
+
+Trên máy cũ chạy:
+
+```bash
+agenthub setup export --out agenthub-setup.json
+```
+
+Chuyển file này sang máy mới (file không chứa token, key, password, secret hoặc đường dẫn tuyệt đối riêng của máy), rồi nói với Claude: “đọc `docs/setup/SETUP-PLAYBOOK.md` và cài theo `agenthub-setup.json`”. Claude sẽ chạy import dry-run, báo project cần clone và chỉ hỏi lại bí mật còn thiếu qua `hub_request_secret`:
+
+```bash
+agenthub setup import agenthub-setup.json --dry-run
+agenthub setup import agenthub-setup.json
+```
+
 ---
 
 ## 1. Yêu cầu

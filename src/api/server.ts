@@ -16,7 +16,7 @@ import { registerBrainRoutes } from '../brain.js';
 import { registerChatRoutes } from '../chat/service.js';
 import { brandingLogoPath, saveBrandingLogo } from '../branding.js';
 import { decodeCursor } from '../pagination.js';
-import { registerOpenProjectRoutes } from '../integrations/openproject/routes.js';
+import { registerOpenProjectRoutes, type OpenProjectSyncResult } from '../integrations/openproject/routes.js';
 import { parseDateNoon } from '../integrations/openproject/daily-report.js';
 import { SetupSecretRequestSchema } from '../setup-tools.js';
 
@@ -37,7 +37,7 @@ export async function createServer(
   options?: {
     webDir?: string;
     onShutdown?: (disable: boolean) => void;
-    openProjectSync?: (sourceId: string) => Promise<{ imported: number; comments: number }>;
+    openProjectSync?: (sourceId: string) => Promise<OpenProjectSyncResult>;
     openProjectDailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
   },
 ): Promise<FastifyInstance> {
@@ -156,6 +156,20 @@ export async function createServer(
   fastify.post('/api/setup/integration-discover', async (req) => {
     const body = (req.body || {}) as { kind: 'openproject' | 'gitea' | 'checks'; sourceId?: string; url?: string; project?: string };
     return service.getSetupTools().discover(body.kind, body);
+  });
+  fastify.get('/api/setup/export', async () => service.getSetupTools().exportSetup());
+  fastify.post('/api/setup/import', async (req) => {
+    const body = (req.body || {}) as { file?: unknown; dryRun?: unknown };
+    if (typeof body.file !== 'string' || !body.file.trim()) throw new HttpError(400, 'bad_request', 'File setup là bắt buộc');
+    try {
+      const filePath = path.resolve(body.file);
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile() || stat.size > 2 * 1024 * 1024) throw new Error('File setup không hợp lệ hoặc quá lớn');
+      const imported = JSON.parse(fs.readFileSync(filePath, 'utf8')) as unknown;
+      return service.getSetupTools().importSetup(imported, body.dryRun !== false);
+    } catch (error) {
+      throw new HttpError(400, 'bad_request', `Không thể đọc file setup: ${error instanceof Error ? error.message : 'dữ liệu không hợp lệ'}`);
+    }
   });
   fastify.post('/api/secrets/requests', async (req) => service.getSetupTools().requestSecret(SetupSecretRequestSchema.parse(req.body)));
   fastify.get('/api/secrets/requests/:id', async (req) => service.getSetupTools().getSecretRequest((req.params as { id: string }).id) || { configured: false, reason: 'not_found' });

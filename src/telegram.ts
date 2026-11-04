@@ -14,7 +14,6 @@ import {
   DigestData,
   generateDigest,
   isQuietHours,
-  isQuotaEventEngineWide,
   isSystemIncident,
   forwardDecisionToBrain,
   getMinutesSinceTime,
@@ -25,7 +24,7 @@ import { canAlwaysAllowCommand, commandPermissionLabel } from './chat/permission
 import { formatReset } from './time-format.js';
 import { NotificationDeduper } from './notification-dedupe.js';
 import { reviewerSettingsFromLegacy } from './reviewer-config.js';
-import { QuotaService, QuotaCapacitySnapshot, formatRunnableCapacity } from './quota/index.js';
+import { QuotaService, QuotaCapacitySnapshot } from './quota/index.js';
 
 const WAITING_QUOTA_BATCH_DELAY_MS = 100;
 
@@ -303,16 +302,14 @@ export class TelegramBotService {
   // Deduplication for event notifications
   private lastNotificationTime = new Map<string, number>();
   private allQuotaNotified = new Set<string>();
-  private quotaInfoNotified = new Set<string>();
   private quotaIncidentActive = false;
-  private pendingQuotaInfo = new Map<string, string>();
-  private quotaInfoTimer: ReturnType<typeof setTimeout> | undefined;
   private waitingQuotaNotified = false;
   private waitingQuotaCheckTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly eventDeduper: NotificationDeduper;
   private brainWaitingNotified = new Set<string>();
   private focusDigest = new Map<string, number>();
   private reviewFallbackNotified = new Set<string>();
+  private mergeConflictNotified = new Set<string>();
 
   // Bound handler for EventBus
   private boundEventHandler: ((type: string, taskId?: string, payload?: unknown) => void) | null = null;
@@ -379,6 +376,16 @@ export class TelegramBotService {
   private quotaCapacity(): QuotaCapacitySnapshot | null {
     if (!this.quotaService || !this.profileRepo || this.profileRepo.getAll().length === 0) return null;
     return this.quotaService.capacitySnapshot(undefined, Math.floor(this.now() / 1000));
+  }
+
+  private isAllQuotaExhausted(payload?: Record<string, unknown>, now = this.now()): boolean {
+    const snapshot = this.quotaCapacity();
+    const hasProfiles = Boolean(this.profileRepo && this.profileRepo.getAll().length > 0);
+    return snapshot
+      ? snapshot.runnable.length === 0
+      : (hasProfiles && this.quotaMarkRepo
+          ? new QuotaService(this.quotaMarkRepo, this.profileRepo!).runnableCapacity(undefined, Math.floor(now / 1000)).length === 0
+          : Boolean(payload?.allExhausted === true));
   }
 
   private quotaIncidentMessage(snapshot: QuotaCapacitySnapshot | null): string {
@@ -692,10 +699,6 @@ export class TelegramBotService {
     if (this.waitingQuotaCheckTimer) {
       clearTimeout(this.waitingQuotaCheckTimer);
       this.waitingQuotaCheckTimer = undefined;
-    }
-    if (this.quotaInfoTimer) {
-      clearTimeout(this.quotaInfoTimer);
-      this.quotaInfoTimer = undefined;
     }
 
     if (this.pollAbortController) {
@@ -3589,18 +3592,15 @@ export class TelegramBotService {
       reviewReady: true,
       failed: true,
       blocked: true,
-      quotaPerModel: false,
       quotaAllExhausted: true,
       fallback: true,
     };
-    const notifyPerModel = typeof notify.quotaPerModel === 'boolean' ? notify.quotaPerModel : (notify as unknown as { quota?: boolean }).quota === true;
     const notifyAllExhausted = notify.quotaAllExhausted !== false;
 
     const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
     if (type === 'quota.cleared') {
       this.allQuotaNotified.delete('all');
       if (typeof p.family === 'string') this.allQuotaNotified.delete(p.family);
-      this.quotaInfoNotified.clear();
       for (const key of this.lastNotificationTime.keys()) {
         if (key.startsWith('quota.exhausted:')) this.lastNotificationTime.delete(key);
       }
@@ -3619,6 +3619,57 @@ export class TelegramBotService {
     }
     if ((type === 'quota.cleared' || type === 'task.queued') && this.taskRepo) this.queueWaitingQuotaCheck(notifyAllExhausted);
 
+    if (type === 'merge.conflict') {
+      const conflictCount = typeof p.conflictCount === 'number' ? p.conflictCount : undefined;
+      const isRoutine = (conflictCount === undefined || conflictCount <= 3) && (
+        p.autoRetried === true || (
+          p.autoRetried === undefined &&
+          (() => {
+            if (!taskId || !this.taskRepo) return true;
+            const task = this.taskRepo.get(taskId);
+            return task && task.status !== 'cancelled';
+          })()
+        )
+      );
+      if (isRoutine) return;
+    }
+
+    if (type === 'merge.failed') {
+      if (p.autoFixCreated === true) return;
+      if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+        /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+      )) {
+        return;
+      }
+    }
+
+    if (taskId && /-fix-merge(?:-\d+)?$/.test(taskId)) {
+      const task = this.taskRepo?.get(taskId);
+      if (!task || task.status === 'draft') return;
+    }
+
+    const now = this.now();
+    if (type === 'quota.exhausted' || type === 'claude.quota_exhausted') {
+      const snapshot = this.quotaCapacity();
+      const isAllExhausted = this.isAllQuotaExhausted(p, now);
+
+      const quotaKey = (typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '') || 'all';
+      if (!isAllExhausted) {
+        this.allQuotaNotified.delete(quotaKey);
+        if (this.quotaIncidentActive) {
+          this.quotaIncidentActive = false;
+          if (snapshot && snapshot.runnable.length > 0) this.broadcastMessage('✅ <b>Có quota trở lại</b>');
+        }
+        return;
+      }
+    }
+
+    if (type === 'review.fallback') {
+      if (!this.isAllQuotaExhausted(p, now)) {
+        return;
+      }
+    }
+
     const projectId = taskId?.includes('/') ? taskId.slice(0, taskId.indexOf('/')) : typeof p.projectId === 'string' ? p.projectId : null;
     if (!this.eventDeduper.shouldSend(type, taskId, payload)) return;
 
@@ -3630,7 +3681,6 @@ export class TelegramBotService {
     const textKey = typeof p.text === 'string' ? p.text.slice(0, 32) : '';
     const levelKey = (p.level || '') as string;
     const dedupKey = `${type}:${projectId || ''}:${taskId || batchKey || decisionKey}:${profileKey}:${familyKey}:${levelKey}:${textKey}`;
-    const now = this.now();
     const lastTime = this.lastNotificationTime.get(dedupKey) || 0;
     if (now - lastTime < 10_000) {
       return;
@@ -3651,10 +3701,6 @@ export class TelegramBotService {
     const minimal = this.isMinimalProject(projectId);
     const effectiveMode = effectiveBrainMode(projectId, projectId ? this.projectRepo.get(projectId) : null, this.config.brain);
     if (effectiveMode === 'auto') {
-      const allExhausted =
-        type === 'quota.exhausted' &&
-        isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, now);
-
       const isAllowedInAuto =
         type === 'brain.notify' ||
         type === 'disk.low' ||
@@ -3672,7 +3718,7 @@ export class TelegramBotService {
         type === 'merge.conflict' ||
         type === 'merge.failed' ||
         type === 'review.fallback' ||
-        allExhausted ||
+        type === 'quota.exhausted' ||
         (type === 'task.waiting_quota' && p.reason === 'no_department_profile');
 
         if (!isAllowedInAuto) {
@@ -3691,6 +3737,11 @@ export class TelegramBotService {
               ? p.decisionId
               : `dec-${now}-${Math.random().toString(36).slice(2, 8)}`;
           this.decisionTracker.recordDecision(decisionId, text, allowedChats, now, taskId);
+        }
+
+        if (type === 'merge.conflict') {
+          if (!taskId || this.isMergeConflictNotified(taskId)) return;
+          this.markMergeConflictNotified(taskId);
         }
 
         const desc = this.describeEventForQuietHours(type, taskId, p);
@@ -3864,6 +3915,7 @@ export class TelegramBotService {
 
       case 'review.fallback': {
         if (!notify.fallback) return;
+        if (!this.isAllQuotaExhausted(p, now)) return;
         if (taskId && this.reviewFallbackNotified.has(taskId)) return;
         if (taskId) this.reviewFallbackNotified.add(taskId);
 
@@ -3970,44 +4022,14 @@ export class TelegramBotService {
         break;
       }
 
-      case 'quota.exhausted': {
-        const family = typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '';
-        const quotaKey = family || 'all';
+      case 'quota.exhausted':
+      case 'claude.quota_exhausted': {
+        const quotaKey = (typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '') || 'all';
         const snapshot = this.quotaCapacity();
-        const isAllExhausted = snapshot ? snapshot.runnable.length === 0 : isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, now);
-        const engineWide = isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, now);
-        if (!isAllExhausted) this.allQuotaNotified.delete(quotaKey);
-        if (!isAllExhausted && this.quotaIncidentActive) {
-          this.quotaIncidentActive = false;
-          if (snapshot && snapshot.runnable.length > 0) this.broadcastMessage('✅ <b>Có quota trở lại</b>');
-        }
-        if (effectiveMode === 'auto') {
-          if (isAllExhausted && notifyAllExhausted && !this.quotaIncidentActive) {
-            this.allQuotaNotified.add(quotaKey);
-            this.quotaIncidentActive = true;
-            this.broadcastMessage(this.quotaIncidentMessage(snapshot));
-          }
-          break;
-        }
-        if (isAllExhausted) {
-          if (!notifyAllExhausted || this.quotaIncidentActive) return;
-          this.allQuotaNotified.add(quotaKey);
-          this.quotaIncidentActive = true;
-          this.broadcastMessage(this.quotaIncidentMessage(snapshot));
-          break;
-        }
-        if (engineWide && !this.quotaInfoNotified.has(`${p.engine || 'agy'}:${family}`)) {
-          this.quotaInfoNotified.add(`${p.engine || 'agy'}:${family}`);
-          this.queueQuotaInfo(p.engine === 'agy' ? 'Antigravity' : String(p.engine || ''), family);
-          break;
-        }
-        if (!notifyPerModel) return;
-        const name = (p.profile || p.worker || p.profileName || 'Hồ sơ') as string;
-        const resetStr = this.resolveResetTime(p, name, family);
-        const text = resetStr
-          ? `⏳ <b>Hết Quota</b>\nHồ sơ <b>${name}</b> hết quota <code>${family}</code> đến ${resetStr}`
-          : `⏳ <b>Hết Quota</b>\nHồ sơ <b>${name}</b> hết quota <code>${family}</code>`;
-        this.broadcastMessage(text);
+        if (!notifyAllExhausted || this.quotaIncidentActive) return;
+        this.allQuotaNotified.add(quotaKey);
+        this.quotaIncidentActive = true;
+        this.broadcastMessage(this.quotaIncidentMessage(snapshot));
         break;
       }
 
@@ -4038,20 +4060,24 @@ export class TelegramBotService {
         break;
       }
 
-      case 'claude.quota_exhausted': {
-        if (!notifyAllExhausted || p.fallbackAvailable !== false) return;
-        this.broadcastMessage('⏳ <b>Claude hết quota</b>\nKhông còn bước fallback khả dụng, cần chờ reset quota.');
-        break;
-      }
-
       case 'merge.conflict': {
-        const message = typeof p.message === 'string' ? p.message : 'Xung đột khi merge tự động';
-        const taskLabel = taskId || 'Task';
-        this.broadcastMessage(`${prefix}⚠️ <b>Xung đột tự động gộp: ${this.escapeHtml(taskLabel)}</b>\n${this.escapeHtml(message)}`);
+        if (!taskId) return;
+        if (this.isMergeConflictNotified(taskId)) return;
+        this.markMergeConflictNotified(taskId);
+
+        const count = typeof p.conflictCount === 'number' ? p.conflictCount : 1;
+        const filesText = this.extractConflictFiles(p);
+        this.broadcastMessage(`${prefix}⚠️ ${this.escapeHtml(taskId)} xung đột merge lần thứ ${count}, cần xem: ${this.escapeHtml(filesText)}`);
         break;
       }
 
       case 'merge.failed': {
+        if (p.autoFixCreated === true) return;
+        if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+          /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+        )) {
+          return;
+        }
         const message = typeof p.message === 'string' ? p.message : 'Lỗi khi merge tự động';
         const taskLabel = taskId || 'Task';
         const title = p.environment ? 'Lỗi môi trường khi tự động gộp' : 'Lỗi tự động gộp';
@@ -4382,25 +4408,6 @@ export class TelegramBotService {
     }, WAITING_QUOTA_BATCH_DELAY_MS);
   }
 
-  private queueQuotaInfo(engine: string, family: string): void {
-    this.pendingQuotaInfo.set(`${engine}:${family}`, family);
-    if (this.quotaInfoTimer) return;
-    this.quotaInfoTimer = setTimeout(() => {
-      this.quotaInfoTimer = undefined;
-      const snapshot = this.quotaCapacity();
-      const families = [...this.pendingQuotaInfo.values()]
-        .map((value) => value === 'gpt' ? 'GPT' : value.charAt(0).toUpperCase() + value.slice(1))
-        .sort()
-        .join('/');
-      this.pendingQuotaInfo.clear();
-      const reset = snapshot?.nextReset
-        ? ` (reset sớm nhất ${this.escapeHtml(formatReset(snapshot.nextReset.at, this.now()))})`
-        : '';
-      const runnable = snapshot ? formatRunnableCapacity(snapshot) : 'model khác';
-      this.broadcastMessage(`ℹ️ Hết quota <b>${this.escapeHtml(families)}</b> trên mọi tài khoản Antigravity${reset}. Vẫn chạy bằng: ${this.escapeHtml(runnable)}`);
-    }, WAITING_QUOTA_BATCH_DELAY_MS);
-  }
-
   broadcastMessage(
     text: string,
     replyMarkup?: { inline_keyboard: InlineKeyboardButton[][] },
@@ -4662,30 +4669,6 @@ export class TelegramBotService {
     return 'Task';
   }
 
-  private resolveResetTime(p: Record<string, unknown>, profile: string, family: string): string {
-    if (typeof p.time === 'string') return p.time;
-    if (typeof p.untilStr === 'string') return p.untilStr;
-
-    let epochSec: number | undefined;
-    if (typeof p.until === 'number') {
-      epochSec = p.until > 1e11 ? Math.floor(p.until / 1000) : p.until;
-    } else if (typeof p.resetAt === 'number') {
-      epochSec = p.resetAt > 1e11 ? Math.floor(p.resetAt / 1000) : p.resetAt;
-    } else if (typeof p.resetSeconds === 'number') {
-      epochSec = Math.floor(this.now() / 1000) + p.resetSeconds;
-    } else if (this.quotaMarkRepo && profile && family) {
-      const marks = this.quotaMarkRepo.getActive();
-      const mark = marks.find((m) => m.profileName === profile && m.family === family);
-      if (mark) epochSec = mark.until;
-    }
-
-    if (epochSec !== undefined) {
-      return formatReset(epochSec, this.now(), 'vi');
-    }
-
-    return '';
-  }
-
   private escapeHtml(text: string): string {
     return text
       .replace(/&/g, '&amp;')
@@ -4734,17 +4717,47 @@ export class TelegramBotService {
         return `${prefix}Đồng bộ Gitea thất bại: ${p?.error || ''}`;
       case 'gitea.sync.conflict':
         return `${prefix}Xung đột khi đồng bộ Gitea`;
-      case 'merge.conflict':
-        return `${prefix}Xung đột khi merge tự động (${taskId || 'task'})`;
+      case 'merge.conflict': {
+        const count = typeof p?.conflictCount === 'number' ? p.conflictCount : 1;
+        const filesText = this.extractConflictFiles((p && typeof p === 'object' ? p : {}) as Record<string, unknown>);
+        return `${prefix}⚠️ ${taskId || 'task'} xung đột merge lần thứ ${count}, cần xem: ${filesText}`;
+      }
       case 'merge.failed':
         return `${prefix}Lỗi khi merge tự động (${taskId || 'task'})`;
       case 'review.fallback':
+        if (!this.isAllQuotaExhausted(p)) return '';
         return `${prefix}Codex hết quota, Claude đang duyệt …`;
       case 'quota.exhausted':
-        return `Hồ sơ ${p?.profile || p?.profileName || 'tài khoản'} hết quota ${p?.family || ''}`;
+      case 'claude.quota_exhausted':
+        return 'Hết sạch quota ở mọi tài khoản và model';
       default:
         return taskId ? `${prefix}${type} (${taskId})` : type;
     }
+  }
+
+  private extractConflictFiles(p: Record<string, unknown>): string {
+    if (typeof p.files === 'string' && p.files.trim()) return p.files.trim();
+    if (Array.isArray(p.files) && p.files.length > 0) return p.files.join(', ');
+    if (typeof p.message === 'string') {
+      const match = p.message.match(/Xung đột merge ở:\s*(.+)/i);
+      if (match && match[1].trim()) return match[1].trim();
+      return p.message.trim();
+    }
+    return '(không rõ file)';
+  }
+
+  private isMergeConflictNotified(taskId: string): boolean {
+    if (this.mergeConflictNotified.has(taskId)) return true;
+    if (this.taskRepo?.isNotificationSent('telegram', 'merge.conflict', taskId)) {
+      this.mergeConflictNotified.add(taskId);
+      return true;
+    }
+    return false;
+  }
+
+  private markMergeConflictNotified(taskId: string): void {
+    this.mergeConflictNotified.add(taskId);
+    this.taskRepo?.markNotificationSent('telegram', 'merge.conflict', taskId);
   }
 
   private renderHelp(): string {

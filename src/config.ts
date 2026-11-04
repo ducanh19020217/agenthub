@@ -167,7 +167,6 @@ export interface TelegramNotifyConfig {
   reviewReady: boolean;
   failed: boolean;
   blocked: boolean;
-  quotaPerModel: boolean;
   quotaAllExhausted: boolean;
   fallback: boolean;
   brainWaiting?: boolean;
@@ -225,7 +224,6 @@ export const DEFAULT_TELEGRAM_NOTIFY: TelegramNotifyConfig = {
   reviewReady: true,
   failed: true,
   blocked: true,
-  quotaPerModel: false,
   quotaAllExhausted: true,
   fallback: true,
   brainWaiting: true,
@@ -1112,10 +1110,6 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
       reviewReady: rawTelegramNotify.reviewReady !== false,
       failed: rawTelegramNotify.failed !== false,
       blocked: rawTelegramNotify.blocked !== false,
-      // `quota` was the old switch for per-model notifications.
-      quotaPerModel: typeof rawTelegramNotify.quotaPerModel === 'boolean'
-        ? rawTelegramNotify.quotaPerModel
-        : rawTelegramNotify.quota === true,
       quotaAllExhausted: rawTelegramNotify.quotaAllExhausted !== false,
       fallback: rawTelegramNotify.fallback !== false,
       brainWaiting: rawTelegramNotify.brainWaiting !== false,

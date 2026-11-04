@@ -523,7 +523,7 @@ describe('NotificationService (Desktop Notifications)', () => {
     notifier.stop();
   });
 
-  it('uses runnable capacity for the shared info notification and batches families', async () => {
+  it('silences notifications when claude/gpt are exhausted on agy but gemini and codex remain (incident 2026-11-03)', async () => {
     profileRepo.update('g1', { enabled: 0 });
     profileRepo.update('chinh', { enabled: 0 });
     for (const name of ['g3', 'g4', 'pa-gemini', 'g2']) {
@@ -541,14 +541,60 @@ describe('NotificationService (Desktop Notifications)', () => {
     notifier.start();
     eventBus.emit('quota.exhausted', undefined, { profile: 'g2', family: 'gpt', engine: 'agy' });
     eventBus.emit('quota.exhausted', undefined, { profile: 'g2', family: 'claude', engine: 'agy' });
+    eventBus.emit('claude.quota_exhausted', undefined, { profileName: 'g2', fallbackAvailable: false });
+    eventBus.emit('claude.fallback_changed', undefined, { step: { type: 'wait' }, reason: 'quota' });
     await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(execCalls).toHaveLength(0);
+    notifier.stop();
+  });
+
+  it('silences claude.quota_exhausted when other models/engines remain available', async () => {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    quotaMarkRepo.mark('g1', 'claude', future);
+    quotaMarkRepo.mark('chinh', 'claude', future);
+
+    const notifier = new NotificationService({ eventBus, config, profileRepo, quotaMarkRepo, exec: fakeExec });
+    notifier.start();
+
+    // Claude is exhausted on agy, but Gemini on g1/chinh remains runnable:
+    eventBus.emit('claude.quota_exhausted', undefined, { profileName: 'g1', fallbackAvailable: false });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(execCalls).toHaveLength(0);
+
+    // When all runnable capacity across all profiles is exhausted:
+    quotaMarkRepo.mark('g1', 'gemini', future);
+    quotaMarkRepo.mark('chinh', 'gemini', future);
+    quotaMarkRepo.mark('g1', 'gpt', future);
+    quotaMarkRepo.mark('chinh', 'gpt', future);
+    eventBus.emit('claude.quota_exhausted', undefined, { profileName: 'g1', fallbackAvailable: false });
+    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(execCalls).toHaveLength(1);
-    expect(execCalls[0].args).not.toContain('critical');
-    expect(execCalls.some((c) => c.args.includes('critical'))).toBe(false);
-    expect(execCalls[0].args.at(-1)).toContain('Hết quota Claude/GPT trên mọi tài khoản Antigravity');
-    expect(execCalls[0].args.at(-1)).toContain('Vẫn chạy bằng: Gemini (4 tài khoản), Codex (codeX1)');
-    expect(execCalls[0].args.at(-1)).not.toContain('mọi tài khoản đều hết');
-    expect(execCalls[0].args.at(-1)).not.toContain('tạm dừng');
+    expect(execCalls[0].args.at(-1)).toContain('🚨 Hết sạch quota ở mọi tài khoản và model');
+    notifier.stop();
+  });
+
+  it('silences claude.fallback_changed when other models/engines remain available', async () => {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    quotaMarkRepo.mark('g1', 'claude', future);
+    quotaMarkRepo.mark('chinh', 'claude', future);
+
+    const notifier = new NotificationService({ eventBus, config, profileRepo, quotaMarkRepo, exec: fakeExec });
+    notifier.start();
+
+    // Claude is exhausted and has to wait, but Gemini on g1/chinh remains runnable:
+    eventBus.emit('claude.fallback_changed', undefined, { step: { type: 'wait' }, reason: 'quota' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(execCalls).toHaveLength(0);
+
+    // When all runnable capacity across all profiles is exhausted:
+    quotaMarkRepo.mark('g1', 'gemini', future);
+    quotaMarkRepo.mark('chinh', 'gemini', future);
+    quotaMarkRepo.mark('g1', 'gpt', future);
+    quotaMarkRepo.mark('chinh', 'gpt', future);
+    eventBus.emit('claude.fallback_changed', undefined, { step: { type: 'wait' }, reason: 'quota' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toBe('Claude fallback: đang dùng chờ reset');
     notifier.stop();
   });
 
@@ -1113,6 +1159,83 @@ describe('NotificationService (Desktop Notifications)', () => {
     eventBus.emit('daily_report.failed', undefined, { sourceId: 'demo-source', error: 'Network error' });
     expect(execCalls).toHaveLength(2);
     expect(execCalls[1].args.at(-1)).toContain('tạo báo cáo ngày (demo-source) thất bại');
+
+    notifier.stop();
+  });
+
+  it('suppresses routine merge conflict and auto-fix notifications on desktop', () => {
+    config.notifications.desktopLevel = 'important';
+    const notifier = new NotificationService({
+      eventBus,
+      config,
+      taskRepo,
+      profileRepo,
+      quotaMarkRepo,
+      projectRepo,
+      exec: fakeExec,
+    });
+    notifier.start();
+
+    // 1. Conflict 1 to 3 auto-reassigned: no desktop notification
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 1, autoRetried: true, message: 'Xung đột merge ở: a.ts' });
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 2, autoRetried: true, message: 'Xung đột merge ở: a.ts' });
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 3, autoRetried: true, message: 'Xung đột merge ở: a.ts' });
+    expect(execCalls).toHaveLength(0);
+
+    // 2. Conflict 4: sends exactly one notification
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 4, autoRetried: false, files: 'a.ts, b.ts' });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('⚠️ proj/task-1 xung đột merge lần thứ 4, cần xem: a.ts, b.ts');
+
+    // Duplicate event on same task: no second notification
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 5, autoRetried: false, files: 'a.ts, b.ts' });
+    expect(execCalls).toHaveLength(1);
+
+    // Contradictory payload: conflictCount > 3 but autoRetried is true must still notify
+    eventBus.emit('merge.conflict', 'proj/task-contradictory', { conflictCount: 4, autoRetried: true, files: 'c.ts' });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('⚠️ proj/task-contradictory xung đột merge lần thứ 4, cần xem: c.ts');
+
+    // 3. Cannot auto-reassign: sends notification
+    eventBus.emit('merge.conflict', 'proj/task-cancelled', { conflictCount: 1, autoRetried: false, message: 'Xung đột merge ở: bad.ts' });
+    expect(execCalls).toHaveLength(3);
+    expect(execCalls[2].args.at(-1)).toContain('⚠️ proj/task-cancelled xung đột merge lần thứ 1, cần xem: bad.ts');
+
+    // 4. merge.failed with fix task: no notification
+    eventBus.emit('merge.failed', 'proj/task-postcheck', { autoFixCreated: true, message: 'Checks sau merge thất bại' });
+    expect(execCalls).toHaveLength(3);
+
+    // 5. merge.failed due to environment error: sends notification
+    eventBus.emit('merge.failed', 'proj/task-env', { environment: true, message: 'Thiếu dependency' });
+    expect(execCalls).toHaveLength(4);
+    expect(execCalls[3].args.at(-1)).toContain('Lỗi môi trường khi tự động gộp: proj/task-env');
+
+    // 6. -fix-merge draft task: no notification
+    taskRepo.insert({
+      id: 'proj/task-postcheck-fix-merge',
+      projectId: 'proj',
+      slug: 'task-postcheck-fix-merge',
+      title: 'Fix merge',
+      status: 'draft',
+      sourceRef: JSON.stringify({ checkName: 'merge' }),
+    });
+    eventBus.emit('task.queued', 'proj/task-postcheck-fix-merge');
+    expect(execCalls).toHaveLength(4);
+
+    // 7. Restart persistence: a new NotificationService instance with the same taskRepo does not re-notify already alerted tasks
+    const restartedNotifier = new NotificationService({
+      eventBus,
+      config,
+      taskRepo,
+      profileRepo,
+      quotaMarkRepo,
+      projectRepo,
+      exec: fakeExec,
+    });
+    restartedNotifier.start();
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 6, autoRetried: false, files: 'a.ts' });
+    expect(execCalls).toHaveLength(4);
+    restartedNotifier.stop();
 
     notifier.stop();
   });

@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { getProfiles, getProjects, getSetupStatus, getTasks, getTelegramStatus } from '../api/client';
 import { useLocale } from '../context/LocaleContext';
+import { SetupChatButton } from './SetupChatButton';
 
 export const GettingStartedChecklist: React.FC = () => {
   const { t } = useLocale();
@@ -24,7 +25,7 @@ export const GettingStartedChecklist: React.FC = () => {
   return (
     <section data-tour="checklist" className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-4 shadow-xs">
       <div className="flex items-start justify-between gap-3">
-        <div><h2 className="text-sm font-semibold">{t('checklist.title')}</h2><p className="mt-1 text-xs text-[var(--t-text-3)]">{t('checklist.subtitle')}</p></div>
+        <div><h2 className="text-sm font-semibold">{t('checklist.title')}</h2><p className="mt-1 text-xs text-[var(--t-text-3)]">{t('checklist.subtitle')}</p></div><SetupChatButton />
         <button type="button" onClick={() => { localStorage.setItem('agenthub_checklist_hidden', '1'); setHidden(true); }} aria-label={t('checklist.hide')} className="rounded p-1 text-[var(--t-text-3)] hover:bg-[var(--t-hover)]"><X size={16} /></button>
       </div>
       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">

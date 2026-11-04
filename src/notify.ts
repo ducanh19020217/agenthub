@@ -4,11 +4,11 @@ import { AgentHubConfig, updateConfigInMemory } from './config.js';
 import { EventBus } from './scheduler/index.js';
 import { QuotaMarkRepo, TaskRepo, ProfileRepo, CiRepo } from './db/index.js';
 import { toTaskId } from './services/index.js';
-import { isQuietHours, isQuotaEventEngineWide, isSystemIncident, getMinutesSinceTime } from './brain/digest.js';
+import { isQuietHours, isSystemIncident, getMinutesSinceTime } from './brain/digest.js';
 import { effectiveBrainMode } from './brain/mode.js';
 import { formatReset } from './time-format.js';
 import { NotificationDeduper } from './notification-dedupe.js';
-import { QuotaService, QuotaCapacitySnapshot, formatRunnableCapacity } from './quota/index.js';
+import { QuotaService, QuotaCapacitySnapshot } from './quota/index.js';
 
 const WAITING_QUOTA_BATCH_DELAY_MS = 100;
 
@@ -44,10 +44,7 @@ export class NotificationService {
   private lastSent = new Map<string, number>();
   private lastSentCi = new Map<string, number>();
   private allQuotaNotified = new Set<string>();
-  private quotaInfoNotified = new Set<string>();
   private quotaIncidentActive = false;
-  private pendingQuotaInfo = new Map<string, string>();
-  private quotaInfoTimer: ReturnType<typeof setTimeout> | undefined;
   private waitingQuotaNotified = false;
   private waitingQuotaCheckTimer: ReturnType<typeof setTimeout> | undefined;
   private lastSentSummary = new Map<string, number>();
@@ -60,6 +57,7 @@ export class NotificationService {
   private boundHandler: ((type: string, taskId?: string, payload?: unknown) => void) | null = null;
   private quietHoursQueue: Array<{ type: string; taskId?: string; payload?: unknown; timestamp: number }> = [];
   private focusDigest = new Map<string, number>();
+  private mergeConflictNotified = new Set<string>();
   private get appName(): string { return this.config.branding?.name || 'AgentHub'; }
   private checkTimer?: NodeJS.Timeout;
 
@@ -79,6 +77,16 @@ export class NotificationService {
   private quotaCapacity(): QuotaCapacitySnapshot | null {
     if (!this.quotaService || !this.profileRepo || this.profileRepo.getAll().length === 0) return null;
     return this.quotaService.capacitySnapshot(undefined, Math.floor(this.now() / 1000));
+  }
+
+  private isAllQuotaExhausted(payload?: Record<string, unknown>, now = this.now(), defaultWhenNoProfiles = false): boolean {
+    const snapshot = this.quotaCapacity();
+    const hasProfiles = Boolean(this.profileRepo && this.profileRepo.getAll().length > 0);
+    return snapshot
+      ? snapshot.runnable.length === 0
+      : (hasProfiles && this.quotaMarkRepo
+          ? new QuotaService(this.quotaMarkRepo, this.profileRepo!).runnableCapacity(undefined, Math.floor(now / 1000)).length === 0
+          : (defaultWhenNoProfiles ? Boolean(payload?.allExhausted !== false) : Boolean(payload?.allExhausted === true)));
   }
 
   private quotaRecoveryMessage(snapshot: QuotaCapacitySnapshot): string {
@@ -146,10 +154,6 @@ export class NotificationService {
       clearInterval(this.checkTimer);
       this.checkTimer = undefined;
     }
-    if (this.quotaInfoTimer) {
-      clearTimeout(this.quotaInfoTimer);
-      this.quotaInfoTimer = undefined;
-    }
     if (this.waitingQuotaCheckTimer) {
       clearTimeout(this.waitingQuotaCheckTimer);
       this.waitingQuotaCheckTimer = undefined;
@@ -177,15 +181,42 @@ export class NotificationService {
     if (level === 'off') return;
     if (level === 'important' && !new Set([
       'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
-      'disk.low', 'disk.ok', 'disk.docker_low', 'quota.exhausted', 'ci.failed', 'task.waiting_quota',
+      'disk.low', 'disk.ok', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed', 'task.waiting_quota',
       'quota.cleared', 'remote_deploy.failed', 'remote_deploy.health_timeout',
+      'merge.conflict', 'merge.failed',
     ]).has(type)) return;
 
     const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+
+    if (type === 'merge.conflict') {
+      const conflictCount = typeof p.conflictCount === 'number' ? p.conflictCount : undefined;
+      const isRoutine = (conflictCount === undefined || conflictCount <= 3) && (
+        p.autoRetried === true || (
+          p.autoRetried === undefined &&
+          (() => {
+            if (!taskId || !this.taskRepo) return true;
+            const task = this.taskRepo.get(taskId);
+            return task && task.status !== 'cancelled';
+          })()
+        )
+      );
+      if (isRoutine) return;
+    }
+
+    if (type === 'merge.failed') {
+      if (p.autoFixCreated === true) return;
+      if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+        /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+      )) {
+        return;
+      }
+    }
+
+    if (taskId && /-fix-merge(?:-\d+)?$/.test(taskId)) {
+      const task = this.taskRepo?.get(taskId);
+      if (!task || task.status === 'draft') return;
+    }
     const notifyConfig = this.config.telegram?.notify;
-    const notifyPerModel = notifyConfig
-      ? typeof notifyConfig.quotaPerModel === 'boolean' ? notifyConfig.quotaPerModel : (notifyConfig as unknown as { quota?: boolean }).quota === true
-      : false;
     const notifyAllExhausted = notifyConfig?.quotaAllExhausted !== false;
     if (type === 'quota.cleared') {
       this.allQuotaNotified.delete('all');
@@ -195,11 +226,12 @@ export class NotificationService {
           this.lastSent.delete(key);
         }
       }
-      this.quotaInfoNotified.clear();
       const snapshot = this.quotaCapacity();
       if (this.quotaIncidentActive) {
         this.quotaIncidentActive = false;
-        if (snapshot && snapshot.runnable.length > 0) this.notify(this.quotaRecoveryMessage(snapshot), 'normal');
+        if (snapshot && snapshot.runnable.length > 0) {
+          this.notify(this.quotaRecoveryMessage(snapshot), 'normal');
+        }
       }
     }
     if (type === 'task.waiting_quota' && p.reason === 'quota' && this.taskRepo) {
@@ -208,6 +240,23 @@ export class NotificationService {
     }
     if ((type === 'quota.cleared' || type === 'task.queued') && this.taskRepo) this.queueWaitingQuotaCheck(notifyAllExhausted);
     if (!this.eventDeduper.shouldSend(type, taskId, payload)) return;
+
+    if (type === 'quota.exhausted' || type === 'claude.quota_exhausted') {
+      const snapshot = this.quotaCapacity();
+      const isAllExhausted = this.isAllQuotaExhausted(p, this.now());
+
+      const quotaKey = (typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '') || 'all';
+      if (!isAllExhausted) {
+        this.allQuotaNotified.delete(quotaKey);
+        if (this.quotaIncidentActive) {
+          this.quotaIncidentActive = false;
+          if (snapshot && snapshot.runnable.length > 0) {
+            this.notify(this.quotaRecoveryMessage(snapshot), 'normal');
+          }
+        }
+        return;
+      }
+    }
 
     // 1. In brain auto mode: suppress raw task notifications
     const taskProjectId = taskId?.includes('/') ? taskId.slice(0, taskId.indexOf('/')) : typeof p.projectId === 'string' ? p.projectId : null;
@@ -218,10 +267,6 @@ export class NotificationService {
     }
     const effectiveMode = effectiveBrainMode(taskProjectId, taskProjectId ? this.projectRepo?.get(taskProjectId) : null, this.config.brain);
     if (effectiveMode === 'auto') {
-      const allExhausted =
-        type === 'quota.exhausted' &&
-        isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, this.now());
-
       const isSystemEvent =
         type === 'brain.notify' ||
         type === 'disk.low' ||
@@ -233,9 +278,11 @@ export class NotificationService {
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||
+        type === 'merge.conflict' ||
+        type === 'merge.failed' ||
         type.startsWith('remote_deploy.') ||
         type.startsWith('tracker.') ||
-        allExhausted ||
+        type === 'quota.exhausted' ||
         (type === 'task.waiting_quota' && p.reason === 'no_department_profile');
 
       if (!isSystemEvent) {
@@ -250,6 +297,10 @@ export class NotificationService {
     if (isQuietHours(this.config.notifications?.quietHours, new Date(now))) {
       const isIncident = isSystemIncident(type, payload, this.profileRepo, this.quotaMarkRepo, now);
       if (!isIncident) {
+        if (type === 'merge.conflict') {
+          if (!taskId || this.isMergeConflictNotified(taskId)) return;
+          this.markMergeConflictNotified(taskId);
+        }
         if (this.quietHoursQueue.length >= 200) {
           this.quietHoursQueue.shift();
         }
@@ -414,6 +465,31 @@ export class NotificationService {
         break;
       }
 
+      case 'merge.conflict': {
+        if (!taskId) break;
+        if (this.isMergeConflictNotified(taskId)) break;
+        this.markMergeConflictNotified(taskId);
+
+        const count = typeof p.conflictCount === 'number' ? p.conflictCount : 1;
+        const filesText = this.extractConflictFiles(p);
+        this.notify(`⚠️ ${taskId} xung đột merge lần thứ ${count}, cần xem: ${filesText}`, 'critical');
+        break;
+      }
+
+      case 'merge.failed': {
+        if (p.autoFixCreated === true) break;
+        if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+          /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+        )) {
+          break;
+        }
+        const message = typeof p.message === 'string' ? p.message : 'Lỗi khi merge tự động';
+        const taskLabel = taskId || 'Task';
+        const title = p.environment ? 'Lỗi môi trường khi tự động gộp' : 'Lỗi tự động gộp';
+        this.notify(`${this.appName}: ${title}: ${taskLabel} - ${message}`, 'critical');
+        break;
+      }
+
       case 'disk.low': {
         this.diskState = 'low';
         const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
@@ -530,52 +606,21 @@ export class NotificationService {
         break;
       }
 
-      case 'quota.exhausted': {
-        const family = typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '';
-        const quotaKey = family || 'all';
+      case 'quota.exhausted':
+      case 'claude.quota_exhausted': {
+        const quotaKey = (typeof p.family === 'string' ? p.family : typeof p.model === 'string' ? p.model : '') || 'all';
         const snapshot = this.quotaCapacity();
-        const isAllExhausted = snapshot ? snapshot.runnable.length === 0 : isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, this.now());
-        const engineWide = isQuotaEventEngineWide(p, this.profileRepo, this.quotaMarkRepo, this.now());
-        if (!isAllExhausted) this.allQuotaNotified.delete(quotaKey);
-        if (!isAllExhausted && this.quotaIncidentActive) {
-          this.quotaIncidentActive = false;
-          this.notify(this.quotaRecoveryMessage(snapshot!), 'normal');
-        }
-        if (effectiveMode === 'auto') {
-          if (isAllExhausted && notifyAllExhausted && !this.quotaIncidentActive) {
-            this.allQuotaNotified.add(quotaKey);
-            this.quotaIncidentActive = true;
-            this.notify(this.quotaIncidentMessage(snapshot), 'critical');
-          }
-          break;
-        }
-        if (isAllExhausted) {
-          if (!notifyAllExhausted || this.quotaIncidentActive) break;
-          this.allQuotaNotified.add(quotaKey);
-          this.quotaIncidentActive = true;
-          this.notify(this.quotaIncidentMessage(snapshot), 'critical');
-          break;
-        }
-        if (engineWide && !this.quotaInfoNotified.has(`${p.engine || 'agy'}:${family}`)) {
-          this.quotaInfoNotified.add(`${p.engine || 'agy'}:${family}`);
-          this.queueQuotaInfo(p.engine === 'agy' ? 'Antigravity' : String(p.engine || ''), family);
-          break;
-        }
-        if (!notifyPerModel) break;
-        const name = (p.profile || p.worker || p.profileName || 'Hồ sơ') as string;
-        const resetTimeStr = this.resolveResetTime(p, name, family);
-        const msg = isAllExhausted
-          ? 'AgentHub: Mọi tài khoản đều đã hết quota'
-          : resetTimeStr
-          ? `Hồ sơ ${name} hết quota ${family} tới ${resetTimeStr}`
-          : `Hồ sơ ${name} hết quota ${family}`;
-        this.notify(msg, isAllExhausted ? 'critical' : 'normal');
+        if (!notifyAllExhausted || this.quotaIncidentActive) break;
+        this.allQuotaNotified.add(quotaKey);
+        this.quotaIncidentActive = true;
+        this.notify(this.quotaIncidentMessage(snapshot), 'critical');
         break;
       }
 
       case 'claude.fallback_changed': {
         const step = p.step && typeof p.step === 'object' ? p.step as Record<string, unknown> : null;
         if (p.fallbackAvailable === true || (step && step.type !== 'wait')) break;
+        if (!this.isAllQuotaExhausted(p, this.now(), true)) break;
         const label = step?.type === 'model' ? `model ${String(step.model)}`
           : step?.type === 'profile' ? `tài khoản ${String(step.profile || 'khác')}`
           : step?.type === 'apiKey' ? 'API key'
@@ -696,24 +741,7 @@ export class NotificationService {
     }, WAITING_QUOTA_BATCH_DELAY_MS);
   }
 
-  private queueQuotaInfo(engine: string, family: string): void {
-    this.pendingQuotaInfo.set(`${engine}:${family}`, family);
-    if (this.quotaInfoTimer) return;
-    this.quotaInfoTimer = setTimeout(() => {
-      this.quotaInfoTimer = undefined;
-      const snapshot = this.quotaCapacity();
-      const families = [...this.pendingQuotaInfo.values()]
-        .map((value) => value === 'gpt' ? 'GPT' : value.charAt(0).toUpperCase() + value.slice(1))
-        .sort()
-        .join('/');
-      this.pendingQuotaInfo.clear();
-      const reset = snapshot?.nextReset
-        ? ` (reset sớm nhất ${formatReset(snapshot.nextReset.at, this.now())})`
-        : '';
-      const runnable = snapshot ? formatRunnableCapacity(snapshot) : 'model khác';
-      this.notify(`ℹ️ Hết quota ${families} trên mọi tài khoản Antigravity${reset}. Vẫn chạy bằng: ${runnable}`, 'normal');
-    }, WAITING_QUOTA_BATCH_DELAY_MS);
-  }
+
 
   private resolveTaskTitle(taskId?: string, payload?: Record<string, unknown>): string {
     if (payload?.title && typeof payload.title === 'string') {
@@ -727,33 +755,30 @@ export class NotificationService {
     return 'Task';
   }
 
-  private resolveResetTime(p: Record<string, unknown>, profile: string, family: string): string {
-    if (typeof p.time === 'string') return p.time;
-    if (typeof p.untilStr === 'string') return p.untilStr;
-    if (typeof p.until === 'string' && p.until.includes(':')) return p.until;
-
-    let epochSec: number | undefined;
-    if (typeof p.until === 'number') {
-      epochSec = p.until > 1e11 ? Math.floor(p.until / 1000) : p.until;
-    } else if (typeof p.resetAt === 'number') {
-      epochSec = p.resetAt > 1e11 ? Math.floor(p.resetAt / 1000) : p.resetAt;
-    } else if (typeof p.resetSeconds === 'number') {
-      epochSec = Math.floor(this.now() / 1000) + p.resetSeconds;
-    } else if (typeof p.duration === 'number') {
-      epochSec = Math.floor(this.now() / 1000) + p.duration;
-    } else if (this.quotaMarkRepo && profile && family) {
-      const marks = this.quotaMarkRepo.getActive();
-      const mark = marks.find((m) => m.profileName === profile && m.family === family);
-      if (mark) epochSec = mark.until;
+  private extractConflictFiles(p: Record<string, unknown>): string {
+    if (typeof p.files === 'string' && p.files.trim()) return p.files.trim();
+    if (Array.isArray(p.files) && p.files.length > 0) return p.files.join(', ');
+    if (typeof p.message === 'string') {
+      const match = p.message.match(/Xung đột merge ở:\s*(.+)/i);
+      if (match && match[1].trim()) return match[1].trim();
+      return p.message.trim();
     }
-
-    if (epochSec !== undefined) {
-      return formatReset(epochSec, this.now(), 'vi');
-    }
-
-    return '';
+    return '(không rõ file)';
   }
 
+  private isMergeConflictNotified(taskId: string): boolean {
+    if (this.mergeConflictNotified.has(taskId)) return true;
+    if (this.taskRepo?.isNotificationSent('desktop', 'merge.conflict', taskId)) {
+      this.mergeConflictNotified.add(taskId);
+      return true;
+    }
+    return false;
+  }
+
+  private markMergeConflictNotified(taskId: string): void {
+    this.mergeConflictNotified.add(taskId);
+    this.taskRepo?.markNotificationSent('desktop', 'merge.conflict', taskId);
+  }
   private notify(message: string, urgency: 'normal' | 'warning' | 'critical' = 'normal'): void {
     const level = this.config.notifications?.desktopLevel || 'all';
     if (level === 'off') return;

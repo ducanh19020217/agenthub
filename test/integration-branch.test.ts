@@ -424,6 +424,51 @@ describe('Integration branch and cross-project dependencies', () => {
     expect(ctx.taskRepo.get(task3.id)!.status).toBe('review');
   });
 
+  it('does not auto-reassign after 3 merge conflicts and emits autoRetried: false', async () => {
+    const repo = path.join(tmpDir, 'conflict-limit-repo');
+    initGitRepo(repo, 'main');
+    ctx.service.createProject({
+      id: 'conflict-lim-proj',
+      name: 'Conflict Limit',
+      path: repo,
+      defaultBranch: 'main',
+      settings: { integration: { enabled: true, branch: 'agenthub/integration' }, review: { autoMerge: true } },
+      reviewChain: [{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }],
+      merge: { enabled: true, worktrees: {}, checks: [], timeoutSec: 30 },
+    });
+    ctx.service.createTask({ project: 'conflict-lim-proj', slug: 'feat', title: 'Feature', body: 'Do it', level: 'easy', start: true });
+    ctx.scheduler.tick();
+    const task = ctx.taskRepo.get('conflict-lim-proj/feat')!;
+    const intPath = path.join(tmpDir, 'integration', 'conflict-lim-proj');
+    fs.writeFileSync(path.join(intPath, 'conflict.txt'), 'base content\n');
+    execFileSync('git', ['-C', intPath, 'add', '.']);
+    execFileSync('git', ['-C', intPath, 'commit', '-m', 'base commit']);
+
+    fs.writeFileSync(path.join(task.worktreePath!, 'conflict.txt'), 'branch content\n');
+    execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
+    execFileSync('git', ['-C', task.worktreePath!, 'commit', '-m', 'branch commit']);
+    persistPassedCheck(task.id, 'chk');
+    ctx.reviewRepo.insert({ id: 'codex-chk', taskId: task.id, verdict: 'approved', feedback: 'ok', actor: 'codex-reviewer' });
+
+    // Seed 3 existing merge.conflict events so next conflict is the 4th
+    ctx.eventRepo.insert('merge.conflict', task.id, { conflictCount: 1 });
+    ctx.eventRepo.insert('merge.conflict', task.id, { conflictCount: 2 });
+    ctx.eventRepo.insert('merge.conflict', task.id, { conflictCount: 3 });
+
+    let emittedPayload: Record<string, unknown> | undefined;
+    ctx.scheduler.getEventBus().on('merge.conflict', (id, p) => {
+      if (id === task.id) emittedPayload = p as Record<string, unknown>;
+    });
+
+    ctx.taskRepo.update(task.id, { status: 'review' });
+    await ctx.service.autoMergeReviewedTask(task.id);
+
+    // Stays in review (not queued) because conflictCount = 4 > 3
+    expect(ctx.taskRepo.get(task.id)!.status).toBe('review');
+    expect(emittedPayload?.conflictCount).toBe(4);
+    expect(emittedPayload?.autoRetried).toBe(false);
+  });
+
   it('does not auto-merge a Codex approval without a review chain on the project default branch', async () => {
     const repo = path.join(tmpDir, 'review-no-chain-repo');
     initGitRepo(repo, 'main');

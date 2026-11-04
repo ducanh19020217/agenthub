@@ -853,6 +853,52 @@ describe('Gitea Integration', () => {
       finishFirstSync();
       await firstSync;
     });
+
+    it('getStatus trả về tokenConfigured và thông tin remote từ git origin', async () => {
+      const f = initGitRepoFixture();
+      execFileSync('git', ['remote', 'set-url', 'origin', 'https://gitea.example.com/acme/my-service.git'], {
+        cwd: f.repoDir,
+        env: f.env,
+      });
+
+      const projectRepo = {
+        get: (id: string) => (id === 'p1' ? {
+          id: 'p1',
+          name: 'Project 1',
+          path: f.repoDir,
+          settings: '{}',
+        } : null),
+        getAll: () => [],
+      } as unknown as ProjectRepo;
+
+      const service = new GiteaSyncService({
+        config: makeTestConfig(f.hubHome),
+        projectRepo,
+        eventBus: { emit: () => true } as unknown as EventBus,
+        service: { createTask: vi.fn() as any },
+      });
+
+      const status1 = service.getStatus('p1');
+      expect(status1.tokenConfigured).toBe(false);
+      expect(status1.remote).toEqual({
+        host: 'gitea.example.com',
+        owner: 'acme',
+        repo: 'my-service',
+      });
+
+      saveGiteaToken(f.hubHome, 'p1', 'token-123');
+      const status2 = service.getStatus('p1');
+      expect(status2.tokenConfigured).toBe(true);
+      expect(status2.remote).toEqual({
+        host: 'gitea.example.com',
+        owner: 'acme',
+        repo: 'my-service',
+      });
+
+      const statusUnknown = service.getStatus('unknown');
+      expect(statusUnknown.tokenConfigured).toBe(false);
+      expect(statusUnknown.remote).toBeNull();
+    });
   });
 
   describe('6. HTTP Routes & MCP Tool', () => {
@@ -882,6 +928,7 @@ describe('Gitea Integration', () => {
         }),
         getGiteaStatus: vi.fn((id: string) => ({
           tokenConfigured: isGiteaTokenConfigured(hubHome, id),
+          remote: { host: 'gitea.example.com', owner: 'owner', repo: 'repo' },
         })),
         triggerGiteaSync: vi.fn().mockResolvedValue({ ok: true, status: 'succeeded' }),
       };
@@ -908,6 +955,7 @@ describe('Gitea Integration', () => {
       expect(getRes1.statusCode).toBe(200);
       expect(JSON.parse(getRes1.body)).toEqual({
         tokenConfigured: false,
+        remote: { host: 'gitea.example.com', owner: 'owner', repo: 'repo' },
       });
 
       // PUT token

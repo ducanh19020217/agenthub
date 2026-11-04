@@ -40,6 +40,7 @@ import type { OpenProjectIntakeService } from '../integrations/openproject/intak
 import type { DailyReportService } from '../integrations/openproject/daily-report.js';
 import type { GiteaSyncService } from '../integrations/gitea/service.js';
 import { isGiteaTokenConfigured, saveGiteaToken } from '../integrations/gitea/secrets.js';
+import { parseRemote } from '../integrations/gitea/client.js';
 import { BulletinService } from '../bulletin.js';
 import { ProfileService as CoreProfileService, accountKey, isProfileLoggedIn, exchangeAgyRefreshToken, writeAgyIsolatedToken, fetchAgyGoogleUserInfo, fetchAgyGoogleUserInfoDetailed, inspectAgyAccessToken } from '../profiles/index.js';
 import { Scheduler } from '../scheduler/index.js';
@@ -1781,9 +1782,30 @@ export class AppService {
   }
 
   getGiteaStatus(id: string) {
-    this.getProject(id);
-    return this.giteaSyncService?.getStatus(id) || {
+    const project = this.getProject(id);
+    if (this.giteaSyncService) {
+      return this.giteaSyncService.getStatus(id);
+    }
+    let remote: { owner: string; repo: string; host?: string } | null = null;
+    if (project?.path) {
+      try {
+        const cleanPath = (process.env.PATH || '')
+          .split(path.delimiter)
+          .filter((entry) => !entry.includes(`${path.sep}shims${path.sep}worker`))
+          .join(path.delimiter);
+        const remoteUrl = execFileSync('git', ['-C', project.path, 'remote', 'get-url', 'origin'], {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: cleanPath },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }).trim();
+        remote = parseRemote(remoteUrl);
+      } catch {
+        remote = null;
+      }
+    }
+    return {
       tokenConfigured: isGiteaTokenConfigured(this.config.hubHome, id),
+      remote,
     };
   }
 

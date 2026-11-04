@@ -294,13 +294,14 @@ describe('Integrations UI Suite', () => {
       });
 
       // Check Gitea token input is type=password and empty initially
-      const tokenInput = screen.getByLabelText('Token') as HTMLInputElement;
+      const tokenInput = screen.getByLabelText('Token Gitea') as HTMLInputElement;
       expect(tokenInput.type).toBe('password');
       expect(tokenInput.value).toBe('');
 
       // Enter token and save
       fireEvent.change(tokenInput, { target: { value: 'secret-token-123' } });
       const saveTokenBtn = screen.getByTestId('save-gitea-token-button');
+      expect(saveTokenBtn).toHaveTextContent('Lưu token');
       fireEvent.click(saveTokenBtn);
 
       await waitFor(() => {
@@ -308,13 +309,15 @@ describe('Integrations UI Suite', () => {
       });
 
       // Check Deploy env input is type=password and empty initially
-      const envInput = screen.getByLabelText('Bí mật env (KEY=VALUE)') as HTMLInputElement;
+      const envInput = screen.getByLabelText('Bí mật env') as HTMLInputElement;
       expect(envInput.type).toBe('password');
       expect(envInput.value).toBe('');
+      expect(envInput.placeholder).toBe('KEY=VALUE');
 
       // Enter deploy secrets with '=' inside value
       fireEvent.change(envInput, { target: { value: 'TOKEN=secret=with=equals' } });
       const saveEnvBtn = screen.getByTestId('save-deploy-env-button');
+      expect(saveEnvBtn).toHaveTextContent('Lưu biến bí mật');
       fireEvent.click(saveEnvBtn);
 
       await waitFor(() => {
@@ -373,6 +376,133 @@ describe('Integrations UI Suite', () => {
           }),
         );
       });
+    });
+
+    it('supports getByLabelText for integration fields: Nhánh nguồn, Nhánh đích, URL Gitea, Token Gitea, Trigger, Steps', async () => {
+      renderWithProviders(
+        <ProjectSettingsDrawer
+          project={mockProject}
+          isOpen={true}
+          onClose={vi.fn()}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('project-gitea-section')).toBeInTheDocument();
+        expect(screen.getByTestId('project-remote-deploy-section')).toBeInTheDocument();
+      });
+
+      expect(screen.getByLabelText('Nhánh nguồn')).toBeInTheDocument();
+      expect(screen.getByLabelText('Nhánh đích')).toBeInTheDocument();
+      expect(screen.getByLabelText('URL Gitea')).toBeInTheDocument();
+      expect(screen.getByLabelText('Token Gitea')).toBeInTheDocument();
+      expect(screen.getByLabelText('Trigger')).toBeInTheDocument();
+      expect(screen.getByLabelText('Steps')).toBeInTheDocument();
+    });
+
+    it('renders link to /settings when no OpenProject sources are configured', async () => {
+      vi.spyOn(client, 'getOpenProjectSources').mockResolvedValue([]);
+
+      renderWithProviders(
+        <ProjectSettingsDrawer
+          project={mockProject}
+          isOpen={true}
+          onClose={vi.fn()}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('project-openproject-section')).toBeInTheDocument();
+      });
+
+      const settingsLink = screen.getByRole('link', { name: /Cài đặt/ });
+      expect(settingsLink).toHaveAttribute('href', '/settings');
+    });
+
+    it('changes token badge according to tokenConfigured', async () => {
+      // Case 1: tokenConfigured: false
+      vi.spyOn(client, 'getGiteaStatus').mockResolvedValue({
+        tokenConfigured: false,
+      });
+
+      const { unmount } = renderWithProviders(
+        <ProjectSettingsDrawer
+          project={mockProject}
+          isOpen={true}
+          onClose={vi.fn()}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('gitea-token-badge')).toHaveTextContent('Chưa có token');
+      });
+
+      unmount();
+
+      // Case 2: tokenConfigured: true
+      vi.spyOn(client, 'getGiteaStatus').mockResolvedValue({
+        tokenConfigured: true,
+      });
+
+      renderWithProviders(
+        <ProjectSettingsDrawer
+          project={mockProject}
+          isOpen={true}
+          onClose={vi.fn()}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('gitea-token-badge')).toHaveTextContent('Đã cấu hình');
+      });
+    });
+
+    it('renders Repo line when status returns remote and hides when null', async () => {
+      // When remote exists
+      vi.spyOn(client, 'getGiteaStatus').mockResolvedValue({
+        tokenConfigured: true,
+        remote: {
+          host: 'git.example.com',
+          owner: 'acme',
+          repo: 'core-api',
+        },
+      });
+
+      const { unmount } = renderWithProviders(
+        <ProjectSettingsDrawer
+          project={mockProject}
+          isOpen={true}
+          onClose={vi.fn()}
+        />,
+      );
+
+      await waitFor(() => {
+        const repoInfo = screen.getByTestId('gitea-repo-info');
+        expect(repoInfo).toBeInTheDocument();
+        expect(repoInfo).toHaveTextContent('Repo: acme/core-api (đọc từ git remote origin)');
+      });
+
+      unmount();
+
+      // When remote is null
+      vi.spyOn(client, 'getGiteaStatus').mockResolvedValue({
+        tokenConfigured: false,
+        remote: null,
+      });
+
+      renderWithProviders(
+        <ProjectSettingsDrawer
+          project={mockProject}
+          isOpen={true}
+          onClose={vi.fn()}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('project-gitea-section')).toBeInTheDocument();
+      });
+
+      expect(screen.queryByTestId('gitea-repo-info')).not.toBeInTheDocument();
     });
   });
 

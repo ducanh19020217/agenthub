@@ -256,7 +256,19 @@ export interface OpenProjectStatusDto {
 }
 export interface OpenProjectTypeDto { id: number; name: string; position: number; }
 export interface OpenProjectSyncResult { imported: number; comments: number; baseline: number; watched: number; }
-export interface GiteaStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
+export interface GiteaStatus {
+  projectId?: string;
+  status?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+  tokenConfigured?: boolean;
+  remote?: {
+    owner: string;
+    repo: string;
+    host?: string;
+  } | null;
+}
 export interface RemoteDeployStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
 
 export interface KnowledgeEntry {

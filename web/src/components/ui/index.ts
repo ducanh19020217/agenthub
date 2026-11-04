@@ -11,3 +11,4 @@ export * from './StatTile';
 export * from './useFocusTrap';
 export * from './SelectOrCustomInput';
 export * from './SortableModelList';
+export * from './Field';

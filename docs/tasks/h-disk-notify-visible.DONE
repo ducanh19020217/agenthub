@@ -31,11 +31,11 @@
 - **Lint**: `npm run lint` pass (0 errors, 26 warnings trong test).
 - **Typecheck**: `npm run typecheck` pass (0 errors).
 - **Backend tests**: `npm run test` pass:
-  - 113/113 test files passed
-  - 1390/1390 tests passed
+  - 114/114 test files passed
+  - 1401/1401 tests passed
 - **Web tests**: `npm run test:web` pass:
   - 61/61 test files passed
-  - 492/492 tests passed
+  - 496/496 tests passed
 - **Build**:
   - `npm run build` pass (tsc & protocol.md copy thành công).
   - `npm run build:web` pass (tsc & vite production build thành công).
@@ -44,6 +44,7 @@
 - Không có (toàn bộ yêu cầu task, feedback review và giải quyết xung đột merge đã được hoàn thành trọn vẹn).
 
 ## Danh sách commit
+- `ce3d886` Merge branch 'integration' into agenthub/h-disk-notify-visible
 - `4737714` Merge branch 'integration' into agenthub/h-disk-notify-visible
 - `dfd6270` fix(telegram): clear disk incident and deduplication on partial recovery
 - `4ea424f` fix(notify): clear disk incident and deduplication on partial recovery

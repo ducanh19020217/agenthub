@@ -114,6 +114,8 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     const diskLowEvent = emittedEvents.find((e) => e.type === 'disk.low');
     expect(diskLowEvent).toBeDefined();
     expect(diskLowEvent?.payload?.minFreeGB).toBe(3);
+    expect(diskLowEvent?.payload?.isBlocking).toBe(true);
+    expect(diskLowEvent?.payload?.tasks).toEqual(['t1']);
 
     const waitingEvent = emittedEvents.find((e) => e.type === 'task.waiting_quota' && e.taskId === 'proj/t1');
     expect(waitingEvent).toBeDefined();
@@ -486,5 +488,41 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     expect(detail1.blockingDisk?.path).toBe(drive1);
     expect(detail2.blockingDisk?.freeGB).toBe(1.2);
     expect(detail2.blockingDisk?.path).toBe(drive2);
+  });
+
+  it('emits disk.low with isBlocking=true and task list when task is blocked by low project disk', () => {
+    fakeDiskReader = (_p: string) => ({ freeGB: 1, totalGB: 100 });
+
+    const emittedEvents: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+    ctx.scheduler.getEventBus().on('*', (type, _taskId, payload) => {
+      emittedEvents.push({ type, payload: payload as Record<string, unknown> });
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj/t-blocking-1',
+      projectId: 'proj',
+      slug: 't-blocking-1',
+      title: 'Task Blocking 1',
+      status: 'queued',
+      level: 'easy',
+    });
+    ctx.taskRepo.insert({
+      id: 'proj/t-blocking-2',
+      projectId: 'proj',
+      slug: 't-blocking-2',
+      title: 'Task Blocking 2',
+      status: 'queued',
+      level: 'easy',
+    });
+
+    ctx.scheduler.tick();
+
+    expect(ctx.taskRepo.get('proj/t-blocking-1')?.status).toBe('waiting_quota');
+    expect(ctx.taskRepo.get('proj/t-blocking-2')?.status).toBe('waiting_quota');
+
+    const diskLowEvents = emittedEvents.filter((e) => e.type === 'disk.low');
+    expect(diskLowEvents).toHaveLength(1);
+    expect(diskLowEvents[0].payload?.isBlocking).toBe(true);
+    expect(diskLowEvents[0].payload?.tasks).toEqual(['t-blocking-1', 't-blocking-2']);
   });
 });

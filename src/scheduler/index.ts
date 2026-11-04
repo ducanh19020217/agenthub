@@ -269,6 +269,7 @@ export class Scheduler {
   private skipSchedulingOnce = false;
   private diskLow = false;
   private lastDiskLowEmit = 0;
+  private diskBlockedEmitted = false;
   private dockerDiskLow = false;
   private tasksWaitingForDisk = new Set<string>();
   private unavailableProjects = new Set<string>();
@@ -1272,7 +1273,11 @@ export class Scheduler {
     const disks = this.getMonitoredDisks();
     const blockedDisk = disks.find((disk) => disk.low);
     if (blockedDisk) {
-      this.markDiskLow(blockedDisk);
+      const diskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
+      const hasQueuedTasks = this.taskRepo.getByStatus('queued').length > 0;
+      if (blockedDisk.source === 'hub_home' || diskWaiters.length > 0 || !hasQueuedTasks) {
+        this.markDiskLow(blockedDisk);
+      }
       const dockerDisk = disks.find((disk) => disk.label === 'Docker' && disk.low);
       if (dockerDisk && this.running.size > 0) this.markDockerDiskLow(dockerDisk);
     } else {
@@ -1282,6 +1287,7 @@ export class Scheduler {
       if (this.diskLow && recovered) {
         this.diskLow = false;
         this.lastDiskLowEmit = 0;
+        this.diskBlockedEmitted = false;
         const diskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
         const resumedTasks: TaskRow[] = [];
         for (const t of diskWaiters) {
@@ -2253,6 +2259,7 @@ export class Scheduler {
       const departmentId = this.projectRepo.get(running.projectId)?.departmentId || 'chung';
       fairUsage.set(departmentId, (fairUsage.get(departmentId) || 0) + 1);
     }
+    let blockedDiskInTick: MonitoredDisk | undefined;
     const remainingTasks = [...schedulableTasks];
     while (remainingTasks.length > 0) {
       remainingTasks.sort((a, b) => {
@@ -2310,7 +2317,7 @@ export class Scheduler {
           this.tasksWaitingForDisk.add(task.id);
           this.taskRepo.updateStatus(task.id, 'waiting_quota', 'disk');
           this.eventBus.emit('task.waiting_quota', task.id, { reason: 'disk', label: disk.label, path: disk.path, freeGB: disk.freeGB, minFreeGB: disk.minFreeGB, message: this.diskWaitMessage(disk) });
-          this.markDiskLow(disk);
+          blockedDiskInTick = disk;
           continue;
         }
         const departmentId = this.departmentIdForTask(task);
@@ -2342,6 +2349,15 @@ export class Scheduler {
             message: `Gán tài khoản cho phòng ${department?.name || this.departmentIdForTask(task)} hoặc bỏ gán`,
           } : {}),
         });
+      }
+    }
+
+    if (blockedDiskInTick) {
+      this.markDiskLow(blockedDiskInTick);
+    } else {
+      const lowDisk = this.getMonitoredDisks().find((d) => d.low);
+      if (lowDisk && !this.diskLow) {
+        this.markDiskLow(lowDisk);
       }
     }
   }
@@ -3943,18 +3959,30 @@ export class Scheduler {
 
   private markDiskLow(disk: MonitoredDisk): void {
     const now = Date.now();
-    if (this.diskLow && now - this.lastDiskLowEmit < 60 * 60_000) return;
+    const waitingTasks = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
+    const isBlocking = disk.source === 'hub_home' || waitingTasks.length > 0;
+
+    if (this.diskLow) {
+      if (isBlocking && !this.diskBlockedEmitted) {
+        // Transition to blocking incident: must emit immediately
+      } else if (now - this.lastDiskLowEmit < 60 * 60_000) {
+        return;
+      }
+    }
     this.diskLow = true;
+    if (isBlocking) {
+      this.diskBlockedEmitted = true;
+    }
     this.lastDiskLowEmit = now;
     pruneNodeModulesCache(this.config.cacheDir, { maxEntries: this.config.cacheMaxEntries, maxBytes: this.config.cacheMaxGB * 1024 ** 3 });
     const cache = nodeModulesCacheSummary(this.config.cacheDir);
-    const waitingTasks = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
     this.eventBus.emit('disk.low', undefined, {
       label: disk.label,
       path: disk.path,
       freeGB: disk.freeGB,
       minFreeGB: disk.minFreeGB,
       source: disk.source,
+      isBlocking,
       tasks: waitingTasks.map((t) => t.slug || t.title || t.id),
       cacheDir: cache.path,
       cacheEntries: cache.entries,

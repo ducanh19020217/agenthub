@@ -923,7 +923,7 @@ export const en: typeof vi = {
     navLabel: 'Setup', loading: 'Checking environment…', loadError: 'Unable to check setup environment.', title: 'Get started with AgentHub', subtitle: 'Prepare the tools you need to start working.',
     progress: 'Readiness progress', progressSummary: '{ready}/{total} items ready',
     node: 'Node.js {version}', git: 'Git{version}', claude: 'Claude Code', codex: 'Codex CLI', agy: 'Antigravity CLI', service: 'Background service', mcp: 'Claude Code MCP registration', accounts: 'Sign in to accounts', account: 'Account {name}', login: 'Sign in in Profiles', needsCheck: 'Needs checking', manualGuide: 'Guide', install: 'Install', installAll: 'Install all missing tools', installing: 'Installing…', log: 'View log', complete: 'Complete', skip: 'Skip for now', done: 'Complete', notDone: 'Needs action', running: 'Running', installFailed: 'Installation failed', agyInstallConfirm: 'AgentHub will run Antigravity’s official installer (curl | bash). Do you want to continue?', agyManualHint: 'If automatic installation fails, run this command in a terminal and check again:',
-    firstProject: 'Add first project', addProject: 'Add project',
+    firstProject: 'Add first project', addProject: 'Add project', chatButton: 'Set up by chat', chatTitle: 'AgentHub setup',
   },
   departments: {
     title: 'Departments', subtitle: 'Group projects, accounts, and execution limits by department.',

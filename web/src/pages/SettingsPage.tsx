@@ -9,6 +9,7 @@ import { OpenProjectSettings } from '../components/OpenProjectSettings';
 import { deletePermissionRule, getPermissionRules } from '../api/chat';
 import { useTour } from '../components/tour/TourContext';
 import { InfoTooltip } from '../components/tour/InfoTooltip';
+import { SetupChatButton } from '../components/SetupChatButton';
 import { DataTable, SelectOrCustomInput, SortableModelList } from '../components/ui';
 import {
   DEFAULT_CLAUDE_MODELS,
@@ -484,7 +485,7 @@ export const SettingsPage: React.FC = () => {
           {t('extra.settingsSubtitle')}
         </p>
         </div>
-        <button type="button" onClick={() => openTour('intro')} className="rounded-lg border border-[var(--t-border)] px-3 py-2 text-xs text-[var(--t-text-2)] hover:bg-[var(--t-hover)]">{t('tour.replay')}</button>
+        <div className="flex items-center gap-2"><SetupChatButton /><button type="button" onClick={() => openTour('intro')} className="rounded-lg border border-[var(--t-border)] px-3 py-2 text-xs text-[var(--t-text-2)] hover:bg-[var(--t-hover)]">{t('tour.replay')}</button></div>
       </div>
 
       {/* Global Presets */}

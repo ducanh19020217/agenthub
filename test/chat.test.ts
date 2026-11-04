@@ -7,7 +7,7 @@ import { createContext } from '../src/daemon.js';
 import { createServer } from '../src/api/server.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
-import { buildBrainPrompt, buildClaudeArgs, buildHubSnapshot, checkClaudePartialSupport, checkClaudeStreamJsonSupport, clearPartialSupportCache, ensureChatMcpConfig, findClaudeBin, readHubSnapshotFiles } from '../src/chat/claude.js';
+import { buildBrainPrompt, buildClaudeArgs, buildHubSnapshot, buildSetupPrompt, checkClaudePartialSupport, checkClaudeStreamJsonSupport, clearPartialSupportCache, ensureChatMcpConfig, findClaudeBin, readHubSnapshotFiles, SETUP_ALLOWED_TOOLS } from '../src/chat/claude.js';
 import { parseStreamJsonLine, formatToolSummary, StreamChunkParser } from '../src/chat/parse.js';
 
 let tmpDir: string;
@@ -592,6 +592,13 @@ describe('AgentHub Chat Backend API (t-chat-api)', () => {
     expect(safeArgs).toContain(buildBrainPrompt());
     expect(safeArgs).toContain('--mcp-config');
     expect(JSON.parse(logLines[0]).env.ENABLE_TOOL_SEARCH).toBe('false');
+  });
+
+  it('gives setup sessions the playbook and setup-only tool allowlist', () => {
+    const args = buildClaudeArgs({ mcpConfigPath: '/tmp/mcp.json', mode: 'safe', kind: 'setup', systemPrompt: buildSetupPrompt() });
+    expect(args.join(' ')).toContain('mcp__agenthub__hub_setup_import');
+    expect(args.join(' ')).toContain(SETUP_ALLOWED_TOOLS);
+    expect(buildSetupPrompt()).toContain('SETUP-PLAYBOOK');
   });
 
   it('runs assistant sessions in the mode set by assistant.permissions', async () => {

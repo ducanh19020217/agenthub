@@ -922,7 +922,7 @@ export const vi = {
     navLabel: 'Thiết lập', loading: 'Đang kiểm tra môi trường…', loadError: 'Không thể kiểm tra môi trường thiết lập.', title: 'Bắt đầu với AgentHub', subtitle: 'Chuẩn bị các công cụ cần thiết để bạn có thể dùng ngay.',
     progress: 'Tiến độ sẵn sàng', progressSummary: '{ready}/{total} mục đã sẵn sàng',
     node: 'Node.js {version}', git: 'Git{version}', claude: 'Claude Code', codex: 'Codex CLI', agy: 'Antigravity CLI', service: 'Service nền', mcp: 'Đăng ký MCP với Claude Code', accounts: 'Đăng nhập tài khoản', account: 'Tài khoản {name}', login: 'Đăng nhập trong Profiles', needsCheck: 'Cần kiểm tra', manualGuide: 'Hướng dẫn', install: 'Cài đặt', installAll: 'Cài tất cả công cụ còn thiếu', installing: 'Đang cài đặt…', log: 'Xem log', complete: 'Hoàn tất', skip: 'Bỏ qua, làm sau', done: 'Đã hoàn tất', notDone: 'Cần làm', running: 'Đang chạy', installFailed: 'Cài đặt thất bại', agyInstallConfirm: 'AgentHub sẽ chạy lệnh cài đặt chính thức của Antigravity (curl | bash). Bạn có đồng ý không?', agyManualHint: 'Nếu cài tự động thất bại, chạy lệnh sau trong terminal rồi bấm kiểm tra lại:',
-    firstProject: 'Thêm dự án đầu tiên', addProject: 'Thêm dự án',
+    firstProject: 'Thêm dự án đầu tiên', addProject: 'Thêm dự án', chatButton: 'Thiết lập bằng chat', chatTitle: 'Thiết lập AgentHub',
   },
   departments: {
     title: 'Phòng ban', subtitle: 'Gom project, tài khoản và giới hạn chạy theo phòng ban.',

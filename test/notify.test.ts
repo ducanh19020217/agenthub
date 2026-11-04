@@ -383,7 +383,7 @@ describe('NotificationService (Desktop Notifications)', () => {
 
   it('does not send recovery notification on disk.ok if there was no prior blocking notification', () => {
     config.notifications.desktopLevel = 'all';
-    let current = 1_000_000;
+    const current = 1_000_000;
     const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
     notifier.start();
 

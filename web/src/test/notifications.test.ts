@@ -125,4 +125,36 @@ describe('browser notification policy', () => {
     // -fix-merge task: false
     expect(shouldNotifyBrowserEvent({ ...event('task.queued'), taskId: 'p/task-fix-merge' })).toBe(false);
   });
+
+  it('deduplicates merge conflict browser notifications permanently per task', () => {
+    const notifySpy = vi.fn();
+    Object.defineProperty(window, 'Notification', {
+      configurable: true,
+      value: class MockNotification {
+        static permission = 'granted';
+        constructor(title: string, options?: NotificationOptions) {
+          notifySpy(title, options);
+        }
+      },
+    });
+
+    const ev = { ...event('merge.conflict', { conflictCount: 4, autoRetried: false, files: 'a.ts' }), taskId: 'p/task-conflict-dedupe' };
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+
+    // First call: notifies
+    notifyBrowserEvent(ev, 'all');
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+
+    // Second call within 30 mins: deduplicated
+    now.mockReturnValue(1_100_000);
+    notifyBrowserEvent(ev, 'all');
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+
+    // Third call after 30 mins (e.g. 2 hours later): STILL deduplicated permanently per task
+    now.mockReturnValue(10_000_000);
+    notifyBrowserEvent(ev, 'all');
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+
+    now.mockRestore();
+  });
 });

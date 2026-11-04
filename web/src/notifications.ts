@@ -16,6 +16,7 @@ const DESKTOP_EVENTS = new Set([
 const WINDOW_MS = 30 * 60 * 1000;
 const DISK_WINDOW_MS = 60 * 60 * 1000;
 const LOAD_WINDOW_MS = 15 * 60 * 1000;
+const mergeConflictNotifiedTasks = new Set<string>();
 
 export interface BrowserNotificationOptions {
   quietHours?: { enabled?: boolean; start?: string; end?: string };
@@ -301,10 +302,24 @@ export function notifyBrowserEvent(
 
   const key = `agenthub:notification:${identity}`;
   const now = Date.now();
+  if (event.type === 'merge.conflict' && event.taskId && mergeConflictNotifiedTasks.has(event.taskId)) {
+    return;
+  }
   try {
-    const previous = Number(localStorage.getItem(key) || 0);
-    if (previous && now - previous < throttleWindow) return;
+    const previous = localStorage.getItem(key);
+    if (event.type === 'merge.conflict') {
+      if (previous !== null) {
+        if (event.taskId) mergeConflictNotifiedTasks.add(event.taskId);
+        return;
+      }
+    } else {
+      const prevTs = Number(previous || 0);
+      if (prevTs && now - prevTs < throttleWindow) return;
+    }
     localStorage.setItem(key, String(now));
+    if (event.type === 'merge.conflict' && event.taskId) {
+      mergeConflictNotifiedTasks.add(event.taskId);
+    }
     new Notification(formatEventType(event.type, getActiveLocale()), { body: browserNotificationBody(event, getActiveLocale()) });
   } catch {
     // Browser notification APIs may be unavailable or blocked by policy.

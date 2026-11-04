@@ -55,6 +55,7 @@ import {
   X,
   Edit3,
   Bell,
+  ExternalLink,
 } from 'lucide-react';
 
 const VALID_MODELS = [
@@ -573,6 +574,7 @@ export const TaskDetailPage: React.FC = () => {
               </span>
             </div>
             <h1 className="text-xl md:text-2xl font-bold tracking-tight">{task.title}</h1>
+            {task.externalRef && <a href={task.externalRef} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-xs text-[var(--t-accent)] hover:underline" data-testid="openproject-ticket-link">{task.externalRef}<ExternalLink className="h-3 w-3" /></a>}
           </div>
         </div>
 

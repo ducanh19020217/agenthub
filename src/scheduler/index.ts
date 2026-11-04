@@ -295,6 +295,7 @@ export class Scheduler {
   private reviewerErrorCounts = new Map<string, number>();
   private reviewerFallbackNotified = new Set<string>();
   private lastOrphanScan = 0;
+  private lastMergedTasksCheck = 0;
   private readonly worktreeCleanupRetryAt = new Map<string, number>();
   private readonly worktreeCleanupLogged = new Set<string>();
   private readonly dirtyWorktreeLogged = new Set<string>();
@@ -1393,6 +1394,13 @@ export class Scheduler {
     // 3b. Prune expired worktrees before dispatching tasks. When disk is low,
     // this gives cleanup a chance to free space before queued work is parked.
     this.cleanExpiredWorktrees();
+
+    // Auto-close tasks that have already been merged elsewhere (e.g. into integration or default branch)
+    const nowMergedCheck = Date.now();
+    if (nowMergedCheck - this.lastMergedTasksCheck >= 10_000) {
+      this.lastMergedTasksCheck = nowMergedCheck;
+      this.autoCloseMergedTasks();
+    }
 
     // 3c. Start new tasks if possible
     this.scheduleNewTasks();
@@ -4134,5 +4142,157 @@ export class Scheduler {
         }
       }
     }
+  }
+
+  /**
+   * Auto-closes tasks that have already been merged elsewhere into the project's target branch.
+   * Targets blocked, review, or failed tasks that have at least one commit on their branch
+   * and whose branch is an ancestor of the target branch (integration if enabled, otherwise defaultBranch).
+   */
+  autoCloseMergedTasks(): number {
+    let closedCount = 0;
+    const candidates = [
+      ...this.taskRepo.getByStatus('blocked'),
+      ...this.taskRepo.getByStatus('review'),
+      ...this.taskRepo.getByStatus('failed'),
+    ];
+
+    for (const task of candidates) {
+      if (!task.branch) continue;
+      // Do not touch tasks that are actively running, starting, queued, or checking
+      if (task.status === 'running' || task.status === 'queued' || task.status === 'checking') continue;
+      if (this.running.has(task.id) || this.starting.has(task.id)) continue;
+
+      const project = this.projectRepo.get(task.projectId);
+      if (!project || !fs.existsSync(project.path)) continue;
+
+      const localBranch = task.branch.replace(/^refs\/heads\//, '');
+      // 1. Check if branch exists in the project git repo
+      try {
+        execFileSync('git', ['-C', project.path, 'rev-parse', '--verify', `refs/heads/${localBranch}`], {
+          stdio: ['ignore', 'ignore', 'ignore'],
+        });
+      } catch {
+        continue;
+      }
+
+      // 4. Target branch: integration branch if enabled, otherwise default branch
+      const settings = projectSettings(project);
+      const targetBranch = settings.integration?.enabled
+        ? (settings.integration.branch || 'agenthub/integration')
+        : project.defaultBranch;
+
+      // Check if task.branch is an ancestor of targetBranch (or defaultBranch if integration is enabled)
+      let matchedTargetBranch: string | null = null;
+      try {
+        execFileSync('git', ['-C', project.path, 'merge-base', '--is-ancestor', `refs/heads/${localBranch}`, targetBranch], {
+          stdio: ['ignore', 'ignore', 'ignore'],
+        });
+        matchedTargetBranch = targetBranch;
+      } catch {
+        if (settings.integration?.enabled && targetBranch !== project.defaultBranch) {
+          try {
+            execFileSync('git', ['-C', project.path, 'merge-base', '--is-ancestor', `refs/heads/${localBranch}`, project.defaultBranch], {
+              stdio: ['ignore', 'ignore', 'ignore'],
+            });
+            matchedTargetBranch = project.defaultBranch;
+          } catch {
+            matchedTargetBranch = null;
+          }
+        }
+      }
+
+      if (!matchedTargetBranch) continue;
+
+      // 3. Must have at least 1 commit compared to base lúc tạo.
+      // If the branch was merged into matchedTargetBranch, find the merge commit bringing it in
+      // and verify that the branch contributed at least 1 commit not present on the trunk prior to merge.
+      let hasCommits = false;
+      const branchesToCheck = [matchedTargetBranch];
+      if (settings.integration?.enabled && matchedTargetBranch !== project.defaultBranch) {
+        branchesToCheck.push(project.defaultBranch);
+      }
+
+      for (const branchToCheck of branchesToCheck) {
+        try {
+          const mergesStr = execFileSync(
+            'git',
+            ['-C', project.path, 'rev-list', '--merges', '--ancestry-path', `refs/heads/${localBranch}..${branchToCheck}`],
+            { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+          ).trim();
+
+          const merges = mergesStr ? mergesStr.split('\n').map((m) => m.trim()).filter(Boolean) : [];
+          for (const mergeCommit of merges) {
+            try {
+              const countStr = execFileSync(
+                'git',
+                ['-C', project.path, 'rev-list', '--count', `${mergeCommit}^1..refs/heads/${localBranch}`],
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+              ).trim();
+              const count = parseInt(countStr, 10);
+              if (Number.isFinite(count) && count > 0) {
+                hasCommits = true;
+                break;
+              }
+            } catch {
+              // ignore and check next merge
+            }
+          }
+          if (hasCommits) break;
+        } catch {
+          // ignore
+        }
+      }
+
+      if (!hasCommits) continue;
+
+      // Clean up any reviewer runs/state if task was in review
+      const reviewerRun = this.reviewerRuns.get(task.id);
+      if (reviewerRun) {
+        clearTimeout(reviewerRun.timeout);
+        if (reviewerRun.exitTimeout) clearTimeout(reviewerRun.exitTimeout);
+        if (reviewerRun.pid) {
+          try { process.kill(-reviewerRun.pid, 'SIGKILL'); } catch {
+            try { process.kill(reviewerRun.pid, 'SIGKILL'); } catch {}
+          }
+        }
+        if (reviewerRun.lockFile) {
+          this.locks.release(reviewerRun.profileName, reviewerRun.lockFile);
+        }
+        this.locks.invalidate(reviewerRun.profileName);
+        this.reviewerRuns.delete(task.id);
+      }
+      this.reviewNotified.delete(task.id);
+      this.reviewWaitingNotified.delete(task.id);
+      this.reviewerFallbackNotified.delete(task.id);
+      this.reviewerErrorCounts.delete(task.id);
+      this.resetReviewerEscalation(task.id);
+
+      // Transition to done
+      this.taskRepo.updateStatus(task.id, 'done');
+      if (this.runMetricsRepo) {
+        recalculateTaskLines(
+          this.taskRepo,
+          this.projectRepo,
+          this.runRepo,
+          this.runMetricsRepo,
+          task.id,
+        ).catch(() => {});
+      }
+
+      this.eventBus.emit('task.auto_closed', task.id, {
+        reason: 'merged_elsewhere',
+        branch: task.branch,
+        targetBranch: matchedTargetBranch,
+      });
+      this.eventBus.emit('task.done', task.id, {
+        reason: 'merged_elsewhere',
+        autoClosed: true,
+      });
+
+      closedCount++;
+    }
+
+    return closedCount;
   }
 }

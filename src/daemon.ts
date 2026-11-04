@@ -360,8 +360,10 @@ export function createContext(
 
   scheduler.getEventBus().on('task.done', (taskId) => {
     if (taskId) void service.cleanupOrphanedMergeFixTasks(taskId);
+    void scheduler.autoCloseMergedTasks();
   });
   void service.cleanupOrphanedMergeFixTasks();
+  void scheduler.autoCloseMergedTasks();
 
   const ciRepo = new CiRepo(db);
   const ciService = new CiWatchService({

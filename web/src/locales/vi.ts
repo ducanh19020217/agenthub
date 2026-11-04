@@ -1533,6 +1533,7 @@ export const vi = {
       install_refresh_error: "Lỗi làm mới cài đặt",
     },
     task: {
+      auto_closed: "Task tự động đóng",
       blocked: "Task bị chặn",
       cancelled: "Task đã hủy",
       checking: "Task đang kiểm tra",
@@ -1577,6 +1578,7 @@ export const vi = {
     "dotnet-build": "Kiểm tra build .NET",
   },
   reasons: {
+    merged_elsewhere: "Đã merge qua nhánh khác",
     lock_busy: "Khóa reviewer đang bận",
     quota: "Hết quota reviewer",
     timeout: "Quá thời gian review",

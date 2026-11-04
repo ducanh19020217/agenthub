@@ -746,6 +746,11 @@ export function formatEventSummary(
       return `${taskLabel} bắt đầu chạy`;
     }
 
+    case 'task.auto_closed':
+      return p.reason === 'merged_elsewhere'
+        ? `${taskLabel} tự động hoàn thành (đã merge qua nhánh khác)`
+        : `${taskLabel} đã tự động đóng`;
+
     case 'task.blocked':
       return `${taskLabel} bị chặn`;
 
@@ -753,7 +758,9 @@ export function formatEventSummary(
       return `${taskLabel} thất bại`;
 
     case 'task.done':
-      return `${taskLabel} hoàn thành`;
+      return p.reason === 'merged_elsewhere'
+        ? `${taskLabel} hoàn thành (đã merge qua nhánh khác)`
+        : `${taskLabel} hoàn thành`;
 
     case 'task.cancelled':
       return `${taskLabel} đã bị hủy`;
@@ -4101,6 +4108,10 @@ export class AppService {
       }
     }
     return cancelled;
+  }
+
+  autoCloseMergedTasks(): number {
+    return this.scheduler.autoCloseMergedTasks();
   }
 
   retryTask(idParam: string, raw: unknown): TaskRow {

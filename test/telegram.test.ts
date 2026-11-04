@@ -1338,6 +1338,44 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
     });
 
+    it('broadcasts recovery sequentially when multiple disks recover at different times', async () => {
+      config.telegram.notify.disk = true;
+      recordedCalls = [];
+
+      // 1. Two separate disk blocking alerts
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Drive A', path: '/drive-a', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-a'] });
+      await bot.flushQueue(CHAT_ID);
+      let calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Drive A');
+
+      recordedCalls = [];
+      currentTime += 15_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Drive B', path: '/drive-b', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-b'] });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Drive B');
+
+      // 2. Drive A recovers first (1 task resumed, 1 remaining)
+      recordedCalls = [];
+      currentTime += 15_000;
+      ctx.scheduler.getEventBus().emit('disk.ok', undefined, { path: '/drive-a', freeGB: 10, minFreeGB: 3, resumedCount: 1, remainingCount: 1, tasks: ['t-a'] });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('✅ Đã đủ dung lượng, 1 task tiếp tục chạy');
+
+      // 3. Drive B recovers afterwards (31m later, 1 task resumed, 0 remaining)
+      recordedCalls = [];
+      currentTime += 31 * 60_000;
+      ctx.scheduler.getEventBus().emit('disk.ok', undefined, { path: '/drive-b', freeGB: 10, minFreeGB: 3, resumedCount: 1, remainingCount: 0, tasks: ['t-b'] });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('✅ Đã đủ dung lượng, 1 task tiếp tục chạy');
+    });
+
     it('escapes HTML special characters in disk alert messages to prevent Telegram 400 errors', async () => {
       config.telegram.notify.disk = true;
 

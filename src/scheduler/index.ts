@@ -270,6 +270,7 @@ export class Scheduler {
   private diskLow = false;
   private lastDiskLowEmit = 0;
   private diskBlockedEmitted = false;
+  private diskIncidents = new Map<string, { lastLowEmit: number; blockedEmitted: boolean }>();
   private dockerDiskLow = false;
   private tasksWaitingForDisk = new Set<string>();
   private unavailableProjects = new Set<string>();
@@ -1269,61 +1270,89 @@ export class Scheduler {
           }
         }
       }
-    // 0. Check disk space: if sufficient, resume any tasks waiting for disk
+    // 0. Check disk space: resume tasks whose blocking disk is now free, and report low disks / recoveries
     const disks = this.getMonitoredDisks();
-    const blockedDisk = disks.find((disk) => disk.low);
-    if (blockedDisk) {
-      this.diskLow = true;
-      const diskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
-      const hasQueuedTasks = this.taskRepo.getByStatus('queued').length > 0;
-      if (blockedDisk.source === 'hub_home' || diskWaiters.length > 0 || !hasQueuedTasks) {
-        this.markDiskLow(blockedDisk);
-      }
-      const dockerDisk = disks.find((disk) => disk.label === 'Docker' && disk.low);
-      if (dockerDisk && this.running.size > 0) this.markDockerDiskLow(dockerDisk);
-    } else {
-      const diskSpace = disks.find((disk) => disk.source === 'worktrees')!;
+    const lowDisks = disks.filter((disk) => disk.low);
+
+    const dockerDisk = disks.find((disk) => disk.label === 'Docker' && disk.low);
+    if (dockerDisk && this.running.size > 0) {
+      this.markDockerDiskLow(dockerDisk);
+    } else if (!dockerDisk) {
       this.dockerDiskLow = false;
-      const recovered = diskSpace ? diskSpace.freeGB >= diskSpace.minFreeGB + 1 : true;
-      if (this.diskLow && recovered) {
-        this.diskLow = false;
-        this.lastDiskLowEmit = 0;
-        this.diskBlockedEmitted = false;
-        const diskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
-        const resumedTasks: TaskRow[] = [];
-        for (const t of diskWaiters) {
-          if (!this.projectRepo.get(t.projectId)) continue;
-          if (!this.getBlockingDiskForTask(t)) {
-            this.tasksWaitingForDisk.delete(t.id);
-            this.taskRepo.updateStatus(t.id, 'queued');
-            this.eventBus.emit('task.queued', t.id, { reason: 'disk_ready' });
-            resumedTasks.push(t);
-          }
-        }
-        this.eventBus.emit('disk.ok', undefined, {
-          freeGB: diskSpace?.freeGB ?? 0,
-          minFreeGB: this.config.disk.minFreeGB,
-          resumedCount: resumedTasks.length,
-          tasks: resumedTasks.map((t) => t.slug || t.title || t.id),
-        });
-      }
-      if (this.recheckWaitingOnDiskOk) {
-        // tasksWaitingForDisk chỉ nằm trong bộ nhớ: sau khi daemon restart, task đã vào
-        // waiting_quota vì đĩa sẽ kẹt mãi. Đánh thức lại một lần; task thật sự hết quota
-        // sẽ được dispatch đưa về waiting_quota như cũ.
-        this.recheckWaitingOnDiskOk = false;
-        this.wakeWaitingQuotaTasks('startup_recheck');
-      }
     }
 
     // Resume disk waiters individually if their specific blocking disk is now free
     const diskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
+    const resumedTasks: TaskRow[] = [];
     for (const t of diskWaiters) {
       if (!this.projectRepo.get(t.projectId)) continue;
       if (!this.getBlockingDiskForTask(t)) {
         this.tasksWaitingForDisk.delete(t.id);
         this.taskRepo.updateStatus(t.id, 'queued');
         this.eventBus.emit('task.queued', t.id, { reason: 'disk_ready' });
+        resumedTasks.push(t);
+      }
+    }
+
+    // Clean up incident tracking for disks that are no longer low
+    for (const [key] of this.diskIncidents) {
+      if (!lowDisks.some((d) => this.getDiskIncidentKey(d.path) === key)) {
+        this.diskIncidents.delete(key);
+      }
+    }
+
+    const defaultDisk = disks.find((disk) => disk.source === 'worktrees');
+    const recovered = defaultDisk ? defaultDisk.freeGB >= defaultDisk.minFreeGB + 1 : true;
+    const allDisksOk = lowDisks.length === 0;
+
+    if (allDisksOk && this.diskLow && recovered) {
+      this.diskLow = false;
+      this.lastDiskLowEmit = 0;
+      this.diskBlockedEmitted = false;
+      this.diskIncidents.clear();
+      const remainingDiskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk').length;
+      this.eventBus.emit('disk.ok', undefined, {
+        freeGB: defaultDisk?.freeGB ?? 0,
+        minFreeGB: this.config.disk.minFreeGB,
+        resumedCount: resumedTasks.length,
+        remainingCount: remainingDiskWaiters,
+        tasks: resumedTasks.map((t) => t.slug || t.title || t.id),
+      });
+    } else if (resumedTasks.length > 0) {
+      const remainingDiskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk').length;
+      this.eventBus.emit('disk.ok', undefined, {
+        freeGB: defaultDisk?.freeGB ?? 0,
+        minFreeGB: this.config.disk.minFreeGB,
+        resumedCount: resumedTasks.length,
+        remainingCount: remainingDiskWaiters,
+        tasks: resumedTasks.map((t) => t.slug || t.title || t.id),
+      });
+    }
+
+    if (allDisksOk && this.recheckWaitingOnDiskOk) {
+      this.recheckWaitingOnDiskOk = false;
+      this.wakeWaitingQuotaTasks('startup_recheck');
+    }
+
+    if (lowDisks.length > 0) {
+      this.diskLow = true;
+      const hasQueuedTasks = this.taskRepo.getByStatus('queued').length > 0;
+      const seenDiskKeys = new Set<string>();
+      for (const lowDisk of lowDisks) {
+        const diskKey = this.getDiskIncidentKey(lowDisk.path);
+        if (seenDiskKeys.has(diskKey)) continue;
+        seenDiskKeys.add(diskKey);
+
+        const diskWaitersForThisDisk = this.taskRepo.getByStatus('waiting_quota').filter((t) => {
+          if (t.waitReason !== 'disk') return false;
+          const blocking = this.getBlockingDiskForTask(t);
+          if (!blocking) return false;
+          if (lowDisk.source === 'hub_home') return blocking.source === 'hub_home';
+          return this.getDiskIncidentKey(blocking.path) === diskKey;
+        });
+        if (lowDisk.source === 'hub_home' || diskWaitersForThisDisk.length > 0 || !hasQueuedTasks) {
+          this.markDiskLow(lowDisk);
+        }
       }
     }
 
@@ -2260,7 +2289,7 @@ export class Scheduler {
       const departmentId = this.projectRepo.get(running.projectId)?.departmentId || 'chung';
       fairUsage.set(departmentId, (fairUsage.get(departmentId) || 0) + 1);
     }
-    let blockedDiskInTick: MonitoredDisk | undefined;
+    const blockedDisksInTick = new Map<string, MonitoredDisk>();
     const remainingTasks = [...schedulableTasks];
     while (remainingTasks.length > 0) {
       remainingTasks.sort((a, b) => {
@@ -2318,7 +2347,7 @@ export class Scheduler {
           this.tasksWaitingForDisk.add(task.id);
           this.taskRepo.updateStatus(task.id, 'waiting_quota', 'disk');
           this.eventBus.emit('task.waiting_quota', task.id, { reason: 'disk', label: disk.label, path: disk.path, freeGB: disk.freeGB, minFreeGB: disk.minFreeGB, message: this.diskWaitMessage(disk) });
-          blockedDiskInTick = disk;
+          blockedDisksInTick.set(this.getDiskIncidentKey(disk.path), disk);
           continue;
         }
         const departmentId = this.departmentIdForTask(task);
@@ -2353,11 +2382,17 @@ export class Scheduler {
       }
     }
 
-    if (blockedDiskInTick) {
-      this.markDiskLow(blockedDiskInTick);
+    if (blockedDisksInTick.size > 0) {
+      for (const disk of blockedDisksInTick.values()) {
+        this.markDiskLow(disk);
+      }
     } else {
-      const lowDisk = this.getMonitoredDisks().find((d) => d.low);
-      if (lowDisk) {
+      const seenDiskKeys = new Set<string>();
+      const lowDisks = this.getMonitoredDisks().filter((d) => d.low);
+      for (const lowDisk of lowDisks) {
+        const diskKey = this.getDiskIncidentKey(lowDisk.path);
+        if (seenDiskKeys.has(diskKey)) continue;
+        seenDiskKeys.add(diskKey);
         this.markDiskLow(lowDisk);
       }
     }
@@ -3899,6 +3934,15 @@ export class Scheduler {
     return this.diskReader;
   }
 
+  private getDiskIncidentKey(diskPath: string): string {
+    const resolved = path.resolve(diskPath);
+    const worktreesResolved = path.resolve(this.config.worktreesDir);
+    if (resolved === worktreesResolved || resolved.startsWith(worktreesResolved + path.sep)) {
+      return worktreesResolved;
+    }
+    return resolved;
+  }
+
   private getHubHomeDisk(): MonitoredDisk {
     const space = this.diskReader(this.config.hubHome);
     const minFreeGB = this.config.disk.hubHomeMinFreeGB ?? 1;
@@ -3960,20 +4004,32 @@ export class Scheduler {
 
   private markDiskLow(disk: MonitoredDisk): void {
     const now = Date.now();
-    const waitingTasks = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
+    const diskKey = this.getDiskIncidentKey(disk.path);
+    const incident = this.diskIncidents.get(diskKey) || { lastLowEmit: 0, blockedEmitted: false };
+
+    const waitingTasks = this.taskRepo.getByStatus('waiting_quota').filter((t) => {
+      if (t.waitReason !== 'disk') return false;
+      const blocking = this.getBlockingDiskForTask(t);
+      if (!blocking) return false;
+      if (disk.source === 'hub_home') return blocking.source === 'hub_home';
+      return this.getDiskIncidentKey(blocking.path) === diskKey;
+    });
     const isBlocking = disk.source === 'hub_home' || waitingTasks.length > 0;
 
-    if (this.diskLow) {
-      if (isBlocking && !this.diskBlockedEmitted) {
+    if (incident.lastLowEmit > 0) {
+      if (isBlocking && !incident.blockedEmitted) {
         // Transition to blocking incident: must emit immediately
-      } else if (now - this.lastDiskLowEmit < 60 * 60_000) {
+      } else if (now - incident.lastLowEmit < 60 * 60_000) {
         return;
       }
     }
     this.diskLow = true;
+    incident.lastLowEmit = now;
     if (isBlocking) {
+      incident.blockedEmitted = true;
       this.diskBlockedEmitted = true;
     }
+    this.diskIncidents.set(diskKey, incident);
     this.lastDiskLowEmit = now;
     pruneNodeModulesCache(this.config.cacheDir, { maxEntries: this.config.cacheMaxEntries, maxBytes: this.config.cacheMaxGB * 1024 ** 3 });
     const cache = nodeModulesCacheSummary(this.config.cacheDir);

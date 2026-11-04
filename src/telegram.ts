@@ -264,6 +264,7 @@ export class TelegramBotService {
   private lastSentDisk = new Map<'low' | 'ok', number>();
   private diskBlockedNotified = false;
   private lastSentDiskBlocked = 0;
+  private lastSentDiskBlockedByPath = new Map<string, number>();
   private lastSentLoadSummary = 0;
   private lastBroadcast = new Map<string, number>();
   private fetchFn: typeof fetch;
@@ -4134,9 +4135,12 @@ export class TelegramBotService {
         const isBlocking = isHubHomeLow || waitingTasks.length > 0 || p.isBlocking === true;
 
         if (isBlocking) {
-          if (this.diskBlockedNotified && now - this.lastSentDiskBlocked < 60 * 60_000) return;
+          const diskKey = typeof p.path === 'string' && p.path ? path.resolve(p.path) : (typeof p.label === 'string' ? p.label : 'default');
+          const lastSent = this.lastSentDiskBlockedByPath.get(diskKey) ?? 0;
+          if (lastSent > 0 && now - lastSent < 60 * 60_000) return;
           this.diskBlockedNotified = true;
           this.lastSentDiskBlocked = now;
+          this.lastSentDiskBlockedByPath.set(diskKey, now);
           this.lastSentDisk.set('low', now);
 
           const label = typeof p.label === 'string' && p.label ? this.escapeHtml(p.label) : 'Ổ đĩa';
@@ -4186,10 +4190,17 @@ export class TelegramBotService {
           : 0;
 
         if (this.diskBlockedNotified) {
-          this.diskBlockedNotified = false;
           this.lastSentDisk.set('ok', now);
           if (resumedCount > 0) {
             this.broadcastMessage(`✅ Đã đủ dung lượng, ${resumedCount} task tiếp tục chạy`);
+          }
+          if (typeof p.remainingCount === 'number' && p.remainingCount > 0) {
+            if (typeof p.path === 'string' && p.path) {
+              this.lastSentDiskBlockedByPath.delete(path.resolve(p.path));
+            }
+          } else {
+            this.diskBlockedNotified = false;
+            this.lastSentDiskBlockedByPath.clear();
           }
           break;
         }

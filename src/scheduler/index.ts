@@ -268,6 +268,7 @@ export class Scheduler {
   private inTick = false;
   private skipSchedulingOnce = false;
   private diskLow = false;
+  private lastDiskLowEmit = 0;
   private dockerDiskLow = false;
   private tasksWaitingForDisk = new Set<string>();
   private unavailableProjects = new Set<string>();
@@ -1280,9 +1281,23 @@ export class Scheduler {
       const recovered = diskSpace ? diskSpace.freeGB >= diskSpace.minFreeGB + 1 : true;
       if (this.diskLow && recovered) {
         this.diskLow = false;
+        this.lastDiskLowEmit = 0;
+        const diskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
+        const resumedTasks: TaskRow[] = [];
+        for (const t of diskWaiters) {
+          if (!this.projectRepo.get(t.projectId)) continue;
+          if (!this.getBlockingDiskForTask(t)) {
+            this.tasksWaitingForDisk.delete(t.id);
+            this.taskRepo.updateStatus(t.id, 'queued');
+            this.eventBus.emit('task.queued', t.id, { reason: 'disk_ready' });
+            resumedTasks.push(t);
+          }
+        }
         this.eventBus.emit('disk.ok', undefined, {
           freeGB: diskSpace?.freeGB ?? 0,
           minFreeGB: this.config.disk.minFreeGB,
+          resumedCount: resumedTasks.length,
+          tasks: resumedTasks.map((t) => t.slug || t.title || t.id),
         });
       }
       if (this.recheckWaitingOnDiskOk) {
@@ -3927,14 +3942,20 @@ export class Scheduler {
   }
 
   private markDiskLow(disk: MonitoredDisk): void {
-    if (this.diskLow) return;
+    const now = Date.now();
+    if (this.diskLow && now - this.lastDiskLowEmit < 60 * 60_000) return;
     this.diskLow = true;
+    this.lastDiskLowEmit = now;
     pruneNodeModulesCache(this.config.cacheDir, { maxEntries: this.config.cacheMaxEntries, maxBytes: this.config.cacheMaxGB * 1024 ** 3 });
     const cache = nodeModulesCacheSummary(this.config.cacheDir);
+    const waitingTasks = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
     this.eventBus.emit('disk.low', undefined, {
       label: disk.label,
+      path: disk.path,
       freeGB: disk.freeGB,
       minFreeGB: disk.minFreeGB,
+      source: disk.source,
+      tasks: waitingTasks.map((t) => t.slug || t.title || t.id),
       cacheDir: cache.path,
       cacheEntries: cache.entries,
       cacheBytes: cache.bytes,

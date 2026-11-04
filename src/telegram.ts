@@ -4032,6 +4032,10 @@ export class TelegramBotService {
         const sourceId = typeof p.sourceId === 'string' ? p.sourceId : '';
         const wpId = typeof p.wpId === 'number' ? p.wpId : 0;
         const analysis = p.analysis && typeof p.analysis === 'object' ? p.analysis as { conclusion?: string; size?: string; summary?: string } : {};
+        if (p.autoDispatch === true) {
+          this.broadcastMessage(`${prefix}✅ <b>[${this.escapeHtml(String(p.displayId || 'ticket'))}] Đã tự giao</b>\nKết luận: ${this.escapeHtml(String(analysis.conclusion || ''))}\nĐộ lớn: ${this.escapeHtml(String(analysis.size || ''))}`);
+          break;
+        }
         const rows: InlineKeyboardButton[][] = [[
           { text: analysis.conclusion === 'việc thủ công' ? '🙋 Tôi tự làm' : '✅ Làm', callback_data: `triage:${analysis.conclusion === 'việc thủ công' ? 'manual' : 'do'}:${sourceId}:${wpId}` },
           ...(analysis.size === 'lớn (cần chia)' ? [{ text: '🧩 Làm + chia', callback_data: `triage:split:${sourceId}:${wpId}` }] : []),
@@ -4039,7 +4043,10 @@ export class TelegramBotService {
           { text: '❓ Hỏi tester', callback_data: `triage:ask:${sourceId}:${wpId}` },
           { text: '🚫 Không làm', callback_data: `triage:skip:${sourceId}:${wpId}` },
         ]];
-        this.broadcastMessage(`${prefix}🔎 <b>[${this.escapeHtml(String(p.displayId || 'ticket'))}] Phân tích xong</b>\nKết luận: ${this.escapeHtml(String(analysis.conclusion || ''))}\nĐộ lớn: ${this.escapeHtml(String(analysis.size || ''))}\n${this.escapeHtml(String(analysis.summary || ''))}`, { inline_keyboard: rows });
+        const summary = String(analysis.summary || '').slice(0, 900);
+        const ticketUrl = typeof p.ticketUrl === 'string' ? `\n<a href="${this.escapeHtml(p.ticketUrl)}">Mở ticket</a>` : '';
+        const dashboardUrl = typeof p.taskId === 'string' ? `\n<a href="${this.escapeHtml(this.getDashboardUrl(`#/tasks/${toRouteId(p.taskId)}`))}">Mở trên hub</a>` : '';
+        this.broadcastMessage(`${prefix}🔎 <b>[${this.escapeHtml(String(p.displayId || 'ticket'))}] Phân tích xong</b>\nKết luận: ${this.escapeHtml(String(analysis.conclusion || ''))}\nĐộ lớn: ${this.escapeHtml(String(analysis.size || ''))}\n${this.escapeHtml(summary)}${ticketUrl}${dashboardUrl}`, { inline_keyboard: rows });
         break;
       }
 

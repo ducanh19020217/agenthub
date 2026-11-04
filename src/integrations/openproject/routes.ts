@@ -27,6 +27,7 @@ export interface RegisterOpenProjectRoutesOptions {
   sync?: (sourceId: string) => Promise<OpenProjectSyncResult>;
   dailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
   decision?: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>;
+  triageInput?: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>;
 }
 
 export function registerOpenProjectRoutes(
@@ -167,5 +168,12 @@ export function registerOpenProjectRoutes(
     const body = z.object({ action: z.enum(['do', 'split', 'ask', 'skip', 'manual']), note: z.string().optional() }).parse(req.body || {});
     if (!options.decision) throw new HttpError(503, 'unavailable', 'OpenProject triage chưa sẵn sàng');
     return options.decision(params.sourceId, params.wpId, body.action, body.note);
+  });
+
+  fastify.post('/api/tracker/:sourceId/:wpId/input', async (req: FastifyRequest) => {
+    const params = z.object({ sourceId: z.string().min(1), wpId: z.coerce.number().int().positive() }).parse(req.params);
+    const body = z.object({ content: z.string().min(1) }).parse(req.body || {});
+    if (!options.triageInput) throw new HttpError(503, 'unavailable', 'OpenProject triage chưa sẵn sàng');
+    return options.triageInput(params.sourceId, params.wpId, body.content);
   });
 }

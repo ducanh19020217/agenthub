@@ -76,7 +76,9 @@ Nếu OpenProject đã tạo work package nhưng một bước đọc ticket, ch
 
 Poller chạy theo `pollIntervalSec`. Khi lỗi thì backoff, tối đa 1800s.
 
-Nếu `triage` khác `off`, ticket NEW/REOPENED/COMMENT phù hợp sẽ tạo task `op-<id>-triage` (hoặc `-r<n>`), task chỉ đọc và phải ghi `## Phân tích` theo `src/protocol.md`. Khi DONE hợp lệ, hub phát event `tracker.triage_ready`; người dùng chọn `do`, `split`, `ask`, `skip` hoặc `manual` qua API `POST /api/tracker/:sourceId/:wpId/decision` hoặc MCP `hub_ticket_decision`. `auto` tự chọn `do` khi kết luận là `lỗi` và độ lớn `nhỏ`/`vừa`.
+Nếu `triage` khác `off`, ticket NEW/REOPENED hoặc comment trả lời sau `ask` sẽ tạo task `op-<id>-triage` (hoặc `-r<n>`), task chỉ đọc và phải ghi `## Phân tích` theo `src/protocol.md`. Khi DONE hợp lệ, hub phát event `tracker.triage_ready`; người dùng chọn `do`, `split`, `ask`, `skip` hoặc `manual` qua API `POST /api/tracker/:sourceId/:wpId/decision` hoặc MCP `hub_ticket_decision`. `auto` tự chọn `do` khi kết luận là `lỗi` và độ lớn `nhỏ`/`vừa`, đồng thời thông báo đã tự giao.
+
+Quyết định được ghi trong `tracker_items.writeback` và xử lý tuần tự để bấm lặp không tạo task trùng. `do` truyền toàn bộ phân tích vào task sửa, dùng `autoStart`; phần `Việc thủ công kèm theo` được đưa vào comment ghi ngược. Khi nguồn gắn nhiều project, mỗi project nhận một task; phần phụ thuộc API được nối bằng `dependsOn`.
 
 - **Lần đầu của một nguồn**: chỉ ghi mốc, không tạo task.
 - **Phân loại sự kiện**:

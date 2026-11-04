@@ -1,5 +1,5 @@
 export const TRIAGE_CONCLUSIONS = ['lỗi', 'không phải lỗi', 'thiếu thông tin', 'yêu cầu tính năng', 'việc thủ công'] as const;
-export const TRIAGE_SIZES = ['nhỏ', 'vừa', 'lớn (cần chia)'] as const;
+export const TRIAGE_SIZES = ['nhỏ', 'vừa', 'lớn', 'lớn (cần chia)'] as const;
 
 export type TriageConclusion = typeof TRIAGE_CONCLUSIONS[number];
 export type TriageSize = typeof TRIAGE_SIZES[number];
@@ -23,7 +23,7 @@ export interface TriageAnalysis {
 
 function section(text: string, heading: string): string {
   const lines = text.split(/\r?\n/);
-  const start = lines.findIndex((line) => line.trim().toLowerCase() === heading.toLowerCase());
+  const start = lines.findIndex((line) => line.trim().toLowerCase().startsWith(heading.toLowerCase()));
   if (start < 0) return '';
   const end = lines.findIndex((line, index) => index > start && /^#{2,3}\s/.test(line.trim()));
   return lines.slice(start + 1, end < 0 ? lines.length : end).join('\n').trim();

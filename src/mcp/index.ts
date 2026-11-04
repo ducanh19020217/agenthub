@@ -610,6 +610,18 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   );
 
   server.tool(
+    'hub_ticket_triage_input',
+    'Gửi thêm thông tin tester cho lượt phân tích triage OpenProject',
+    { sourceId: z.string().min(1), wpId: z.number().int().positive(), content: z.string().min(1) },
+    async (args) => {
+      try {
+        const result = await callApi<{ taskId: string }>('POST', `/api/tracker/${encodeURIComponent(args.sourceId)}/${args.wpId}/input`, { content: args.content });
+        return { content: [{ type: 'text', text: `✓ Đã tạo lượt triage bổ sung: ${result.taskId}` }] };
+      } catch (err: unknown) { return handleError(err); }
+    },
+  );
+
+  server.tool(
     'hub_daily_report',
     'Tạo ngay báo cáo ngày OpenProject cho một nguồn',
     {

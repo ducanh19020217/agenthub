@@ -926,6 +926,7 @@ export function formatEventSummary(
 export class AppService {
   private trackerRepo?: TrackerItemRepo;
   private triageDecisionHandler?: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>;
+  private triageInputHandler?: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>;
   public deployService?: DeployService;
   public remoteDeployService?: RemoteDeployService;
   public ciRepo?: CiRepo;
@@ -977,6 +978,11 @@ export class AppService {
   async decideOpenProjectTicket(sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string): Promise<{ action: string; taskIds: string[] }> {
     if (!this.triageDecisionHandler) throw new HttpError(503, 'unavailable', 'OpenProject triage chưa sẵn sàng');
     return this.triageDecisionHandler(sourceId, wpId, action, note);
+  }
+  setTriageInputHandler(handler: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>): void { this.triageInputHandler = handler; }
+  async submitOpenProjectTriageInput(sourceId: string, wpId: number, content: string): Promise<{ taskId: string }> {
+    if (!this.triageInputHandler) throw new HttpError(503, 'unavailable', 'OpenProject triage chưa sẵn sàng');
+    return this.triageInputHandler(sourceId, wpId, content);
   }
   private openProjectTicketUrl(task: TaskRow): string | null {
     if (!task.externalRef || !this.trackerRepo) return task.externalRef?.startsWith('http') ? task.externalRef : null;

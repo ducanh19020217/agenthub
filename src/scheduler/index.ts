@@ -22,7 +22,7 @@ import {
   TrackerItemRepo,
 } from '../db/index.js';
 import { projectSettings } from '../projects/settings.js';
-import { isTriageTaskSlug } from '../integrations/openproject/triage.js';
+import { isTriageTaskSlug, parseTriageAnalysis } from '../integrations/openproject/triage.js';
 import { renderCommitTemplate, renderTaskBranch } from '../commit-convention.js';
 import { isProjectWorktreeRootAccessible, projectWorktreeRoot, projectWorktreeRoots } from '../projects/paths.js';
 import { Engine, AgyEngine, CodexEngine } from '../engines/index.js';
@@ -1150,10 +1150,25 @@ export class Scheduler {
       }
       if (this.stopped) return;
       if (isTriageTaskSlug(currentTask.slug)) {
-        if (currentTask.diffStat && currentTask.diffStat.trim()) {
+        let codeChanged = Boolean(currentTask.diffStat && currentTask.diffStat.trim());
+        if (!codeChanged && currentTask.worktreePath && project?.path) {
+          try {
+            const status = await execFileAsync('git', ['status', '--porcelain'], { cwd: currentTask.worktreePath, timeout: 10_000 });
+            const base = currentTask.baseRef || project.defaultBranch || 'main';
+            const branch = currentTask.branch || `agenthub/${currentTask.slug}`;
+            const diff = await execFileAsync('git', ['diff', '--quiet', `${base}...${branch}`], { cwd: currentTask.worktreePath, timeout: 10_000 }).then(() => '').catch(() => 'changed');
+            codeChanged = Boolean(status.stdout.trim() || diff);
+          } catch { codeChanged = true; }
+        }
+        const parsedTriage = parseTriageAnalysis(currentTask.doneReport || '');
+        if (codeChanged) {
           const blockedReport = '## Phân tích\n\nTriage không hợp lệ: worker đã tạo thay đổi code. Task triage bị chặn để người dùng kiểm tra.';
           this.taskRepo.update(taskId, { status: 'blocked', blockedReport, transientRetries: 0, notBefore: null });
           this.eventBus.emit('tracker.triage_invalid', taskId, { reason: 'code_changes' });
+        } else if (!parsedTriage.analysis) {
+          const blockedReport = `## Phân tích\n\nTriage không hợp lệ: ${parsedTriage.errors.join('; ')}. Worker phải bổ sung DONE đúng định dạng.`;
+          this.taskRepo.update(taskId, { status: 'blocked', blockedReport, transientRetries: 0, notBefore: null });
+          this.eventBus.emit('tracker.triage_invalid', taskId, { reason: 'invalid_report', errors: parsedTriage.errors });
         } else {
           this.taskRepo.update(taskId, { status: 'done', transientRetries: 0, notBefore: null, reviewStep: 0 });
           this.eventBus.emit('task.done', taskId, { triage: true });

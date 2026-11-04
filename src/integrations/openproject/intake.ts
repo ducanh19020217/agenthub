@@ -106,6 +106,10 @@ function decisionOf(row: TrackerItemRow): string | undefined {
   } catch { return undefined; }
 }
 
+function triageState(row: TrackerItemRow): { decision?: { action?: string }; triage?: unknown } {
+  try { return JSON.parse(row.writeback) as { decision?: { action?: string }; triage?: unknown }; } catch { return {}; }
+}
+
 export class OpenProjectIntakeService {
   private readonly config: AgentHubConfig;
   private readonly projectRepo: ProjectRepo;
@@ -290,7 +294,8 @@ export class OpenProjectIntakeService {
     let imported = 0;
     let comments = 0;
     const dir = path.join(this.config.hubHome, 'tracker', source.id, String(wp.id));
-    const canTriageComment = source.triage !== 'off' && event === 'comment' && decision !== 'skip' && decision !== 'manual';
+    const previousState = triageState(previous);
+    const canTriageComment = source.triage !== 'off' && event === 'comment' && decision === 'ask';
     if ((isNewTaskEvent || canTriageComment) && number !== null && number >= source.minTicketNumber && openTasks.length === 0) {
       await writeTicketDirectory(client, wp, activities, dir, source.url);
       const triage = source.triage !== 'off';
@@ -307,6 +312,12 @@ export class OpenProjectIntakeService {
       const task = this.taskService.createTask({ project: primary.id, slug, title, body: taskBody, level: 'easy', modelChain: triage ? source.triageModelChain : undefined, externalRef: displayId(wp), start: triage ? true : source.autoStart });
       ids.push(task.id);
       imported = 1;
+      if (triage) {
+        const state = previousState as Record<string, unknown>;
+        delete state.decision;
+        delete state.triage;
+        previous.writeback = JSON.stringify(state);
+      }
       this.eventBus.emit(triage ? 'tracker.triage_started' : 'tracker.ticket_imported', task.id, { sourceId: source.id, wpId: wp.id, displayId: displayId(wp), triage });
     } else if (openTasks.length > 0) {
       await writeTicketDirectory(client, wp, activities, dir, source.url);

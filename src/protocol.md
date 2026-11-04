@@ -10,7 +10,7 @@ Task có hậu tố `-triage` chỉ phân tích, không sửa code và không co
 
 ```text
 Kết luận: lỗi | không phải lỗi | thiếu thông tin | yêu cầu tính năng | việc thủ công
-Độ lớn: nhỏ | vừa | lớn (cần chia)
+Độ lớn: nhỏ | vừa | lớn | lớn (cần chia)
 Repo: <projectId>[, <projectId>]
 ### Tóm tắt yêu cầu
 ### Bằng chứng

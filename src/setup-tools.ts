@@ -44,7 +44,9 @@ export interface AgentHubSetupBundle {
   integrations: Record<string, unknown>;
 }
 
-const SECRET_FIELD = /(?:token|password|secret|api[-_]?key|private[-_]?key|credential)/i;
+// Match fields that contain credentials, but not budget fields such as
+// `dailyTokenBudget` or `maxTokens`. Those are configuration, not secrets.
+const SECRET_FIELD = /^(?:token|password|secret|credential|api[-_]?key|private[-_]?key|(?:api|access|auth)Token)$/i;
 function portablePath(value: string, home = process.env.HOME || ''): string {
   if (home && (value === home || value.startsWith(`${home}${path.sep}`))) return `~${value.slice(home.length).split(path.sep).join('/')}`;
   return value;

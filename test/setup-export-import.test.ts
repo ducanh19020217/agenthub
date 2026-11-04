@@ -27,9 +27,12 @@ function fixture() {
   )`);
   db.prepare('INSERT INTO projects (id,name,path,defaultBranch,envTemplate,settings) VALUES (?,?,?,?,?,?)')
     .run('demo', 'Demo', repo, 'main', JSON.stringify({ TOKEN: 'should-not-export' }), JSON.stringify({
-      preset: 'balanced', gitea: { enabled: true, url: 'https://gitea.test/api/v1' },
+      preset: 'balanced', brain: { dailyTokenBudget: 12000, maxTokens: 24000 },
+      gitea: { enabled: true, url: 'https://gitea.test/api/v1' },
       remoteDeploy: { enabled: true, steps: [['npm', 'run', 'deploy']] },
     }));
+  db.prepare('INSERT INTO departments (id,name,priority,maxParallel,claudeDailyTokenBudget,brainDailyTokenBudget,brainMaxTurnsPerHour) VALUES (?,?,?,?,?,?,?)')
+    .run('eng', 'Engineering', 1, 2, 30000, 40000, 20);
   const config = loadConfig(home);
   config.integrations.openproject.sources = [{ id: 'op', url: 'https://openproject.test', project: 'demo' }];
   const service = {
@@ -49,8 +52,21 @@ describe('setup export/import bundle', () => {
     const serialized = JSON.stringify(bundle);
     expect(bundle.integrations).toMatchObject({ openproject: { sources: [{ url: 'https://openproject.test' }] } });
     expect(serialized).toContain('https://gitea.test/api/v1');
+    expect(bundle.projects[0]).toMatchObject({ settings: expect.anything() });
+    expect(JSON.parse(bundle.projects[0].settings as string).brain).toEqual({ dailyTokenBudget: 12000, maxTokens: 24000 });
+    expect(bundle.departments[0]).toMatchObject({ claudeDailyTokenBudget: 30000, brainDailyTokenBudget: 40000 });
     expect(serialized).not.toContain('should-not-export');
-    expect(serialized).not.toMatch(/(?:token|password|secret|api[-_]?key)\s*[:=]/i);
+    const secretKeys: string[] = [];
+    const collectKeys = (value: unknown) => {
+      if (Array.isArray(value)) return value.forEach(collectKeys);
+      if (!value || typeof value !== 'object') return;
+      for (const [key, item] of Object.entries(value)) {
+        if (/^(?:token|password|secret|credential|api[-_]?key|private[-_]?key|(?:api|access|auth)Token)$/i.test(key)) secretKeys.push(key);
+        collectKeys(item);
+      }
+    };
+    collectKeys(bundle);
+    expect(secretKeys).toEqual([]);
     expect(serialized).not.toMatch(/\/home\/[^" ]+/);
   });
 

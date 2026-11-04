@@ -1273,6 +1273,7 @@ export class Scheduler {
     const disks = this.getMonitoredDisks();
     const blockedDisk = disks.find((disk) => disk.low);
     if (blockedDisk) {
+      this.diskLow = true;
       const diskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
       const hasQueuedTasks = this.taskRepo.getByStatus('queued').length > 0;
       if (blockedDisk.source === 'hub_home' || diskWaiters.length > 0 || !hasQueuedTasks) {
@@ -2356,7 +2357,7 @@ export class Scheduler {
       this.markDiskLow(blockedDiskInTick);
     } else {
       const lowDisk = this.getMonitoredDisks().find((d) => d.low);
-      if (lowDisk && !this.diskLow) {
+      if (lowDisk) {
         this.markDiskLow(lowDisk);
       }
     }

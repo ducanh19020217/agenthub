@@ -593,6 +593,35 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   );
 
   server.tool(
+    'hub_ticket_decision',
+    'Quyết định ticket OpenProject sau khi triage: làm, chia, hỏi tester, bỏ qua hoặc tự làm',
+    {
+      sourceId: z.string().min(1),
+      wpId: z.number().int().positive(),
+      action: z.enum(['do', 'split', 'ask', 'skip', 'manual']),
+      note: z.string().optional(),
+    },
+    async (args) => {
+      try {
+        const result = await callApi<{ action: string; taskIds: string[] }>('POST', `/api/tracker/${encodeURIComponent(args.sourceId)}/${args.wpId}/decision`, { action: args.action, note: args.note });
+        return { content: [{ type: 'text', text: `✓ Đã quyết định ${result.action}; task: ${result.taskIds.join(', ') || 'không tạo task'}` }] };
+      } catch (err: unknown) { return handleError(err); }
+    },
+  );
+
+  server.tool(
+    'hub_ticket_triage_input',
+    'Gửi thêm thông tin tester cho lượt phân tích triage OpenProject',
+    { sourceId: z.string().min(1), wpId: z.number().int().positive(), content: z.string().min(1) },
+    async (args) => {
+      try {
+        const result = await callApi<{ taskId: string }>('POST', `/api/tracker/${encodeURIComponent(args.sourceId)}/${args.wpId}/input`, { content: args.content });
+        return { content: [{ type: 'text', text: `✓ Đã tạo lượt triage bổ sung: ${result.taskId}` }] };
+      } catch (err: unknown) { return handleError(err); }
+    },
+  );
+
+  server.tool(
     'hub_daily_report',
     'Tạo ngay báo cáo ngày OpenProject cho một nguồn',
     {

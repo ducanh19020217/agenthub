@@ -935,6 +935,8 @@ export function formatEventSummary(
 
 export class AppService {
   private trackerRepo?: TrackerItemRepo;
+  private triageDecisionHandler?: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>;
+  private triageInputHandler?: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>;
   public deployService?: DeployService;
   public remoteDeployService?: RemoteDeployService;
   public ciRepo?: CiRepo;
@@ -982,6 +984,16 @@ export class AppService {
 
   setSetupTools(tools: SetupTools): void { this.setupTools = tools; }
   setTrackerRepo(repo: TrackerItemRepo): void { this.trackerRepo = repo; }
+  setTriageDecisionHandler(handler: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>): void { this.triageDecisionHandler = handler; }
+  async decideOpenProjectTicket(sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string): Promise<{ action: string; taskIds: string[] }> {
+    if (!this.triageDecisionHandler) throw new HttpError(503, 'unavailable', 'OpenProject triage chưa sẵn sàng');
+    return this.triageDecisionHandler(sourceId, wpId, action, note);
+  }
+  setTriageInputHandler(handler: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>): void { this.triageInputHandler = handler; }
+  async submitOpenProjectTriageInput(sourceId: string, wpId: number, content: string): Promise<{ taskId: string }> {
+    if (!this.triageInputHandler) throw new HttpError(503, 'unavailable', 'OpenProject triage chưa sẵn sàng');
+    return this.triageInputHandler(sourceId, wpId, content);
+  }
   private openProjectTicketUrl(task: TaskRow): string | null {
     if (!task.externalRef || !this.trackerRepo) return task.externalRef?.startsWith('http') ? task.externalRef : null;
     const item = this.trackerRepo.listForTask(task.id).find((row) => row.display_id === task.externalRef);
@@ -3058,12 +3070,25 @@ export class AppService {
   }
 
   listTasks(filter?: { project?: string; status?: string }): TaskRow[] {
-    return this.decorateTasks(this.taskRepo.list(filter));
+    return this.decorateTriageTasks(this.decorateTasks(this.taskRepo.list(filter)));
   }
 
   listTasksPage(filter?: { project?: string; status?: string; search?: string; limit?: string | number; cursor?: string; offset?: string | number; sort?: string; order?: string }): PageResult<TaskRow> {
     const page = this.taskRepo.page(filter);
-    return { ...page, items: this.decorateTasks(page.items) };
+    return { ...page, items: this.decorateTriageTasks(this.decorateTasks(page.items)) };
+  }
+
+  private decorateTriageTasks(tasks: TaskRow[]): TaskRow[] {
+    if (!this.trackerRepo) return tasks;
+    return tasks.map((task) => {
+      const row = this.trackerRepo!.listForTask(task.id).find((item) => item.display_id === task.externalRef);
+      if (!row) return task;
+      try {
+        const writeback = JSON.parse(row.writeback) as { triage?: unknown; decision?: unknown };
+        if (!writeback.triage) return task;
+        return { ...task, triage: { sourceId: row.source_id, wpId: row.wp_id, displayId: row.display_id, analysis: (writeback.triage as { analysis?: unknown }).analysis, decision: writeback.decision || null } } as TaskRow;
+      } catch { return task; }
+    });
   }
 
   getTasksGraph(options?: { project?: string; includeDone?: string | boolean }) {
@@ -3175,6 +3200,14 @@ export class AppService {
       : (isFallback ? fallbackReviewer : (reviews.at(-1)?.actor === 'claude-reviewer' ? 'claude' : (activeReviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex')));
 
     const blockingDisk = this.getBlockingDiskForTask(task);
+    const tracker = this.trackerRepo?.listForTask(task.id).find((row) => row.display_id === task.externalRef);
+    let triage: unknown = null;
+    if (tracker) {
+      try {
+        const writeback = JSON.parse(tracker.writeback) as { triage?: unknown; decision?: unknown };
+        triage = { sourceId: tracker.source_id, wpId: tracker.wp_id, displayId: tracker.display_id, ...(writeback.triage ? { analysis: (writeback.triage as { analysis?: unknown }).analysis } : {}), decision: writeback.decision || null };
+      } catch { triage = null; }
+    }
     const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
     const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
     return {
@@ -3213,6 +3246,7 @@ export class AppService {
       worktreePath: task.worktreePath,
       checks: this.scheduler.getCheckResults(taskId),
       sourceRef: task.sourceRef ? JSON.parse(task.sourceRef) : null,
+      triage,
       derivedTasks: this.taskRepo.getDerivedFrom(taskId).map((t) => apiTask(t, this.getBlockingDiskForTask(t))),
       claudeCost: (() => { const measured = this.claudeSessionRepo?.taskCost(taskId); return measured ? { measured: measured.effectiveTokens > 0, ...measured } : { measured: false, effectiveTokens: 0, sessions: 0 }; })(),
     };

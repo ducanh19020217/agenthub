@@ -94,6 +94,7 @@ export interface TelegramUpdate {
     message_thread_id?: number;
     date: number;
     text?: string;
+    reply_to_message?: { message_id: number; text?: string };
   };
   callback_query?: {
     id: string;
@@ -144,6 +145,7 @@ export interface TelegramServiceOptions {
 
 export type PendingChatState =
   | { action: 'reject_feedback'; taskId: string }
+  | { action: 'triage_note'; sourceId: string; wpId: number; decision: 'ask' | 'skip' }
   | { action: 'newtask_description'; projectId?: string }
   | { action: 'newtask_project_description'; description: string; externalRef?: string }
   | { action: 'newtask_project' }
@@ -293,6 +295,7 @@ export class TelegramBotService {
 
   // Pending user input state per chat (e.g. entering feedback for reject)
   private chatStates = new Map<number, PendingChatState>();
+  private triageReplies = new Map<string, { sourceId: string; wpId: number }>();
 
   // Anti-flood: message queue per chat and last send timestamp
   private chatQueues = new Map<number, SendQueueItem[]>();
@@ -1127,6 +1130,19 @@ export class TelegramBotService {
     }
 
     // 2. Allowed chat - check if user has a pending state (e.g. entering feedback for reject)
+    if (msg.reply_to_message?.text && rawText) {
+      const displayId = msg.reply_to_message.text.match(/\[([^\]]+)\]/)?.[1];
+      const target = displayId ? this.triageReplies.get(displayId) : undefined;
+      if (target) {
+        try {
+          const result = await this.service.submitOpenProjectTriageInput(target.sourceId, target.wpId, rawText);
+          await this.sendMessage(chatId, `✅ Đã tạo lượt triage bổ sung: <code>${this.escapeHtml(result.taskId)}</code>`);
+        } catch (error) {
+          await this.sendMessage(chatId, `❌ Không thể gửi thêm thông tin: ${this.escapeHtml(error instanceof Error ? error.message : String(error))}`);
+        }
+        return;
+      }
+    }
     const pendingState = this.chatStates.get(chatId);
     if (pendingState) {
       if (rawText.toLowerCase() === '/cancel') {
@@ -1148,6 +1164,21 @@ export class TelegramBotService {
         } catch (err: unknown) {
           const errMsg = err instanceof Error ? err.message : String(err);
           await this.sendMessage(chatId, `❌ Lỗi khi trả về task ${taskId}: ${errMsg}`);
+        }
+        return;
+      }
+
+      if (pendingState.action === 'triage_note') {
+        this.chatStates.delete(chatId);
+        if (!rawText) {
+          await this.sendMessage(chatId, 'Vui lòng nhập lý do hoặc /cancel.');
+          return;
+        }
+        try {
+          const result = await this.service.decideOpenProjectTicket(pendingState.sourceId, pendingState.wpId, pendingState.decision, rawText);
+          await this.sendMessage(chatId, `✅ Đã chọn <b>${pendingState.decision}</b>${result.taskIds.length ? `\nTask: <code>${this.escapeHtml(result.taskIds.join(', '))}</code>` : ''}`);
+        } catch (error) {
+          await this.sendMessage(chatId, `❌ Không thể quyết định triage: ${this.escapeHtml(error instanceof Error ? error.message : String(error))}`);
         }
         return;
       }
@@ -2340,6 +2371,36 @@ export class TelegramBotService {
           answer,
           text: updated?.text || d.text,
         });
+        break;
+      }
+      case 'triage': {
+        if (!['do', 'split', 'ask', 'skip', 'skip-note', 'manual'].includes(action)) {
+          await this.answerCallbackQuery(query.id, 'Lựa chọn không hợp lệ.');
+          return;
+        }
+        const parts = taskIdOrParam.split(':');
+        const sourceId = parts.slice(0, -1).join(':');
+        const wpIdText = parts.at(-1) || '';
+        const wpId = Number(wpIdText);
+        if (!sourceId || !Number.isSafeInteger(wpId) || wpId <= 0) {
+          await this.answerCallbackQuery(query.id, 'Mã ticket không hợp lệ.');
+          return;
+        }
+        if (action === 'ask' || action === 'skip-note') {
+          this.chatStates.set(chatId, { action: 'triage_note', sourceId, wpId, decision: action === 'ask' ? 'ask' : 'skip' });
+          await this.answerCallbackQuery(query.id, 'Hãy nhập ghi chú hoặc lý do.');
+          await this.sendMessage(chatId, action === 'ask' ? 'Nhập ghi chú bổ sung cho tester, hoặc /cancel:' : 'Nhập lý do không xử lý (hoặc /cancel):');
+          return;
+        }
+        const resolvedAction = action as 'do' | 'split' | 'skip' | 'manual';
+        try {
+          const result = await this.service.decideOpenProjectTicket(sourceId, wpId, resolvedAction);
+          await this.answerCallbackQuery(query.id, `Đã chọn: ${resolvedAction}`);
+          await this.sendMessage(chatId, `🔗 ${this.escapeHtml(sourceId)}/${wpId}: đã chọn <b>${this.escapeHtml(resolvedAction)}</b>${result.taskIds.length ? `\nTask: <code>${this.escapeHtml(result.taskIds.join(', '))}</code>` : ''}`);
+        } catch (error) {
+          await this.answerCallbackQuery(query.id, 'Không thể thực hiện quyết định.');
+          await this.sendMessage(chatId, `❌ Không thể quyết định triage: ${this.escapeHtml(error instanceof Error ? error.message : String(error))}`);
+        }
         break;
       }
       case 'chatlimit': {
@@ -4004,14 +4065,39 @@ export class TelegramBotService {
       }
 
       case 'tracker.ticket_imported':
+      case 'tracker.triage_started':
       case 'tracker.comment':
       case 'tracker.poll_failed':
       case 'tracker.resolved':
       case 'tracker.review_requested':
       case 'tracker.writeback_failed': {
         const ref = typeof p.displayId === 'string' ? p.displayId : typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
-        const label = type === 'tracker.ticket_imported' ? 'đã nhập ticket thành task' : type === 'tracker.comment' ? 'có comment mới' : type === 'tracker.poll_failed' ? 'đồng bộ thất bại' : type === 'tracker.resolved' ? 'đã resolve' : type === 'tracker.review_requested' ? 'cần quyết định' : 'ghi ngược thất bại';
+        const label = type === 'tracker.ticket_imported' ? 'đã nhập ticket thành task' : type === 'tracker.triage_started' ? 'đã tạo task phân tích' : type === 'tracker.comment' ? 'có comment mới' : type === 'tracker.poll_failed' ? 'đồng bộ thất bại' : type === 'tracker.resolved' ? 'đã resolve' : type === 'tracker.review_requested' ? 'cần quyết định' : 'ghi ngược thất bại';
         this.broadcastMessage(`${prefix}🔗 <b>${this.escapeHtml(ref)}</b> ${label}.`);
+        break;
+      }
+      case 'tracker.triage_ready': {
+        const sourceId = typeof p.sourceId === 'string' ? p.sourceId : '';
+        const wpId = typeof p.wpId === 'number' ? p.wpId : 0;
+        const analysis = p.analysis && typeof p.analysis === 'object' ? p.analysis as { conclusion?: string; size?: string; summary?: string } : {};
+        if (p.autoDispatch === true) {
+          this.broadcastMessage(`${prefix}✅ <b>[${this.escapeHtml(String(p.displayId || 'ticket'))}] Đã tự giao</b>\nKết luận: ${this.escapeHtml(String(analysis.conclusion || ''))}\nĐộ lớn: ${this.escapeHtml(String(analysis.size || ''))}`);
+          break;
+        }
+        const rows: InlineKeyboardButton[][] = [[
+          { text: analysis.conclusion === 'việc thủ công' ? '🙋 Tôi tự làm' : '✅ Làm', callback_data: `triage:${analysis.conclusion === 'việc thủ công' ? 'manual' : 'do'}:${sourceId}:${wpId}` },
+          ...((analysis.size === 'lớn' || analysis.size === 'lớn (cần chia)') ? [{ text: '🧩 Làm + chia', callback_data: `triage:split:${sourceId}:${wpId}` }] : []),
+        ], [
+          { text: '❓ Hỏi tester', callback_data: `triage:ask:${sourceId}:${wpId}` },
+          { text: '🚫 Không làm', callback_data: `triage:skip:${sourceId}:${wpId}` },
+          { text: '🚫 Không làm + lý do', callback_data: `triage:skip-note:${sourceId}:${wpId}` },
+        ]];
+        const summary = String(analysis.summary || '').slice(0, 900);
+        const ticketUrl = typeof p.ticketUrl === 'string' ? `\n<a href="${this.escapeHtml(p.ticketUrl)}">Mở ticket</a>` : '';
+        const dashboardUrl = typeof p.taskId === 'string' ? `\n<a href="${this.escapeHtml(this.getDashboardUrl(`#/tasks/${toRouteId(p.taskId)}`))}">Mở trên hub</a>` : '';
+        const displayId = String(p.displayId || 'ticket');
+        if (sourceId && Number.isSafeInteger(wpId) && wpId > 0) this.triageReplies.set(displayId, { sourceId, wpId });
+        this.broadcastMessage(`${prefix}🔎 <b>[${this.escapeHtml(displayId)}] Phân tích xong</b>\nKết luận: ${this.escapeHtml(String(analysis.conclusion || ''))}\nĐộ lớn: ${this.escapeHtml(String(analysis.size || ''))}\n${this.escapeHtml(summary)}\n<i>Trả lời tin nhắn này để gửi thêm thông tin</i>${ticketUrl}${dashboardUrl}`, { inline_keyboard: rows });
         break;
       }
 

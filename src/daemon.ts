@@ -391,6 +391,16 @@ export function createContext(
     taskService: service,
     eventBus: scheduler.getEventBus(),
   });
+  service.setTriageDecisionHandler(async (sourceId, wpId, action, note) => {
+    const row = trackerRepo.get(sourceId, wpId);
+    if (!row) throw new Error(`Tracker item không tồn tại: ${sourceId}/${wpId}`);
+    return writebackService.decide(row, action, note);
+  });
+  service.setTriageInputHandler(async (sourceId, wpId, content) => {
+    const row = trackerRepo.get(sourceId, wpId);
+    if (!row) throw new Error(`Tracker item không tồn tại: ${sourceId}/${wpId}`);
+    return writebackService.submitTriageInput(row, content);
+  });
 
   const dailyReportService = new DailyReportService({
     config,

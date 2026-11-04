@@ -410,4 +410,19 @@ describe('TasksPage & Kanban Long Lists', () => {
     expect(screen.getByText('Tạm dừng (thủ công)')).toBeInTheDocument();
     expect(screen.queryByText(/im lặng/i)).not.toBeInTheDocument();
   });
+
+  it('hiển thị khu vực Chờ bạn quyết định cho triage đã phân tích', async () => {
+    const triageTask: Task = {
+      id: 'p1~op-op-42-triage', projectId: 'p1', slug: 'op-op-42-triage', title: '[OP-42] Lỗi export',
+      status: 'done', level: 'easy', dependsOn: [], attempt: 1, resume: 0,
+      createdAt: '2026-10-15T00:00:00Z', updatedAt: '2026-10-15T00:00:00Z',
+      triage: { sourceId: 'demo', wpId: 42, displayId: 'OP-42', analysis: { conclusion: 'lỗi', size: 'vừa', summary: 'Tóm tắt' }, decision: null },
+    };
+    vi.spyOn(client, 'getTasks').mockResolvedValue([triageTask]);
+    vi.spyOn(client, 'getTasksPage').mockResolvedValue({ items: [], total: 0, nextCursor: null });
+    renderPage();
+    expect(await screen.findByTestId('triage-pending-section')).toBeInTheDocument();
+    expect(screen.getByText('OP-42')).toBeInTheDocument();
+    expect(screen.getByText('lỗi · vừa')).toBeInTheDocument();
+  });
 });

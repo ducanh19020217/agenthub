@@ -292,6 +292,85 @@ describe('OpenProjectIntakeService', () => {
     expect(events.some((event) => event.type === 'tracker.comment')).toBe(true);
   });
 
+  it('approve mode creates only a queued triage task for a new ticket', async () => {
+    source = { ...source, triage: 'approve' };
+    config.integrations.openproject.sources = [source];
+    workPackages.clear();
+    const intake = service();
+    await intake.sync('demo');
+    workPackages.set(42, workPackage);
+    await intake.sync('demo');
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({ slug: 'op-op-123-triage', start: true, level: 'easy' });
+    expect(String(created[0].body)).toContain('TRIAGE: Không sửa code, không commit');
+    expect(String(created[0].body)).toContain('## Phân tích');
+  });
+
+  it('off mode keeps the legacy repair-task flow', async () => {
+    source = { ...source, triage: 'off' };
+    config.integrations.openproject.sources = [source];
+    workPackages.clear();
+    const intake = service();
+    await intake.sync('demo');
+    workPackages.set(42, workPackage);
+    await intake.sync('demo');
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({ slug: 'op-op-123', start: false });
+    expect(String(created[0].body)).toContain('## Comment cho tester');
+    expect(String(created[0].body)).not.toContain('TRIAGE:');
+  });
+
+  it('only triages a tester comment after ask and does not loop on AgentHub comments', async () => {
+    source = { ...source, triage: 'approve' };
+    config.integrations.openproject.sources = [source];
+    workPackages.clear();
+    const intake = service();
+    await intake.sync('demo');
+    workPackages.set(42, workPackage);
+    await intake.sync('demo');
+    const row = trackerRepo.get('demo', 42)!;
+    taskRepo.updateStatus('primary/op-op-123-triage', 'done');
+    trackerRepo.upsert({ ...row, writeback: JSON.stringify({ decision: { action: 'ask' } }) });
+    workPackage = { ...workPackage, updatedAt: '2026-11-03T11:00:00Z' };
+    workPackages.set(42, workPackage);
+    activities = [{ id: 1, comment: { raw: 'Tester trả lời' }, _links: { user: { href: '/api/v3/users/2' } } }];
+    await intake.sync('demo');
+    expect(created).toHaveLength(2);
+
+    const afterTester = trackerRepo.get('demo', 42)!;
+    taskRepo.updateStatus('primary/op-op-123-triage-r2', 'done');
+    trackerRepo.upsert({ ...afterTester, writeback: JSON.stringify({ decision: { action: 'do' } }) });
+    workPackage = { ...workPackage, updatedAt: '2026-11-03T12:00:00Z' };
+    workPackages.set(42, workPackage);
+    activities = [{ id: 2, comment: { raw: '**[AgentHub] Cần thêm thông tin**' }, _links: { user: { href: '/api/v3/users/1' } } }];
+    await intake.sync('demo');
+    expect(created).toHaveLength(2);
+  });
+
+  it('does not triage comments after manual, but re-triages when the ticket is reopened', async () => {
+    source = { ...source, triage: 'approve' };
+    config.integrations.openproject.sources = [source];
+    workPackages.clear();
+    const intake = service();
+    await intake.sync('demo');
+    workPackages.set(42, workPackage);
+    await intake.sync('demo');
+    const row = trackerRepo.get('demo', 42)!;
+    taskRepo.updateStatus('primary/op-op-123-triage', 'done');
+    trackerRepo.upsert({ ...row, writeback: JSON.stringify({ decision: { action: 'manual' } }) });
+    workPackage = { ...workPackage, updatedAt: '2026-11-03T11:00:00Z' };
+    workPackages.set(42, workPackage);
+    activities = [{ id: 1, comment: { raw: 'Thông tin vận hành mới' }, _links: { user: { href: '/api/v3/users/2' } } }];
+    await intake.sync('demo');
+    expect(created).toHaveLength(1);
+
+    workPackage = { ...workPackage, updatedAt: '2026-11-03T12:00:00Z', _links: { status: { href: '/api/v3/statuses/2' } }, status: { title: 'Reopened' } };
+    workPackages.set(42, workPackage);
+    await intake.sync('demo');
+    expect(created.map((task) => task.slug)).toEqual(['op-op-123-triage', 'op-op-123-triage-r2']);
+    expect(JSON.parse(trackerRepo.get('demo', 42)!.writeback)).not.toHaveProperty('decision');
+  });
+
   it('emits COMMENT for an open task, honors minTicketNumber, and does not start without a source', async () => {
     workPackages.clear();
     const intake = service();

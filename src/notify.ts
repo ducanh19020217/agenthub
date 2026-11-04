@@ -389,6 +389,20 @@ export class NotificationService {
         break;
       }
 
+      case 'tracker.triage_ready': {
+        const ref = typeof p.displayId === 'string' ? p.displayId : 'ticket';
+        const auto = p.autoDispatch === true ? ' (đã tự giao)' : '';
+        this.notify(`${this.appName}: OpenProject ticket ${ref} đã phân tích, chờ quyết định${auto}`, 'normal');
+        break;
+      }
+
+      case 'tracker.triage_invalid': {
+        const ref = typeof p.displayId === 'string' ? p.displayId : 'ticket';
+        const errors = Array.isArray(p.errors) ? `: ${p.errors.join('; ')}` : '';
+        this.notify(`${this.appName}: phân tích OpenProject ${ref} không hợp lệ${errors}`, 'normal');
+        break;
+      }
+
       case 'tracker.writeback_failed': {
         const error = typeof p.error === 'string' ? `: ${p.error}` : '';
         this.notify(`${this.appName}: ghi ngược OpenProject thất bại${error}`, 'critical');

@@ -722,5 +722,29 @@ describe('TaskDetailPage', () => {
     const backBtn = screen.getByRole('button', { name: /Quay lại/i });
     expect(backBtn).toBeInTheDocument();
   });
+
+  it('hiển thị toàn bộ phân tích triage, nút chia và ô gửi thêm thông tin', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      triage: {
+        sourceId: 'demo', wpId: 42, displayId: 'OP-42', decision: null,
+        analysis: {
+          conclusion: 'lỗi', size: 'lớn', summary: 'Tóm tắt đầy đủ',
+          evidence: 'Bằng chứng tái hiện', cause: 'Nguyên nhân dự kiến', proposal: 'Hướng sửa', risks: 'Rủi ro', questions: 'Câu hỏi',
+        },
+      },
+    });
+    vi.spyOn(client, 'decideOpenProjectTicket').mockResolvedValue({ action: 'split', taskIds: [] });
+    vi.spyOn(client, 'submitOpenProjectTriageInput').mockResolvedValue({ taskId: 'proj-1/op-op-42-triage-r1' });
+    renderPage();
+    expect(await screen.findByText('Tóm tắt đầy đủ')).toBeInTheDocument();
+    expect(screen.getByText('Bằng chứng tái hiện')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Làm \+ chia/i })).toBeInTheDocument();
+    const input = screen.getByPlaceholderText(/Gửi thêm thông tin/i);
+    fireEvent.change(input, { target: { value: 'log từ server' } });
+    fireEvent.click(screen.getByRole('button', { name: /Gửi thêm thông tin/i }));
+    await vi.waitFor(() => expect(client.submitOpenProjectTriageInput).toHaveBeenCalledWith('demo', 42, 'log từ server'));
+  });
 });
 

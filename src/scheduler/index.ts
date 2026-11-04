@@ -22,6 +22,7 @@ import {
   TrackerItemRepo,
 } from '../db/index.js';
 import { projectSettings } from '../projects/settings.js';
+import { isTriageTaskSlug } from '../integrations/openproject/triage.js';
 import { renderCommitTemplate, renderTaskBranch } from '../commit-convention.js';
 import { isProjectWorktreeRootAccessible, projectWorktreeRoot, projectWorktreeRoots } from '../projects/paths.js';
 import { Engine, AgyEngine, CodexEngine } from '../engines/index.js';
@@ -1148,6 +1149,18 @@ export class Scheduler {
         }
       }
       if (this.stopped) return;
+      if (isTriageTaskSlug(currentTask.slug)) {
+        if (currentTask.diffStat && currentTask.diffStat.trim()) {
+          const blockedReport = '## Phân tích\n\nTriage không hợp lệ: worker đã tạo thay đổi code. Task triage bị chặn để người dùng kiểm tra.';
+          this.taskRepo.update(taskId, { status: 'blocked', blockedReport, transientRetries: 0, notBefore: null });
+          this.eventBus.emit('tracker.triage_invalid', taskId, { reason: 'code_changes' });
+        } else {
+          this.taskRepo.update(taskId, { status: 'done', transientRetries: 0, notBefore: null, reviewStep: 0 });
+          this.eventBus.emit('task.done', taskId, { triage: true });
+        }
+        if (!this.stopped) this.triggerTick();
+        return;
+      }
       this.taskRepo.update(taskId, { status: 'review', transientRetries: 0, notBefore: null, reviewStep: 0 });
       if (this.reviewChainForTask(currentTask).length === 0) {
         this.emitReviewReadyIfReview(taskId, {

@@ -331,6 +331,9 @@ export const OpenProjectSourceSchema = z.object({
   minTicketNumber: z.number().int().min(0).default(0),
   autoStart: z.boolean().default(true),
   autoResolve: z.boolean().default(true),
+  triage: z.enum(['off', 'approve', 'auto']).default('off'),
+  triageModelChain: z.array(z.string().min(1)).optional(),
+  feedbackStatusId: z.number().int().nullable().default(null),
   language: z.string().default('vi'),
   dailyReport: DailyReportConfigSchema.optional(),
 });

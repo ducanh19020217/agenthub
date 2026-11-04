@@ -183,6 +183,7 @@ export async function createServer(
   registerOpenProjectRoutes(fastify, config, {
     sync: options?.openProjectSync,
     dailyReport: options?.openProjectDailyReport || (service.dailyReportService ? (sourceId, date) => service.dailyReportService!.generateReport(sourceId, date ? parseDateNoon(date) : undefined, { overwrite: true }) : undefined),
+    decision: (sourceId, wpId, action, note) => service.decideOpenProjectTicket(sourceId, wpId, action, note),
   });
 
   fastify.post('/api/hub/shutdown', async (req) => {

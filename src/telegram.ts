@@ -2339,6 +2339,23 @@ export class TelegramBotService {
         });
         break;
       }
+      case 'triage': {
+        if (!['do', 'split', 'ask', 'skip', 'manual'].includes(action)) {
+          await this.answerCallbackQuery(query.id, 'Lựa chọn không hợp lệ.');
+          return;
+        }
+        const [sourceId, wpIdText] = taskIdOrParam.split(':');
+        const wpId = Number(wpIdText);
+        try {
+          const result = await this.service.decideOpenProjectTicket(sourceId, wpId, action as 'do' | 'split' | 'ask' | 'skip' | 'manual');
+          await this.answerCallbackQuery(query.id, `Đã chọn: ${action}`);
+          await this.sendMessage(chatId, `🔗 ${this.escapeHtml(sourceId)}/${wpId}: đã chọn <b>${this.escapeHtml(action)}</b>${result.taskIds.length ? `\nTask: <code>${this.escapeHtml(result.taskIds.join(', '))}</code>` : ''}`);
+        } catch (error) {
+          await this.answerCallbackQuery(query.id, 'Không thể thực hiện quyết định.');
+          await this.sendMessage(chatId, `❌ Không thể quyết định triage: ${this.escapeHtml(error instanceof Error ? error.message : String(error))}`);
+        }
+        break;
+      }
       case 'chatlimit': {
         if (!this.chatService) { await this.answerCallbackQuery(query.id, 'Chat chưa sẵn sàng.'); return; }
         const result = action === 'cancel' ? this.chatService.cancelLimitRetry(taskIdOrParam) : this.chatService.retryLimitNow(taskIdOrParam);
@@ -4000,14 +4017,29 @@ export class TelegramBotService {
       }
 
       case 'tracker.ticket_imported':
+      case 'tracker.triage_started':
       case 'tracker.comment':
       case 'tracker.poll_failed':
       case 'tracker.resolved':
       case 'tracker.review_requested':
       case 'tracker.writeback_failed': {
         const ref = typeof p.displayId === 'string' ? p.displayId : typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
-        const label = type === 'tracker.ticket_imported' ? 'đã nhập ticket thành task' : type === 'tracker.comment' ? 'có comment mới' : type === 'tracker.poll_failed' ? 'đồng bộ thất bại' : type === 'tracker.resolved' ? 'đã resolve' : type === 'tracker.review_requested' ? 'cần quyết định' : 'ghi ngược thất bại';
+        const label = type === 'tracker.ticket_imported' ? 'đã nhập ticket thành task' : type === 'tracker.triage_started' ? 'đã tạo task phân tích' : type === 'tracker.comment' ? 'có comment mới' : type === 'tracker.poll_failed' ? 'đồng bộ thất bại' : type === 'tracker.resolved' ? 'đã resolve' : type === 'tracker.review_requested' ? 'cần quyết định' : 'ghi ngược thất bại';
         this.broadcastMessage(`${prefix}🔗 <b>${this.escapeHtml(ref)}</b> ${label}.`);
+        break;
+      }
+      case 'tracker.triage_ready': {
+        const sourceId = typeof p.sourceId === 'string' ? p.sourceId : '';
+        const wpId = typeof p.wpId === 'number' ? p.wpId : 0;
+        const analysis = p.analysis && typeof p.analysis === 'object' ? p.analysis as { conclusion?: string; size?: string; summary?: string } : {};
+        const rows: InlineKeyboardButton[][] = [[
+          { text: analysis.conclusion === 'việc thủ công' ? '🙋 Tôi tự làm' : '✅ Làm', callback_data: `triage:${analysis.conclusion === 'việc thủ công' ? 'manual' : 'do'}:${sourceId}:${wpId}` },
+          ...(analysis.size === 'lớn (cần chia)' ? [{ text: '🧩 Làm + chia', callback_data: `triage:split:${sourceId}:${wpId}` }] : []),
+        ], [
+          { text: '❓ Hỏi tester', callback_data: `triage:ask:${sourceId}:${wpId}` },
+          { text: '🚫 Không làm', callback_data: `triage:skip:${sourceId}:${wpId}` },
+        ]];
+        this.broadcastMessage(`${prefix}🔎 <b>[${this.escapeHtml(String(p.displayId || 'ticket'))}] Phân tích xong</b>\nKết luận: ${this.escapeHtml(String(analysis.conclusion || ''))}\nĐộ lớn: ${this.escapeHtml(String(analysis.size || ''))}\n${this.escapeHtml(String(analysis.summary || ''))}`, { inline_keyboard: rows });
         break;
       }
 

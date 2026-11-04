@@ -38,6 +38,9 @@ Mọi tính năng **tắt mặc định** và cấu hình theo nguồn hoặc th
   "openStatusIds": [1, 100, 7, 94],   // dùng cho báo cáo ngày
   "minTicketNumber": 0,               // chỉ tự tạo task cho số ticket >= mức này
   "autoStart": true,                  // true: task queued; false: draft
+  "triage": "off",                   // off | approve | auto
+  "triageModelChain": ["gemini-3.8-flash-medium"],
+  "feedbackStatusId": null,            // trạng thái hỏi thêm tester
   "autoResolve": true,                // xong + đã push → comment + resolvedStatusId
   "language": "vi"                    // ngôn ngữ comment ghi ngược
 } ] } }
@@ -72,6 +75,8 @@ Nếu OpenProject đã tạo work package nhưng một bước đọc ticket, ch
 ### 4.1 Intake
 
 Poller chạy theo `pollIntervalSec`. Khi lỗi thì backoff, tối đa 1800s.
+
+Nếu `triage` khác `off`, ticket NEW/REOPENED/COMMENT phù hợp sẽ tạo task `op-<id>-triage` (hoặc `-r<n>`), task chỉ đọc và phải ghi `## Phân tích` theo `src/protocol.md`. Khi DONE hợp lệ, hub phát event `tracker.triage_ready`; người dùng chọn `do`, `split`, `ask`, `skip` hoặc `manual` qua API `POST /api/tracker/:sourceId/:wpId/decision` hoặc MCP `hub_ticket_decision`. `auto` tự chọn `do` khi kết luận là `lỗi` và độ lớn `nhỏ`/`vừa`.
 
 - **Lần đầu của một nguồn**: chỉ ghi mốc, không tạo task.
 - **Phân loại sự kiện**:

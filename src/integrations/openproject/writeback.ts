@@ -5,6 +5,7 @@ import { projectSettings } from '../../projects/settings.js';
 import type { ProjectRepo, ProjectRow, TaskRepo, TaskRow, TrackerItemRepo, TrackerItemRow } from '../../db/index.js';
 import { OpenProjectClient, OpenProjectError } from './client.js';
 import { readOpenProjectKey } from './secrets.js';
+import { isTriageTaskSlug, parseTriageAnalysis, shouldAutoDispatch, type TriageAnalysis } from './triage.js';
 
 type GitRunner = (cwd: string, args: string[]) => Promise<{ code: number; output: string }>;
 type WritebackState = {
@@ -15,6 +16,8 @@ type WritebackState = {
   resolved?: boolean;
   pushWarning?: boolean;
   failed?: string;
+  triage?: { taskId: string; analysis: TriageAnalysis; readyAt: string };
+  decision?: { action: 'do' | 'split' | 'ask' | 'skip' | 'manual'; by: string; at: string; note?: string };
 };
 
 export interface OpenProjectWritebackServiceOptions {
@@ -116,6 +119,10 @@ export class OpenProjectWritebackService {
     if (!task?.externalRef) return;
     const matches = this.trackerRepo.listAll().filter((row) => row.display_id === task.externalRef && parseIds(row).includes(taskId));
     for (const row of matches) await this.enqueue(row, async () => {
+      if (type === 'task.done' && isTriageTaskSlug(task.slug)) {
+        await this.handleTriageDone(this.latest(row), task);
+        return;
+      }
       if (type === 'task.done') await this.createLinkedTasks(this.latest(row), task);
       if (type === 'task.merged') {
         const merge = payload && typeof payload === 'object' ? payload as { mergeCommit?: string } : {};
@@ -124,6 +131,64 @@ export class OpenProjectWritebackService {
       if (type === 'task.blocked') await this.requestReview(this.latest(row), task);
       await this.process(this.latest(row));
     });
+  }
+
+  private async handleTriageDone(row: TrackerItemRow, task: TaskRow): Promise<void> {
+    const parsed = parseTriageAnalysis(task.doneReport || '');
+    if (!parsed.analysis) {
+      this.eventBus.emit('tracker.triage_invalid', task.id, { sourceId: row.source_id, displayId: row.display_id, errors: parsed.errors });
+      return;
+    }
+    const state = parseState(row);
+    state.triage = { taskId: task.id, analysis: parsed.analysis, readyAt: new Date(this.now()).toISOString() };
+    this.save(row, state);
+    this.eventBus.emit('tracker.triage_ready', task.id, {
+      sourceId: row.source_id, wpId: row.wp_id, displayId: row.display_id, taskId: task.id,
+      analysis: parsed.analysis, auto: sourceFor(this.config, row.source_id)?.triage === 'auto',
+    });
+    const source = sourceFor(this.config, row.source_id);
+    if (source?.triage === 'auto' && shouldAutoDispatch(parsed.analysis)) await this.decide(row, 'do', undefined, 'auto');
+  }
+
+  async decide(row: TrackerItemRow, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string, by = 'user'): Promise<{ action: string; taskIds: string[] }> {
+    row = this.latest(row);
+    const state = parseState(row);
+    if (state.decision) return { action: state.decision.action, taskIds: parseIds(row) };
+    const source = sourceFor(this.config, row.source_id);
+    const triage = state.triage?.analysis;
+    if (!source || !triage) throw new Error('Ticket chưa có phân tích triage hợp lệ');
+    const at = new Date(this.now()).toISOString();
+    state.decision = { action, by, at, note };
+    if (action === 'ask') {
+      const key = readOpenProjectKey(this.config.hubHome, source.id);
+      if (!key) throw new Error('Nguồn OpenProject chưa có API key');
+      const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
+      await client.addComment(row.wp_id, `**[AgentHub] Cần thêm thông tin**\n${triage.questions}${note ? `\n\n${note}` : ''}`);
+      if (source.feedbackStatusId !== null) await client.setStatus(row.wp_id, source.feedbackStatusId);
+      this.save(row, state);
+      return { action, taskIds: parseIds(row) };
+    }
+    if (action === 'skip' || action === 'manual') {
+      if (note && action === 'skip') {
+        const key = readOpenProjectKey(this.config.hubHome, source.id);
+        if (key) await new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn }).addComment(row.wp_id, `**[AgentHub] Không xử lý**: ${note}`);
+      }
+      this.save(row, state);
+      return { action, taskIds: parseIds(row) };
+    }
+    const primary = this.projectRepo.getAll().find((project) => {
+      const settings = projectSettings(project).openproject;
+      return settings.enabled && settings.role === 'primary' && settings.sourceId === row.source_id;
+    });
+    if (!primary) throw new Error('Không tìm thấy project primary của nguồn OpenProject');
+    const base = `op-${row.display_id.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+    let slug = base;
+    let n = 1;
+    while (this.taskRepo.get(`${primary.id}/${slug}`)) slug = `${base}-${++n}`;
+    const task = this.taskService.createTask({ project: primary.id, slug, title: `[${row.display_id}] ${triage.summary.slice(0, 100)}`, body: `${note ? `## Chỉ đạo người dùng\n${note}\n\n` : ''}## Phân tích triage\n\n${JSON.stringify(triage, null, 2)}\n\n${triage.proposal}\n\nSửa theo đề xuất và ghi ## Comment cho tester trong DONE.`, level: triage.size === 'lớn (cần chia)' && action === 'split' ? 'hard' : 'easy', externalRef: row.display_id, start: true });
+    this.save(row, state, [...new Set([...parseIds(row), task.id])]);
+    this.eventBus.emit('tracker.triage_decided', task.id, { sourceId: row.source_id, displayId: row.display_id, action, taskId: task.id });
+    return { action, taskIds: parseIds(this.latest(row)) };
   }
 
   private async handlePushEvent(type: string, payload: unknown): Promise<void> {

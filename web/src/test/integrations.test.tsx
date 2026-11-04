@@ -737,7 +737,7 @@ describe('Integrations UI Suite', () => {
         expect(syncSpy).toHaveBeenCalledWith('op-corp');
         expect(syncBtn).not.toBeDisabled();
         expect(syncBtn).toHaveTextContent('Đồng bộ ngay');
-        expect(screen.getByRole('status')).toHaveTextContent('Đã ghi mốc 13 ticket (lần đầu, chưa tạo task)');
+        expect(screen.getByRole('status')).toHaveTextContent('Đã ghi mốc 13 ticket (lần đầu, chưa tạo task, theo dõi 13)');
         expect(screen.getByRole('status')).toHaveClass('text-[var(--t-ok)]');
       }, { timeout: 5000 });
     }, 15_000);
@@ -807,6 +807,30 @@ describe('Integrations UI Suite', () => {
       await waitFor(() => {
         expect(syncSpy).toHaveBeenCalledWith('op-corp');
         expect(screen.getByRole('status')).toHaveTextContent('Đã nhập 1 ticket (theo dõi 13, mốc 0)');
+        expect(screen.getByRole('status')).toHaveClass('text-[var(--t-ok)]');
+      });
+    });
+
+    it('displays sync results with baseline only when watched is not provided', async () => {
+      const syncSpy = vi.spyOn(client, 'syncOpenProject').mockResolvedValue({
+        imported: 0,
+        comments: 0,
+        baseline: 7,
+      } as any);
+
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+        expect(screen.getByText('Đồng bộ ngay')).not.toBeDisabled();
+      });
+
+      const syncBtn = screen.getByText('Đồng bộ ngay');
+      fireEvent.click(syncBtn);
+
+      await waitFor(() => {
+        expect(syncSpy).toHaveBeenCalledWith('op-corp');
+        expect(screen.getByRole('status')).toHaveTextContent('Đã ghi mốc 7 ticket (lần đầu, chưa tạo task)');
         expect(screen.getByRole('status')).toHaveClass('text-[var(--t-ok)]');
       });
     });

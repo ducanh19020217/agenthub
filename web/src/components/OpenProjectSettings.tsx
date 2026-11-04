@@ -183,10 +183,17 @@ export const OpenProjectSettings: React.FC = () => {
     mutationFn: (sourceId: string) => syncOpenProject(sourceId),
     onSuccess: (res) => {
       if (res && typeof res.baseline === 'number' && res.baseline > 0) {
-        setMessage({
-          type: 'ok',
-          text: t('integrations.syncBaselineSuccess', { count: res.baseline }),
-        });
+        if (typeof res.watched === 'number') {
+          setMessage({
+            type: 'ok',
+            text: t('integrations.syncBaselineWatchedSuccess', { count: res.baseline, watched: res.watched }),
+          });
+        } else {
+          setMessage({
+            type: 'ok',
+            text: t('integrations.syncBaselineSuccess', { count: res.baseline }),
+          });
+        }
       } else if (res && typeof res.watched === 'number') {
         const count = res?.imported ?? 0;
         if (typeof res.baseline === 'number') {

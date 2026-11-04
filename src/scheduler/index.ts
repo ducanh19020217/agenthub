@@ -3669,13 +3669,38 @@ export class Scheduler {
   }
 
   /**
-   * Cancel a running task
+   * Cancel a running or pending/idle task
    */
   cancelTask(taskId: string): void {
     const rt = this.running.get(taskId);
     if (rt) {
       this.killTask(taskId, 'cancelled');
     } else {
+      const task = this.taskRepo.get(taskId);
+      if (task?.status === 'done' || task?.status === 'cancelled') return;
+
+      const reviewerRun = this.reviewerRuns.get(taskId);
+      if (reviewerRun) {
+        clearTimeout(reviewerRun.timeout);
+        if (reviewerRun.exitTimeout) clearTimeout(reviewerRun.exitTimeout);
+        if (reviewerRun.pid) {
+          try {
+            process.kill(-reviewerRun.pid, 'SIGKILL');
+          } catch {
+            try { process.kill(reviewerRun.pid, 'SIGKILL'); } catch {}
+          }
+        }
+        if (reviewerRun.lockFile) {
+          this.locks.release(reviewerRun.profileName, reviewerRun.lockFile);
+        }
+        this.locks.invalidate(reviewerRun.profileName);
+        this.reviewerRuns.delete(taskId);
+      }
+      this.reviewNotified.delete(taskId);
+      this.reviewWaitingNotified.delete(taskId);
+      this.reviewerFallbackNotified.delete(taskId);
+      this.reviewerErrorCounts.delete(taskId);
+      this.resetReviewerEscalation(taskId);
       this.taskRepo.updateStatus(taskId, 'cancelled');
       this.eventBus.emit('task.cancelled', taskId);
     }

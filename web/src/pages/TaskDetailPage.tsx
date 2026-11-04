@@ -633,8 +633,8 @@ export const TaskDetailPage: React.FC = () => {
             )
           )}
 
-          {/* Cancel (if running or queued) */}
-          {(task.status === 'running' || task.status === 'checking' || task.status === 'queued') && (
+          {/* Cancel (if not done or cancelled) */}
+          {task.status !== 'done' && task.status !== 'cancelled' && (
             <button
               type="button"
               onClick={() => setShowCancelModal(true)}

@@ -131,6 +131,33 @@ describe('TaskDetailPage', () => {
     expect(screen.queryByRole('heading', { name: /Xác nhận hủy task/i })).not.toBeInTheDocument();
   });
 
+  it('2b. Nút Hủy hiển thị với blocked, failed, review, waiting_quota, paused, draft và ẩn với done, cancelled', async () => {
+    const statusesToShow = ['blocked', 'failed', 'review', 'waiting_quota', 'paused', 'draft'] as const;
+    for (const status of statusesToShow) {
+      queryClient.clear();
+      vi.spyOn(client, 'getTask').mockResolvedValue({
+        ...baseTask,
+        status,
+      });
+      const { unmount } = renderPage();
+      expect(await screen.findByRole('button', { name: /^Hủy$/i })).toBeInTheDocument();
+      unmount();
+    }
+
+    const statusesToHide = ['done', 'cancelled'] as const;
+    for (const status of statusesToHide) {
+      queryClient.clear();
+      vi.spyOn(client, 'getTask').mockResolvedValue({
+        ...baseTask,
+        status,
+      });
+      const { unmount } = renderPage();
+      await screen.findByText('Task Alpha');
+      expect(screen.queryByRole('button', { name: /^Hủy$/i })).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
   it('3. Nút Thử lại kèm ghi chú: mở modal khi status failed, nhập note và gọi retryTask', async () => {
     const retrySpy = vi.spyOn(client, 'retryTask').mockResolvedValue({
       ...baseTask,

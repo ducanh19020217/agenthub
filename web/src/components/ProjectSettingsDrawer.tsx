@@ -1003,7 +1003,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     },
   });
 
-  const giteaStatus = useQuery({ queryKey: ['gitea-status', project?.id], queryFn: () => getGiteaStatus(project!.id), enabled: Boolean(isOpen && project?.id), refetchInterval: 10_000 });
+  const giteaStatus = useQuery({ queryKey: ['gitea-status', project?.id], queryFn: () => getGiteaStatus(project!.id), enabled: Boolean(isOpen && project?.id), refetchInterval: (query) => query.state.data?.running ? 3_000 : false });
   const remoteDeployStatus = useQuery({ queryKey: ['remote-deploy-status', project?.id], queryFn: () => getRemoteDeployStatus(project!.id), enabled: Boolean(isOpen && project?.id), refetchInterval: 10_000 });
   const giteaSyncMutation = useMutation({ mutationFn: () => syncGitea(project!.id), onSuccess: () => giteaStatus.refetch() });
   const deployNowMutation = useMutation({ mutationFn: () => triggerRemoteDeploy(project!.id), onSuccess: () => remoteDeployStatus.refetch() });
@@ -2518,8 +2518,11 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                     variant="secondary"
                     data-testid="sync-gitea-button"
                     onClick={() => giteaSyncMutation.mutate()}
+                    disabled={Boolean(giteaStatus.data?.running) || giteaSyncMutation.isPending}
                   >
-                    {t('integrations.syncNow')}
+                    {giteaStatus.data?.running
+                      ? t('integrations.syncRunning', { step: giteaStatus.data.step || '…' })
+                      : t('integrations.syncNow')}
                   </Button>
                 </div>
               )}
@@ -2529,7 +2532,15 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 {t('integrations.repo')}: {giteaStatus.data.remote.owner}/{giteaStatus.data.remote.repo} ({t('integrations.fromRemoteOrigin')})
               </p>
             )}
-            <p className="text-xs text-[var(--t-text-3)]">{t('integrations.lastSync')}: {giteaStatus.data?.status || '—'}</p>
+            {giteaStatus.data?.last ? (() => {
+              const last = giteaStatus.data.last;
+              const resultLabel = last.status === 'succeeded' ? t('integrations.syncSucceeded') : last.status === 'skipped' ? t('integrations.syncSkipped') : last.status === 'conflict' ? t('integrations.syncConflict') : t('integrations.syncFailed');
+              return <p className="text-xs text-[var(--t-text-3)]" data-testid="gitea-last-sync">
+                {t('integrations.lastSync')}: {new Date(last.finishedAt || '').toLocaleString()} — {resultLabel}
+                {(last.reason || last.error) && <> ({last.reason || last.error})</>}
+                {last.url && <> · <a className="underline" href={last.url} target="_blank" rel="noreferrer">{t('integrations.syncPr')} #{last.prNumber}</a></>}
+              </p>;
+            })() : <p className="text-xs text-[var(--t-text-3)]">{t('integrations.lastSync')}: —</p>}
           </Card>
 
           <Card className="p-5 space-y-4" data-testid="project-remote-deploy-section">

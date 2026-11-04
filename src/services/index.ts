@@ -1818,7 +1818,7 @@ export class AppService {
     if (!this.giteaSyncService) {
       throw new HttpError(503, 'unavailable', 'Gitea sync service chưa sẵn sàng');
     }
-    return this.giteaSyncService.syncProject(id);
+    return this.giteaSyncService.startSync(id);
   }
 
   getRemoteDeployStatus(id: string): RemoteDeployStatus | null {

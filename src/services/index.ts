@@ -33,6 +33,7 @@ import {
   TaskBatchRow,
   CiRepo,
   BlockingDiskInfo,
+  TrackerItemRepo,
 } from '../db/index.js';
 import type { CiWatchService } from '../ci.js';
 import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
@@ -78,6 +79,9 @@ import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../pres
 import type { SetupTools } from '../setup-tools.js';
 import { computeEffectiveConfig } from '../effective-config.js';
 import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
+import { OpenProjectClient, type OpenProjectWorkPackage } from '../integrations/openproject/client.js';
+import { readOpenProjectKey } from '../integrations/openproject/secrets.js';
+import { writeTicketDirectory } from '../integrations/openproject/ticket.js';
 
 const execFileAsync = promisify(execFile);
 const CODEX_EMAIL_RECHECK_MS = 10 * 60 * 1000;
@@ -355,6 +359,7 @@ export const CreateTaskSchema = z.object({
   batchId: z.string().optional(),
   sessionId: z.string().optional(),
   goal: z.string().optional(),
+  createTicket: z.object({ sourceId: z.string().min(1).optional() }).optional(),
 });
 
 export const BatchTaskInputSchema = z.object({
@@ -919,6 +924,7 @@ export function formatEventSummary(
 }
 
 export class AppService {
+  private trackerRepo?: TrackerItemRepo;
   public deployService?: DeployService;
   public remoteDeployService?: RemoteDeployService;
   public ciRepo?: CiRepo;
@@ -965,6 +971,14 @@ export class AppService {
   ) {}
 
   setSetupTools(tools: SetupTools): void { this.setupTools = tools; }
+  setTrackerRepo(repo: TrackerItemRepo): void { this.trackerRepo = repo; }
+  private openProjectTicketUrl(task: TaskRow): string | null {
+    if (!task.externalRef || !this.trackerRepo) return task.externalRef?.startsWith('http') ? task.externalRef : null;
+    const item = this.trackerRepo.listAll().find((row) => row.display_id === task.externalRef && row.task_ids.includes(task.id));
+    if (!item) return task.externalRef.startsWith('http') ? task.externalRef : null;
+    const source = this.config.integrations.openproject.sources.find((candidate) => candidate.id === item.source_id);
+    return source ? `${source.url.replace(/\/+$/, '')}/work_packages/${item.wp_id}` : null;
+  }
   getSetupTools(): SetupTools { if (!this.setupTools) throw new HttpError(503, 'unavailable', 'Setup tools chưa sẵn sàng'); return this.setupTools; }
 
   private validateOpenProjectBinding(projectId: string, settings: ReturnType<typeof projectSettings>): void {
@@ -2986,6 +3000,7 @@ export class AppService {
       const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
       return {
         ...apiTask(task, blockingDisk),
+        externalUrl: this.openProjectTicketUrl(task),
         blockingDisk,
         reviewChain,
         reviewRound,
@@ -3133,6 +3148,7 @@ export class AppService {
     const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
     return {
       ...apiTask(task, blockingDisk),
+      externalUrl: this.openProjectTicketUrl(task),
       blockingDisk,
       reviewer,
       events,
@@ -3169,6 +3185,54 @@ export class AppService {
       derivedTasks: this.taskRepo.getDerivedFrom(taskId).map((t) => apiTask(t, this.getBlockingDiskForTask(t))),
       claudeCost: (() => { const measured = this.claudeSessionRepo?.taskCost(taskId); return measured ? { measured: measured.effectiveTokens > 0, ...measured } : { measured: false, effectiveTokens: 0, sessions: 0 }; })(),
     };
+  }
+
+  private async prepareOpenProjectTicket(parsed: z.infer<typeof CreateTaskSchema>, project: ProjectRow): Promise<{
+    sourceId: string;
+    wp: OpenProjectWorkPackage;
+    displayId: string;
+    url: string;
+    activities: Awaited<ReturnType<OpenProjectClient['listActivities']>>;
+  } | null> {
+    if (!parsed.createTicket) return null;
+    const projectOpenProject = projectSettings(project).openproject;
+    const sourceId = parsed.createTicket.sourceId || (projectOpenProject.enabled ? projectOpenProject.sourceId : null);
+    if (!sourceId) throw new HttpError(400, 'bad_request', 'Project chưa bật nguồn OpenProject để tạo ticket');
+    const source = this.config.integrations.openproject.sources.find((item) => item.id === sourceId);
+    if (!source) throw new HttpError(400, 'bad_request', `Nguồn OpenProject "${sourceId}" không tồn tại`);
+    const key = readOpenProjectKey(this.config.hubHome, source.id);
+    if (!key) throw new HttpError(400, 'bad_request', `Nguồn OpenProject "${source.id}" chưa có API key`);
+    const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key });
+    const description = (parsed.body || '').trim();
+    const result = await client.createWorkPackage({
+      subject: parsed.title,
+      descriptionMarkdown: description.length > 30000 ? `${description.slice(0, 29997)}...` : description,
+      typeId: source.createTypeId ?? undefined,
+      assigneeMe: true,
+      statusId: source.createStatusId ?? undefined,
+    });
+    const wp = await client.getWorkPackage(result.id);
+    const activities = await client.listActivities(result.id);
+    await writeTicketDirectory(client, wp, activities, path.join(this.config.hubHome, 'tracker', source.id, String(result.id)), source.url);
+    return { sourceId: source.id, wp, displayId: result.displayId, url: result.url, activities };
+  }
+
+  private recordOpenProjectTicket(prepared: NonNullable<Awaited<ReturnType<AppService['prepareOpenProjectTicket']>>>, taskId: string): void {
+    if (!this.trackerRepo) throw new HttpError(503, 'unavailable', 'OpenProject tracker chưa sẵn sàng');
+    const statusHref = prepared.wp._links?.status?.href || '';
+    const statusValue = Number(statusHref.split('/').at(-1));
+    const statusId = Number.isInteger(statusValue) ? statusValue : null;
+    const lastCommentId = prepared.activities.reduce((max, item) => Math.max(max, item.id || 0), 0) || null;
+    this.trackerRepo.upsert({
+      source_id: prepared.sourceId,
+      wp_id: prepared.wp.id,
+      display_id: prepared.displayId,
+      status_id: statusId,
+      updated_at: prepared.wp.updatedAt || new Date().toISOString(),
+      last_comment_id: lastCommentId,
+      task_ids: JSON.stringify([taskId]),
+      writeback: '{}',
+    });
   }
 
   createTask(raw: unknown): TaskRow {
@@ -3273,6 +3337,23 @@ export class AppService {
     }
 
     return this.taskRepo.get(taskId)!;
+  }
+
+  async createTaskWithTicket(raw: unknown): Promise<TaskRow> {
+    const parsed = CreateTaskSchema.parse(raw);
+    if (!parsed.createTicket) return this.createTask(raw);
+    const project = this.projectRepo.get(parsed.project);
+    if (!project) throw new HttpError(404, 'not_found', `Project "${parsed.project}" không tồn tại`);
+    const prepared = await this.prepareOpenProjectTicket(parsed, project);
+    if (!prepared) return this.createTask(raw);
+    const task = this.createTask({
+      ...parsed,
+      title: `[${prepared.displayId}] ${parsed.title}`,
+      externalRef: prepared.displayId,
+      createTicket: undefined,
+    });
+    this.recordOpenProjectTicket(prepared, task.id);
+    return task;
   }
 
   captureTask(raw: unknown): TaskRow {

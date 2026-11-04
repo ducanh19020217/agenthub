@@ -570,7 +570,9 @@ export async function createServer(
   });
 
   fastify.post('/api/tasks', async (req: FastifyRequest, reply: FastifyReply) => {
-    const task = service.createTask(req.body);
+    const task = (req.body && typeof req.body === 'object' && 'createTicket' in req.body)
+      ? await service.createTaskWithTicket(req.body)
+      : service.createTask(req.body);
     return reply.status(201).send(task);
   });
 

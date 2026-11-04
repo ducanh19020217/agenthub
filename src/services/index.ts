@@ -364,6 +364,7 @@ export const CreateTaskSchema = z.object({
 });
 
 export const BatchTaskInputSchema = z.object({
+  project: z.string().optional(),
   slug: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/),
   title: z.string().min(1),
   body: z.string().optional(),
@@ -3669,11 +3670,17 @@ export class AppService {
 
     const slugs = new Set<string>();
     for (const t of parsed.tasks) {
-      if (slugs.has(t.slug)) {
-        throw new HttpError(400, 'bad_request', `Trùng slug "${t.slug}" trong cùng đợt`);
+      const taskProject = t.project || parsed.project;
+      const targetProject = this.projectRepo.get(taskProject);
+      if (!targetProject) {
+        throw new HttpError(404, 'not_found', `Project "${taskProject}" không tồn tại`);
       }
-      slugs.add(t.slug);
-      const taskId = `${parsed.project}/${t.slug}`;
+      const slugKey = `${taskProject}/${t.slug}`;
+      if (slugs.has(slugKey)) {
+        throw new HttpError(400, 'bad_request', `Trùng slug "${t.slug}" trong cùng đợt và project "${taskProject}"`);
+      }
+      slugs.add(slugKey);
+      const taskId = slugKey;
       if (this.taskRepo.get(taskId)) {
         throw new HttpError(409, 'conflict', `Task "${taskId}" đã tồn tại`);
       }
@@ -3694,17 +3701,18 @@ export class AppService {
     const taskDepsToPopulate: Array<{ taskId: string; deps: string[] }> = [];
 
     for (const t of parsed.tasks) {
-      const taskId = `${parsed.project}/${t.slug}`;
+      const taskProject = t.project || parsed.project;
+      const taskId = `${taskProject}/${t.slug}`;
       const normalizedDeps: string[] = (t.dependsOn || []).map((dep) => {
         if (!dep.includes('/') && !dep.includes('~')) {
-          return `${parsed.project}/${dep}`;
+          return `${taskProject}/${dep}`;
         }
         return toTaskId(dep);
       });
 
       this.taskRepo.insert({
         id: taskId,
-        projectId: parsed.project,
+        projectId: taskProject,
         slug: t.slug,
         title: t.title,
         body: t.body,

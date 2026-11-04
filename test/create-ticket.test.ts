@@ -6,6 +6,7 @@ import { createContext, closeContext } from '../src/daemon.js';
 import { loadConfig, OpenProjectSourceSchema } from '../src/config.js';
 import { mergeProjectSettings, DEFAULT_PROJECT_SETTINGS } from '../src/projects/settings.js';
 import { saveOpenProjectKey } from '../src/integrations/openproject/secrets.js';
+import { HttpError } from '../src/errors.js';
 
 describe('create task with OpenProject ticket', () => {
   let home: string;
@@ -66,6 +67,7 @@ describe('create task with OpenProject ticket', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     closeContext(ctx);
     fs.rmSync(home, { recursive: true, force: true });
@@ -116,5 +118,31 @@ describe('create task with OpenProject ticket', () => {
     releaseWorkPackage?.();
     await creation;
     expect(ctx.taskRepo.list()).toHaveLength(1);
+  });
+
+  it('does not delete a task created by a concurrent request after the ticket is created', async () => {
+    const createTask = vi.spyOn(ctx.service, 'createTask').mockImplementation(() => {
+      ctx.taskRepo.insert({
+        id: 'primary/race-conflict', projectId: 'primary', slug: 'race-conflict',
+        title: 'Concurrent task', body: '', level: 'easy', status: 'queued',
+      });
+      throw new HttpError(409, 'conflict', 'Task "primary/race-conflict" đã tồn tại');
+    });
+
+    await expect(ctx.service.createTaskWithTicket({
+      project: 'primary', slug: 'race-conflict', title: 'Race conflict', body: 'Body', level: 'easy', createTicket: {},
+    })).rejects.toThrow('OP-88');
+    expect(createTask).toHaveBeenCalledOnce();
+    expect(ctx.taskRepo.get('primary/race-conflict')).toMatchObject({ title: 'Concurrent task' });
+    expect(ctx.trackerRepo.get('demo', 88)).toBeUndefined();
+  });
+
+  it('validates dependencies before creating the OpenProject ticket', async () => {
+    await expect(ctx.service.createTaskWithTicket({
+      project: 'primary', slug: 'invalid-dependency', title: 'Invalid dependency', body: 'Body', level: 'easy',
+      dependsOn: ['primary/missing'], createTicket: {},
+    })).rejects.toThrow('không tồn tại trong project');
+    expect(fetchMock.mock.calls.some(([input, init]) => init?.method === 'POST' && String(input).endsWith('/work_packages'))).toBe(false);
+    expect(ctx.taskRepo.list()).toHaveLength(0);
   });
 });

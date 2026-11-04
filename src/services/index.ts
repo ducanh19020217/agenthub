@@ -3205,6 +3205,7 @@ export class AppService {
     if (!this.trackerRepo) throw new HttpError(503, 'unavailable', 'OpenProject tracker chưa sẵn sàng');
     const taskId = `${parsed.project}/${parsed.slug}`;
     if (this.taskRepo.get(taskId)) throw new HttpError(409, 'conflict', `Task "${taskId}" đã tồn tại`);
+    this.validateOpenProjectTaskDependencies(parsed);
     const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key });
     const description = (parsed.body || '').trim();
     const result = await client.createWorkPackage({
@@ -3235,6 +3236,17 @@ export class AppService {
       this.trackerRepo.delete(source.id, result.id);
       const reason = error instanceof Error ? error.message : String(error);
       throw new HttpError(502, 'bad_gateway', `Đã tạo ticket ${result.displayId} nhưng không thể hoàn tất liên kết: ${reason}`);
+    }
+  }
+
+  private validateOpenProjectTaskDependencies(parsed: z.infer<typeof CreateTaskSchema>): void {
+    for (const dependency of parsed.dependsOn || []) {
+      const normalized = toTaskId(dependency);
+      const dependencyId = normalized.includes('/') ? normalized : `${parsed.project}/${normalized}`;
+      const task = this.taskRepo.get(dependencyId);
+      if (!task || task.projectId !== parsed.project) {
+        throw new HttpError(422, 'unprocessable_entity', `Task phụ thuộc "${dependency}" không tồn tại trong project "${parsed.project}"`);
+      }
     }
   }
 
@@ -3370,6 +3382,7 @@ export class AppService {
     if (!project) throw new HttpError(404, 'not_found', `Project "${parsed.project}" không tồn tại`);
     const prepared = await this.prepareOpenProjectTicket(parsed, project);
     if (!prepared) return this.createTask(raw);
+    let taskCreatedByThisRequest = false;
     try {
       const task = this.createTask({
         ...parsed,
@@ -3377,12 +3390,12 @@ export class AppService {
         externalRef: prepared.displayId,
         createTicket: undefined,
       });
+      taskCreatedByThisRequest = true;
       this.recordOpenProjectTicket(prepared, task.id);
       return task;
     } catch (error) {
       this.trackerRepo?.delete(prepared.sourceId, prepared.wp.id);
-      const taskId = `${parsed.project}/${parsed.slug}`;
-      if (this.taskRepo.get(taskId)) this.taskRepo.delete(taskId);
+      if (taskCreatedByThisRequest) this.taskRepo.delete(`${parsed.project}/${parsed.slug}`);
       const reason = error instanceof Error ? error.message : String(error);
       throw new HttpError(502, 'bad_gateway', `Đã tạo ticket ${prepared.displayId} nhưng không thể tạo task liên kết: ${reason}`);
     }

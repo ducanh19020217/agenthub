@@ -827,9 +827,22 @@ export const PlansPage: React.FC = () => {
                                   {task.title}
                                 </Link>
                                 {task.externalRef && task.externalRef !== splitMeta?.displayId && (
-                                  <span data-testid={`child-ticket-${task.id}`} className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-[var(--t-surface-2)] border border-[var(--t-border)] text-[var(--t-text-2)]" title={t('plans.childTickets')}>
-                                    #{task.externalRef}
-                                  </span>
+                                  splitMeta?.ticketUrl ? (
+                                    <a
+                                      data-testid={`child-ticket-${task.id}`}
+                                      href={splitMeta.ticketUrl.replace(/work_packages\/[^/]+$/, `work_packages/${task.externalRef}`)}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-[var(--t-surface-2)] border border-[var(--t-border)] text-[var(--t-accent)] hover:underline"
+                                      title={t('plans.childTickets')}
+                                    >
+                                      #{task.externalRef}
+                                    </a>
+                                  ) : (
+                                    <span data-testid={`child-ticket-${task.id}`} className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-[var(--t-surface-2)] border border-[var(--t-border)] text-[var(--t-text-2)]" title={t('plans.childTickets')}>
+                                      #{task.externalRef}
+                                    </span>
+                                  )
                                 )}
                               </div>
                               {task.body && (

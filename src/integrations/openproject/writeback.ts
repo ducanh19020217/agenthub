@@ -42,7 +42,7 @@ export interface OpenProjectWritebackServiceOptions {
   taskRepo: TaskRepo;
   trackerRepo: TrackerItemRepo;
   taskService: { createTask(raw: unknown): { id: string } };
-  batchService?: { createBatch(raw: unknown): { id: string; tasks: TaskRow[] } };
+  batchService?: { createBatch(raw: unknown): { id: string; tasks: TaskRow[] }; dispatchBatch?: (id: string) => unknown };
   taskBatchRepo?: { get(id: string): { goal: string | null; status: string } | undefined };
   reviewRepo?: { getByTask(taskId: string): Array<{ actor?: string | null; verdict: string; feedback?: string | null }> };
   eventBus: Pick<EventBus, 'on' | 'off' | 'emit'>;
@@ -220,7 +220,7 @@ export class OpenProjectWritebackService {
         ticketUrl: `${source.url.replace(/\/+$/, '')}/work_packages/${row.wp_id}`,
       }),
       createdBy: 'openproject-split',
-      dispatch: source.autoStart,
+      dispatch: false,
       tasks: parsed.plan.parts.map((part) => {
         const partProject = this.projectRepo.get(part.project) ? part.project : task.projectId;
         return {
@@ -242,6 +242,7 @@ export class OpenProjectWritebackService {
     current.split = { planTaskId: task.id, children, plan: parsed.plan };
     this.save(row, current, [...new Set([...parseIds(row), ...children])]);
     this.eventBus.emit('tracker.split_planned', task.id, { sourceId: row.source_id, displayId: row.display_id, batchId: batch.id, taskIds: children });
+    if (source.autoStart) this.batchService.dispatchBatch?.(batch.id);
   }
 
   private async handleBatchDispatched(payload: unknown): Promise<void> {
@@ -606,8 +607,11 @@ export class OpenProjectWritebackService {
     const comments = tasks.map((task) => {
       const comment = section(task.doneReport, '## Comment cho tester');
       const analysis = parseState(row).triage?.analysis;
-      return comment ? `${comment}${analysis?.manualAlongside ? `\n\nCần thao tác thủ công kèm theo: ${analysis.manualAlongside}` : ''}` : null;
-    }).filter(Boolean) as string[];
+      return {
+        task,
+        text: comment ? `${comment}${analysis?.manualAlongside ? `\n\nCần thao tác thủ công kèm theo: ${analysis.manualAlongside}` : ''}` : null,
+      };
+    }).filter((item): item is { task: TaskRow; text: string } => Boolean(item.text));
     const push = tasks.map((task) => this.hasPush(task.projectId));
     for (let i = 0; i < tasks.length; i++) {
       if (!push[i]) {
@@ -623,8 +627,7 @@ export class OpenProjectWritebackService {
     try {
       const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
       if (!currentState.commented) {
-        const commentList = comments.map((text, i) => {
-          const childTask = tasks[i];
+        const commentList = comments.map(({ task: childTask, text }) => {
           const childTicket = currentState.split?.childTickets?.[childTask.id];
           const heading = childTicket ? `[${childTicket.displayId}] ${childTask.title}` : (childTask.title || childTask.id);
           return `### ${heading}\n${text}`;

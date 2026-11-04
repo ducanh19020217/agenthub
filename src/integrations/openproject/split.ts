@@ -49,13 +49,25 @@ export function parseSplitPlan(
     const body = lines.slice(current.index + 1, next);
     const index = Number(match[1]);
     const title = (match[2] || '').trim();
-    const project = field(body, 'project') || defaultProject;
-    const rawLevel = (field(body, 'level') || 'easy').toLowerCase();
+    const rawProject = field(body, 'project');
+    const project = rawProject || defaultProject;
+    if (rawProject && !/^[a-z0-9][a-z0-9._-]*$/i.test(rawProject)) {
+      errors.push(`Việc ${index} có project không hợp lệ: ${rawProject}`);
+    }
+    const rawLevelField = field(body, 'level');
+    const rawLevel = (rawLevelField || 'easy').toLowerCase();
     const level = rawLevel === 'hard' ? 'hard' : 'easy';
+    if (rawLevelField && rawLevel !== 'easy' && rawLevel !== 'hard') {
+      errors.push(`Việc ${index} có level không hợp lệ: ${rawLevelField}`);
+    }
     const rawDeps = field(body, 'phụ thuộc') || field(body, 'depends on') || '';
-    const dependsOn = rawDeps && !/^[-–—]?\s*(không|none|0)\s*$/i.test(rawDeps)
-      ? rawDeps.split(/[,\s]+/).map(Number).filter((item) => Number.isInteger(item) && item > 0)
-      : [];
+    let dependsOn: number[] = [];
+    if (rawDeps && !/^[-–—]?\s*(không|none|0)\s*$/i.test(rawDeps)) {
+      const tokens = rawDeps.split(/[,\s]+/).filter(Boolean);
+      const invalid = tokens.filter((token) => !/^\d+$/.test(token) || Number(token) < 1);
+      if (invalid.length) errors.push(`Việc ${index} có phụ thuộc không hợp lệ: ${invalid.join(', ')}`);
+      dependsOn = tokens.filter((token) => /^\d+$/.test(token)).map(Number).filter((item) => item > 0);
+    }
     const description = body
       .filter((line) => !/^\s*-\s*(project|level|phụ thuộc|depends on):/i.test(line))
       .join('\n').trim();

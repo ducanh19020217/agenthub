@@ -32,6 +32,7 @@ import {
   Clock,
   Sparkles,
   ArrowRight,
+  ExternalLink,
 } from 'lucide-react';
 
 const toArray = (val: string | string[] | null | undefined): string[] => {
@@ -362,6 +363,25 @@ export const PlansPage: React.FC = () => {
         ? 'completed'
         : 'working';
 
+  const splitMeta = useMemo(() => {
+    if (!currentBatch?.goal) return null;
+    try {
+      const parsed = JSON.parse(currentBatch.goal);
+      if (parsed && typeof parsed === 'object' && parsed.kind === 'openproject-split') {
+        return parsed as {
+          kind: string;
+          sourceId: string;
+          wpId: number;
+          displayId: string;
+          ticketUrl?: string;
+          plan?: { parts: Array<{ index: number; title: string; project: string; level: string; dependsOn: number[]; description: string }> };
+          reviewSummary?: string;
+        };
+      }
+    } catch { /* not json */ }
+    return null;
+  }, [currentBatch?.goal]);
+
   return (
     <div className="flex flex-col h-[calc(100vh-56px)] overflow-hidden">
       {/* Top Header */}
@@ -663,7 +683,41 @@ export const PlansPage: React.FC = () => {
                 </div>
 
                 {/* Batch Goal Banner */}
-                {currentBatch.goal ? (
+                {splitMeta ? (
+                  <div data-testid="split-plan-banner" className="mt-4 p-4 rounded-lg bg-[var(--t-surface-2)] border border-[var(--t-border)] text-xs text-[var(--t-text-2)] space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-[var(--t-text)]">{t('plans.parentTicket')}:</span>
+                        {splitMeta.ticketUrl ? (
+                          <a
+                            href={splitMeta.ticketUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono text-[var(--t-accent)] hover:underline flex items-center gap-1"
+                          >
+                            <span>#{splitMeta.displayId}</span>
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+                        ) : (
+                          <span className="font-mono text-[var(--t-text)]">#{splitMeta.displayId}</span>
+                        )}
+                      </div>
+                      {splitMeta.plan?.parts && (
+                        <span className="px-2 py-0.5 rounded-full bg-[var(--t-surface)] border border-[var(--t-border)] text-[11px]">
+                          {splitMeta.plan.parts.length} {t('plans.parts')}
+                        </span>
+                      )}
+                    </div>
+                    {splitMeta.reviewSummary && (
+                      <div className="pt-2 border-t border-[var(--t-border)]">
+                        <span className="font-semibold text-[var(--t-text)] block mb-1">{t('plans.splitReviewSummary')}:</span>
+                        <div className="whitespace-pre-wrap font-mono text-[11px] bg-[var(--t-surface)] p-2 rounded border border-[var(--t-border)]">
+                          {splitMeta.reviewSummary}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : currentBatch.goal ? (
                   <div className="mt-4 p-3 rounded-lg bg-[var(--t-surface-2)] border border-[var(--t-border)] text-xs text-[var(--t-text-2)]">
                     <span className="font-semibold text-[var(--t-text)] mr-1.5">
                       {t('plans.goal')}:
@@ -768,9 +822,16 @@ export const PlansPage: React.FC = () => {
                               {task.slug}
                             </td>
                             <td className="py-3 px-3">
-                              <Link to={`/tasks/${task.id.replace('/', '~')}`} className="font-medium text-[var(--t-accent)] hover:underline">
-                                {task.title}
-                              </Link>
+                              <div className="flex items-center gap-2">
+                                <Link to={`/tasks/${task.id.replace('/', '~')}`} className="font-medium text-[var(--t-accent)] hover:underline">
+                                  {task.title}
+                                </Link>
+                                {task.externalRef && task.externalRef !== splitMeta?.displayId && (
+                                  <span data-testid={`child-ticket-${task.id}`} className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-[var(--t-surface-2)] border border-[var(--t-border)] text-[var(--t-text-2)]" title={t('plans.childTickets')}>
+                                    #{task.externalRef}
+                                  </span>
+                                )}
+                              </div>
                               {task.body && (
                                 <div className="text-[11px] text-[var(--t-text-3)] line-clamp-1 mt-0.5">
                                   {task.body}

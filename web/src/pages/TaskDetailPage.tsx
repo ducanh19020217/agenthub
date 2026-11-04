@@ -24,6 +24,7 @@ import {
   getModelOptions,
   pauseTask,
   resumeTask,
+  splitTask,
 } from '../api/client';
 import { TaskLevel, EventItem } from '../types/api';
 import { subscribeToRunOutput, subscribeToEvents } from '../api/sse';
@@ -58,6 +59,7 @@ import {
   Edit3,
   Bell,
   ExternalLink,
+  GitFork,
 } from 'lucide-react';
 
 const VALID_MODELS = [
@@ -334,6 +336,15 @@ export const TaskDetailPage: React.FC = () => {
   const captureMutation = useMutation({
     mutationFn: () => createTaskFromError({ sourceTaskId: task?.id || id, excerpt: capture?.excerpt || '', checkName: capture?.checkName, slug: captureSlug, title: captureTitle, level: 'easy' }),
     onSuccess: (created) => { setCapture(null); queryClient.invalidateQueries({ queryKey: ['tasks'] }); navigate(`/tasks/${encodeURIComponent(created.id.replace('/', '~'))}`); },
+  });
+
+  const splitTaskMutation = useMutation({
+    mutationFn: () => splitTask(id),
+    onSuccess: (created) => {
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['task', id] });
+      navigate(`/tasks/${encodeURIComponent(created.taskId.replace('/', '~'))}`);
+    },
   });
 
   // Text currently selected inside the live log; drives the "create fix task" button.
@@ -665,6 +676,20 @@ export const TaskDetailPage: React.FC = () => {
             >
               <XCircle className="w-4 h-4" />
               <span>{t('taskDetail.btnCancel')}</span>
+            </button>
+          )}
+
+          {/* Split (if queued or blocked, has externalRef, not already plan) */}
+          {task.externalRef && (task.status === 'queued' || task.status === 'blocked') && !task.slug.endsWith('-plan') && (
+            <button
+              type="button"
+              data-testid="btn-split-task"
+              onClick={() => splitTaskMutation.mutate()}
+              disabled={splitTaskMutation.isPending}
+              className="px-3.5 py-1.5 rounded-lg border border-[var(--t-border)] hover:bg-[var(--t-surface-2)] text-[var(--t-text)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
+            >
+              <GitFork className="w-4 h-4" />
+              <span>{t('taskDetail.btnSplit')}</span>
             </button>
           )}
 

@@ -504,6 +504,50 @@ describe('Integrations UI Suite', () => {
 
       expect(screen.queryByTestId('gitea-repo-info')).not.toBeInTheDocument();
     });
+
+    it('polls a running Gitea sync every 3 seconds, then shows the last result and PR link', async () => {
+      const getStatus = vi.mocked(client.getGiteaStatus);
+      getStatus.mockReset();
+      let statusCalls = 0;
+      getStatus.mockImplementation(async () => {
+        statusCalls += 1;
+        if (statusCalls <= 2) return { tokenConfigured: true, running: true, startedAt: '2026-11-04T10:00:00Z', step: 'fetch' };
+        return {
+          tokenConfigured: true,
+          running: false,
+          last: {
+            status: 'succeeded',
+            finishedAt: '2026-11-04T10:00:05Z',
+            reason: 'Đã đồng bộ',
+            prNumber: 42,
+            url: 'https://gitea.example.com/acme/repo/pulls/42',
+          },
+        };
+      });
+
+      renderWithProviders(
+        <ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />,
+      );
+
+      await waitFor(() => {
+        const button = screen.getByTestId('sync-gitea-button');
+        expect(button).toBeDisabled();
+        expect(button).toHaveTextContent('Đang đồng bộ… (fetch)');
+        return button;
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 6_200));
+      await waitFor(() => {
+        expect(screen.getByTestId('gitea-last-sync')).toHaveTextContent('thành công');
+        expect(screen.getByTestId('gitea-last-sync')).toHaveTextContent('Đã đồng bộ');
+      });
+      const prLink = screen.getByRole('link', { name: 'PR #42' });
+      expect(prLink).toHaveAttribute('href', 'https://gitea.example.com/acme/repo/pulls/42');
+      expect(getStatus).toHaveBeenCalledTimes(3);
+
+      await new Promise((resolve) => setTimeout(resolve, 3_100));
+      expect(getStatus).toHaveBeenCalledTimes(3);
+    }, 15_000);
   });
 
   describe('3. OpenProjectSettings Global Settings', () => {

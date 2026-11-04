@@ -3,6 +3,13 @@ import { resolveProjectFile } from './projects/paths.js';
 
 export type ReviewerVerdict = 'approved' | 'changes_requested';
 
+export type ReviewerActor = 'codex-reviewer' | 'claude-reviewer';
+
+/** Automated reviewers whose verdicts drive gates, round limits and auto-merge. */
+export function isAutoReviewer(by: string | undefined): by is ReviewerActor {
+  return by === 'codex-reviewer' || by === 'claude-reviewer';
+}
+
 export interface ReviewerResult {
   verdict: ReviewerVerdict;
   feedback: string;

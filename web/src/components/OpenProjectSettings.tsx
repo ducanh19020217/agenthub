@@ -132,8 +132,8 @@ export const OpenProjectSettings: React.FC = () => {
       }
     },
     onError: (err: any) => {
-      qc.invalidateQueries({ queryKey: ['openproject-sources'] });
       if (err?.isKeyError) {
+        qc.invalidateQueries({ queryKey: ['openproject-sources'] });
         setMessage({
           type: 'error',
           text: t('integrations.saveKeyError', { error: err.message }),

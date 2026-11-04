@@ -974,7 +974,7 @@ export class AppService {
   setTrackerRepo(repo: TrackerItemRepo): void { this.trackerRepo = repo; }
   private openProjectTicketUrl(task: TaskRow): string | null {
     if (!task.externalRef || !this.trackerRepo) return task.externalRef?.startsWith('http') ? task.externalRef : null;
-    const item = this.trackerRepo.listAll().find((row) => row.display_id === task.externalRef && row.task_ids.includes(task.id));
+    const item = this.trackerRepo.listForTask(task.id).find((row) => row.display_id === task.externalRef);
     if (!item) return task.externalRef.startsWith('http') ? task.externalRef : null;
     const source = this.config.integrations.openproject.sources.find((candidate) => candidate.id === item.source_id);
     return source ? `${source.url.replace(/\/+$/, '')}/work_packages/${item.wp_id}` : null;
@@ -3202,6 +3202,9 @@ export class AppService {
     if (!source) throw new HttpError(400, 'bad_request', `Nguồn OpenProject "${sourceId}" không tồn tại`);
     const key = readOpenProjectKey(this.config.hubHome, source.id);
     if (!key) throw new HttpError(400, 'bad_request', `Nguồn OpenProject "${source.id}" chưa có API key`);
+    if (!this.trackerRepo) throw new HttpError(503, 'unavailable', 'OpenProject tracker chưa sẵn sàng');
+    const taskId = `${parsed.project}/${parsed.slug}`;
+    if (this.taskRepo.get(taskId)) throw new HttpError(409, 'conflict', `Task "${taskId}" đã tồn tại`);
     const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key });
     const description = (parsed.body || '').trim();
     const result = await client.createWorkPackage({
@@ -3210,6 +3213,18 @@ export class AppService {
       typeId: source.createTypeId ?? undefined,
       assigneeMe: true,
       statusId: source.createStatusId ?? undefined,
+    });
+    // Claim the ticket before any further network or filesystem work. Intake
+    // treats this marker as in-flight and therefore cannot create a duplicate.
+    this.trackerRepo.upsert({
+      source_id: source.id,
+      wp_id: result.id,
+      display_id: result.displayId,
+      status_id: null,
+      updated_at: new Date().toISOString(),
+      last_comment_id: null,
+      task_ids: '[]',
+      writeback: JSON.stringify({ createPending: true }),
     });
     const wp = await client.getWorkPackage(result.id);
     const activities = await client.listActivities(result.id);
@@ -3237,6 +3252,9 @@ export class AppService {
 
   createTask(raw: unknown): TaskRow {
     const parsed = CreateTaskSchema.parse(raw);
+    if (parsed.createTicket) {
+      throw new HttpError(400, 'bad_request', 'createTicket phải được xử lý qua luồng tạo task kèm ticket');
+    }
     const project = this.projectRepo.get(parsed.project);
     if (!project) {
       throw new HttpError(404, 'not_found', `Project "${parsed.project}" không tồn tại`);

@@ -76,6 +76,16 @@ function isBaselineRow(row: TrackerItemRow | undefined): boolean {
   }
 }
 
+function isCreatePendingRow(row: TrackerItemRow | undefined): boolean {
+  if (!row) return false;
+  try {
+    const parsed = JSON.parse(row.writeback);
+    return Boolean(parsed && typeof parsed === 'object' && parsed.createPending === true);
+  } catch {
+    return false;
+  }
+}
+
 function clearBaseline(writebackJson: string): string {
   try {
     const parsed = JSON.parse(writebackJson);
@@ -205,6 +215,14 @@ export class OpenProjectIntakeService {
           writeback: JSON.stringify({ baseline: true }),
         });
         baseline += 1;
+        continue;
+      }
+
+      // A task-created ticket is claimed immediately after POST, before its
+      // details and ticket directory are fetched. Never import that claim as
+      // a second task while the original request is still completing.
+      if (previous && isCreatePendingRow(previous)) {
+        this.trackerRepo.upsert({ ...previous, display_id: displayId(wp), status_id: currentStatus, updated_at: wp.updatedAt || previous.updated_at, last_comment_id: lastComment });
         continue;
       }
 

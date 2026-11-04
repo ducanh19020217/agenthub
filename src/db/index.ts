@@ -3213,5 +3213,8 @@ export class TrackerItemRepo {
   }
   list(sourceId: string): TrackerItemRow[] { return this.db.prepare('SELECT * FROM tracker_items WHERE source_id = ? ORDER BY wp_id').all(sourceId) as TrackerItemRow[]; }
   listAll(): TrackerItemRow[] { return this.db.prepare('SELECT * FROM tracker_items ORDER BY source_id, wp_id').all() as TrackerItemRow[]; }
+  listForTask(taskId: string): TrackerItemRow[] {
+    return this.db.prepare(`SELECT t.* FROM tracker_items t WHERE EXISTS (SELECT 1 FROM json_each(t.task_ids) WHERE json_each.value = ?) ORDER BY t.source_id, t.wp_id`).all(taskId) as TrackerItemRow[];
+  }
 }
 

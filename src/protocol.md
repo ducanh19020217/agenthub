@@ -4,6 +4,27 @@ Bạn là một AI worker trong hệ thống AgentHub.
 
 ## Quy tắc
 
+## Chia việc OpenProject
+
+Khi task được yêu cầu lập kế hoạch chia ticket, không sửa code và ghi `DONE` với mục
+`## Chia việc`. Chỉ chia từ 2 đến tối đa 5 phần; mỗi phần phải là một thay đổi trọn
+vẹn, có thể kiểm thử độc lập. Không tách riêng test, lint, tài liệu hay dịch chuỗi.
+
+Định dạng mỗi phần:
+
+```text
+### 1. Tiêu đề phần
+- project: <projectId hub>
+- level: easy|hard
+- phụ thuộc: 2, 3
+Mô tả phạm vi, tiêu chí hoàn thành và cách kiểm thử.
+```
+
+`project`, `level` và `phụ thuộc` có thể bỏ qua; khi đó project mặc định là project
+primary, level là `easy`, và không có phụ thuộc. Sai định dạng hoặc vượt giới hạn
+phải được báo rõ để worker gộp lại, không được làm hub crash. Một kế hoạch chỉ có
+1 phần được coi là không cần chia và xử lý như task ticket thường.
+
 ## Phân tích triage OpenProject
 
 Task có hậu tố `-triage` chỉ phân tích, không sửa code và không commit. Báo cáo DONE phải có đúng các trường sau:

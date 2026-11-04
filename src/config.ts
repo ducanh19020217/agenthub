@@ -316,6 +316,14 @@ export const DailyReportConfigSchema = z.object({
   telegram: z.boolean().default(false),
 });
 
+export const OpenProjectSplitConfigSchema = z.object({
+  typeIds: z.array(z.number().int()).default([]),
+  keyword: z.string().nullable().default('[chia]'),
+  workerMayRequest: z.boolean().default(true),
+  maxParts: z.number().int().min(2).max(5).default(5),
+  createChildTickets: z.boolean().default(true),
+});
+
 export type DailyReportConfig = z.infer<typeof DailyReportConfigSchema>;
 
 export const OpenProjectSourceSchema = z.object({
@@ -337,6 +345,7 @@ export const OpenProjectSourceSchema = z.object({
   triageModelChain: z.array(z.string().min(1)).optional(),
   feedbackStatusId: z.number().int().nullable().default(null),
   language: z.string().default('vi'),
+  split: OpenProjectSplitConfigSchema.default({}),
   dailyReport: DailyReportConfigSchema.optional(),
 });
 

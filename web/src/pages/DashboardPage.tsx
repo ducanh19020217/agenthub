@@ -235,8 +235,41 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
     };
   });
 
+  const diskWaitersCount = status.waitingReasons?.disk || 0;
+  const hubHomeDisk = status.disks?.find((d) => d.source === 'hub_home');
+  const isHubHomeLow = hubHomeDisk?.low || false;
+  const isDiskBlocking = diskWaitersCount > 0 || isHubHomeLow;
+  const lowDisks = (status.disks || []).filter((d) => d.low);
+
   return (
     <div className="flex flex-col gap-8">
+      {isDiskBlocking && (
+        <div
+          data-testid="disk-blocking-banner"
+          role="alert"
+          className="order-0 rounded-xl border border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_12%,transparent)] p-4 text-[var(--t-text)] shadow-xs flex items-start gap-3"
+        >
+          <AlertTriangle className="w-5 h-5 text-[var(--t-crit)] shrink-0 mt-0.5" />
+          <div className="flex-1 space-y-1">
+            <div className="font-semibold text-sm text-[var(--t-crit)]">
+              {t('dashboard.diskBlockingTitle')}
+            </div>
+            <p className="text-xs text-[var(--t-text-2)]">
+              {isHubHomeLow
+                ? t('dashboard.diskBlockingHubHome', {
+                    path: hubHomeDisk?.path || '~/.agenthub',
+                    free: hubHomeDisk?.freeGB ?? 0,
+                    threshold: hubHomeDisk?.minFreeGB ?? 1,
+                  })
+                : t('dashboard.diskBlockingBanner', {
+                    count: diskWaitersCount,
+                    disks: lowDisks.map((d) => `${d.label} (${d.freeGB} GB / ${d.minFreeGB} GB)`).join(', ') || t('dashboard.diskSpaceFallback'),
+                  })}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Page Title */}
       <div className="order-0 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>

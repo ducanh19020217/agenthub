@@ -787,7 +787,7 @@ export interface ChatSession {
   outputTokens?: number;
   contextTokens?: number;
   createdAt?: string;
-  kind?: 'chat' | 'brain' | 'assistant';
+  kind?: 'chat' | 'brain' | 'assistant' | 'setup';
 }
 
 export type ChatMessageRole = 'user' | 'assistant' | 'tool' | 'error' | 'system';
@@ -835,6 +835,7 @@ export interface CreateChatSessionInput {
   mode?: ChatMode;
   model?: string;
   profileName?: string | null;
+  kind?: 'chat' | 'brain' | 'assistant' | 'setup';
 }
 
 export interface UpdateChatSessionInput {

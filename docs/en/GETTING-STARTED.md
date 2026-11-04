@@ -18,6 +18,25 @@ AgentHub runs locally on your machine. It breaks down development tasks and sche
 
 > **Flexible Control Interfaces:** You can interact with and control AgentHub (dispatch tasks, review diffs, manage queues) via **direct Chat with Claude on the Web Dashboard**, **Remote Control via Telegram Bot** on your mobile device, or **Claude Code in VS Code** using the Model Context Protocol (MCP) (see Sections 7 and 8). The Web Dashboard provides real-time progress tracking, live streaming logs, account quota gauges, host resource monitors, and comprehensive task management.
 
+## Quick setup by chat
+
+Open the Dashboard and click **Set up by chat** in the checklist, Setup page, or Settings. Claude follows the [setup playbook](setup/SETUP-PLAYBOOK.md), asks one question at a time, shows a dry-run diff before every write, and uses the secure secret page for keys and tokens. You can stop at any point and resume the setup session later.
+
+## Move to a new machine
+
+On the old machine run:
+
+```bash
+agenthub setup export --out agenthub-setup.json
+```
+
+Move the file to the new machine (it contains no tokens, keys, passwords, secrets, or machine-specific absolute paths), then tell Claude: “read `docs/setup/SETUP-PLAYBOOK.md` and install from `agenthub-setup.json`”. Claude runs an import dry-run, reports projects that need cloning, and asks again only for missing secrets through `hub_request_secret`:
+
+```bash
+agenthub setup import agenthub-setup.json --dry-run
+agenthub setup import agenthub-setup.json
+```
+
 ---
 
 ## 1. Requirements

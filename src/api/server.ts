@@ -151,6 +151,13 @@ export async function createServer(
     const body = (req.body || {}) as { kind: 'openproject' | 'gitea' | 'checks'; sourceId?: string; url?: string; project?: string };
     return service.getSetupTools().discover(body.kind, body);
   });
+  fastify.get('/api/setup/export', async () => service.getSetupTools().exportSetup());
+  fastify.post('/api/setup/import', async (req) => {
+    const body = (req.body || {}) as { file?: unknown; dryRun?: unknown };
+    if (typeof body.file !== 'string' || !body.file.trim()) throw new HttpError(400, 'bad_request', 'File setup là bắt buộc');
+    const imported = JSON.parse(fs.readFileSync(path.resolve(body.file), 'utf8')) as unknown;
+    return service.getSetupTools().importSetup(imported, body.dryRun !== false);
+  });
   fastify.post('/api/secrets/requests', async (req) => service.getSetupTools().requestSecret(SetupSecretRequestSchema.parse(req.body)));
   fastify.get('/api/secrets/requests/:id', async (req) => service.getSetupTools().getSecretRequest((req.params as { id: string }).id) || { configured: false, reason: 'not_found' });
   fastify.post('/api/secrets/requests/:id/value', async (req) => service.getSetupTools().saveSecret((req.params as { id: string }).id, String((req.body as { value?: unknown })?.value || '')));

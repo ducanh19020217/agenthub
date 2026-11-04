@@ -21,11 +21,37 @@ function diff(before: unknown, after: unknown): { changed: boolean; before: unkn
 }
 
 interface SetupProjectRow {
+  id?: string;
+  name?: string;
   path: string;
   defaultBranch?: string;
   settings?: string | Record<string, unknown> | null;
   checks?: string | unknown[] | null;
   reviewChain?: string | unknown[] | null;
+}
+
+export const SETUP_SCHEMA_VERSION = 1;
+export interface AgentHubSetupBundle {
+  schemaVersion: number;
+  exportedAt: string;
+  projects: Array<Record<string, unknown>>;
+  departments: Array<Record<string, unknown>>;
+  preset: Record<string, unknown>;
+  brain: Record<string, unknown>;
+  reviewer: Record<string, unknown>;
+  integrations: Record<string, unknown>;
+}
+
+const SECRET_FIELD = /(?:token|password|secret|api[-_]?key|private[-_]?key|credential)/i;
+function portablePath(value: string, home = process.env.HOME || ''): string {
+  if (home && (value === home || value.startsWith(`${home}${path.sep}`))) return `~${value.slice(home.length).split(path.sep).join('/')}`;
+  if (path.isAbsolute(value)) return `./${path.basename(value)}`;
+  return value;
+}
+function withoutSecrets(value: unknown, home?: string): unknown {
+  if (Array.isArray(value)) return value.map((item) => withoutSecrets(item, home));
+  if (!value || typeof value !== 'object') return typeof value === 'string' && path.isAbsolute(value) ? portablePath(value, home) : value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !SECRET_FIELD.test(key)).map(([key, item]) => [key, withoutSecrets(item, home)]));
 }
 
 const SetupProjectPatchSchema = ProjectSettingsInputSchema.extend({
@@ -63,6 +89,69 @@ export class SetupTools {
   effectiveConfig(project: string) { return this.service().getEffectiveConfig(project); }
   presets() { return this.service().getPresets(); }
   departments() { return this.service().listDepartments(); }
+
+  exportSetup(): AgentHubSetupBundle {
+    const projects = (this.db.prepare('SELECT id,name,path,defaultBranch,envTemplate,settings,departmentId FROM projects WHERE archivedAt IS NULL ORDER BY id').all() as SetupProjectRow[])
+      .map((project) => {
+        let remoteGit: string | null = null;
+        try { remoteGit = execFileSync('git', ['-C', project.path, 'config', '--get', 'remote.origin.url'], { encoding: 'utf8' }).trim() || null; } catch { /* not a git checkout */ }
+        return withoutSecrets({ ...project, path: portablePath(project.path), remoteGit }, process.env.HOME) as Record<string, unknown>;
+      });
+    const departments = this.db.prepare('SELECT id,name,priority,maxParallel,claudeDailyTokenBudget,brainEngine,brainModel,brainCodexProfile,brainMode,brainPermissions,brainDailyTokenBudget,brainMaxTurnsPerHour FROM departments ORDER BY id').all() as Array<Record<string, unknown>>;
+    const config = withoutSecrets(this.service().getConfig(), process.env.HOME) as Record<string, unknown>;
+    const projectSettingsValue = (project: Record<string, unknown>) => {
+      if (typeof project.settings !== 'string') return (project.settings as Record<string, unknown> | undefined) || {};
+      try { return JSON.parse(project.settings) as Record<string, unknown>; } catch { return {}; }
+    };
+    const preset = { projects: projects.map((project) => ({ id: project.id, preset: projectSettingsValue(project).preset || null })) };
+    const integrations = projects.map((project) => ({ id: project.id, settings: projectSettingsValue(project) }));
+    return {
+      schemaVersion: SETUP_SCHEMA_VERSION,
+      exportedAt: new Date().toISOString(),
+      projects,
+      departments: withoutSecrets(departments, process.env.HOME) as Array<Record<string, unknown>>,
+      preset,
+      brain: (config.brain || {}) as Record<string, unknown>,
+      reviewer: (config.reviewer || {}) as Record<string, unknown>,
+      integrations: withoutSecrets(integrations, process.env.HOME) as Record<string, unknown>,
+    };
+  }
+
+  importSetup(bundle: unknown, dryRun = true): { dryRun: boolean; schemaVersion: number; projects: Array<Record<string, unknown>>; missingSecrets: string[] } {
+    if (!bundle || typeof bundle !== 'object') throw new Error('File setup không hợp lệ');
+    const value = bundle as Record<string, unknown>;
+    const schemaVersion = Number(value.schemaVersion);
+    if (schemaVersion !== SETUP_SCHEMA_VERSION) throw new Error(`Không hỗ trợ schema setup version ${String(value.schemaVersion)}`);
+    const current = new Set((this.db.prepare('SELECT id FROM projects').all() as Array<{ id: string }>).map((row) => row.id));
+    const projects = (Array.isArray(value.projects) ? value.projects : []).map((item) => {
+      const project = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+      const id = String(project.id || '');
+      return { id, name: String(project.name || id), remoteGit: project.remoteGit || null, path: project.path || null, needsClone: !current.has(id), status: current.has(id) ? 'present' : 'needs_clone' };
+    });
+    const missingSecrets = new Set<string>();
+    for (const item of Array.isArray(value.projects) ? value.projects : []) {
+      const settings = (item as Record<string, unknown>).settings;
+      if (!settings || typeof settings !== 'object') continue;
+      const integrations = settings as Record<string, unknown>;
+      if ((integrations.openproject as Record<string, unknown> | undefined)?.enabled) missingSecrets.add('openproject-key');
+      if ((integrations.gitea as Record<string, unknown> | undefined)?.enabled) missingSecrets.add('gitea-token');
+      if ((integrations.remoteDeploy as Record<string, unknown> | undefined)?.enabled) missingSecrets.add('deploy-env');
+    }
+    // Import intentionally remains an explicit, reviewable operation. The dry-run result is also the
+    // contract used by chat/CLI; actual writes are limited to existing projects and never secrets.
+    if (!dryRun) {
+      for (const item of Array.isArray(value.projects) ? value.projects : []) {
+        const project = item as Record<string, unknown>;
+        if (typeof project.id !== 'string' || !current.has(project.id)) continue;
+        const settings = project.settings;
+        if (settings && typeof settings === 'object') this.service().updateProject(project.id, { settings });
+        else if (typeof settings === 'string') {
+          try { this.service().updateProject(project.id, { settings: JSON.parse(settings) }); } catch { /* invalid settings stay untouched */ }
+        }
+      }
+    }
+    return { dryRun, schemaVersion, projects, missingSecrets: [...missingSecrets] };
+  }
 
   applyPreset(input: { scope: string; preset: string; dryRun?: boolean }) {
     const dryRun = input.dryRun !== false;

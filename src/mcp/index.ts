@@ -1548,6 +1548,13 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     try { const result = await callApi<{ configured: boolean; reason?: string; url?: string }>('POST', '/api/secrets/requests', args, 10 * 60 * 1000 + 30_000); return { content: [{ type: 'text', text: JSON.stringify(result) }] }; }
     catch (err: unknown) { return handleError(err); }
   });
+  server.tool('hub_setup_import', 'Đối chiếu hoặc nhập file agenthub-setup.json; mặc định chỉ dry-run', { file: z.string(), dryRun: z.boolean().default(true) }, async (args) => {
+    try {
+      assertSetupWriteAllowed('hub_setup_import', args.dryRun);
+      const result = await callApi('POST', '/api/setup/import', args);
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    } catch (err: unknown) { return handleError(err); }
+  });
 
   return server;
 }

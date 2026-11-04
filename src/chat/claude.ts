@@ -30,6 +30,17 @@ function loadAssistantPlaybook(): string {
   return 'Trả lời ngắn bằng tiếng Việt; đọc dữ liệu thật trước khi kết luận; việc duyệt/merge thuộc về bộ não.';
 }
 
+function loadSetupPlaybook(): string {
+  const candidates = [
+    path.resolve(path.dirname(new URL('.', import.meta.url).pathname), '../../docs/setup/SETUP-PLAYBOOK.md'),
+    path.resolve(process.env.AGENTHUB_INSTALL_DIR || '', 'docs/setup/SETUP-PLAYBOOK.md'),
+  ];
+  for (const candidate of candidates) {
+    try { if (fs.existsSync(candidate)) return fs.readFileSync(candidate, 'utf8'); } catch { /* optional */ }
+  }
+  return 'Hãy kiểm tra cấu hình hiệu lực, luôn dry-run trước khi ghi, và dùng hub_request_secret cho mọi bí mật.';
+}
+
 export const BRAIN_PROMPT =
   'Bạn là Claude, bộ não điều phối của AgentHub. Người dùng chat với bạn qua dashboard. Dùng trực tiếp các tool mcp__agenthub__hub_status, mcp__agenthub__hub_projects, mcp__agenthub__hub_register_project, mcp__agenthub__hub_profiles, mcp__agenthub__hub_create_task, mcp__agenthub__hub_update_task, mcp__agenthub__hub_create_batch, mcp__agenthub__hub_batch, mcp__agenthub__hub_dispatch_batch, mcp__agenthub__hub_tasks, mcp__agenthub__hub_task, mcp__agenthub__hub_task_log, mcp__agenthub__hub_review, mcp__agenthub__hub_retry, mcp__agenthub__hub_cancel, mcp__agenthub__hub_pause, mcp__agenthub__hub_resume, mcp__agenthub__hub_wait, mcp__agenthub__hub_mark_quota, mcp__agenthub__hub_git (git status/log/diff/show an toàn), cùng hub_effective_config, hub_presets, hub_departments, hub_integration_discover và hub_request_secret; không cần tìm tool. Các tool ghi cấu hình hub_preset_apply, hub_project_settings, hub_department, hub_config_set luôn phải gọi dryRun trước và chỉ ghi khi người dùng xác nhận. Không bao giờ yêu cầu người dùng gửi bí mật trong chat. Khi tạm dừng task vì quá tải, bắt buộc dùng hub_pause với reason:\'load\' để hệ thống tự resume khi máy hạ tải. Số % trong hub_profiles là phần CÒN LẠI. Ảnh chụp hub ở trên là mới nhất; KHÔNG gọi lại hub_status/hub_projects/hub_tasks/git log để tìm hiểu lại trừ khi cần chi tiết cụ thể. Trước khi khám phá nhiều bước, viết 1–2 câu cho người dùng biết bạn sẽ làm gì; sau mỗi khoảng 5 tool call, viết 1 câu báo tiến độ. {{PLANNING_RULE}}Trả lời ngắn gọn bằng tiếng Việt. Không tự viết code tính năng: hãy chia việc thành task nhỏ cho worker (Gemini/Codex) qua hub_create_task hoặc hub_create_batch, sau đó review.' + `\n\nSỔ TAY BRAIN-PLAYBOOK:\n${loadBrainPlaybook()}`;
 
@@ -39,6 +50,10 @@ export const ASSISTANT_PROMPT =
 export function buildAssistantPrompt(projectKnowledge?: string): string {
   const knowledge = projectKnowledge ? `\n\n${projectKnowledge}` : '';
   return ASSISTANT_PROMPT.replace('{{PLAYBOOK}}', `\n\nSỔ TAY ASSISTANT-PLAYBOOK:\n${loadAssistantPlaybook()}${knowledge}`);
+}
+
+export function buildSetupPrompt(): string {
+  return `Bạn là Claude, trợ lý thiết lập AgentHub. Hỏi người dùng từng câu một, tiếp tục sau khi họ xác nhận, luôn dry-run và cho xem diff trước khi ghi, không bao giờ hỏi bí mật trong chat. Dùng các MCP tool setup/discover/secret hiện có.\n\nSỔ TAY SETUP-PLAYBOOK:\n${loadSetupPlaybook()}`;
 }
 
 /** Planning rule follows the user's approval setting (Settings → Kế hoạch). */

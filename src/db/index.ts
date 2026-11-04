@@ -879,6 +879,27 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_secret_requests_status_expiry ON secret_requests(status, expiresAt);
   `,
+  // Migration 62: setup chat sessions use the setup playbook and have their own MCP policy.
+  `
+  PRAGMA foreign_keys = OFF;
+  CREATE TABLE chat_sessions_setup_new AS SELECT * FROM chat_sessions;
+  DROP TABLE chat_sessions;
+  CREATE TABLE chat_sessions (
+    id TEXT PRIMARY KEY, projectId TEXT, claudeSessionId TEXT, title TEXT,
+    mode TEXT NOT NULL DEFAULT 'safe' CHECK(mode IN ('safe','full')),
+    busy INTEGER NOT NULL DEFAULT 0, createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+    updatedAt TEXT NOT NULL DEFAULT (datetime('now')), model TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'idle' CHECK(state IN ('idle','running','waiting_permission','waiting_limit','error')),
+    profileName TEXT, pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
+    lastMessageAt TEXT, inputTokens INTEGER NOT NULL DEFAULT 0, outputTokens INTEGER NOT NULL DEFAULT 0,
+    contextTokens INTEGER NOT NULL DEFAULT 0, waitingLimitResetAt INTEGER,
+    kind TEXT NOT NULL DEFAULT 'chat' CHECK(kind IN ('chat','brain','assistant','setup')),
+    FOREIGN KEY (projectId) REFERENCES projects(id)
+  );
+  INSERT INTO chat_sessions SELECT * FROM chat_sessions_setup_new;
+  DROP TABLE chat_sessions_setup_new;
+  PRAGMA foreign_keys = ON;
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -2111,7 +2132,7 @@ export interface ChatSessionRow {
   contextTokens: number;
   createdAt: string;
   updatedAt: string;
-  kind: 'chat' | 'brain' | 'assistant';
+  kind: 'chat' | 'brain' | 'assistant' | 'setup';
 }
 
 export interface ChatRetryRow {
@@ -2257,7 +2278,7 @@ export class ChatSessionRepo {
     inputTokens?: number;
     outputTokens?: number;
     contextTokens?: number;
-    kind?: 'chat' | 'brain' | 'assistant';
+    kind?: 'chat' | 'brain' | 'assistant' | 'setup';
   }): void {
     this.db
       .prepare(
@@ -2284,7 +2305,7 @@ export class ChatSessionRepo {
       );
   }
 
-  getByKind(kind: 'chat' | 'brain' | 'assistant', projectId?: string | null): ChatSessionRow | undefined {
+  getByKind(kind: 'chat' | 'brain' | 'assistant' | 'setup', projectId?: string | null): ChatSessionRow | undefined {
     if (kind === 'assistant') {
       const id = projectId ? `assistant:${projectId}` : 'assistant';
       const session = this.get(id);
@@ -2298,7 +2319,7 @@ export class ChatSessionRepo {
     return session ? this.normalizeAssistantSession(session) : undefined;
   }
 
-  updateKind(id: string, kind: 'chat' | 'brain' | 'assistant'): void {
+  updateKind(id: string, kind: 'chat' | 'brain' | 'assistant' | 'setup'): void {
     this.db.prepare("UPDATE chat_sessions SET kind = ?, updatedAt = datetime('now') WHERE id = ?").run(kind, id);
   }
 

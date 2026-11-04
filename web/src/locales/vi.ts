@@ -329,7 +329,7 @@ export const vi = {
     bulletinSendBtn: 'Gửi ghi chú',
     bulletinSendingBtn: 'Đang gửi...',
     btnStart: 'Bắt đầu',
-    triageTitle: 'Phân tích triage', triageManual: '🙋 Tôi tự làm', triageDo: '✅ Làm', triageSplit: '🧩 Làm + chia', triageAsk: '❓ Hỏi tester', triageSkip: '🚫 Không làm', triageError: 'Task chưa gắn tracker',
+    triageTitle: 'Phân tích triage', triageManual: '🙋 Tôi tự làm', triageDo: '✅ Làm', triageSplit: '🧩 Làm + chia', triageAsk: '❓ Hỏi tester', triageSkip: '🚫 Không làm', triageError: 'Task chưa gắn tracker', triageNotePlaceholder: 'Ghi chú / chỉ đạo cho quyết định', triageInputPlaceholder: 'Gửi thêm thông tin (log / kết quả kiểm tra)', triageInputSubmit: 'Gửi thêm thông tin', triageInputMissing: 'Thiếu thông tin',
     btnPause: 'Tạm dừng',
     btnResume: 'Tiếp tục',
     btnCancel: 'Hủy',

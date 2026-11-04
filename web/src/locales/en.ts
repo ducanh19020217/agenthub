@@ -331,7 +331,7 @@ export const en: typeof vi = {
     bulletinSendBtn: 'Post Note',
     bulletinSendingBtn: 'Posting...',
     btnStart: 'Start',
-    triageTitle: 'Triage analysis', triageManual: '🙋 I will handle it', triageDo: '✅ Do', triageSplit: '🧩 Do + split', triageAsk: '❓ Ask tester', triageSkip: '🚫 Skip', triageError: 'Task is not linked to a tracker',
+    triageTitle: 'Triage analysis', triageManual: '🙋 I will handle it', triageDo: '✅ Do', triageSplit: '🧩 Do + split', triageAsk: '❓ Ask tester', triageSkip: '🚫 Skip', triageError: 'Task is not linked to a tracker', triageNotePlaceholder: 'Decision note / direction', triageInputPlaceholder: 'Send more information (logs / check results)', triageInputSubmit: 'Send more information', triageInputMissing: 'Information is required',
     btnPause: 'Pause',
     btnResume: 'Resume',
     btnCancel: 'Cancel',

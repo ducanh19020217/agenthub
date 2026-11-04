@@ -323,6 +323,8 @@ export const OpenProjectSourceSchema = z.object({
   pollIntervalSec: z.number().int().positive().default(120),
   watchStatusIds: z.array(z.number().int()).default([]),
   reopenedStatusIds: z.array(z.number().int()).default([]),
+  createTypeId: z.number().int().nullable().default(null),
+  createStatusId: z.number().int().nullable().default(null),
   resolvedStatusId: z.number().int().nullable().default(null),
   reviewStatusId: z.number().int().nullable().default(null),
   openStatusIds: z.array(z.number().int()).default([]),

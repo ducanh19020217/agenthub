@@ -38,7 +38,7 @@ import {
   ApplyPresetInput,
   ApplyPresetResult,
   EffectiveConfigResponse,
-  OpenProjectSource, OpenProjectSourceInput, GiteaStatus, RemoteDeployStatus,
+  OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto, OpenProjectTypeDto, OpenProjectSyncResult, GiteaStatus, RemoteDeployStatus,
 } from '../types/api';
 import { getActiveLocale, translateApiErrorMessage } from '../utils/apiError';
 
@@ -327,7 +327,9 @@ export const saveOpenProjectSource = (id: string, data: OpenProjectSourceInput) 
 export const deleteOpenProjectSource = (id: string) => apiFetch<{ ok: boolean }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}`, { method: 'DELETE' });
 export const saveOpenProjectKey = (id: string, key: string) => apiFetch<{ configured: boolean }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/key`, { method: 'PUT', body: JSON.stringify({ key }) });
 export const testOpenProjectConnection = (id: string) => apiFetch<{ ok: boolean; name?: string }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/test`, { method: 'POST' });
-export const syncOpenProject = (id: string) => apiFetch<{ imported: number; comments: number }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/sync`, { method: 'POST' });
+export const syncOpenProject = (id: string) => apiFetch<OpenProjectSyncResult>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/sync`, { method: 'POST' });
+export const getOpenProjectStatuses = (id: string) => apiFetch<OpenProjectStatusDto[]>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/statuses`);
+export const getOpenProjectTypes = (id: string) => apiFetch<OpenProjectTypeDto[]>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/types`);
 export const createOpenProjectDailyReport = (id: string) => apiFetch<{ ok: boolean; path: string; content: string }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/daily-report`, { method: 'POST' });
 export const saveGiteaToken = (projectId: string, token: string) => apiFetch<{ configured: boolean }>(`/api/projects/${encodeURIComponent(projectId)}/gitea/token`, { method: 'PUT', body: JSON.stringify({ token }) });
 export const getGiteaStatus = (projectId: string) => apiFetch<GiteaStatus>(`/api/projects/${encodeURIComponent(projectId)}/gitea/status`);

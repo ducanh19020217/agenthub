@@ -1,17 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { LocaleProvider } from '../context/LocaleContext';
 import { ThemeProvider } from '../context/ThemeContext';
 import type { Locale } from '../locales';
 import { ProjectSettingsDrawer, parseArgv, parseDeployEnv } from '../components/ProjectSettingsDrawer';
-import { OpenProjectSettings } from '../components/OpenProjectSettings';
+import { OpenProjectSettings, parseIdList, matchStatusIds } from '../components/OpenProjectSettings';
 import { TasksPage } from '../pages/TasksPage';
 import { TaskDetailPage } from '../pages/TaskDetailPage';
 import * as client from '../api/client';
 import * as sse from '../api/sse';
-import type { Project, Task, TaskDetail, OpenProjectSource } from '../types/api';
+import type { Project, Task, TaskDetail, OpenProjectSource, OpenProjectStatusDto } from '../types/api';
 
 const mockProject: Project = {
   id: 'proj-1',
@@ -67,6 +67,14 @@ const mockSources: OpenProjectSource[] = [
   },
 ];
 
+const mockStatuses: OpenProjectStatusDto[] = [
+  { id: 1, name: 'New', isClosed: false, position: 1 },
+  { id: 2, name: 'In progress', isClosed: false, position: 2 },
+  { id: 3, name: 'Resolved', isClosed: true, position: 3 },
+  { id: 4, name: 'Reopened', isClosed: false, position: 4 },
+  { id: 5, name: 'Closed', isClosed: true, position: 5 },
+];
+
 function renderWithProviders(ui: React.ReactElement, initialLocale: Locale = 'vi') {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -90,6 +98,7 @@ describe('Integrations UI Suite', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.spyOn(client, 'getOpenProjectSources').mockResolvedValue(mockSources);
+    vi.spyOn(client, 'getOpenProjectStatuses').mockResolvedValue(mockStatuses);
     vi.spyOn(client, 'getGiteaStatus').mockResolvedValue({ projectId: 'proj-1', status: 'ok', finishedAt: '2026-11-03T10:00:00Z' });
     vi.spyOn(client, 'getRemoteDeployStatus').mockResolvedValue({ projectId: 'proj-1', status: 'succeeded', finishedAt: '2026-11-03T11:00:00Z' });
     vi.spyOn(client, 'getEffectiveConfig').mockResolvedValue({} as any);
@@ -559,6 +568,252 @@ describe('Integrations UI Suite', () => {
     });
   });
 
+  describe('3b. OpenProject Status Picker & Fallback', () => {
+    it('parseIdList helper drops empty elements, avoids generating 0, and parses comma lists', () => {
+      expect(parseIdList('1, 100')).toEqual([1, 100]);
+      expect(parseIdList('1,')).toEqual([1]);
+      expect(parseIdList('')).toEqual([]);
+      expect(parseIdList('   ')).toEqual([]);
+      expect(parseIdList('1, , 2')).toEqual([1, 2]);
+      expect(parseIdList('0, 5')).toEqual([0, 5]);
+      expect(parseIdList('1, abc, 100')).toEqual([1, 100]);
+    });
+
+    it('matchStatusIds helper matches names case-insensitively', () => {
+      expect(matchStatusIds(mockStatuses, ['new', 'reopened'])).toEqual([1, 4]);
+      expect(matchStatusIds(mockStatuses, ['reopened'])).toEqual([4]);
+      expect(matchStatusIds(mockStatuses, ['new', 'reopened', 'in progress'])).toEqual([1, 2, 4]);
+      expect(matchStatusIds(mockStatuses, ['nonexistent'])).toEqual([]);
+    });
+
+    it('renders multi-select chips and single select options with Name (id) when key and statuses are present', async () => {
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+        expect(screen.getByTestId('status-picker-watchStatusIds')).toBeInTheDocument();
+      });
+
+      // Statuses from mockStatuses are rendered in watchStatusIds picker
+      const watchPicker = screen.getByTestId('status-picker-watchStatusIds');
+      expect(within(watchPicker).getByText('New (1)')).toBeInTheDocument();
+      expect(within(watchPicker).getByText('In progress (2)')).toBeInTheDocument();
+      expect(within(watchPicker).getByText('Resolved (3)')).toBeInTheDocument();
+      expect(within(watchPicker).getByText('Reopened (4)')).toBeInTheDocument();
+      expect(within(watchPicker).getByText('Closed (5)')).toBeInTheDocument();
+
+      // For op-corp, watchStatusIds is [1, 2] -> checkboxes 1 and 2 are checked
+      const chip1 = screen.getByTestId('status-chip-watchStatusIds-1').querySelector('input')!;
+      const chip2 = screen.getByTestId('status-chip-watchStatusIds-2').querySelector('input')!;
+      const chip3 = screen.getByTestId('status-chip-watchStatusIds-3').querySelector('input')!;
+      expect(chip1.checked).toBe(true);
+      expect(chip2.checked).toBe(true);
+      expect(chip3.checked).toBe(false);
+
+      // op-corp has resolvedStatusId: 7 which is not in mockStatuses -> shows unknown
+      const resolvedSelect = screen.getByTestId('status-select-resolvedStatusId') as HTMLSelectElement;
+      expect(resolvedSelect.value).toBe('7');
+      expect(screen.getByText(/không rõ \(7\)/)).toBeInTheDocument();
+    });
+
+    it('selecting and deselecting chips updates ID array and persists on save', async () => {
+      const saveSpy = vi.spyOn(client, 'saveOpenProjectSource').mockResolvedValue(mockSources[0]);
+
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('status-picker-watchStatusIds')).toBeInTheDocument();
+      });
+
+      // Uncheck New (1)
+      const chip1 = screen.getByTestId('status-chip-watchStatusIds-1').querySelector('input')!;
+      fireEvent.click(chip1);
+      expect(chip1.checked).toBe(false);
+
+      // Check Closed (5)
+      const chip5 = screen.getByTestId('status-chip-watchStatusIds-5').querySelector('input')!;
+      fireEvent.click(chip5);
+      expect(chip5.checked).toBe(true);
+
+      // Save
+      fireEvent.click(screen.getByText('Lưu'));
+
+      await waitFor(() => {
+        expect(saveSpy).toHaveBeenCalledWith(
+          'op-corp',
+          expect.objectContaining({
+            watchStatusIds: [2, 5],
+          }),
+        );
+      });
+    });
+
+    it('single select allows choosing null (-- không đổi --) or status ID', async () => {
+      const saveSpy = vi.spyOn(client, 'saveOpenProjectSource').mockResolvedValue(mockSources[0]);
+
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('status-select-resolvedStatusId')).toBeInTheDocument();
+      });
+
+      const select = screen.getByTestId('status-select-resolvedStatusId') as HTMLSelectElement;
+      expect(select.value).toBe('7');
+
+      // Select null ("— không đổi —")
+      fireEvent.change(select, { target: { value: '' } });
+      expect(select.value).toBe('');
+
+      // Select Resolved (3) for reviewStatusId
+      const reviewSelect = screen.getByTestId('status-select-reviewStatusId') as HTMLSelectElement;
+      fireEvent.change(reviewSelect, { target: { value: '3' } });
+      expect(reviewSelect.value).toBe('3');
+
+      // Save
+      fireEvent.click(screen.getByText('Lưu'));
+
+      await waitFor(() => {
+        expect(saveSpy).toHaveBeenCalledWith(
+          'op-corp',
+          expect.objectContaining({
+            resolvedStatusId: null,
+            reviewStatusId: 3,
+          }),
+        );
+      });
+    });
+
+    it('falls back to manual inputs with hint when key is missing or statuses API fails', async () => {
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+      });
+
+      // Switch to op-client which has keyConfigured: false
+      fireEvent.click(screen.getByText('op-client'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('status-picker-hint')).toHaveTextContent('Lưu URL + API key rồi bấm Tải lại');
+        expect(screen.getByTestId('manual-input-watchStatusIds')).toBeInTheDocument();
+      });
+
+      // When API rejects with error on an existing source
+      vi.spyOn(client, 'getOpenProjectStatuses').mockRejectedValueOnce(new Error('Network error'));
+      fireEvent.click(screen.getByText('op-corp'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('status-picker-hint')).toHaveTextContent('Lưu URL + API key rồi bấm Tải lại');
+        expect(screen.getByTestId('manual-input-watchStatusIds')).toBeInTheDocument();
+      });
+    });
+
+    it('typing in manual inputs does not produce 0 and parses properly on blur or save', async () => {
+      const saveSpy = vi.spyOn(client, 'saveOpenProjectSource').mockResolvedValue(mockSources[1]);
+
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+      });
+
+      // Switch to op-client (manual input mode)
+      fireEvent.click(screen.getByText('op-client'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('manual-input-watchStatusIds')).toBeInTheDocument();
+      });
+
+      const input = screen.getByTestId('manual-input-watchStatusIds') as HTMLInputElement;
+
+      // Typing "1," should NOT produce "1, 0"
+      fireEvent.change(input, { target: { value: '1,' } });
+      expect(input.value).toBe('1,');
+
+      // Typing "1, 100"
+      fireEvent.change(input, { target: { value: '1, 100' } });
+      expect(input.value).toBe('1, 100');
+
+      // Blur parses properly
+      fireEvent.blur(input);
+      expect(input.value).toBe('1, 100');
+
+      // Save persists [1, 100]
+      fireEvent.click(screen.getByText('Lưu'));
+
+      await waitFor(() => {
+        expect(saveSpy).toHaveBeenCalledWith(
+          'op-client',
+          expect.objectContaining({
+            watchStatusIds: [1, 100],
+          }),
+        );
+      });
+    });
+
+    it('suggest by name button fills default statuses for an empty source without overwriting existing values', async () => {
+      const emptySource: OpenProjectSource = {
+        ...mockSources[0],
+        id: 'op-empty',
+        watchStatusIds: [],
+        reopenedStatusIds: [],
+        resolvedStatusId: null,
+        reviewStatusId: null,
+        openStatusIds: [],
+      };
+      vi.spyOn(client, 'getOpenProjectSources').mockResolvedValue([emptySource]);
+
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('suggest-statuses-button')).toBeInTheDocument();
+      });
+
+      // Click Suggest button
+      fireEvent.click(screen.getByTestId('suggest-statuses-button'));
+
+      // watchStatusIds should become [1, 4] (New, Reopened)
+      // reopenedStatusIds should become [4] (Reopened)
+      // resolvedStatusId should become 3 (Resolved)
+      // openStatusIds should become [1, 2, 4] (New, Reopened, In progress)
+      await waitFor(() => {
+        const watch1 = screen.getByTestId('status-chip-watchStatusIds-1').querySelector('input')!;
+        const watch4 = screen.getByTestId('status-chip-watchStatusIds-4').querySelector('input')!;
+        expect(watch1.checked).toBe(true);
+        expect(watch4.checked).toBe(true);
+
+        const reopened4 = screen.getByTestId('status-chip-reopenedStatusIds-4').querySelector('input')!;
+        expect(reopened4.checked).toBe(true);
+
+        const resolvedSelect = screen.getByTestId('status-select-resolvedStatusId') as HTMLSelectElement;
+        expect(resolvedSelect.value).toBe('3');
+
+        const open1 = screen.getByTestId('status-chip-openStatusIds-1').querySelector('input')!;
+        const open2 = screen.getByTestId('status-chip-openStatusIds-2').querySelector('input')!;
+        const open4 = screen.getByTestId('status-chip-openStatusIds-4').querySelector('input')!;
+        expect(open1.checked).toBe(true);
+        expect(open2.checked).toBe(true);
+        expect(open4.checked).toBe(true);
+      });
+    });
+
+    it('reload statuses button triggers refetch', async () => {
+      const getStatusesSpy = vi.spyOn(client, 'getOpenProjectStatuses').mockResolvedValue(mockStatuses);
+
+      renderWithProviders(<OpenProjectSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('reload-statuses-button')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByTestId('reload-statuses-button'));
+
+      await waitFor(() => {
+        expect(getStatusesSpy).toHaveBeenCalled();
+      });
+    });
+  });
+
   describe('4. externalRef links in TasksPage and TaskDetailPage', () => {
     it('renders clickable externalRef link in TaskDetailPage', async () => {
       const taskWithRef: TaskDetail = {
@@ -601,6 +856,40 @@ describe('Integrations UI Suite', () => {
         expect(link).toHaveAttribute('href', 'https://openproject.example.com/work_packages/1234');
         expect(link).toHaveAttribute('target', '_blank');
       });
+    });
+
+    it('uses the resolved ticket URL and label when externalRef is linked', async () => {
+      const taskWithRef: TaskDetail = {
+        id: 'proj-1~t2', projectId: 'proj-1', slug: 't2', title: 'Linked task', externalRef: 'OP-12',
+        externalUrl: 'https://openproject.example.com/work_packages/12', level: 'easy', status: 'draft',
+        dependsOn: '[]', attempt: 0, resume: 0, createdAt: '2026-10-15T00:00:00Z', updatedAt: '2026-10-15T00:00:00Z', runs: [], reviews: [],
+      };
+      vi.spyOn(client, 'getTask').mockResolvedValue(taskWithRef);
+      render(
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+          <LocaleProvider initialLocale="vi"><MemoryRouter initialEntries={['/tasks/proj-1~t2']}><Routes><Route path="/tasks/:id" element={<TaskDetailPage />} /></Routes></MemoryRouter></LocaleProvider>
+        </QueryClientProvider>,
+      );
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-ticket-link')).toHaveTextContent('Mở ticket');
+        expect(screen.getByTestId('openproject-ticket-link')).toHaveAttribute('href', taskWithRef.externalUrl);
+      });
+    });
+
+    it('does not render a broken link for an unlinked display ID', async () => {
+      const taskWithRef: TaskDetail = {
+        id: 'proj-1~t3', projectId: 'proj-1', slug: 't3', title: 'Unlinked task', externalRef: 'OP-13',
+        level: 'easy', status: 'draft', dependsOn: '[]', attempt: 0, resume: 0,
+        createdAt: '2026-10-15T00:00:00Z', updatedAt: '2026-10-15T00:00:00Z', runs: [], reviews: [],
+      };
+      vi.spyOn(client, 'getTask').mockResolvedValue(taskWithRef);
+      render(
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+          <LocaleProvider initialLocale="vi"><MemoryRouter initialEntries={['/tasks/proj-1~t3']}><Routes><Route path="/tasks/:id" element={<TaskDetailPage />} /></Routes></MemoryRouter></LocaleProvider>
+        </QueryClientProvider>,
+      );
+      await waitFor(() => expect(screen.getByText('Unlinked task')).toBeInTheDocument());
+      expect(screen.queryByTestId('openproject-ticket-link')).not.toBeInTheDocument();
     });
 
     it('renders valid non-nested externalRef link in TasksPage project view', async () => {

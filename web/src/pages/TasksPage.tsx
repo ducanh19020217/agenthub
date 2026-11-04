@@ -266,9 +266,9 @@ const ProjectTaskGroup: React.FC<{ project: { id: string; name: string }; tasks:
               <div className="text-xs font-mono text-[var(--t-text-2)] truncate">{task.slug}</div>
               <div className="mt-1 text-sm font-semibold text-[var(--t-text)] line-clamp-2">{task.title}</div>
             </Link>
-            {task.externalRef && (
-              <a href={task.externalRef} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-xs text-[var(--t-accent)] hover:underline" data-testid="openproject-ticket-link">
-                {task.externalRef}
+            {task.externalRef && (task.externalUrl || task.externalRef.startsWith('http')) && (
+              <a href={task.externalUrl || task.externalRef} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-xs text-[var(--t-accent)] hover:underline" data-testid="openproject-ticket-link">
+                {task.externalUrl ? t('taskDetail.openTicket') : task.externalRef}
               </a>
             )}
             <div className="mt-2">
@@ -556,9 +556,9 @@ export const TasksPage: React.FC = () => {
             { key: 'title', title: t('tasks.title'), sortable: true, sortValue: (task) => task.title, render: (task) => (
               <div>
                 <span className="truncate block" title={task.title}>{task.title}</span>
-                {task.externalRef && (
-                  <a href={task.externalRef} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-[var(--t-accent)] hover:underline" data-testid="openproject-ticket-link">
-                    {task.externalRef}
+                {task.externalRef && (task.externalUrl || task.externalRef.startsWith('http')) && (
+                  <a href={task.externalUrl || task.externalRef} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-[var(--t-accent)] hover:underline" data-testid="openproject-ticket-link">
+                    {task.externalUrl ? t('taskDetail.openTicket') : task.externalRef}
                   </a>
                 )}
               </div>

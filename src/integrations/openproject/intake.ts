@@ -2,11 +2,19 @@ import path from 'node:path';
 import type { AgentHubConfig, OpenProjectSource } from '../../config.js';
 import { projectSettings } from '../../projects/settings.js';
 import type { ProjectRepo, ProjectRow, TaskRepo, TrackerItemRepo, TrackerItemRow } from '../../db/index.js';
+import { HttpError } from '../../errors.js';
 import { OpenProjectClient, type OpenProjectActivity, type OpenProjectWorkPackage } from './client.js';
 import { readOpenProjectKey } from './secrets.js';
 import { writeTicketDirectory } from './ticket.js';
 
 const OPEN_TASK_STATUSES = new Set(['draft', 'queued', 'running', 'checking', 'review', 'waiting_quota', 'paused']);
+
+export interface OpenProjectSyncResult {
+  imported: number;
+  comments: number;
+  baseline: number;
+  watched: number;
+}
 
 export interface IntakeTaskService {
   createTask(raw: unknown): { id: string };
@@ -58,6 +66,39 @@ function isComment(activity: OpenProjectActivity): boolean {
   return Boolean(activity.comment?.raw);
 }
 
+function isBaselineRow(row: TrackerItemRow | undefined): boolean {
+  if (!row) return false;
+  try {
+    const parsed = JSON.parse(row.writeback);
+    return Boolean(parsed && typeof parsed === 'object' && parsed.baseline === true);
+  } catch {
+    return false;
+  }
+}
+
+function isCreatePendingRow(row: TrackerItemRow | undefined): boolean {
+  if (!row) return false;
+  try {
+    const parsed = JSON.parse(row.writeback);
+    return Boolean(parsed && typeof parsed === 'object' && parsed.createPending === true);
+  } catch {
+    return false;
+  }
+}
+
+function clearBaseline(writebackJson: string): string {
+  try {
+    const parsed = JSON.parse(writebackJson);
+    if (parsed && typeof parsed === 'object') {
+      delete parsed.baseline;
+      return JSON.stringify(parsed);
+    }
+    return '{}';
+  } catch {
+    return '{}';
+  }
+}
+
 export class OpenProjectIntakeService {
   private readonly config: AgentHubConfig;
   private readonly projectRepo: ProjectRepo;
@@ -102,7 +143,7 @@ export class OpenProjectIntakeService {
     this.timer = undefined;
   }
 
-  async sync(sourceId: string): Promise<{ imported: number; comments: number }> {
+  async sync(sourceId: string): Promise<OpenProjectSyncResult> {
     const source = this.config.integrations.openproject.sources.find((item) => item.id === sourceId);
     if (!source) throw new Error(`Nguồn OpenProject không tồn tại: ${sourceId}`);
     return this.pollSource(source);
@@ -120,7 +161,13 @@ export class OpenProjectIntakeService {
   private async pollDue(): Promise<void> {
     const now = this.now();
     for (const source of this.config.integrations.openproject.sources) {
-      if (!this.attached(source.id)) continue;
+      if (!this.attached(source.id)) {
+        if ((this.nextPoll.get(source.id) || 0) <= now) {
+          console.debug(`[openproject-intake] Nguồn ${source.id} chưa gắn với project nào`);
+          this.nextPoll.set(source.id, now + source.pollIntervalSec * 1000);
+        }
+        continue;
+      }
       if ((this.nextPoll.get(source.id) || 0) > now) continue;
       try {
         await this.pollSource(source);
@@ -136,17 +183,20 @@ export class OpenProjectIntakeService {
     }
   }
 
-  private async pollSource(source: OpenProjectSource): Promise<{ imported: number; comments: number }> {
+  private async pollSource(source: OpenProjectSource): Promise<OpenProjectSyncResult> {
     const key = readOpenProjectKey(this.config.hubHome, source.id);
     if (!key) throw new Error('Nguồn OpenProject chưa có API key');
     const attached = this.attached(source.id);
-    if (!attached) return { imported: 0, comments: 0 };
+    if (!attached) {
+      throw new HttpError(400, 'bad_request', 'Nguồn chưa được gắn vào project nào (Dự án → Cài đặt → OpenProject → Bật + chọn nguồn, vai trò primary)');
+    }
     const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
     const watched = await client.listWatched(source.watchStatusIds);
     const me = await client.me();
     const firstPoll = !this.initializedSources.has(source.id) && this.trackerRepo.list(source.id).length === 0;
     let imported = 0;
     let comments = 0;
+    let baseline = 0;
     for (const listed of watched) {
       const wp = await client.getWorkPackage(listed.id);
       const activities = await client.listActivities(wp.id);
@@ -154,7 +204,25 @@ export class OpenProjectIntakeService {
       const currentStatus = statusId(wp);
       const lastComment = activities.reduce((max, item) => Math.max(max, item.id || 0), 0) || null;
       if (!previous && firstPoll) {
-        this.trackerRepo.upsert({ source_id: source.id, wp_id: wp.id, display_id: displayId(wp), status_id: currentStatus, updated_at: wp.updatedAt || new Date(this.now()).toISOString(), last_comment_id: lastComment, task_ids: '[]', writeback: '{}' });
+        this.trackerRepo.upsert({
+          source_id: source.id,
+          wp_id: wp.id,
+          display_id: displayId(wp),
+          status_id: currentStatus,
+          updated_at: wp.updatedAt || new Date(this.now()).toISOString(),
+          last_comment_id: lastComment,
+          task_ids: '[]',
+          writeback: JSON.stringify({ baseline: true }),
+        });
+        baseline += 1;
+        continue;
+      }
+
+      // A task-created ticket is claimed immediately after POST, before its
+      // details and ticket directory are fetched. Never import that claim as
+      // a second task while the original request is still completing.
+      if (previous && isCreatePendingRow(previous)) {
+        this.trackerRepo.upsert({ ...previous, display_id: displayId(wp), status_id: currentStatus, updated_at: wp.updatedAt || previous.updated_at, last_comment_id: lastComment });
         continue;
       }
 
@@ -191,7 +259,8 @@ export class OpenProjectIntakeService {
 
       let row = previous;
       const hasTasks = taskIds(previous).length > 0;
-      const isNew = !hasTasks && !changed;
+      const isBaseline = isBaselineRow(previous);
+      const isNew = !hasTasks && !isBaseline;
       if (reopened || (changed && freshComments.length > 0) || isNew) {
         const event = reopened ? 'reopened' : isNew ? 'new' : 'comment';
         const importedResult = await this.handleTicket(source, attached.primary, client, wp, activities, row, event);
@@ -199,10 +268,10 @@ export class OpenProjectIntakeService {
         comments += importedResult.comments;
         row = importedResult.row;
       }
-      this.trackerRepo.upsert({ ...row, display_id: displayId(wp), status_id: currentStatus, updated_at: wp.updatedAt || row.updated_at, last_comment_id: lastComment, task_ids: row.task_ids });
+      this.trackerRepo.upsert({ ...row, display_id: displayId(wp), status_id: currentStatus, updated_at: wp.updatedAt || row.updated_at, last_comment_id: lastComment, task_ids: row.task_ids, writeback: row.writeback });
     }
     this.initializedSources.add(source.id);
-    return { imported, comments };
+    return { imported, comments, baseline, watched: watched.length };
   }
 
   private async handleTicket(source: OpenProjectSource, primary: ProjectRow, client: OpenProjectClient, wp: OpenProjectWorkPackage, activities: OpenProjectActivity[], previous: TrackerItemRow, event: 'new' | 'reopened' | 'comment'): Promise<{ row: TrackerItemRow; imported: number; comments: number }> {
@@ -232,6 +301,14 @@ export class OpenProjectIntakeService {
         this.eventBus.emit('tracker.comment', openTasks[0].id, { sourceId: source.id, wpId: wp.id, displayId: displayId(wp), comment: activities.at(-1)?.comment?.raw || '' });
       }
     }
-    return { row: { ...previous, task_ids: JSON.stringify(ids) }, imported, comments };
+    return {
+      row: {
+        ...previous,
+        task_ids: JSON.stringify(ids),
+        writeback: imported > 0 ? clearBaseline(previous.writeback) : previous.writeback,
+      },
+      imported,
+      comments,
+    };
   }
 }

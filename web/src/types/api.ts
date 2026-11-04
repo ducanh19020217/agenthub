@@ -376,7 +376,7 @@ export interface Task {
     excerptHash: string;
   } | null;
   batchId?: string | null;
-  triage?: { sourceId: string; wpId: number; displayId: string; analysis?: { conclusion?: string; size?: string; summary?: string }; decision?: { action?: string } | null } | null;
+  triage?: { sourceId: string; wpId: number; displayId: string; analysis?: { conclusion?: string; size?: string; repo?: string[]; summary?: string; evidence?: string; cause?: string; proposal?: string; risks?: string; questions?: string; manualAssessment?: string; serverChecklist?: string; draftReply?: string; manualAlongside?: string; perRepo?: string }; decision?: { action?: string } | null } | null;
 }
 
 export type BatchStatus = 'draft' | 'dispatched' | 'discarded';

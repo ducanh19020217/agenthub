@@ -136,6 +136,10 @@ export const vi = {
     perfChartLabel: 'Biểu đồ CPU 1 giờ',
     perfProcess: '{count} tiến trình',
     perfProcesses: '{count} tiến trình',
+    diskBlockingTitle: 'Tạm dừng dispatch: Hết dung lượng ổ đĩa',
+    diskBlockingBanner: '{count} task đang phải chờ vì hết dung lượng ({disks}). Gợi ý: dọn thùng rác hoặc cache node_modules.',
+    diskBlockingHubHome: 'Ổ chứa dữ liệu hub (~/.agenthub) sắp đầy. Toàn bộ dispatch bị tạm dừng.',
+    diskSpaceFallback: 'Ổ đĩa',
     diskSpaceSummary: '{free} / {total} GB trống · ngưỡng {threshold} GB',
     quotaTitle: 'Quota {engine}',
     profilesCount: '{count} hồ sơ',
@@ -152,6 +156,7 @@ export const vi = {
     failoverTurnOff: 'Tắt failover',
   },
   tasks: {
+    triagePending: 'Chờ bạn quyết định',
     title: 'Quản lý Task',
     subtitle: 'Theo dõi tiến độ Kanban và can thiệp vòng đời tác vụ AI.',
     filterProject: 'Lọc theo project',
@@ -329,6 +334,7 @@ export const vi = {
     bulletinSendBtn: 'Gửi ghi chú',
     bulletinSendingBtn: 'Đang gửi...',
     btnStart: 'Bắt đầu',
+    triageTitle: 'Phân tích triage', triageManual: '🙋 Tôi tự làm', triageDo: '✅ Làm', triageSplit: '🧩 Làm + chia', triageAsk: '❓ Hỏi tester', triageSkip: '🚫 Không làm', triageError: 'Task chưa gắn tracker', triageNotePlaceholder: 'Ghi chú / chỉ đạo cho quyết định', triageInputPlaceholder: 'Gửi thêm thông tin (log / kết quả kiểm tra)', triageInputSubmit: 'Gửi thêm thông tin', triageInputMissing: 'Thiếu thông tin',
     btnPause: 'Tạm dừng',
     btnResume: 'Tiếp tục',
     btnCancel: 'Hủy',
@@ -1279,7 +1285,7 @@ export const vi = {
     selectDay: 'Chọn ngày',
   },
   telegram: {
-    settingsTitle: 'Cài đặt Telegram', settingsDescription: 'Kết nối bot Telegram để nhận thông báo và điều khiển AgentHub.', enabled: 'Bật Telegram', tokenLabel: 'Bot token', tokenConfigured: 'Đã cấu hình token', tokenPlaceholder: 'Ví dụ: 123456:ABC...', topicLabel: 'chủ đề #{id}', saveToken: 'Lưu token', testButton: 'Kiểm tra', tokenSaved: 'Đã lưu token.', testSuccess: 'Kết nối Telegram thành công.', botFound: 'Bot', loadError: 'Không thể tải cài đặt Telegram.', pairTitle: 'Ghép chat Telegram', pairInstructions: 'Mở bot và gửi /start {code}.', newCode: 'Tạo mã mới', chatsTitle: 'Chat đã ghép', noChats: 'Chưa có chat nào.', removeChat: 'Gỡ chat', projectsTitle: 'Project và topic/chat', departmentsTitle: 'Phòng ban và topic', topicModeTitle: 'Chế độ topic', topicModeProject: 'Theo dự án', topicModeDepartment: 'Theo phòng ban', createTopic: 'Tạo topic', attachChat: 'Gắn chat', chatLabel: 'chat', notConfigured: 'Chưa cấu hình', notifyTitle: 'Loại thông báo', botFatherTitle: 'Tạo bot với @BotFather', botFatherStep1: 'Mở Telegram, tìm @BotFather và gửi /newbot.', botFatherStep2: 'Đặt tên, username kết thúc bằng bot và sao chép token.', botFatherStep3: 'Dán token ở trên, bấm Kiểm tra rồi bật Telegram.', notify: { reviewReady: 'Có task chờ review', failed: 'Task thất bại', blocked: 'Task bị chặn', quotaAllExhausted: 'Mọi tài khoản đều hết quota', fallback: 'Chuyển model / tài khoản' },
+    settingsTitle: 'Cài đặt Telegram', settingsDescription: 'Kết nối bot Telegram để nhận thông báo và điều khiển AgentHub.', enabled: 'Bật Telegram', tokenLabel: 'Bot token', tokenConfigured: 'Đã cấu hình token', tokenPlaceholder: 'Ví dụ: 123456:ABC...', topicLabel: 'chủ đề #{id}', saveToken: 'Lưu token', testButton: 'Kiểm tra', tokenSaved: 'Đã lưu token.', testSuccess: 'Kết nối Telegram thành công.', botFound: 'Bot', loadError: 'Không thể tải cài đặt Telegram.', pairTitle: 'Ghép chat Telegram', pairInstructions: 'Mở bot và gửi /start {code}.', newCode: 'Tạo mã mới', chatsTitle: 'Chat đã ghép', noChats: 'Chưa có chat nào.', removeChat: 'Gỡ chat', projectsTitle: 'Project và topic/chat', departmentsTitle: 'Phòng ban và topic', topicModeTitle: 'Chế độ topic', topicModeProject: 'Theo dự án', topicModeDepartment: 'Theo phòng ban', createTopic: 'Tạo topic', attachChat: 'Gắn chat', chatLabel: 'chat', notConfigured: 'Chưa cấu hình', notifyTitle: 'Loại thông báo', botFatherTitle: 'Tạo bot với @BotFather', botFatherStep1: 'Mở Telegram, tìm @BotFather và gửi /newbot.', botFatherStep2: 'Đặt tên, username kết thúc bằng bot và sao chép token.', botFatherStep3: 'Dán token ở trên, bấm Kiểm tra rồi bật Telegram.', notify: { reviewReady: 'Có task chờ review', failed: 'Task thất bại', blocked: 'Task bị chặn', quotaAllExhausted: 'Mọi tài khoản đều hết quota', fallback: 'Chuyển model / tài khoản', disk: 'Ổ đĩa thấp / hết chỗ' },
     cardTitle: 'Điều khiển Telegram Bot',
     pairingCode: 'Mã ghép đôi',
     expiresIn: 'Hết hạn sau {min}:{sec}',
@@ -1535,6 +1541,7 @@ export const vi = {
       install_refresh_error: "Lỗi làm mới cài đặt",
     },
     task: {
+      auto_closed: "Task tự động đóng",
       blocked: "Task bị chặn",
       cancelled: "Task đã hủy",
       checking: "Task đang kiểm tra",
@@ -1579,6 +1586,7 @@ export const vi = {
     "dotnet-build": "Kiểm tra build .NET",
   },
   reasons: {
+    merged_elsewhere: "Đã merge qua nhánh khác",
     lock_busy: "Khóa reviewer đang bận",
     quota: "Hết quota reviewer",
     timeout: "Quá thời gian review",
@@ -1652,7 +1660,7 @@ export const vi = {
   },
   integrations: {
     createTypeId: 'Loại ticket khi tạo', createStatusId: 'Trạng thái khi tạo',
-    openProjectTitle: 'Tích hợp → OpenProject', openProjectDescription: 'Quản lý nguồn OpenProject và các thao tác đồng bộ.', addSource: 'Thêm nguồn', saved: 'Đã lưu', saveSecret: 'Lưu bí mật', id: 'Mã nguồn', url: 'URL', project: 'Project', language: 'Ngôn ngữ', watchStatusIds: 'Trạng thái theo dõi', reopenedStatusIds: 'Trạng thái mở lại', openStatusIds: 'Trạng thái mở', pollInterval: 'Chu kỳ (giây)', minTicket: 'Số ticket tối thiểu', resolvedStatusId: 'ID trạng thái đã xử lý', reviewStatusId: 'ID trạng thái review', autoStart: 'Tự tạo task', autoResolve: 'Tự resolve', dailyReportConfig: 'Cấu hình báo cáo ngày', reportTime: 'Giờ báo cáo', reportDirectory: 'Thư mục báo cáo', maxReportItems: 'Số mục tối đa', apiKey: 'API key', configured: 'Đã cấu hình', testConnection: 'Kiểm tra kết nối', testOk: 'Kết nối OK', testOkWithName: 'Kết nối OK: {name}', syncNow: 'Đồng bộ ngay', syncSuccess: 'Đã nhập {count} ticket', dailyReport: 'Tạo báo cáo ngày', dailyReportSuccess: 'Đã tạo báo cáo ngày', projectOpenProject: 'OpenProject', enabled: 'Bật', source: 'Nguồn', role: 'Vai trò', sourceBranch: 'Nhánh nguồn', targetBranch: 'Nhánh đích', schedule: 'Lịch', scheduleSlot: 'Lịch (HH:MM)', addScheduleTime: 'Mốc giờ mới', removeScheduleTime: 'Xóa mốc giờ', invalidScheduleTime: 'Định dạng giờ không hợp lệ (HH:MM)', weekdaysOnly: 'Chỉ ngày làm việc', checks: 'Checks', unionMergeGlobs: 'Union merge globs', token: 'Token', writeOnly: 'Chỉ ghi', lastSync: 'Lượt sync gần nhất', remoteDeploy: 'Deploy từ xa', trigger: 'Trigger', waitMinutes: 'Chờ (phút)', steps: 'Steps', healthChecks: 'Health checks', deploySecrets: 'Bí mật env', savedKeys: 'Key bí mật đã lưu', deployNow: 'Deploy ngay', lastDeploy: 'Lượt deploy gần nhất', reloadStatuses: 'Tải lại trạng thái', suggestByName: 'Gợi ý theo tên', saveUrlAndKeyFirst: 'Lưu URL + API key rồi bấm Tải lại', noChange: '— không đổi —', unknownStatus: 'không rõ', loadingStatuses: 'Đang tải trạng thái...', statusMappingTitle: 'Trạng thái OpenProject',
+    openProjectTitle: 'Tích hợp → OpenProject', openProjectDescription: 'Quản lý nguồn OpenProject và các thao tác đồng bộ.', addSource: 'Thêm nguồn', saved: 'Đã lưu', saveSecret: 'Lưu bí mật', id: 'Mã nguồn', url: 'URL', project: 'Project', language: 'Ngôn ngữ', watchStatusIds: 'Trạng thái theo dõi', reopenedStatusIds: 'Trạng thái mở lại', openStatusIds: 'Trạng thái mở', pollInterval: 'Chu kỳ (giây)', minTicket: 'Số ticket tối thiểu', resolvedStatusId: 'ID trạng thái đã xử lý', reviewStatusId: 'ID trạng thái review', autoStart: 'Tự tạo task', autoResolve: 'Tự resolve', triage: 'Triage ticket', triageOff: 'Tắt', triageApprove: 'Phân tích, chờ duyệt', triageAuto: 'Tự giao lỗi nhỏ/vừa', feedbackStatus: 'Trạng thái hỏi tester', dailyReportConfig: 'Cấu hình báo cáo ngày', reportTime: 'Giờ báo cáo', reportDirectory: 'Thư mục báo cáo', maxReportItems: 'Số mục tối đa', apiKey: 'API key', configured: 'Đã cấu hình', testConnection: 'Kiểm tra kết nối', testOk: 'Kết nối OK', testOkWithName: 'Kết nối OK: {name}', syncNow: 'Đồng bộ ngay', syncSuccess: 'Đã nhập {count} ticket', dailyReport: 'Tạo báo cáo ngày', dailyReportSuccess: 'Đã tạo báo cáo ngày', projectOpenProject: 'OpenProject', enabled: 'Bật', source: 'Nguồn', role: 'Vai trò', sourceBranch: 'Nhánh nguồn', targetBranch: 'Nhánh đích', schedule: 'Lịch', scheduleSlot: 'Lịch (HH:MM)', addScheduleTime: 'Mốc giờ mới', removeScheduleTime: 'Xóa mốc giờ', invalidScheduleTime: 'Định dạng giờ không hợp lệ (HH:MM)', weekdaysOnly: 'Chỉ ngày làm việc', checks: 'Checks', unionMergeGlobs: 'Union merge globs', token: 'Token', writeOnly: 'Chỉ ghi', lastSync: 'Lượt sync gần nhất', remoteDeploy: 'Deploy từ xa', trigger: 'Trigger', waitMinutes: 'Chờ (phút)', steps: 'Steps', healthChecks: 'Health checks', deploySecrets: 'Bí mật env', savedKeys: 'Key bí mật đã lưu', deployNow: 'Deploy ngay', lastDeploy: 'Lượt deploy gần nhất', reloadStatuses: 'Tải lại trạng thái', suggestByName: 'Gợi ý theo tên', saveUrlAndKeyFirst: 'Lưu URL + API key rồi bấm Tải lại', noChange: '— không đổi —', unknownStatus: 'không rõ', loadingStatuses: 'Đang tải trạng thái...', statusMappingTitle: 'Trạng thái OpenProject',
     saving: 'Đang lưu…',
     testingConnection: 'Đang kiểm tra…',
     syncing: 'Đang đồng bộ…',

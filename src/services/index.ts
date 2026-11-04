@@ -69,6 +69,7 @@ import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } fr
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
 import { ReviewChainSchema, parseReviewChain, type ReviewChainStep } from '../review-chain.js';
+import { isAutoReviewer } from '../reviewer.js';
 import { isKnownModel } from '../quota/index.js';
 import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, ReviewerOrderSchema, reviewerSettingsFromLegacy } from '../reviewer-config.js';
 import { SetupManager } from '../tools/setup.js';
@@ -641,6 +642,7 @@ export const UpdateConfigSchema = z.object({
       quotaAllExhausted: z.boolean().optional(),
       fallback: z.boolean().optional(),
       brainWaiting: z.boolean().optional(),
+      disk: z.boolean().optional(),
     }).optional(),
   }).optional(),
   updates: z.object({
@@ -752,6 +754,11 @@ export function formatEventSummary(
       return `${taskLabel} bắt đầu chạy`;
     }
 
+    case 'task.auto_closed':
+      return p.reason === 'merged_elsewhere'
+        ? `${taskLabel} tự động hoàn thành (đã merge qua nhánh khác)`
+        : `${taskLabel} đã tự động đóng`;
+
     case 'task.blocked':
       return `${taskLabel} bị chặn`;
 
@@ -759,7 +766,9 @@ export function formatEventSummary(
       return `${taskLabel} thất bại`;
 
     case 'task.done':
-      return `${taskLabel} hoàn thành`;
+      return p.reason === 'merged_elsewhere'
+        ? `${taskLabel} hoàn thành (đã merge qua nhánh khác)`
+        : `${taskLabel} hoàn thành`;
 
     case 'task.cancelled':
       return `${taskLabel} đã bị hủy`;
@@ -926,6 +935,8 @@ export function formatEventSummary(
 
 export class AppService {
   private trackerRepo?: TrackerItemRepo;
+  private triageDecisionHandler?: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>;
+  private triageInputHandler?: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>;
   public deployService?: DeployService;
   public remoteDeployService?: RemoteDeployService;
   public ciRepo?: CiRepo;
@@ -973,6 +984,16 @@ export class AppService {
 
   setSetupTools(tools: SetupTools): void { this.setupTools = tools; }
   setTrackerRepo(repo: TrackerItemRepo): void { this.trackerRepo = repo; }
+  setTriageDecisionHandler(handler: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>): void { this.triageDecisionHandler = handler; }
+  async decideOpenProjectTicket(sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string): Promise<{ action: string; taskIds: string[] }> {
+    if (!this.triageDecisionHandler) throw new HttpError(503, 'unavailable', 'OpenProject triage chưa sẵn sàng');
+    return this.triageDecisionHandler(sourceId, wpId, action, note);
+  }
+  setTriageInputHandler(handler: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>): void { this.triageInputHandler = handler; }
+  async submitOpenProjectTriageInput(sourceId: string, wpId: number, content: string): Promise<{ taskId: string }> {
+    if (!this.triageInputHandler) throw new HttpError(503, 'unavailable', 'OpenProject triage chưa sẵn sàng');
+    return this.triageInputHandler(sourceId, wpId, content);
+  }
   private openProjectTicketUrl(task: TaskRow): string | null {
     if (!task.externalRef || !this.trackerRepo) return task.externalRef?.startsWith('http') ? task.externalRef : null;
     const item = this.trackerRepo.listForTask(task.id).find((row) => row.display_id === task.externalRef);
@@ -3049,12 +3070,25 @@ export class AppService {
   }
 
   listTasks(filter?: { project?: string; status?: string }): TaskRow[] {
-    return this.decorateTasks(this.taskRepo.list(filter));
+    return this.decorateTriageTasks(this.decorateTasks(this.taskRepo.list(filter)));
   }
 
   listTasksPage(filter?: { project?: string; status?: string; search?: string; limit?: string | number; cursor?: string; offset?: string | number; sort?: string; order?: string }): PageResult<TaskRow> {
     const page = this.taskRepo.page(filter);
-    return { ...page, items: this.decorateTasks(page.items) };
+    return { ...page, items: this.decorateTriageTasks(this.decorateTasks(page.items)) };
+  }
+
+  private decorateTriageTasks(tasks: TaskRow[]): TaskRow[] {
+    if (!this.trackerRepo) return tasks;
+    return tasks.map((task) => {
+      const row = this.trackerRepo!.listForTask(task.id).find((item) => item.display_id === task.externalRef);
+      if (!row) return task;
+      try {
+        const writeback = JSON.parse(row.writeback) as { triage?: unknown; decision?: unknown };
+        if (!writeback.triage) return task;
+        return { ...task, triage: { sourceId: row.source_id, wpId: row.wp_id, displayId: row.display_id, analysis: (writeback.triage as { analysis?: unknown }).analysis, decision: writeback.decision || null } } as TaskRow;
+      } catch { return task; }
+    });
   }
 
   getTasksGraph(options?: { project?: string; includeDone?: string | boolean }) {
@@ -3166,6 +3200,14 @@ export class AppService {
       : (isFallback ? fallbackReviewer : (reviews.at(-1)?.actor === 'claude-reviewer' ? 'claude' : (activeReviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex')));
 
     const blockingDisk = this.getBlockingDiskForTask(task);
+    const tracker = this.trackerRepo?.listForTask(task.id).find((row) => row.display_id === task.externalRef);
+    let triage: unknown = null;
+    if (tracker) {
+      try {
+        const writeback = JSON.parse(tracker.writeback) as { triage?: unknown; decision?: unknown };
+        triage = { sourceId: tracker.source_id, wpId: tracker.wp_id, displayId: tracker.display_id, ...(writeback.triage ? { analysis: (writeback.triage as { analysis?: unknown }).analysis } : {}), decision: writeback.decision || null };
+      } catch { triage = null; }
+    }
     const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
     const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
     return {
@@ -3204,6 +3246,7 @@ export class AppService {
       worktreePath: task.worktreePath,
       checks: this.scheduler.getCheckResults(taskId),
       sourceRef: task.sourceRef ? JSON.parse(task.sourceRef) : null,
+      triage,
       derivedTasks: this.taskRepo.getDerivedFrom(taskId).map((t) => apiTask(t, this.getBlockingDiskForTask(t))),
       claudeCost: (() => { const measured = this.claudeSessionRepo?.taskCost(taskId); return measured ? { measured: measured.effectiveTokens > 0, ...measured } : { measured: false, effectiveTokens: 0, sessions: 0 }; })(),
     };
@@ -3962,6 +4005,7 @@ export class AppService {
     if (parsed.verdict === 'approved' && parsed.merge) {
       const project = this.projectRepo.get(task.projectId);
       if (!project) throw new HttpError(404, 'not_found', `Project "${task.projectId}" không tồn tại`);
+      this.scheduler.setTaskMerging(taskId, true);
       try {
         mergeResult = await mergeTaskIntoBase(task, project, {
           hubHome: this.config.hubHome,
@@ -3998,6 +4042,8 @@ export class AppService {
           throw new HttpError(error.statusCode, error.error, error.message);
         }
         throw error;
+      } finally {
+        this.scheduler.setTaskMerging(taskId, false);
       }
     }
 
@@ -4034,7 +4080,7 @@ export class AppService {
   }
 
   /**
-   * Merges a task whose review chain finished on a Codex approval, when the project opted in with
+   * Merges a task whose review chain finished on an automated gate approval, when the project opted in with
    * `integration.autoMerge` or `review.autoMerge`. A merged task then self-deploys through the usual task.merged hook.
    */
   async autoMergeReviewedTask(taskId: string): Promise<void> {
@@ -4044,13 +4090,31 @@ export class AppService {
     if (!project) return;
     const settings = projectSettings(project);
     if (!(settings.review.autoMerge || settings.integration.autoMerge)) return;
-    const chain = project.review
-      ? (() => { try { return (JSON.parse(project.review) as { chain?: Array<{ reviewer?: string }> }).chain || []; } catch { return []; } })()
-      : project.reviewChain
-        ? (() => { try { return JSON.parse(project.reviewChain) as Array<{ reviewer?: string }>; } catch { return []; } })()
+    const rawChain = project.review
+      ? (() => {
+          try {
+            const val = JSON.parse(project.review) as { chain?: unknown };
+            return val.chain;
+          } catch {
+            return [];
+          }
+        })()
+      : project.reviewChain;
+    const chain: ReviewChainStep[] = Array.isArray(rawChain)
+      ? (() => {
+          const res = ReviewChainSchema.safeParse(rawChain);
+          return res.success ? res.data : [];
+        })()
+      : typeof rawChain === 'string'
+        ? parseReviewChain(rawChain)
         : [];
+    if (!chain.length) return;
+    const lastStep = chain.at(-1);
+    if (!lastStep || lastStep.mode !== 'gate') return;
+    if ((task.reviewStep ?? 0) < chain.length) return;
+    if (task.reviewerEscalated) return;
     const last = this.reviewRepo.getByTask(taskId).at(-1);
-    if (!chain.length || !chain.at(-1)?.reviewer?.startsWith('codex:') || !last || last.actor !== 'codex-reviewer' || last.verdict !== 'approved') return;
+    if (!last || !isAutoReviewer(last.actor) || last.verdict !== 'approved') return;
     const checks = this.scheduler.getCheckResults(taskId);
     if (checks.length === 0 || checks.some((c) => !c.ok)) return;
     if (this.failedAutoMerges.has(taskId)) return;
@@ -4066,7 +4130,7 @@ export class AppService {
         verdict: 'approved',
         merge: true,
         by: 'auto-merge',
-        feedback: 'Tự merge sau khi Codex reviewer chấp thuận.',
+        feedback: `Tự merge sau khi reviewer tự động (${last.actor}) chấp thuận.`,
       });
       this.failedAutoMerges.delete(taskId);
     } catch (error) {
@@ -4249,6 +4313,10 @@ export class AppService {
       }
     }
     return cancelled;
+  }
+
+  async autoCloseMergedTasks(): Promise<number> {
+    return this.scheduler.autoCloseMergedTasks();
   }
 
   retryTask(idParam: string, raw: unknown): TaskRow {

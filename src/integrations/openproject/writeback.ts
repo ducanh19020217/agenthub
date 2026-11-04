@@ -1,10 +1,18 @@
 import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { AgentHubConfig, OpenProjectSource } from '../../config.js';
 import type { EventBus } from '../../scheduler/index.js';
 import { projectSettings } from '../../projects/settings.js';
 import type { ProjectRepo, ProjectRow, TaskRepo, TaskRow, TrackerItemRepo, TrackerItemRow } from '../../db/index.js';
 import { OpenProjectClient, OpenProjectError } from './client.js';
 import { readOpenProjectKey } from './secrets.js';
+import { analysisMarkdown, isTriageTaskSlug, parseTriageAnalysis, shouldAutoDispatch, type TriageAnalysis } from './triage.js';
+
+/** Stable hand-off point for the split workflow used by f-op-split. */
+export function startSplit(analysis: TriageAnalysis, projectId: string, note?: string): string {
+  return `${note ? `## Chỉ đạo người dùng (ưu tiên cao nhất)\n${note}\n\n` : ''}## Phân tích triage\n\n${analysisMarkdown(analysis)}\n\n## Phần việc của repo ${projectId}\n${analysis.perRepo || analysis.proposal}\n\nSửa theo đề xuất và ghi ## Comment cho tester trong DONE.${analysis.manualAlongside ? `\n\n## Việc thủ công kèm theo\n${analysis.manualAlongside}` : ''}`;
+}
 
 type GitRunner = (cwd: string, args: string[]) => Promise<{ code: number; output: string }>;
 type WritebackState = {
@@ -15,6 +23,8 @@ type WritebackState = {
   resolved?: boolean;
   pushWarning?: boolean;
   failed?: string;
+  triage?: { taskId: string; analysis: TriageAnalysis; readyAt: string };
+  decision?: { action: 'do' | 'split' | 'ask' | 'skip' | 'manual'; by: string; at: string; note?: string };
 };
 
 export interface OpenProjectWritebackServiceOptions {
@@ -116,6 +126,10 @@ export class OpenProjectWritebackService {
     if (!task?.externalRef) return;
     const matches = this.trackerRepo.listAll().filter((row) => row.display_id === task.externalRef && parseIds(row).includes(taskId));
     for (const row of matches) await this.enqueue(row, async () => {
+      if (type === 'task.done' && isTriageTaskSlug(task.slug)) {
+        await this.handleTriageDone(this.latest(row), task);
+        return;
+      }
       if (type === 'task.done') await this.createLinkedTasks(this.latest(row), task);
       if (type === 'task.merged') {
         const merge = payload && typeof payload === 'object' ? payload as { mergeCommit?: string } : {};
@@ -124,6 +138,119 @@ export class OpenProjectWritebackService {
       if (type === 'task.blocked') await this.requestReview(this.latest(row), task);
       await this.process(this.latest(row));
     });
+  }
+
+  private async handleTriageDone(row: TrackerItemRow, task: TaskRow): Promise<void> {
+    const parsed = parseTriageAnalysis(task.doneReport || '');
+    if (!parsed.analysis) {
+      this.trackerRepo.upsert({ ...row, writeback: JSON.stringify({ ...parseState(row), triageInvalid: parsed.errors }) });
+      this.eventBus.emit('tracker.triage_invalid', task.id, { sourceId: row.source_id, displayId: row.display_id, errors: parsed.errors });
+      return;
+    }
+    const state = parseState(row);
+    state.triage = { taskId: task.id, analysis: parsed.analysis, readyAt: new Date(this.now()).toISOString() };
+    this.save(row, state);
+    const autoDispatch = sourceFor(this.config, row.source_id)?.triage === 'auto' && shouldAutoDispatch(parsed.analysis);
+    this.eventBus.emit('tracker.triage_ready', task.id, {
+      sourceId: row.source_id, wpId: row.wp_id, displayId: row.display_id, taskId: task.id,
+      ticketUrl: `${sourceFor(this.config, row.source_id)?.url.replace(/\/+$/, '') || ''}/work_packages/${row.wp_id}`,
+      analysis: parsed.analysis, auto: sourceFor(this.config, row.source_id)?.triage === 'auto', autoDispatch,
+    });
+    if (autoDispatch) await this.decideNow(this.latest(row), 'do', undefined, 'auto');
+  }
+
+  async decide(row: TrackerItemRow, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string, by = 'user'): Promise<{ action: string; taskIds: string[] }> {
+    return this.enqueue(row, async () => { await this.decideNow(this.latest(row), action, note, by); }).then(() => {
+      const latest = this.latest(row);
+      const state = parseState(latest);
+      return { action: state.decision?.action || action, taskIds: parseIds(latest) };
+    });
+  }
+
+  async submitTriageInput(row: TrackerItemRow, content: string): Promise<{ taskId: string }> {
+    let createdTaskId = '';
+    return this.enqueue(row, async () => {
+      const current = this.latest(row);
+      const state = parseState(current);
+      if (state.decision?.action !== 'ask') throw new Error('Ticket chưa ở trạng thái chờ thông tin tester');
+      const source = sourceFor(this.config, current.source_id);
+      const primary = source && this.projectRepo.getAll().find((project) => {
+        const settings = projectSettings(project).openproject;
+        return settings.enabled && settings.role === 'primary' && settings.sourceId === current.source_id;
+      });
+      if (!source || !primary) throw new Error('Không tìm thấy project primary của nguồn OpenProject');
+      const dir = path.join(this.config.hubHome, 'tracker', current.source_id, String(current.wp_id));
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const n = fs.readdirSync(dir).filter((name) => /^user-input-\d+\.md$/.test(name)).length + 1;
+      fs.writeFileSync(path.join(dir, `user-input-${n}.md`), content, { mode: 0o600 });
+      const base = `op-${current.display_id.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-triage-r${n}`;
+      const task = this.taskService.createTask({ project: primary.id, slug: base, title: `[${current.display_id}] Phân tích bổ sung`, level: 'easy', modelChain: source.triageModelChain, externalRef: current.display_id, start: true, body: `Đọc lại ticket và file .agenthub/context/ticket/user-input-${n}.md. Không sửa code, không commit. Ghi DONE có ## Phân tích đúng định dạng.` });
+      createdTaskId = task.id;
+      delete state.decision;
+      state.triage = undefined;
+      this.save(current, state, [...new Set([...parseIds(current), task.id])]);
+      this.eventBus.emit('tracker.triage_started', task.id, { sourceId: current.source_id, wpId: current.wp_id, displayId: current.display_id, revision: n });
+    }).then(() => ({ taskId: createdTaskId }));
+  }
+
+  private async decideNow(row: TrackerItemRow, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string, by = 'user'): Promise<{ action: string; taskIds: string[] }> {
+    row = this.latest(row);
+    const state = parseState(row);
+    if (state.decision) return { action: state.decision.action, taskIds: parseIds(row) };
+    const source = sourceFor(this.config, row.source_id);
+    const triage = state.triage?.analysis;
+    if (!source || !triage) throw new Error('Ticket chưa có phân tích triage hợp lệ');
+    const at = new Date(this.now()).toISOString();
+    const decision = { action, by, at, note } as WritebackState['decision'];
+    if (action === 'ask') {
+      const key = readOpenProjectKey(this.config.hubHome, source.id);
+      if (!key) throw new Error('Nguồn OpenProject chưa có API key');
+      const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
+      await client.addComment(row.wp_id, `**[AgentHub] Cần thêm thông tin**\n${triage.questions}${note ? `\n\n${note}` : ''}`);
+      if (source.feedbackStatusId !== null) await client.setStatus(row.wp_id, source.feedbackStatusId);
+      state.decision = decision;
+      this.save(row, state);
+      return { action, taskIds: parseIds(row) };
+    }
+    if (action === 'skip' || action === 'manual') {
+      if (note && action === 'skip') {
+        const key = readOpenProjectKey(this.config.hubHome, source.id);
+        if (key) await new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn }).addComment(row.wp_id, `**[AgentHub] Không xử lý**: ${note}`);
+      }
+      state.decision = decision;
+      this.save(row, state);
+      return { action, taskIds: parseIds(row) };
+    }
+    const projects = this.projectRepo.getAll().filter((project) => {
+      const settings = projectSettings(project).openproject;
+      return settings.enabled && settings.sourceId === row.source_id;
+    });
+    const primary = projects.find((project) => projectSettings(project).openproject.role === 'primary');
+    if (!primary) throw new Error('Không tìm thấy project primary của nguồn OpenProject');
+    const base = `op-${row.display_id.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+    const multiRepo = projects.length > 1;
+    const taskIds: string[] = [];
+    let providerTaskId: string | undefined;
+    for (const project of projects) {
+      const suffix = multiRepo ? `-${project.id}` : '';
+      const baseSlug = `${base}${suffix}`;
+      let slug = baseSlug;
+      let n = 1;
+      while (this.taskRepo.get(`${project.id}/${slug}`)) slug = `${baseSlug}-${++n}`;
+      const dependsOn = providerTaskId && /api|hợp đồng|contract/i.test(triage.perRepo || '') ? [providerTaskId] : undefined;
+      const task = this.taskService.createTask({
+        project: project.id, slug, title: `[${row.display_id}] ${triage.summary.slice(0, 100)}`,
+        body: startSplit(triage, project.id, note),
+        level: triage.size === 'lớn' || triage.size === 'lớn (cần chia)' || action === 'split' ? 'hard' : 'easy', externalRef: row.display_id,
+        dependsOn, start: source.autoStart,
+      });
+      taskIds.push(task.id);
+      if (/api|hợp đồng|contract/i.test(triage.perRepo || '') && project.id === primary.id) providerTaskId = task.id;
+    }
+    state.decision = decision;
+    this.save(row, state, [...new Set([...parseIds(row), ...taskIds])]);
+    this.eventBus.emit('tracker.triage_decided', taskIds[0], { sourceId: row.source_id, displayId: row.display_id, action, taskIds });
+    return { action, taskIds };
   }
 
   private async handlePushEvent(type: string, payload: unknown): Promise<void> {
@@ -234,14 +361,18 @@ export class OpenProjectWritebackService {
     const state = parseState(row);
     if (!source || state.resolved) return;
     if (changedProjectId && !ids.some((id) => id.startsWith(`${changedProjectId}/`))) return;
-    const tasks = ids.map((id) => this.taskRepo.get(id)).filter((task): task is TaskRow => Boolean(task));
+    const tasks = ids.map((id) => this.taskRepo.get(id)).filter((task): task is TaskRow => task !== undefined && !isTriageTaskSlug(task.slug));
     for (const task of tasks) {
       if (task.doneReport && !state.linked?.[task.projectId]) await this.createLinkedTasks(this.latest(row), task);
     }
     row = this.latest(row);
     const currentState = parseState(row);
     if (tasks.length === 0 || !tasks.every((task) => currentState.merged?.[task.id])) return;
-    const comments = tasks.map((task) => section(task.doneReport, '## Comment cho tester')).filter(Boolean) as string[];
+    const comments = tasks.map((task) => {
+      const comment = section(task.doneReport, '## Comment cho tester');
+      const analysis = parseState(row).triage?.analysis;
+      return comment ? `${comment}${analysis?.manualAlongside ? `\n\nCần thao tác thủ công kèm theo: ${analysis.manualAlongside}` : ''}` : null;
+    }).filter(Boolean) as string[];
     const push = tasks.map((task) => this.hasPush(task.projectId));
     for (let i = 0; i < tasks.length; i++) {
       if (!push[i]) {

@@ -1,5 +1,9 @@
 # Quyết định kiến trúc (Decisions Log)
 
+## DEC-OPENPROJECT-TRIAGE
+
+- `manual` là action nội bộ bổ sung cho hợp đồng `do|split|ask|skip`, dùng cho kết luận `việc thủ công`; action này đánh dấu ticket để người dùng tự xử lý và không tạo task sửa.
+
 ## DEC-003: Watchdog dùng đa nguồn hoạt động của worker
 
 - **Bối cảnh**: `agy -p` có thể không ghi stdout trong khi agent vẫn đang gọi công cụ. Chỉ dùng mtime log khiến watchdog kill nhầm worker Gemini.

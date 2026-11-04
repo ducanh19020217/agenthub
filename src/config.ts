@@ -170,6 +170,7 @@ export interface TelegramNotifyConfig {
   quotaAllExhausted: boolean;
   fallback: boolean;
   brainWaiting?: boolean;
+  disk?: boolean;
 }
 
 export interface TelegramChat {
@@ -226,6 +227,7 @@ export const DEFAULT_TELEGRAM_NOTIFY: TelegramNotifyConfig = {
   quotaAllExhausted: true,
   fallback: true,
   brainWaiting: true,
+  disk: true,
 };
 
 export const DEFAULT_STALL_CONFIG: StallConfig = {
@@ -331,6 +333,9 @@ export const OpenProjectSourceSchema = z.object({
   minTicketNumber: z.number().int().min(0).default(0),
   autoStart: z.boolean().default(true),
   autoResolve: z.boolean().default(true),
+  triage: z.enum(['off', 'approve', 'auto']).default('off'),
+  triageModelChain: z.array(z.string().min(1)).optional(),
+  feedbackStatusId: z.number().int().nullable().default(null),
   language: z.string().default('vi'),
   dailyReport: DailyReportConfigSchema.optional(),
 });
@@ -1113,6 +1118,7 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
       quotaAllExhausted: rawTelegramNotify.quotaAllExhausted !== false,
       fallback: rawTelegramNotify.fallback !== false,
       brainWaiting: rawTelegramNotify.brainWaiting !== false,
+      disk: rawTelegramNotify.disk !== false,
     },
   };
 

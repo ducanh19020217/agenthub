@@ -6,7 +6,7 @@ import { TaskDetailPage } from '../pages/TaskDetailPage';
 import { LocaleProvider } from '../context/LocaleContext';
 import * as client from '../api/client';
 import * as sse from '../api/sse';
-import { TaskDetail } from '../types/api';
+import { TaskDetail, TaskStatus } from '../types/api';
 
 describe('TaskDetailPage', () => {
   let queryClient: QueryClient;
@@ -129,6 +129,33 @@ describe('TaskDetailPage', () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['task', 'proj-1~t1'] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['tasks'] });
     expect(screen.queryByRole('heading', { name: /Xác nhận hủy task/i })).not.toBeInTheDocument();
+  });
+
+  it('2b. Nút Hủy hiển thị với blocked, failed, review, waiting_quota, paused, draft và ẩn với done, cancelled', async () => {
+    const statusesToShow = ['blocked', 'failed', 'review', 'waiting_quota', 'paused', 'draft'] as const;
+    for (const status of statusesToShow) {
+      queryClient.clear();
+      vi.spyOn(client, 'getTask').mockResolvedValue({
+        ...baseTask,
+        status: status as unknown as TaskStatus,
+      });
+      const { unmount } = renderPage();
+      expect(await screen.findByRole('button', { name: /^Hủy$/i })).toBeInTheDocument();
+      unmount();
+    }
+
+    const statusesToHide = ['done', 'cancelled'] as const;
+    for (const status of statusesToHide) {
+      queryClient.clear();
+      vi.spyOn(client, 'getTask').mockResolvedValue({
+        ...baseTask,
+        status: status as unknown as TaskStatus,
+      });
+      const { unmount } = renderPage();
+      await screen.findByText('Task Alpha');
+      expect(screen.queryByRole('button', { name: /^Hủy$/i })).not.toBeInTheDocument();
+      unmount();
+    }
   });
 
   it('3. Nút Thử lại kèm ghi chú: mở modal khi status failed, nhập note và gọi retryTask', async () => {
@@ -694,6 +721,30 @@ describe('TaskDetailPage', () => {
 
     const backBtn = screen.getByRole('button', { name: /Quay lại/i });
     expect(backBtn).toBeInTheDocument();
+  });
+
+  it('hiển thị toàn bộ phân tích triage, nút chia và ô gửi thêm thông tin', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      triage: {
+        sourceId: 'demo', wpId: 42, displayId: 'OP-42', decision: null,
+        analysis: {
+          conclusion: 'lỗi', size: 'lớn', summary: 'Tóm tắt đầy đủ',
+          evidence: 'Bằng chứng tái hiện', cause: 'Nguyên nhân dự kiến', proposal: 'Hướng sửa', risks: 'Rủi ro', questions: 'Câu hỏi',
+        },
+      },
+    });
+    vi.spyOn(client, 'decideOpenProjectTicket').mockResolvedValue({ action: 'split', taskIds: [] });
+    vi.spyOn(client, 'submitOpenProjectTriageInput').mockResolvedValue({ taskId: 'proj-1/op-op-42-triage-r1' });
+    renderPage();
+    expect(await screen.findByText('Tóm tắt đầy đủ')).toBeInTheDocument();
+    expect(screen.getByText('Bằng chứng tái hiện')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Làm \+ chia/i })).toBeInTheDocument();
+    const input = screen.getByPlaceholderText(/Gửi thêm thông tin/i);
+    fireEvent.change(input, { target: { value: 'log từ server' } });
+    fireEvent.click(screen.getByRole('button', { name: /Gửi thêm thông tin/i }));
+    await vi.waitFor(() => expect(client.submitOpenProjectTriageInput).toHaveBeenCalledWith('demo', 42, 'log từ server'));
   });
 });
 

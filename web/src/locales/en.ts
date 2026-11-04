@@ -138,6 +138,10 @@ export const en: typeof vi = {
     perfChartLabel: '1-hour CPU chart',
     perfProcess: '{count} process',
     perfProcesses: '{count} processes',
+    diskBlockingTitle: 'Dispatch paused: Low disk space',
+    diskBlockingBanner: '{count} task(s) waiting due to low disk space ({disks}). Suggestion: clean trash or node_modules cache.',
+    diskBlockingHubHome: 'Hub data disk (~/.agenthub) is running out of space. All dispatches are paused.',
+    diskSpaceFallback: 'Disk',
     diskSpaceSummary: '{free} / {total} GB free · threshold {threshold} GB',
     quotaTitle: '{engine} Quota',
     profilesCount: '{count} profile(s)',
@@ -154,6 +158,7 @@ export const en: typeof vi = {
     failoverTurnOff: 'Disable failover',
   },
   tasks: {
+    triagePending: 'Waiting for your decision',
     title: 'Task Management',
     subtitle: 'Track Kanban progress and intervene in AI task lifecycles.',
     filterProject: 'Filter by project',
@@ -331,6 +336,7 @@ export const en: typeof vi = {
     bulletinSendBtn: 'Post Note',
     bulletinSendingBtn: 'Posting...',
     btnStart: 'Start',
+    triageTitle: 'Triage analysis', triageManual: '🙋 I will handle it', triageDo: '✅ Do', triageSplit: '🧩 Do + split', triageAsk: '❓ Ask tester', triageSkip: '🚫 Skip', triageError: 'Task is not linked to a tracker', triageNotePlaceholder: 'Decision note / direction', triageInputPlaceholder: 'Send more information (logs / check results)', triageInputSubmit: 'Send more information', triageInputMissing: 'Information is required',
     btnPause: 'Pause',
     btnResume: 'Resume',
     btnCancel: 'Cancel',
@@ -1280,7 +1286,7 @@ export const en: typeof vi = {
     selectDay: 'Select day',
   },
   telegram: {
-    settingsTitle: 'Telegram settings', settingsDescription: 'Connect a Telegram bot for notifications and AgentHub control.', enabled: 'Enable Telegram', tokenLabel: 'Bot token', tokenConfigured: 'Token configured', tokenPlaceholder: 'e.g. 123456:ABC...', topicLabel: 'topic #{id}', saveToken: 'Save token', testButton: 'Test', tokenSaved: 'Token saved.', testSuccess: 'Telegram connection succeeded.', botFound: 'Bot', loadError: 'Unable to load Telegram settings.', pairTitle: 'Pair Telegram chat', pairInstructions: 'Open the bot and send /start {code}.', newCode: 'New code', chatsTitle: 'Paired chats', noChats: 'No paired chats yet.', removeChat: 'Remove chat', projectsTitle: 'Projects and topics/chats', departmentsTitle: 'Departments and topics', topicModeTitle: 'Topic mode', topicModeProject: 'By project', topicModeDepartment: 'By department', createTopic: 'Create topic', attachChat: 'Attach chat', chatLabel: 'chat', notConfigured: 'Not configured', notifyTitle: 'Notification types', botFatherTitle: 'Create a bot with @BotFather', botFatherStep1: 'Open Telegram, find @BotFather, and send /newbot.', botFatherStep2: 'Choose a name, a username ending in bot, and copy the token.', botFatherStep3: 'Paste the token above, test it, and enable Telegram.', notify: { reviewReady: 'Review ready', failed: 'Task failed', blocked: 'Task blocked', quotaAllExhausted: 'All accounts quota exhausted', fallback: 'Model / profile fallback' },
+    settingsTitle: 'Telegram settings', settingsDescription: 'Connect a Telegram bot for notifications and AgentHub control.', enabled: 'Enable Telegram', tokenLabel: 'Bot token', tokenConfigured: 'Token configured', tokenPlaceholder: 'e.g. 123456:ABC...', topicLabel: 'topic #{id}', saveToken: 'Save token', testButton: 'Test', tokenSaved: 'Token saved.', testSuccess: 'Telegram connection succeeded.', botFound: 'Bot', loadError: 'Unable to load Telegram settings.', pairTitle: 'Pair Telegram chat', pairInstructions: 'Open the bot and send /start {code}.', newCode: 'New code', chatsTitle: 'Paired chats', noChats: 'No paired chats yet.', removeChat: 'Remove chat', projectsTitle: 'Projects and topics/chats', departmentsTitle: 'Departments and topics', topicModeTitle: 'Topic mode', topicModeProject: 'By project', topicModeDepartment: 'By department', createTopic: 'Create topic', attachChat: 'Attach chat', chatLabel: 'chat', notConfigured: 'Not configured', notifyTitle: 'Notification types', botFatherTitle: 'Create a bot with @BotFather', botFatherStep1: 'Open Telegram, find @BotFather, and send /newbot.', botFatherStep2: 'Choose a name, a username ending in bot, and copy the token.', botFatherStep3: 'Paste the token above, test it, and enable Telegram.', notify: { reviewReady: 'Review ready', failed: 'Task failed', blocked: 'Task blocked', quotaAllExhausted: 'All accounts quota exhausted', fallback: 'Model / profile fallback', disk: 'Low disk space' },
     cardTitle: 'Telegram Bot Remote Control',
     pairingCode: 'Pairing code',
     expiresIn: 'Expires in {min}:{sec}',
@@ -1507,6 +1513,7 @@ export const en: typeof vi = {
       install_refresh_error: "Environment setup refresh error",
     },
     task: {
+      auto_closed: "Task auto-closed",
       blocked: "Task blocked",
       cancelled: "Task cancelled",
       checking: "Task checking",
@@ -1551,6 +1558,7 @@ export const en: typeof vi = {
     "dotnet-build": ".NET build",
   },
   reasons: {
+    merged_elsewhere: "Merged via another branch",
     lock_busy: "Reviewer lock is busy",
     quota: "Reviewer quota exhausted",
     timeout: "Review timed out",
@@ -1624,7 +1632,7 @@ export const en: typeof vi = {
   },
   integrations: {
     createTypeId: 'Ticket type when creating', createStatusId: 'Status when creating',
-    openProjectTitle: 'Integrations → OpenProject', openProjectDescription: 'Manage OpenProject sources and sync actions.', addSource: 'Add source', saved: 'Saved', saveSecret: 'Save secret', id: 'Source ID', url: 'URL', project: 'Project', language: 'Language', watchStatusIds: 'Watch status IDs', reopenedStatusIds: 'Reopened status IDs', openStatusIds: 'Open status IDs', pollInterval: 'Interval (seconds)', minTicket: 'Minimum ticket', resolvedStatusId: 'Resolved status ID', reviewStatusId: 'Review status ID', autoStart: 'Auto-create tasks', autoResolve: 'Auto-resolve', dailyReportConfig: 'Daily report configuration', reportTime: 'Report time', reportDirectory: 'Report directory', maxReportItems: 'Maximum items', apiKey: 'API key', configured: 'Configured', testConnection: 'Test connection', testOk: 'Connection OK', testOkWithName: 'Connection OK: {name}', syncNow: 'Sync now', syncSuccess: 'Imported {count} ticket(s)', dailyReport: 'Create daily report', dailyReportSuccess: 'Daily report created', projectOpenProject: 'OpenProject', enabled: 'Enabled', source: 'Source', role: 'Role', sourceBranch: 'Source branch', targetBranch: 'Target branch', schedule: 'Schedule', scheduleSlot: 'Schedule (HH:MM)', addScheduleTime: 'Add time slot', removeScheduleTime: 'Remove time slot', invalidScheduleTime: 'Invalid time format (HH:MM)', weekdaysOnly: 'Weekdays only', checks: 'Checks', unionMergeGlobs: 'Union merge globs', token: 'Token', writeOnly: 'Write-only', lastSync: 'Latest sync', remoteDeploy: 'Remote deploy', trigger: 'Trigger', waitMinutes: 'Wait (minutes)', steps: 'Steps', healthChecks: 'Health checks', deploySecrets: 'Environment secrets', savedKeys: 'Configured secret keys', deployNow: 'Deploy now', lastDeploy: 'Latest deploy', reloadStatuses: 'Reload statuses', suggestByName: 'Suggest by name', saveUrlAndKeyFirst: 'Save URL + API key then click Reload', noChange: '— no change —', unknownStatus: 'unknown', loadingStatuses: 'Loading statuses...', statusMappingTitle: 'OpenProject statuses',
+    openProjectTitle: 'Integrations → OpenProject', openProjectDescription: 'Manage OpenProject sources and sync actions.', addSource: 'Add source', saved: 'Saved', saveSecret: 'Save secret', id: 'Source ID', url: 'URL', project: 'Project', language: 'Language', watchStatusIds: 'Watch status IDs', reopenedStatusIds: 'Reopened status IDs', openStatusIds: 'Open status IDs', pollInterval: 'Interval (seconds)', minTicket: 'Minimum ticket', resolvedStatusId: 'Resolved status ID', reviewStatusId: 'Review status ID', autoStart: 'Auto-create tasks', autoResolve: 'Auto-resolve', triage: 'Ticket triage', triageOff: 'Off', triageApprove: 'Analyze, then approve', triageAuto: 'Auto-dispatch small/medium bugs', feedbackStatus: 'Tester feedback status', dailyReportConfig: 'Daily report configuration', reportTime: 'Report time', reportDirectory: 'Report directory', maxReportItems: 'Maximum items', apiKey: 'API key', configured: 'Configured', testConnection: 'Test connection', testOk: 'Connection OK', testOkWithName: 'Connection OK: {name}', syncNow: 'Sync now', syncSuccess: 'Imported {count} ticket(s)', dailyReport: 'Create daily report', dailyReportSuccess: 'Daily report created', projectOpenProject: 'OpenProject', enabled: 'Enabled', source: 'Source', role: 'Role', sourceBranch: 'Source branch', targetBranch: 'Target branch', schedule: 'Schedule', scheduleSlot: 'Schedule (HH:MM)', addScheduleTime: 'Add time slot', removeScheduleTime: 'Remove time slot', invalidScheduleTime: 'Invalid time format (HH:MM)', weekdaysOnly: 'Weekdays only', checks: 'Checks', unionMergeGlobs: 'Union merge globs', token: 'Token', writeOnly: 'Write-only', lastSync: 'Latest sync', remoteDeploy: 'Remote deploy', trigger: 'Trigger', waitMinutes: 'Wait (minutes)', steps: 'Steps', healthChecks: 'Health checks', deploySecrets: 'Environment secrets', savedKeys: 'Configured secret keys', deployNow: 'Deploy now', lastDeploy: 'Latest deploy', reloadStatuses: 'Reload statuses', suggestByName: 'Suggest by name', saveUrlAndKeyFirst: 'Save URL + API key then click Reload', noChange: '— no change —', unknownStatus: 'unknown', loadingStatuses: 'Loading statuses...', statusMappingTitle: 'OpenProject statuses',
     saving: 'Saving…',
     testingConnection: 'Testing…',
     syncing: 'Syncing…',

@@ -12,6 +12,8 @@ import {
   getTaskLog,
   retryTask,
   reviewTask,
+  decideOpenProjectTicket,
+  submitOpenProjectTriageInput,
   retryReviewer,
   startTask,
   updateTask,
@@ -77,6 +79,8 @@ export const TaskDetailPage: React.FC = () => {
   // Active Tab: 'log' | 'body' | 'runs' | 'report' | 'bulletin'
   const [activeTab, setActiveTab] = useState<'log' | 'body' | 'runs' | 'report' | 'bulletin'>('log');
   const [newNoteText, setNewNoteText] = useState('');
+  const [triageNote, setTriageNote] = useState('');
+  const [triageInput, setTriageInput] = useState('');
 
   // Modals
   const [showCancelModal, setShowCancelModal] = useState(false);
@@ -294,6 +298,25 @@ export const TaskDetailPage: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: ['task', id] });
       queryClient.invalidateQueries({ queryKey: ['tasks'] });
     },
+  });
+
+  const triageMutation = useMutation({
+    mutationFn: (action: 'do' | 'split' | 'ask' | 'skip' | 'manual') => {
+      if (!task?.triage) throw new Error(t('taskDetail.triageError'));
+      return decideOpenProjectTicket(task.triage.sourceId, task.triage.wpId, action, triageNote || undefined);
+    },
+    onSuccess: () => {
+      setTriageNote('');
+      queryClient.invalidateQueries({ queryKey: ['task', id] });
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+  });
+  const triageInputMutation = useMutation({
+    mutationFn: () => {
+      if (!task?.triage || !triageInput.trim()) throw new Error(t('taskDetail.triageInputMissing'));
+      return submitOpenProjectTriageInput(task.triage.sourceId, task.triage.wpId, triageInput.trim());
+    },
+    onSuccess: () => { setTriageInput(''); queryClient.invalidateQueries({ queryKey: ['task', id] }); },
   });
 
   const deleteWorktreeMutation = useMutation({
@@ -633,8 +656,8 @@ export const TaskDetailPage: React.FC = () => {
             )
           )}
 
-          {/* Cancel (if running or queued) */}
-          {(task.status === 'running' || task.status === 'checking' || task.status === 'queued') && (
+          {/* Cancel (if not done or cancelled) */}
+          {task.status !== 'done' && task.status !== 'cancelled' && (
             <button
               type="button"
               onClick={() => setShowCancelModal(true)}
@@ -655,6 +678,22 @@ export const TaskDetailPage: React.FC = () => {
                 <RotateCcw className="w-4 h-4" /><span>{t('taskDetail.retryWithModel')}</span>
               </button>
             </>
+          )}
+
+          {task.triage?.analysis && !task.triage.decision && (
+            <section data-testid="triage-actions" className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-4 space-y-3">
+              <div className="text-sm"><strong>{t('taskDetail.triageTitle')}</strong> · {task.triage.analysis.conclusion} · {task.triage.analysis.size}</div>
+              <Markdown>{Object.entries(task.triage.analysis).map(([key, value]) => `### ${key}\n${Array.isArray(value) ? value.join(', ') : value || ''}`).join('\n\n')}</Markdown>
+              <textarea value={triageNote} onChange={(event) => setTriageNote(event.target.value)} placeholder={t('taskDetail.triageNotePlaceholder')} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-2 text-sm" rows={2} />
+              <textarea value={triageInput} onChange={(event) => setTriageInput(event.target.value)} placeholder={t('taskDetail.triageInputPlaceholder')} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-2 text-sm" rows={3} />
+              <button type="button" onClick={() => triageInputMutation.mutate()} className="px-3 py-1.5 rounded-lg border text-xs">{t('taskDetail.triageInputSubmit')}</button>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => triageMutation.mutate(task.triage?.analysis?.conclusion?.startsWith('vi') ? 'manual' : 'do')} className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] text-xs">{task.triage.analysis.conclusion?.startsWith('vi') ? t('taskDetail.triageManual') : t('taskDetail.triageDo')}</button>
+                {(task.triage.analysis.size === 'lớn' || task.triage.analysis.size?.includes('(')) && <button type="button" onClick={() => triageMutation.mutate('split')} className="px-3 py-1.5 rounded-lg border text-xs">{t('taskDetail.triageSplit')}</button>}
+                <button type="button" onClick={() => triageMutation.mutate('ask')} className="px-3 py-1.5 rounded-lg border text-xs">{t('taskDetail.triageAsk')}</button>
+                <button type="button" onClick={() => triageMutation.mutate('skip')} className="px-3 py-1.5 rounded-lg border text-xs">{t('taskDetail.triageSkip')}</button>
+              </div>
+            </section>
           )}
 
           {/* Review actions (if review) */}

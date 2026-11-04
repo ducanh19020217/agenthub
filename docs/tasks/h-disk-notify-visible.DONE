@@ -1,0 +1,70 @@
+# DONE: agenthub/h-disk-notify-visible
+
+## Tóm tắt công việc đã thực hiện
+1. **Desktop notification mức critical khi đĩa chặn dispatch**:
+   - Khi đĩa thấp làm chặn dispatch (có ít nhất một task đang chờ quota do disk hoặc ổ hub home dưới ngưỡng tối thiểu), desktop notification được gửi ở mức `critical` (`urgency = 'critical'`), không bị bỏ qua khi cấu hình `notifications.desktopLevel = 'critical'`.
+   - Định dạng nội dung thông báo đầy đủ: `"💾 Hết dung lượng: <nhãn ổ> (<đường dẫn>) còn X GB, cần Y GB. N task đang phải chờ: a, b, c. Gợi ý: dọn thùng rác hoặc cache node_modules (<đường dẫn>, Z GB)."`.
+   - Throttling: mỗi sự cố chặn đĩa chỉ gửi 1 lần và nhắc lại sau mỗi 60 phút nếu vẫn còn chặn.
+
+2. **Cờ cấu hình Telegram riêng và bỏ phụ thuộc fallback**:
+   - Thêm cờ `telegram.notify.disk`, mặc định `true`, tách rời hoàn toàn khỏi cờ `notify.fallback`.
+   - Cập nhật `UpdateConfigSchema` trong `src/services/index.ts` cho phép lưu cờ `disk` từ API/Web UI.
+   - Thêm công tắc cấu hình "Thông báo sự cố đĩa" trong `TelegramCard` với đầy đủ bản dịch tiếng Việt (`vi.ts`) và tiếng Anh (`en.ts`).
+   - Escape toàn bộ dữ liệu động (nhãn ổ, đường dẫn, slug task, thư mục cache) sang HTML entities an toàn trước khi gửi qua Telegram `parse_mode: 'HTML'`, ngăn chặn lỗi HTTP 400.
+   - Giải quyết xung đột merge với `integration` trong `src/notify.ts`, `test/telegram.test.ts`, `web/src/components/TelegramCard.tsx`, `web/src/locales/en.ts`, `web/src/locales/vi.ts`, bảo toàn đồng thời cấu hình disk notification và các cập nhật mới từ integration.
+
+3. **Thông báo khôi phục (recovery) & xử lý đa ổ đĩa**:
+   - Khi nhận event `disk.ok` và có task được resume (`resumedCount > 0`), gửi thông báo `"✅ Đã đủ dung lượng, N task tiếp tục chạy"` trên cả desktop notification và Telegram.
+   - Chỉ gửi thông báo khôi phục nếu trước đó đã gửi thông báo chặn.
+   - Hỗ trợ khôi phục tuần tự khi từng project disk hồi phục: phát `disk.ok` kèm thông tin recovery (`resumedCount`, `remainingCount`, `tasks`, `path`) cho các task được resume ngay cả khi các ổ khác vẫn đang thấp; desktop và Telegram xử lý reset incident theo đường dẫn ổ đĩa.
+   - Xóa bỏ throttling và deduplication cho ổ đã khôi phục để nếu ổ đó đầy lại trong vòng 60 phút thì cảnh báo sự cố mới được phát ngay lập tức.
+   - Khi toàn bộ các ổ hồi phục và không còn task chờ, reset hoàn toàn trạng thái incident.
+
+4. **Lọc danh sách task chờ theo từng ổ đĩa**:
+   - Trong `markDiskLow` của Scheduler, danh sách `waitingTasks` được lọc chính xác theo ổ đĩa gây chặn (`getDiskIncidentKey`), đảm bảo cảnh báo của ổ nào chỉ liệt kê các task thực sự bị chặn bởi ổ đó.
+   - Theo dõi sự cố và giãn cách thông báo 60 phút theo từng ổ đĩa incident (`diskIncidents` trong Scheduler, `lastSentDiskBlockedByPath` trong Notification & Telegram).
+
+5. **Banner cảnh báo trên Dashboard**:
+   - Hiển thị banner cảnh báo đầu trang Dashboard khi hệ thống đang bị chặn do đầy đĩa (lấy từ trạng thái đĩa thấp và task đang chờ đĩa).
+
+## Kết quả lint / typecheck / test / build
+- **Lint**: `npm run lint` pass (0 errors, 26 warnings trong test).
+- **Typecheck**: `npm run typecheck` pass (0 errors).
+- **Backend tests**: `npm run test` pass:
+  - 114/114 test files passed
+  - 1401/1401 tests passed
+- **Web tests**: `npm run test:web` pass:
+  - 61/61 test files passed
+  - 496/496 tests passed
+- **Build**:
+  - `npm run build` pass (tsc & protocol.md copy thành công).
+  - `npm run build:web` pass (tsc & vite production build thành công).
+
+## Việc chưa làm được / còn thiếu
+- Không có (toàn bộ yêu cầu task, feedback review và giải quyết xung đột merge đã được hoàn thành trọn vẹn).
+
+## Danh sách commit
+- `ce3d886` Merge branch 'integration' into agenthub/h-disk-notify-visible
+- `4737714` Merge branch 'integration' into agenthub/h-disk-notify-visible
+- `dfd6270` fix(telegram): clear disk incident and deduplication on partial recovery
+- `4ea424f` fix(notify): clear disk incident and deduplication on partial recovery
+- `d658119` fix(scheduler): emit disk recovery per disk incident with path on partial recovery
+- `b4babad` fix(scheduler): filter waiting tasks per disk incident and emit recovery on partial disk resume
+- `9a2f481` fix(telegram): escape html special characters in disk alert message
+- `75bf08c` fix(scheduler): set diskLow state immediately when low disk is detected in tick
+- `b48385e` fix(notify): reset disk blocked incident state on disk.ok even when resumed count is zero
+- `3cbe388` feat(scheduler): defer disk.low emit until tasks are evaluated and mark blocking incident immediately
+- `8f9a4fd` fix(services): allow telegram.notify.disk in UpdateConfigSchema
+- `41c18c3` fix(web): remove unused React import in telegramDiskSwitch test
+- `ac3c200` fix(notify): use const for unchanged variable in test
+- `4da52cd` test(notify): add tests for disk blocking, 60m reminder and recovery notifications
+- `2d5a368` feat(web): add dashboard disk blocking banner and telegram disk notify switch
+- `0d2c3b9` feat(telegram): support telegram.notify.disk and format blocking and recovery messages
+- `9f34a09` feat(notify): send critical desktop notification when disk blocks dispatch and recovery message
+- `4f13651` feat(scheduler): include path and waiting tasks in disk events and emit 60m reminder
+- `c756bd4` feat(config): add telegram.notify.disk option with true default
+
+## Ghi chú cho task sau
+- Cấu hình `telegram.notify.disk` mặc định là `true`. Khi người dùng tắt cờ này qua Web UI hoặc API `PUT /api/config`, cả cảnh báo hết đĩa và thông báo khôi phục đĩa trên Telegram sẽ được lọc bỏ, trong khi desktop notification vẫn tuân theo `notifications.desktopLevel`.
+- Khi theo dõi nhiều project disk khác nhau, Scheduler chuẩn hóa đường dẫn dưới `worktreesDir` về cùng incident key của worktree gốc để tránh trùng lặp sự cố khi một project dùng thư mục con mặc định của worktree.
+- NotificationService và TelegramBotService đều có cơ chế deduplicate message giống hệt nhau (30 phút với NotificationService, 10 giây event handler và 30 phút message dedupe với TelegramBotService). Khi một ổ đĩa khôi phục (`disk.ok`), các bản ghi dedup liên quan đến đường dẫn của ổ đĩa đó được xóa để sẵn sàng gửi cảnh báo ngay nếu ổ đĩa bị đầy trở lại.

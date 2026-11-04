@@ -77,8 +77,34 @@ export class GiteaSyncService {
     }
   }
 
-  getStatus(projectId: string): { tokenConfigured: boolean } {
-    return { tokenConfigured: isGiteaTokenConfigured(this.config.hubHome, projectId) };
+  private getGitEnv(): NodeJS.ProcessEnv {
+    const cleanPath = (process.env.PATH || '')
+      .split(path.delimiter)
+      .filter((entry) => !entry.includes(`${path.sep}shims${path.sep}worker`))
+      .join(path.delimiter);
+    return { ...process.env, PATH: cleanPath };
+  }
+
+  getStatus(projectId: string): {
+    tokenConfigured: boolean;
+    remote: { owner: string; repo: string; host?: string } | null;
+  } {
+    const tokenConfigured = isGiteaTokenConfigured(this.config.hubHome, projectId);
+    let remote: { owner: string; repo: string; host?: string } | null = null;
+    const project = this.projectRepo.get(projectId);
+    if (project?.path) {
+      try {
+        const remoteUrl = execFileSync('git', ['-C', project.path, 'remote', 'get-url', 'origin'], {
+          encoding: 'utf8',
+          env: this.getGitEnv(),
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }).trim();
+        remote = parseRemote(remoteUrl);
+      } catch {
+        remote = null;
+      }
+    }
+    return { tokenConfigured, remote };
   }
 
   saveToken(projectId: string, token: string): { configured: boolean } {

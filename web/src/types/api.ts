@@ -247,7 +247,19 @@ export interface OpenProjectSource {
   dailyReport?: { time: string; weekdaysOnly: boolean; dir?: string; maxItems: number; telegram: boolean };
 }
 export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured'> { key?: string; }
-export interface GiteaStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
+export interface GiteaStatus {
+  projectId?: string;
+  status?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+  tokenConfigured?: boolean;
+  remote?: {
+    owner: string;
+    repo: string;
+    host?: string;
+  } | null;
+}
 export interface RemoteDeployStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
 
 export interface KnowledgeEntry {

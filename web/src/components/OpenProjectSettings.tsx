@@ -164,10 +164,7 @@ export const OpenProjectSettings: React.FC = () => {
   });
 
   const testConnectionMutation = useMutation({
-    mutationFn: () => {
-      if (!draft) throw new Error('missing');
-      return testOpenProjectConnection(draft.id);
-    },
+    mutationFn: (sourceId: string) => testOpenProjectConnection(sourceId),
     onSuccess: (res) => {
       const name = res?.name;
       setMessage({
@@ -184,10 +181,7 @@ export const OpenProjectSettings: React.FC = () => {
   });
 
   const syncMutation = useMutation({
-    mutationFn: () => {
-      if (!draft) throw new Error('missing');
-      return syncOpenProject(draft.id);
-    },
+    mutationFn: (sourceId: string) => syncOpenProject(sourceId),
     onSuccess: (res) => {
       if (res && typeof res.baseline === 'number' && res.baseline > 0) {
         setMessage({
@@ -211,10 +205,7 @@ export const OpenProjectSettings: React.FC = () => {
   });
 
   const dailyReportMutation = useMutation({
-    mutationFn: () => {
-      if (!draft) throw new Error('missing');
-      return createOpenProjectDailyReport(draft.id);
-    },
+    mutationFn: (sourceId: string) => createOpenProjectDailyReport(sourceId),
     onSuccess: () => {
       setMessage({
         type: 'ok',
@@ -668,7 +659,7 @@ export const OpenProjectSettings: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => testConnectionMutation.mutate()}
+              onClick={() => testConnectionMutation.mutate(draft.id)}
               disabled={isUnsaved || testConnectionMutation.isPending || removeMutation.isPending}
               aria-busy={testConnectionMutation.isPending ? true : undefined}
               title={isUnsaved ? t('integrations.saveSourceFirst') : undefined}
@@ -679,7 +670,7 @@ export const OpenProjectSettings: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => syncMutation.mutate()}
+              onClick={() => syncMutation.mutate(draft.id)}
               disabled={isUnsaved || syncMutation.isPending || removeMutation.isPending}
               aria-busy={syncMutation.isPending ? true : undefined}
               title={isUnsaved ? t('integrations.saveSourceFirst') : undefined}
@@ -690,7 +681,7 @@ export const OpenProjectSettings: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => dailyReportMutation.mutate()}
+              onClick={() => dailyReportMutation.mutate(draft.id)}
               disabled={isUnsaved || dailyReportMutation.isPending || removeMutation.isPending}
               aria-busy={dailyReportMutation.isPending ? true : undefined}
               title={isUnsaved ? t('integrations.saveSourceFirst') : undefined}

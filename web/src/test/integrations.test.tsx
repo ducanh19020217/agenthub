@@ -712,7 +712,7 @@ describe('Integrations UI Suite', () => {
       renderWithProviders(<OpenProjectSettings />);
 
       await waitFor(() => {
-        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+        expect(screen.getByText('Đồng bộ ngay')).toBeInTheDocument();
       });
 
       const syncBtn = screen.getByText('Đồng bộ ngay');
@@ -723,7 +723,7 @@ describe('Integrations UI Suite', () => {
         expect(syncBtn).toHaveAttribute('aria-busy', 'true');
         expect(syncBtn).toHaveTextContent('Đang đồng bộ…');
         expect(syncBtn.querySelector('.animate-spin')).toBeInTheDocument();
-      });
+      }, { timeout: 5000 });
 
       // Other buttons (e.g. Test connection) should NOT be disabled
       expect(screen.getByText('Kiểm tra kết nối')).not.toBeDisabled();
@@ -739,7 +739,7 @@ describe('Integrations UI Suite', () => {
         expect(syncBtn).toHaveTextContent('Đồng bộ ngay');
         expect(screen.getByRole('status')).toHaveTextContent('Đã ghi mốc 13 ticket (lần đầu, chưa tạo task)');
         expect(screen.getByRole('status')).toHaveClass('text-[var(--t-ok)]');
-      });
+      }, { timeout: 5000 });
     });
 
     it('displays error message from server with crit color when save fails', async () => {

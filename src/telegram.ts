@@ -262,6 +262,8 @@ export class TelegramBotService {
   private ciRepo?: CiRepo;
   private lastSentCi = new Map<string, number>();
   private lastSentDisk = new Map<'low' | 'ok', number>();
+  private diskBlockedNotified = false;
+  private lastSentDiskBlocked = 0;
   private lastSentLoadSummary = 0;
   private lastBroadcast = new Map<string, number>();
   private fetchFn: typeof fetch;
@@ -3655,6 +3657,7 @@ export class TelegramBotService {
       const isAllowedInAuto =
         type === 'brain.notify' ||
         type === 'disk.low' ||
+        type === 'disk.ok' ||
         type === 'disk.docker_low' ||
         type === 'claude.quota_exhausted' ||
         type === 'hub.restart_failed' ||
@@ -4114,7 +4117,48 @@ export class TelegramBotService {
       }
 
       case 'disk.low': {
-        if (!notify.fallback) return;
+        const notifyDisk = this.config.telegram?.notify?.disk !== false;
+        if (!notifyDisk) return;
+
+        const isHubHomeLow = p.source === 'hub_home'
+          || p.label === 'Ổ chứa dữ liệu hub (~/.agenthub)'
+          || p.label === 'Dữ liệu hub (~/.agenthub)';
+
+        let waitingTasks: Array<{ id: string; slug?: string; title?: string }> = [];
+        if (Array.isArray(p.tasks)) {
+          waitingTasks = p.tasks.map((item) => typeof item === 'string' ? { id: item, slug: item, title: item } : item as { id: string; slug?: string; title?: string });
+        } else if (this.taskRepo) {
+          waitingTasks = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
+        }
+
+        const isBlocking = isHubHomeLow || waitingTasks.length > 0 || p.isBlocking === true;
+
+        if (isBlocking) {
+          if (this.diskBlockedNotified && now - this.lastSentDiskBlocked < 60 * 60_000) return;
+          this.diskBlockedNotified = true;
+          this.lastSentDiskBlocked = now;
+          this.lastSentDisk.set('low', now);
+
+          const label = typeof p.label === 'string' && p.label ? p.label : 'Ổ đĩa';
+          const pathStr = typeof p.path === 'string' && p.path ? ` (${p.path})` : '';
+          const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
+          const minFreeGB = typeof p.minFreeGB === 'number' ? p.minFreeGB : 0;
+          const taskNames = waitingTasks.map((t) => t.slug || t.title || t.id).filter(Boolean);
+          const taskListStr = taskNames.length > 0 ? ` ${taskNames.length} task đang phải chờ: ${taskNames.join(', ')}.` : '';
+
+          const cacheDir = typeof p.cacheDir === 'string' && p.cacheDir ? p.cacheDir : this.config.cacheDir;
+          const cacheBytes = typeof p.cacheBytes === 'number' ? p.cacheBytes : 0;
+          const cacheGB = cacheBytes > 0
+            ? `${(cacheBytes / (1024 ** 3)).toFixed(1)} GB`
+            : typeof p.cacheGB === 'number' ? `${p.cacheGB} GB` : '';
+          const cacheSuggestion = cacheDir
+            ? ` Gợi ý: dọn thùng rác hoặc cache node_modules (${cacheDir}${cacheGB ? `, ${cacheGB}` : ''}).`
+            : ' Gợi ý: dọn thùng rác hoặc cache node_modules.';
+
+          this.broadcastMessage(`💾 Hết dung lượng: ${label}${pathStr} còn ${freeGB} GB, cần ${minFreeGB} GB.${taskListStr}${cacheSuggestion}`);
+          break;
+        }
+
         const last = this.lastSentDisk.get('low');
         if (last !== undefined && now - last < 60 * 60_000) return;
         this.lastSentDisk.set('low', now);
@@ -4129,12 +4173,29 @@ export class TelegramBotService {
       }
 
       case 'disk.ok': {
-        if (!notify.fallback) return;
-        const last = this.lastSentDisk.get('ok');
-        if (last !== undefined && now - last < 60 * 60_000) return;
-        this.lastSentDisk.set('ok', now);
-        const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
-        this.broadcastMessage(`💾 <b>Ổ đĩa đã đủ chỗ</b> (${freeGB} GB): tiếp tục chạy task.`);
+        const notifyDisk = this.config.telegram?.notify?.disk !== false;
+        if (!notifyDisk) return;
+
+        const resumedCount = typeof p.resumedCount === 'number'
+          ? p.resumedCount
+          : Array.isArray(p.tasks)
+          ? p.tasks.length
+          : 0;
+
+        if (this.diskBlockedNotified && resumedCount > 0) {
+          this.diskBlockedNotified = false;
+          this.lastSentDisk.set('ok', now);
+          this.broadcastMessage(`✅ Đã đủ dung lượng, ${resumedCount} task tiếp tục chạy`);
+          break;
+        }
+
+        if (!this.diskBlockedNotified && resumedCount === 0) {
+          const last = this.lastSentDisk.get('ok');
+          if (last !== undefined && now - last < 60 * 60_000) return;
+          this.lastSentDisk.set('ok', now);
+          const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
+          this.broadcastMessage(`💾 <b>Ổ đĩa đã đủ chỗ</b> (${freeGB} GB): tiếp tục chạy task.`);
+        }
         break;
       }
 

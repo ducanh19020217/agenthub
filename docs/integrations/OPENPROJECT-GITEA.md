@@ -67,6 +67,8 @@ Hub tạo work package trước bằng tiêu đề task và mô tả Markdown (r
 
 Nguồn có thêm `createTypeId` và `createStatusId` để chọn mặc định khi tạo ticket. Danh sách loại được lấy từ `GET /api/integrations/openproject/sources/:id/types`.
 
+Nếu OpenProject đã tạo work package nhưng một bước đọc ticket, chép context hoặc tạo task tiếp theo thất bại, AgentHub xóa dòng `createPending` để ticket không bị bỏ qua vĩnh viễn ở các vòng intake sau. Lỗi trả về vẫn nêu display ID của ticket đã tạo để người dùng có thể xử lý ticket mồ côi. Trong khoảng thời gian hoàn tất request, dòng `createPending` được ghi ngay sau POST tạo work package; intake bỏ qua dòng này để tránh tạo task trùng.
+
 ### 4.1 Intake
 
 Poller chạy theo `pollIntervalSec`. Khi lỗi thì backoff, tối đa 1800s.

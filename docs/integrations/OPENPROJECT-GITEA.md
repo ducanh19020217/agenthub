@@ -78,6 +78,10 @@ Poller chạy theo `pollIntervalSec`. Khi lỗi thì backoff, tối đa 1800s.
 
 Nếu `triage` khác `off`, ticket NEW/REOPENED hoặc comment trả lời sau `ask` sẽ tạo task `op-<id>-triage` (hoặc `-r<n>`), task chỉ đọc và phải ghi `## Phân tích` theo `src/protocol.md`. Khi DONE hợp lệ, hub phát event `tracker.triage_ready`; người dùng chọn `do`, `split`, `ask`, `skip` hoặc `manual` qua API `POST /api/tracker/:sourceId/:wpId/decision` hoặc MCP `hub_ticket_decision`. `auto` tự chọn `do` khi kết luận là `lỗi` và độ lớn `nhỏ`/`vừa`, đồng thời thông báo đã tự giao.
 
+Phân tích triage được lưu trong writeback và hiển thị ở chi tiết task. `ask` ghi câu hỏi lên ticket, đổi sang `feedbackStatusId` (nếu có), rồi comment mới của tester tạo lượt `-triage-r<n>`; người dùng cũng có thể gửi log bổ sung qua API/MCP `hub_ticket_triage_input`, Web hoặc trả lời tin Telegram phân tích. File input chỉ nằm trong thư mục tracker cục bộ.
+
+Nguồn có thể gắn một project `primary` và nhiều `secondary`. Khi chọn `do`/`split`, hub tạo task cho từng repo với hậu tố project; nếu phần phân tích nêu thay đổi API thì task cung cấp (primary) chạy trước và task phụ thuộc nhận `dependsOn`. Chỉ khi mọi task sửa đã merge và push hub mới comment `Đã sửa`/resolve ticket. Kết luận `việc thủ công` dùng action nội bộ `manual`, không tạo task sửa và không triage lại khi có comment thường.
+
 Quyết định được ghi trong `tracker_items.writeback` và xử lý tuần tự để bấm lặp không tạo task trùng. `do` truyền toàn bộ phân tích vào task sửa, dùng `autoStart`; phần `Việc thủ công kèm theo` được đưa vào comment ghi ngược. Khi nguồn gắn nhiều project, mỗi project nhận một task; phần phụ thuộc API được nối bằng `dependsOn`.
 
 - **Lần đầu của một nguồn**: chỉ ghi mốc, không tạo task.

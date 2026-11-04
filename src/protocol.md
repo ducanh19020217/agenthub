@@ -22,6 +22,8 @@ Repo: <projectId>[, <projectId>]
 
 Với `việc thủ công`, thêm `### Nhận định ban đầu`, `### Checklist kiểm tra trên server` và/hoặc `### Nháp tin nhắn/trả lời`. Với nhiều repo, thêm `### Phần việc theo repo`.
 
+`### Việc thủ công kèm theo` liệt kê các bước ngoài repo cần người dùng thực hiện sau khi code được merge; nội dung này được đưa vào comment ghi ngược cho tester.
+
 Không ghi các số liệu dễ thay đổi (ví dụ thời gian build hoặc số test chính xác) vào tài liệu đã commit; chỉ ghi các số liệu đó trong `.agenthub/DONE`.
 1. Đọc `.agenthub/task.md` để biết đề bài.
 2. Đọc thêm AGENTS.md / CLAUDE.md / GEMINI.md của project nếu có.

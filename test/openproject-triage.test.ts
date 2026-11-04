@@ -43,4 +43,10 @@ describe('OpenProject triage analysis', () => {
     expect(result.analysis).toBeDefined();
     expect(shouldAutoDispatch(result.analysis!)).toBe(false);
   });
+
+  it('rejects unknown conclusion and size values', () => {
+    const result = parseTriageAnalysis(report.replace('Kết luận: lỗi', 'Kết luận: maybe').replace('Độ lớn: vừa', 'Độ lớn: khổng lồ'));
+    expect(result.analysis).toBeUndefined();
+    expect(result.errors).toEqual(expect.arrayContaining(['Kết luận thiếu hoặc không hợp lệ', 'Độ lớn thiếu hoặc không hợp lệ']));
+  });
 });

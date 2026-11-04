@@ -83,7 +83,6 @@ export const OpenProjectSettings: React.FC = () => {
 
   const {
     data: statuses,
-    isLoading: isStatusesLoading,
     isFetching: isStatusesFetching,
     isError: isStatusesError,
     refetch: refetchStatuses,

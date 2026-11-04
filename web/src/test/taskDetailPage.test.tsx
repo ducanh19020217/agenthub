@@ -6,7 +6,7 @@ import { TaskDetailPage } from '../pages/TaskDetailPage';
 import { LocaleProvider } from '../context/LocaleContext';
 import * as client from '../api/client';
 import * as sse from '../api/sse';
-import { TaskDetail } from '../types/api';
+import { TaskDetail, TaskStatus } from '../types/api';
 
 describe('TaskDetailPage', () => {
   let queryClient: QueryClient;
@@ -137,7 +137,7 @@ describe('TaskDetailPage', () => {
       queryClient.clear();
       vi.spyOn(client, 'getTask').mockResolvedValue({
         ...baseTask,
-        status,
+        status: status as unknown as TaskStatus,
       });
       const { unmount } = renderPage();
       expect(await screen.findByRole('button', { name: /^Hủy$/i })).toBeInTheDocument();
@@ -149,7 +149,7 @@ describe('TaskDetailPage', () => {
       queryClient.clear();
       vi.spyOn(client, 'getTask').mockResolvedValue({
         ...baseTask,
-        status,
+        status: status as unknown as TaskStatus,
       });
       const { unmount } = renderPage();
       await screen.findByText('Task Alpha');

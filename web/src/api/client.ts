@@ -774,6 +774,10 @@ export async function reviewTask(
   });
 }
 
+export async function decideOpenProjectTicket(sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string): Promise<{ action: string; taskIds: string[] }> {
+  return apiFetch(`/api/tracker/${encodeURIComponent(sourceId)}/${wpId}/decision`, { method: 'POST', body: JSON.stringify({ action, note }) });
+}
+
 export async function retryTask(id: string, data?: RetryTaskInput): Promise<Task> {
   return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/retry`, {
     method: 'POST',

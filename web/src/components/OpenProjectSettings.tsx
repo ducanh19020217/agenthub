@@ -30,6 +30,9 @@ const blank = (id: string): OpenProjectSourceInput => ({
   minTicketNumber: 0,
   autoStart: true,
   autoResolve: true,
+  triage: 'off',
+  triageModelChain: [],
+  feedbackStatusId: null,
   language: 'vi',
   dailyReport: { time: '18:00', weekdaysOnly: true, maxItems: 10, telegram: false },
 });
@@ -468,6 +471,20 @@ export const OpenProjectSettings: React.FC = () => {
               onChange={(e) => set({ autoStart: e.target.checked })}
             />
             {t('integrations.autoStart')}
+          </label>
+          <label className="space-y-1">
+            <span>{t('integrations.triage')}</span>
+            <select value={draft.triage || 'off'} onChange={(e) => set({ triage: e.target.value as OpenProjectSourceInput['triage'] })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" data-testid="triage-select">
+              <option value="off">{t('integrations.triageOff')}</option><option value="approve">{t('integrations.triageApprove')}</option><option value="auto">{t('integrations.triageAuto')}</option>
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span>{t('integrations.feedbackStatus')}</span>
+            {hasValidStatuses && statuses ? (
+              <select value={draft.feedbackStatusId ?? ''} onChange={(e) => set({ feedbackStatusId: e.target.value === '' ? null : Number(e.target.value) })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" data-testid="status-select-feedbackStatusId">
+                <option value="">{t('integrations.noChange')}</option>{statuses.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.id})</option>)}
+              </select>
+            ) : <input type="number" value={draft.feedbackStatusId ?? ''} onChange={(e) => set({ feedbackStatusId: nullableNumber(e.target.value) })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" />}
           </label>
           <label className="flex gap-2 items-center">
             <input

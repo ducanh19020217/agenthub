@@ -245,6 +245,7 @@ export interface OpenProjectSource {
   resolvedStatusId: number | null; reviewStatusId: number | null; openStatusIds: number[];
   createTypeId?: number | null; createStatusId?: number | null;
   minTicketNumber: number; autoStart: boolean; autoResolve: boolean; language: string;
+  triage?: 'off' | 'approve' | 'auto'; triageModelChain?: string[]; feedbackStatusId?: number | null;
   dailyReport?: { time: string; weekdaysOnly: boolean; dir?: string; maxItems: number; telegram: boolean };
 }
 export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured'> { key?: string; }
@@ -375,6 +376,7 @@ export interface Task {
     excerptHash: string;
   } | null;
   batchId?: string | null;
+  triage?: { sourceId: string; wpId: number; displayId: string; analysis?: { conclusion?: string; size?: string; summary?: string }; decision?: { action?: string } | null } | null;
 }
 
 export type BatchStatus = 'draft' | 'dispatched' | 'discarded';

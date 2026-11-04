@@ -12,6 +12,7 @@ import {
   getTaskLog,
   retryTask,
   reviewTask,
+  decideOpenProjectTicket,
   retryReviewer,
   startTask,
   updateTask,
@@ -291,6 +292,17 @@ export const TaskDetailPage: React.FC = () => {
     onSuccess: () => {
       setShowChangesModal(false);
       setFeedback('');
+      queryClient.invalidateQueries({ queryKey: ['task', id] });
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+  });
+
+  const triageMutation = useMutation({
+    mutationFn: (action: 'do' | 'split' | 'ask' | 'skip' | 'manual') => {
+      if (!task?.triage) throw new Error(t('taskDetail.triageError'));
+      return decideOpenProjectTicket(task.triage.sourceId, task.triage.wpId, action);
+    },
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task', id] });
       queryClient.invalidateQueries({ queryKey: ['tasks'] });
     },
@@ -655,6 +667,19 @@ export const TaskDetailPage: React.FC = () => {
                 <RotateCcw className="w-4 h-4" /><span>{t('taskDetail.retryWithModel')}</span>
               </button>
             </>
+          )}
+
+          {task.triage?.analysis && !task.triage.decision && (
+            <section data-testid="triage-actions" className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-4 space-y-3">
+              <div className="text-sm"><strong>{t('taskDetail.triageTitle')}</strong> · {task.triage.analysis.conclusion} · {task.triage.analysis.size}</div>
+              <Markdown>{task.triage.analysis.summary || ''}</Markdown>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => triageMutation.mutate(task.triage?.analysis?.conclusion?.startsWith('vi') ? 'manual' : 'do')} className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] text-xs">{task.triage.analysis.conclusion?.startsWith('vi') ? t('taskDetail.triageManual') : t('taskDetail.triageDo')}</button>
+                {task.triage.analysis.size?.includes('(') && <button type="button" onClick={() => triageMutation.mutate('split')} className="px-3 py-1.5 rounded-lg border text-xs">{t('taskDetail.triageSplit')}</button>}
+                <button type="button" onClick={() => triageMutation.mutate('ask')} className="px-3 py-1.5 rounded-lg border text-xs">{t('taskDetail.triageAsk')}</button>
+                <button type="button" onClick={() => triageMutation.mutate('skip')} className="px-3 py-1.5 rounded-lg border text-xs">{t('taskDetail.triageSkip')}</button>
+              </div>
+            </section>
           )}
 
           {/* Review actions (if review) */}

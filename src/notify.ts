@@ -483,11 +483,34 @@ export class NotificationService {
           }
           if (typeof p.remainingCount === 'number' && p.remainingCount > 0) {
             if (typeof p.path === 'string' && p.path) {
-              this.lastSentDiskBlockedByPath.delete(path.resolve(p.path));
+              const resolved = path.resolve(p.path);
+              this.lastSentDiskBlockedByPath.delete(resolved);
+              for (const key of Array.from(this.lastSentDiskBlockedByPath.keys())) {
+                if (key === resolved || key.startsWith(resolved + path.sep) || resolved.startsWith(key + path.sep)) {
+                  this.lastSentDiskBlockedByPath.delete(key);
+                }
+              }
+              for (const key of Array.from(this.lastSent.keys())) {
+                if (key.includes(p.path) || key.includes(resolved)) {
+                  this.lastSent.delete(key);
+                }
+              }
+            }
+            if (typeof p.label === 'string' && p.label) {
+              this.lastSentDiskBlockedByPath.delete(p.label);
+            }
+            if (this.lastSentDiskBlockedByPath.size === 0) {
+              this.diskBlockedNotified = false;
+              this.diskState = 'ok';
             }
           } else {
             this.diskBlockedNotified = false;
             this.lastSentDiskBlockedByPath.clear();
+            for (const key of Array.from(this.lastSent.keys())) {
+              if (key.includes('💾 Hết dung lượng')) {
+                this.lastSent.delete(key);
+              }
+            }
             this.diskState = 'ok';
           }
           break;

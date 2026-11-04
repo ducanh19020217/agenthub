@@ -463,6 +463,39 @@ describe('NotificationService (Desktop Notifications)', () => {
     notifier.stop();
   });
 
+  it('notifies a new blocking incident after partial recovery without 60m throttle', () => {
+    config.notifications.desktopLevel = 'critical';
+    let current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    // 1. Two separate disk blocking alerts
+    eventBus.emit('disk.low', undefined, { label: 'Drive A', path: '/drive-a', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-a'] });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('Drive A');
+
+    eventBus.emit('disk.low', undefined, { label: 'Drive B', path: '/drive-b', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-b'] });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('Drive B');
+
+    // 2. Drive A recovers first (1 task resumed, 1 remaining on Drive B)
+    eventBus.emit('disk.ok', undefined, { path: '/drive-a', freeGB: 10, minFreeGB: 3, resumedCount: 1, remainingCount: 1, tasks: ['t-a'] });
+    expect(execCalls).toHaveLength(3);
+    expect(execCalls[2].args.at(-1)).toBe('✅ Đã đủ dung lượng, 1 task tiếp tục chạy');
+
+    // 3. 5 minutes later, Drive A becomes low again (< 60m since first alert)
+    current += 5 * 60_000;
+    eventBus.emit('disk.low', undefined, { label: 'Drive A', path: '/drive-a', freeGB: 0.4, minFreeGB: 3, isBlocking: true, tasks: ['t-a'] });
+    expect(execCalls).toHaveLength(4);
+    expect(execCalls[3].args.at(-1)).toContain('Drive A');
+
+    // 4. Meanwhile Drive B emitting disk.low at 5m remains throttled
+    eventBus.emit('disk.low', undefined, { label: 'Drive B', path: '/drive-b', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-b'] });
+    expect(execCalls).toHaveLength(4);
+
+    notifier.stop();
+  });
+
   it('treats quota exhaustion per engine, not across all profiles', () => {
     config.notifications.desktopLevel = 'important';
     quotaMarkRepo.mark('g1', 'gemini', Math.floor(Date.now() / 1000) + 3600);

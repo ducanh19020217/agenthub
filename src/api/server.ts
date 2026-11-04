@@ -379,9 +379,10 @@ export async function createServer(
     return service.getGiteaStatus(id);
   });
 
-  fastify.post('/api/projects/:id/gitea/sync', async (req: FastifyRequest) => {
+  fastify.post('/api/projects/:id/gitea/sync', async (req: FastifyRequest, reply: FastifyReply) => {
     const { id } = req.params as { id: string };
-    return service.triggerGiteaSync(id);
+    const result = await service.triggerGiteaSync(id);
+    return reply.status(result.status === 'started' ? 202 : 200).send(result);
   });
 
   fastify.put('/api/projects/:id/remote-deploy/env', async (req: FastifyRequest) => {

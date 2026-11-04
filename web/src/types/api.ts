@@ -258,16 +258,23 @@ export interface OpenProjectTypeDto { id: number; name: string; position: number
 export interface OpenProjectSyncResult { imported: number; comments: number; baseline: number; watched: number; }
 export interface GiteaStatus {
   projectId?: string;
-  status?: string;
+  status?: 'ok' | 'started' | 'skipped' | 'succeeded' | 'failed' | 'conflict' | string;
+  running?: boolean;
+  step?: 'fetch' | 'worktree' | 'merge' | 'checks' | 'push' | 'pr' | 'merge-pr' | string;
   startedAt?: string;
   finishedAt?: string;
   error?: string;
+  reason?: string;
+  url?: string;
+  prNumber?: number;
+  commit?: string;
   tokenConfigured?: boolean;
   remote?: {
     owner: string;
     repo: string;
     host?: string;
   } | null;
+  last?: GiteaStatus;
 }
 export interface RemoteDeployStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
 

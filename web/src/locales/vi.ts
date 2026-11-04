@@ -1680,6 +1680,7 @@ export const vi = {
     saveToken: 'Lưu token',
     repo: 'Repo',
     fromRemoteOrigin: 'đọc từ git remote origin',
+    syncRunning: 'Đang đồng bộ… ({step})', syncSucceeded: 'thành công', syncSkipped: 'bỏ qua', syncConflict: 'xung đột', syncFailed: 'lỗi', syncStarted: 'đã bắt đầu', syncReason: 'Lý do', syncError: 'Lỗi', syncPr: 'PR',
     remoteDeployDescription: 'Chạy các lệnh deploy lên server test và kiểm tra server còn sống.',
     triggerManual: 'Bấm tay',
     triggerAfterGiteaSync: 'Tự chạy sau khi đồng bộ Gitea thành công',

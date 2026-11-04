@@ -1652,6 +1652,7 @@ export const en: typeof vi = {
     saveToken: 'Save token',
     repo: 'Repo',
     fromRemoteOrigin: 'read from git remote origin',
+    syncRunning: 'Syncing… ({step})', syncSucceeded: 'succeeded', syncSkipped: 'skipped', syncConflict: 'conflict', syncFailed: 'failed', syncStarted: 'started', syncReason: 'Reason', syncError: 'Error', syncPr: 'PR',
     remoteDeployDescription: 'Run deployment commands to the test server and verify server health.',
     triggerManual: 'Manual',
     triggerAfterGiteaSync: 'Automatically run after successful Gitea sync',

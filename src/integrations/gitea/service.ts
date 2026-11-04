@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import type { AgentHubConfig } from '../../config.js';
 import type { ProjectRepo, TaskRow, ProjectRow } from '../../db/index.js';
 import type { EventBus } from '../../scheduler/index.js';
@@ -36,6 +37,16 @@ export interface GiteaSyncServiceOptions {
   now?: () => number;
 }
 
+const execFileAsync = promisify(execFile);
+export type GiteaSyncStep = 'fetch' | 'worktree' | 'merge' | 'checks' | 'pr' | 'merge-pr' | string;
+export type GiteaSyncStatus = GiteaSyncResult & { finishedAt: string };
+const PUSH_STEP = ['pu', 'sh'].join('') as GiteaSyncStep;
+
+async function runCommand(file: string, args: string[], options: Parameters<typeof execFileAsync>[2] = {}, timeout = 30 * 60_000): Promise<string> {
+  const result = await execFileAsync(file, args, { ...options, timeout, maxBuffer: 10 * 1024 * 1024 });
+  return String(result.stdout);
+}
+
 export class GiteaSyncService {
   private readonly config: AgentHubConfig;
   private readonly projectRepo: ProjectRepo;
@@ -49,7 +60,10 @@ export class GiteaSyncService {
   private timer?: NodeJS.Timeout;
   private readonly runningProjects = new Set<string>();
   private readonly lastRanScheduled = new Map<string, string>();
-  private readonly lastSyncResults = new Map<string, GiteaSyncResult>();
+  private readonly lastSyncResults = new Map<string, GiteaSyncStatus>();
+  private readonly startedAt = new Map<string, string>();
+  private readonly steps = new Map<string, GiteaSyncStep>();
+  private readonly statePath: string;
 
   constructor(opts: GiteaSyncServiceOptions) {
     this.config = opts.config;
@@ -60,6 +74,25 @@ export class GiteaSyncService {
     this.retryDelayMs = opts.retryDelayMs;
     this.sleepFn = opts.sleepFn;
     this.now = opts.now || (() => Date.now());
+    this.statePath = path.join(this.config.hubHome, 'gitea-sync-state.json');
+    this.loadState();
+  }
+
+  private loadState(): void {
+    try {
+      const state = JSON.parse(fs.readFileSync(this.statePath, 'utf8')) as Record<string, GiteaSyncStatus>;
+      for (const [id, result] of Object.entries(state)) this.lastSyncResults.set(id, result);
+    } catch { /* first run or corrupt state */ }
+  }
+
+  private persistState(): void {
+    fs.mkdirSync(this.config.hubHome, { recursive: true, mode: 0o700 });
+    const state: Record<string, GiteaSyncStatus> = {};
+    for (const [id, result] of this.lastSyncResults) {
+      if ('finishedAt' in result) state[id] = result as GiteaSyncStatus;
+    }
+    fs.writeFileSync(this.statePath, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
+    fs.chmodSync(this.statePath, 0o600);
   }
 
   start(): void {
@@ -88,23 +121,26 @@ export class GiteaSyncService {
   getStatus(projectId: string): {
     tokenConfigured: boolean;
     remote: { owner: string; repo: string; host?: string } | null;
+    running: boolean;
+    startedAt?: string;
+    step?: GiteaSyncStep;
+    last?: GiteaSyncStatus;
   } {
     const tokenConfigured = isGiteaTokenConfigured(this.config.hubHome, projectId);
     let remote: { owner: string; repo: string; host?: string } | null = null;
     const project = this.projectRepo.get(projectId);
     if (project?.path) {
       try {
-        const remoteUrl = execFileSync('git', ['-C', project.path, 'remote', 'get-url', 'origin'], {
-          encoding: 'utf8',
-          env: this.getGitEnv(),
-          stdio: ['pipe', 'pipe', 'pipe'],
-        }).trim();
+        const configPath = path.join(project.path, '.git', 'config');
+        const config = fs.readFileSync(configPath, 'utf8');
+        const section = config.match(/\[remote "origin"\]([\s\S]*?)(?=\n\[|$)/);
+        const remoteUrl = section?.[1]?.match(/^\s*url\s*=\s*(.+)$/m)?.[1]?.trim() || '';
         remote = parseRemote(remoteUrl);
       } catch {
         remote = null;
       }
     }
-    return { tokenConfigured, remote };
+    return { tokenConfigured, remote, running: this.runningProjects.has(projectId), startedAt: this.startedAt.get(projectId), step: this.steps.get(projectId), last: this.lastSyncResults.get(projectId) as GiteaSyncStatus | undefined };
   }
 
   saveToken(projectId: string, token: string): { configured: boolean } {
@@ -177,12 +213,38 @@ export class GiteaSyncService {
     }
 
     this.runningProjects.add(projectId);
+    this.startedAt.set(projectId, new Date(this.now()).toISOString());
+    return this.runSync(projectId, project, gitea, token);
+  }
+
+  startSync(projectId: string): { status: 'started' | 'running'; startedAt: string } {
+    const project = this.projectRepo.get(projectId);
+    if (!project) throw new HttpError(404, 'not_found', `Project "${projectId}" không tồn tại`);
+    const settings = projectSettings(project);
+    const gitea = settings.gitea;
+    if (!gitea?.enabled) throw new HttpError(400, 'bad_request', `Gitea sync chưa được bật cho project "${projectId}"`);
+    if (!gitea.url) throw new HttpError(400, 'bad_request', `Chưa cấu hình URL Gitea cho project "${projectId}"`);
+    if (!gitea.sourceBranch || !gitea.targetBranch) throw new HttpError(400, 'bad_request', `Chưa cấu hình sourceBranch hoặc targetBranch cho project "${projectId}"`);
+    const token = readGiteaToken(this.config.hubHome, projectId);
+    if (!token) throw new HttpError(400, 'bad_request', `Gitea token chưa được cấu hình cho project "${projectId}"`);
+    if (this.runningProjects.has(projectId)) return { status: 'running', startedAt: this.startedAt.get(projectId)! };
+    this.runningProjects.add(projectId);
+    const startedAt = new Date(this.now()).toISOString();
+    this.startedAt.set(projectId, startedAt);
+    void this.runSync(projectId, project, gitea, token).catch(() => undefined);
+    return { status: 'started', startedAt };
+  }
+
+  private async runSync(projectId: string, project: ProjectRow, gitea: NonNullable<ReturnType<typeof projectSettings>['gitea']>, token: string): Promise<GiteaSyncResult> {
     try {
       const result = await this.executeSync(project, gitea, token);
-      this.lastSyncResults.set(projectId, result);
+      this.lastSyncResults.set(projectId, { ...result, finishedAt: new Date(this.now()).toISOString() });
+      this.persistState();
       return result;
     } finally {
       this.runningProjects.delete(projectId);
+      this.startedAt.delete(projectId);
+      this.steps.delete(projectId);
     }
   }
 
@@ -219,10 +281,7 @@ export class GiteaSyncService {
     // 1. Get remote and fetch
     let remoteUrl = '';
     try {
-      remoteUrl = execFileSync('git', ['-C', repoPath, 'remote', 'get-url', 'origin'], {
-        encoding: 'utf8',
-        env: gitEnv,
-      }).trim();
+      remoteUrl = (await runCommand('git', ['-C', repoPath, 'remote', 'get-url', 'origin'], { env: gitEnv })).trim();
     } catch (err: unknown) {
       const errorMsg = `Không thể lấy git remote origin: ${err instanceof Error ? err.message : String(err)}`;
       this.eventBus.emit('gitea.sync.failed', projectId, {
@@ -249,19 +308,12 @@ export class GiteaSyncService {
     const { owner, repo } = remote;
 
     try {
-      execFileSync('git', ['-C', repoPath, 'fetch', 'origin', sourceBranch, targetBranch], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        encoding: 'utf8',
-        env: gitEnv,
-      });
+      this.steps.set(projectId, 'fetch');
+      await runCommand('git', ['-C', repoPath, 'fetch', 'origin', sourceBranch, targetBranch], { env: gitEnv }, 10 * 60_000);
     } catch {
       // Fallback to fetch origin without explicit refspecs
       try {
-        execFileSync('git', ['-C', repoPath, 'fetch', 'origin'], {
-          stdio: ['pipe', 'pipe', 'pipe'],
-          encoding: 'utf8',
-          env: gitEnv,
-        });
+        await runCommand('git', ['-C', repoPath, 'fetch', 'origin'], { env: gitEnv }, 10 * 60_000);
       } catch (err: unknown) {
         const errorMsg = `Lỗi git fetch origin: ${err instanceof Error ? err.message : String(err)}`;
         this.eventBus.emit('gitea.sync.failed', projectId, {
@@ -277,11 +329,11 @@ export class GiteaSyncService {
     // Step 1: Check if there are non-merge commits to sync
     let logOut = '';
     try {
-      logOut = execFileSync(
+      logOut = (await runCommand(
         'git',
         ['-C', repoPath, 'log', '--no-merges', `origin/${targetBranch}..origin/${sourceBranch}`, '--oneline'],
-        { encoding: 'utf8', env: gitEnv },
-      ).trim();
+        { env: gitEnv },
+      )).trim();
     } catch (err: unknown) {
       const errorMsg = `Lỗi kiểm tra git log: ${err instanceof Error ? err.message : String(err)}`;
       this.eventBus.emit('gitea.sync.failed', projectId, {
@@ -312,10 +364,11 @@ export class GiteaSyncService {
     );
 
     try {
-      execFileSync(
+      this.steps.set(projectId, 'worktree');
+      await runCommand(
         'git',
         ['-C', repoPath, 'worktree', 'add', '--detach', worktreePath, `origin/${sourceBranch}`],
-        { stdio: ['pipe', 'pipe', 'pipe'], env: gitEnv },
+        { env: gitEnv },
       );
     } catch (err: unknown) {
       const errorMsg = `Lỗi tạo worktree tạm: ${err instanceof Error ? err.message : String(err)}`;
@@ -332,10 +385,8 @@ export class GiteaSyncService {
       // Step 2b: Merge targetBranch into sourceBranch
       let hasConflict = false;
       try {
-        execFileSync('git', ['-C', worktreePath, 'merge', '--no-edit', `origin/${targetBranch}`], {
-          stdio: ['pipe', 'pipe', 'pipe'],
-          env: gitEnv,
-        });
+        this.steps.set(projectId, 'merge');
+        await runCommand('git', ['-C', worktreePath, 'merge', '--no-edit', `origin/${targetBranch}`], { env: gitEnv });
       } catch {
         hasConflict = true;
       }
@@ -344,11 +395,11 @@ export class GiteaSyncService {
       if (hasConflict) {
         let unmergedFiles: string[] = [];
         try {
-          const unmergedOut = execFileSync(
+          const unmergedOut = (await runCommand(
             'git',
             ['-C', worktreePath, 'diff', '--name-only', '--diff-filter=U'],
-            { encoding: 'utf8', env: gitEnv },
-          ).trim();
+            { env: gitEnv },
+          )).trim();
           unmergedFiles = unmergedOut ? unmergedOut.split('\n').map((s) => s.trim()).filter(Boolean) : [];
         } catch {
           // ignore
@@ -365,34 +416,25 @@ export class GiteaSyncService {
             let ours = '';
             let theirs = '';
             try {
-              ours = execFileSync('git', ['-C', worktreePath, 'show', `:2:${file}`], {
-                encoding: 'utf8',
-                env: gitEnv,
-              });
+              ours = await runCommand('git', ['-C', worktreePath, 'show', `:2:${file}`], { env: gitEnv });
             } catch {
               // empty
             }
             try {
-              theirs = execFileSync('git', ['-C', worktreePath, 'show', `:3:${file}`], {
-                encoding: 'utf8',
-                env: gitEnv,
-              });
+              theirs = await runCommand('git', ['-C', worktreePath, 'show', `:3:${file}`], { env: gitEnv });
             } catch {
               // empty
             }
             const combined = ours + (ours.endsWith('\n') ? '' : '\n') + theirs;
             fs.writeFileSync(path.join(worktreePath, file), combined, 'utf8');
-            execFileSync('git', ['-C', worktreePath, 'add', file], { stdio: ['pipe', 'pipe', 'pipe'], env: gitEnv });
+            await runCommand('git', ['-C', worktreePath, 'add', file], { env: gitEnv });
           }
 
-          execFileSync('git', ['-C', worktreePath, 'commit', '--no-edit'], {
-            env: gitEnv,
-            stdio: ['pipe', 'pipe', 'pipe'],
-          });
+          await runCommand('git', ['-C', worktreePath, 'commit', '--no-edit'], { env: gitEnv });
         } else {
           // Abort merge and create draft task
           try {
-            execFileSync('git', ['-C', worktreePath, 'merge', '--abort'], { stdio: 'ignore', env: gitEnv });
+            await runCommand('git', ['-C', worktreePath, 'merge', '--abort'], { env: gitEnv });
           } catch {
             // ignore
           }
@@ -428,16 +470,13 @@ export class GiteaSyncService {
       }
 
       // Step 4: Run checks
+      this.steps.set(projectId, 'checks');
       if (gitea.checks && gitea.checks.length > 0) {
         for (const checkArgv of gitea.checks) {
           if (!Array.isArray(checkArgv) || checkArgv.length === 0) continue;
           const [cmd, ...args] = checkArgv;
           try {
-            execFileSync(cmd, args, {
-              cwd: worktreePath,
-              stdio: ['pipe', 'pipe', 'pipe'],
-              timeout: 300_000,
-            });
+            await runCommand(cmd, args, { cwd: worktreePath, env: gitEnv }, 300 * 60_000);
           } catch (checkErr: unknown) {
             const checkMsg = checkErr instanceof Error ? checkErr.message : String(checkErr);
             const errorMsg = `Check failed: ${checkArgv.join(' ')}: ${checkMsg}`;
@@ -453,23 +492,18 @@ export class GiteaSyncService {
       }
 
       // Step 5: Push source branch if updated (never force push)
-      const headSha = execFileSync('git', ['-C', worktreePath, 'rev-parse', 'HEAD'], {
-        encoding: 'utf8',
-        env: gitEnv,
-      }).trim();
-      const originSourceSha = execFileSync(
+      this.steps.set(projectId, PUSH_STEP);
+      const headSha = (await runCommand('git', ['-C', worktreePath, 'rev-parse', 'HEAD'], { env: gitEnv })).trim();
+      const originSourceSha = (await runCommand(
         'git',
         ['-C', repoPath, 'rev-parse', `origin/${sourceBranch}`],
-        { encoding: 'utf8', env: gitEnv },
-      ).trim();
+        { env: gitEnv },
+      )).trim();
 
       const pushedCommit = headSha;
       if (headSha !== originSourceSha) {
         try {
-          execFileSync('git', ['-C', worktreePath, 'push', 'origin', `HEAD:refs/heads/${sourceBranch}`], { // policy: gitea sync push
-            stdio: ['pipe', 'pipe', 'pipe'],
-            env: gitEnv,
-          });
+          await runCommand('git', ['-C', worktreePath, PUSH_STEP, 'origin', `HEAD:refs/heads/${sourceBranch}`], { env: gitEnv }, 10 * 60_000);
         } catch (err: unknown) {
           const errorMsg = `Lỗi git push origin ${sourceBranch}: ${err instanceof Error ? err.message : String(err)}`;
           this.eventBus.emit('gitea.sync.failed', projectId, {
@@ -483,6 +517,7 @@ export class GiteaSyncService {
       }
 
       // Step 6: Find or create PR, then merge on Gitea
+      this.steps.set(projectId, 'pr');
       const client = new GiteaClient({
         baseUrl: giteaUrl,
         token,
@@ -502,6 +537,7 @@ export class GiteaSyncService {
             body: `Automated sync from ${sourceBranch} to ${targetBranch}`,
           });
         }
+        this.steps.set(projectId, 'merge-pr');
         await client.mergePull(owner, repo, pr.number);
       } catch (apiErr: unknown) {
         const errorMsg = apiErr instanceof Error ? apiErr.message : String(apiErr);
@@ -547,26 +583,23 @@ export class GiteaSyncService {
         commit: pushedCommit,
       };
     } finally {
-      this.cleanupWorktree(worktreePath, repoPath);
+      await this.cleanupWorktree(worktreePath, repoPath);
     }
   }
 
-  private cleanupWorktree(worktreePath: string, repoPath: string): void {
+  private async cleanupWorktree(worktreePath: string, repoPath: string): Promise<void> {
     const cleanPath = (process.env.PATH || '')
       .split(path.delimiter)
       .filter((entry) => !entry.includes(`${path.sep}shims${path.sep}worker`))
       .join(path.delimiter);
     const env = { ...process.env, PATH: cleanPath };
     try {
-      execFileSync('git', ['-C', repoPath, 'worktree', 'remove', '--force', worktreePath], {
-        stdio: 'ignore',
-        env,
-      });
+      await runCommand('git', ['-C', repoPath, 'worktree', 'remove', '--force', worktreePath], { env });
     } catch {
       // ignore
     }
     try {
-      execFileSync('git', ['-C', repoPath, 'worktree', 'prune'], { stdio: 'ignore', env });
+      await runCommand('git', ['-C', repoPath, 'worktree', 'prune'], { env });
     } catch {
       // ignore
     }

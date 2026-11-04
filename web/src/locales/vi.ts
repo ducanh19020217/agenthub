@@ -1679,6 +1679,7 @@ export const vi = {
     healthChecksDesc: 'URL cần trả về mã < 500 sau khi deploy',
     waitMinutesDesc: 'Thời gian tối đa chờ health check đạt',
     deploySecretsDesc: 'Biến môi trường bí mật dạng KEY=VALUE, mỗi dòng một biến; chỉ ghi',
+    deploySecretsPlaceholder: 'KEY=VALUE',
     saveEnvSecrets: 'Lưu biến bí mật',
     openProjectEnabledDesc: 'Nhận ticket OpenProject cho dự án này',
     sourceDesc: 'Nguồn khai báo ở Cài đặt → Tích hợp → OpenProject',

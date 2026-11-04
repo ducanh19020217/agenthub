@@ -303,6 +303,7 @@ describe('Integrations UI Suite', () => {
       const envInput = screen.getByLabelText('Bí mật env') as HTMLInputElement;
       expect(envInput.type).toBe('password');
       expect(envInput.value).toBe('');
+      expect(envInput.placeholder).toBe('KEY=VALUE');
 
       // Enter deploy secrets with '=' inside value
       fireEvent.change(envInput, { target: { value: 'TOKEN=secret=with=equals' } });

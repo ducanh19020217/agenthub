@@ -1651,6 +1651,7 @@ export const en: typeof vi = {
     healthChecksDesc: 'URLs that must return status code < 500 after deploy',
     waitMinutesDesc: 'Maximum time to wait for health checks to pass',
     deploySecretsDesc: 'Secret environment variables as KEY=VALUE, one variable per line; write-only',
+    deploySecretsPlaceholder: 'KEY=VALUE',
     saveEnvSecrets: 'Save environment secrets',
     openProjectEnabledDesc: 'Receive OpenProject tickets for this project',
     sourceDesc: 'Source configured in Settings → Integrations → OpenProject',

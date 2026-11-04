@@ -2643,7 +2643,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                     type="password"
                     value={deployEnv}
                     onChange={(e) => setDeployEnv(e.target.value)}
-                    placeholder="KEY=VALUE"
+                    placeholder={t('integrations.deploySecretsPlaceholder')}
                   />
                   <Button
                     type="button"

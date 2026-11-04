@@ -9,6 +9,13 @@ export interface OpenProjectUser {
   email?: string;
 }
 
+export interface OpenProjectStatus {
+  id: number;
+  name: string;
+  isClosed?: boolean;
+  position?: number;
+}
+
 export interface OpenProjectWorkPackage {
   id: number;
   displayId?: string;
@@ -102,8 +109,8 @@ export class OpenProjectClient {
     return this.request<OpenProjectCollection<Record<string, unknown>>>('/api/v3/projects?pageSize=100');
   }
 
-  async listStatuses(): Promise<OpenProjectCollection<{ id: number; name: string; isClosed?: boolean }>> {
-    return this.request<OpenProjectCollection<{ id: number; name: string; isClosed?: boolean }>>('/api/v3/statuses?pageSize=100');
+  async listStatuses(): Promise<OpenProjectCollection<OpenProjectStatus>> {
+    return this.request<OpenProjectCollection<OpenProjectStatus>>('/api/v3/statuses?pageSize=100');
   }
 
   private async listWorkPackagesWithFilters(filtersJson: string, sortBy = '[["id","asc"]]'): Promise<OpenProjectWorkPackage[]> {

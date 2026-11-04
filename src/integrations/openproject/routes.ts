@@ -95,6 +95,34 @@ export function registerOpenProjectRoutes(
     }
   });
 
+  fastify.get('/api/integrations/openproject/sources/:id/statuses', async (req: FastifyRequest) => {
+    const { id } = idParams.parse(req.params);
+    const source = sourceOrThrow(config, id);
+    const key = readOpenProjectKey(config.hubHome, id);
+    if (!key) throw new HttpError(400, 'bad_request', 'Nguồn chưa có API key');
+    try {
+      const client = new OpenProjectClient({
+        baseUrl: source.url,
+        project: source.project,
+        apiKey: key,
+        fetch: options.fetch,
+      });
+      const collection = await client.listStatuses();
+      const elements = collection._embedded?.elements || [];
+      return elements
+        .map((item) => ({
+          id: item.id,
+          name: item.name,
+          isClosed: Boolean(item.isClosed),
+          position: item.position ?? 0,
+        }))
+        .sort((a, b) => a.position - b.position || a.id - b.id);
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      throw new HttpError(502, 'openproject_error', 'Không thể kết nối OpenProject');
+    }
+  });
+
   fastify.post('/api/integrations/openproject/sources/:id/sync', async (req: FastifyRequest) => {
     const { id } = idParams.parse(req.params);
     sourceOrThrow(config, id);

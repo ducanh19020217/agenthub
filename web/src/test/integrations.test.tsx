@@ -728,6 +728,40 @@ describe('Integrations UI Suite', () => {
       });
     });
 
+    it('uses the resolved ticket URL and label when externalRef is linked', async () => {
+      const taskWithRef: TaskDetail = {
+        id: 'proj-1~t2', projectId: 'proj-1', slug: 't2', title: 'Linked task', externalRef: 'OP-12',
+        externalUrl: 'https://openproject.example.com/work_packages/12', level: 'easy', status: 'draft',
+        dependsOn: '[]', attempt: 0, resume: 0, createdAt: '2026-10-15T00:00:00Z', updatedAt: '2026-10-15T00:00:00Z', runs: [], reviews: [],
+      };
+      vi.spyOn(client, 'getTask').mockResolvedValue(taskWithRef);
+      render(
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+          <LocaleProvider initialLocale="vi"><MemoryRouter initialEntries={['/tasks/proj-1~t2']}><Routes><Route path="/tasks/:id" element={<TaskDetailPage />} /></Routes></MemoryRouter></LocaleProvider>
+        </QueryClientProvider>,
+      );
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-ticket-link')).toHaveTextContent('Mở ticket');
+        expect(screen.getByTestId('openproject-ticket-link')).toHaveAttribute('href', taskWithRef.externalUrl);
+      });
+    });
+
+    it('does not render a broken link for an unlinked display ID', async () => {
+      const taskWithRef: TaskDetail = {
+        id: 'proj-1~t3', projectId: 'proj-1', slug: 't3', title: 'Unlinked task', externalRef: 'OP-13',
+        level: 'easy', status: 'draft', dependsOn: '[]', attempt: 0, resume: 0,
+        createdAt: '2026-10-15T00:00:00Z', updatedAt: '2026-10-15T00:00:00Z', runs: [], reviews: [],
+      };
+      vi.spyOn(client, 'getTask').mockResolvedValue(taskWithRef);
+      render(
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+          <LocaleProvider initialLocale="vi"><MemoryRouter initialEntries={['/tasks/proj-1~t3']}><Routes><Route path="/tasks/:id" element={<TaskDetailPage />} /></Routes></MemoryRouter></LocaleProvider>
+        </QueryClientProvider>,
+      );
+      await waitFor(() => expect(screen.getByText('Unlinked task')).toBeInTheDocument());
+      expect(screen.queryByTestId('openproject-ticket-link')).not.toBeInTheDocument();
+    });
+
     it('renders valid non-nested externalRef link in TasksPage project view', async () => {
       const taskItem: Task = {
         id: 'proj-1~t1',

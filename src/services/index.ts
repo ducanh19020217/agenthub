@@ -3226,10 +3226,16 @@ export class AppService {
       task_ids: '[]',
       writeback: JSON.stringify({ createPending: true }),
     });
-    const wp = await client.getWorkPackage(result.id);
-    const activities = await client.listActivities(result.id);
-    await writeTicketDirectory(client, wp, activities, path.join(this.config.hubHome, 'tracker', source.id, String(result.id)), source.url);
-    return { sourceId: source.id, wp, displayId: result.displayId, url: result.url, activities };
+    try {
+      const wp = await client.getWorkPackage(result.id);
+      const activities = await client.listActivities(result.id);
+      await writeTicketDirectory(client, wp, activities, path.join(this.config.hubHome, 'tracker', source.id, String(result.id)), source.url);
+      return { sourceId: source.id, wp, displayId: result.displayId, url: result.url, activities };
+    } catch (error) {
+      this.trackerRepo.delete(source.id, result.id);
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new HttpError(502, 'bad_gateway', `Đã tạo ticket ${result.displayId} nhưng không thể hoàn tất liên kết: ${reason}`);
+    }
   }
 
   private recordOpenProjectTicket(prepared: NonNullable<Awaited<ReturnType<AppService['prepareOpenProjectTicket']>>>, taskId: string): void {
@@ -3364,14 +3370,22 @@ export class AppService {
     if (!project) throw new HttpError(404, 'not_found', `Project "${parsed.project}" không tồn tại`);
     const prepared = await this.prepareOpenProjectTicket(parsed, project);
     if (!prepared) return this.createTask(raw);
-    const task = this.createTask({
-      ...parsed,
-      title: `[${prepared.displayId}] ${parsed.title}`,
-      externalRef: prepared.displayId,
-      createTicket: undefined,
-    });
-    this.recordOpenProjectTicket(prepared, task.id);
-    return task;
+    try {
+      const task = this.createTask({
+        ...parsed,
+        title: `[${prepared.displayId}] ${parsed.title}`,
+        externalRef: prepared.displayId,
+        createTicket: undefined,
+      });
+      this.recordOpenProjectTicket(prepared, task.id);
+      return task;
+    } catch (error) {
+      this.trackerRepo?.delete(prepared.sourceId, prepared.wp.id);
+      const taskId = `${parsed.project}/${parsed.slug}`;
+      if (this.taskRepo.get(taskId)) this.taskRepo.delete(taskId);
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new HttpError(502, 'bad_gateway', `Đã tạo ticket ${prepared.displayId} nhưng không thể tạo task liên kết: ${reason}`);
+    }
   }
 
   captureTask(raw: unknown): TaskRow {

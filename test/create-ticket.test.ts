@@ -12,8 +12,16 @@ describe('create task with OpenProject ticket', () => {
   let config: ReturnType<typeof loadConfig>;
   let ctx: ReturnType<typeof createContext>;
   let fetchMock: ReturnType<typeof vi.fn>;
+  let failAfterCreate = false;
+  let waitForWorkPackage: Promise<void> | null = null;
+  let releaseWorkPackage: (() => void) | null = null;
+  let workPackageGateConsumed = false;
 
   beforeEach(() => {
+    failAfterCreate = false;
+    waitForWorkPackage = null;
+    releaseWorkPackage = null;
+    workPackageGateConsumed = false;
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-create-ticket-'));
     config = loadConfig(home);
     config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({
@@ -32,6 +40,13 @@ describe('create task with OpenProject ticket', () => {
       if (init?.method === 'POST' && url.endsWith('/work_packages')) {
         if (String(init.body).includes('Failure')) return new Response(JSON.stringify({ message: 'Subject rejected' }), { status: 422 });
         return new Response(JSON.stringify({ id: 88, displayId: 'OP-88' }), { status: 201 });
+      }
+      if (/\/work_packages\/88$/.test(url) && failAfterCreate) {
+        return new Response(JSON.stringify({ message: 'Ticket lookup failed' }), { status: 500 });
+      }
+      if (/\/work_packages\/88$/.test(url) && waitForWorkPackage && !workPackageGateConsumed) {
+        workPackageGateConsumed = true;
+        await waitForWorkPackage;
       }
       if (url.endsWith('/activities')) return new Response(JSON.stringify({ _embedded: { elements: [] } }));
       if (/\/work_packages\/88$/.test(url)) return new Response(JSON.stringify(wp));
@@ -74,5 +89,32 @@ describe('create task with OpenProject ticket', () => {
       project: 'primary', slug: 'failure', title: 'Failure', body: '', level: 'easy', createTicket: {},
     })).rejects.toThrow('Subject rejected');
     expect(ctx.taskRepo.list()).toHaveLength(0);
+  });
+
+  it('cleans the pending claim and reports the orphan ticket when lookup fails after creation', async () => {
+    failAfterCreate = true;
+    await expect(ctx.service.createTaskWithTicket({
+      project: 'primary', slug: 'lookup-failure', title: 'Lookup failure', body: 'Body', level: 'easy', createTicket: {},
+    })).rejects.toThrow('OP-88');
+    expect(ctx.taskRepo.list()).toHaveLength(0);
+    expect(ctx.trackerRepo.get('demo', 88)).toBeUndefined();
+  });
+
+  it('claims the ticket before the in-flight request yields to intake', async () => {
+    waitForWorkPackage = new Promise<void>((resolve) => { releaseWorkPackage = resolve; });
+    const creation = ctx.service.createTaskWithTicket({
+      project: 'primary', slug: 'race', title: 'Race', body: 'Body', level: 'easy', createTicket: {},
+    });
+    await vi.waitFor(() => {
+      const row = ctx.trackerRepo.get('demo', 88);
+      expect(row).toBeDefined();
+      expect(row?.writeback).toContain('createPending');
+    });
+    const sync = await ctx.intakeService.sync('demo');
+    expect(sync.imported).toBe(0);
+    expect(ctx.taskRepo.list()).toHaveLength(0);
+    releaseWorkPackage?.();
+    await creation;
+    expect(ctx.taskRepo.list()).toHaveLength(1);
   });
 });

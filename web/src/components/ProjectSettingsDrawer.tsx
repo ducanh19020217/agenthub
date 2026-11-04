@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Sparkles,
   Terminal,
+  Loader2,
 } from 'lucide-react';
 import {
   Card,
@@ -494,6 +495,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const [apiError, setApiError] = useState<string | null>(null);
   const [sectionErrors, setSectionErrors] = useState<Record<string, string | null>>({});
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [giteaMessage, setGiteaMessage] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
+  const [deployMessage, setDeployMessage] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
   const resetDraftState = (targetProject: Project) => {
     setDraftSettings(normalizeProjectSettings(targetProject.settings));
@@ -566,6 +569,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     setRefErrors({});
     setApiError(null);
     setSectionErrors({});
+    setGiteaMessage(null);
+    setDeployMessage(null);
   };
 
   // Initialize draft when project changes
@@ -1005,9 +1010,36 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
 
   const giteaStatus = useQuery({ queryKey: ['gitea-status', project?.id], queryFn: () => getGiteaStatus(project!.id), enabled: Boolean(isOpen && project?.id), refetchInterval: (query) => query.state.data?.running ? 3_000 : false });
   const remoteDeployStatus = useQuery({ queryKey: ['remote-deploy-status', project?.id], queryFn: () => getRemoteDeployStatus(project!.id), enabled: Boolean(isOpen && project?.id), refetchInterval: 10_000 });
-  const giteaSyncMutation = useMutation({ mutationFn: () => syncGitea(project!.id), onSuccess: () => giteaStatus.refetch() });
-  const deployNowMutation = useMutation({ mutationFn: () => triggerRemoteDeploy(project!.id), onSuccess: () => remoteDeployStatus.refetch() });
-  const saveGiteaTokenMutation = useMutation({ mutationFn: () => saveGiteaToken(project!.id, giteaToken), onSuccess: () => setGiteaToken('') });
+  const giteaSyncMutation = useMutation({
+    mutationFn: () => syncGitea(project!.id),
+    onSuccess: () => {
+      giteaStatus.refetch();
+    },
+    onError: (err: any) => {
+      setGiteaMessage({ type: 'error', text: err?.message || t('integrations.syncFailed') });
+    },
+  });
+  const deployNowMutation = useMutation({
+    mutationFn: () => triggerRemoteDeploy(project!.id),
+    onSuccess: () => {
+      remoteDeployStatus.refetch();
+      setDeployMessage({ type: 'ok', text: t('integrations.deployStarted') });
+    },
+    onError: (err: any) => {
+      setDeployMessage({ type: 'error', text: err?.message || t('integrations.deployFailed') });
+    },
+  });
+  const saveGiteaTokenMutation = useMutation({
+    mutationFn: () => saveGiteaToken(project!.id, giteaToken),
+    onSuccess: () => {
+      setGiteaToken('');
+      giteaStatus.refetch();
+      setGiteaMessage({ type: 'ok', text: t('integrations.tokenSaved') });
+    },
+    onError: (err: any) => {
+      setGiteaMessage({ type: 'error', text: err?.message || t('integrations.saveTokenError') });
+    },
+  });
   const saveDeployEnvMutation = useMutation({
     mutationFn: () => saveRemoteDeployEnv(project!.id, parseDeployEnv(deployEnv)),
     onSuccess: (res) => {
@@ -1015,6 +1047,10 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       const keys = Array.isArray(res) ? res : (res as any)?.keys || parsedKeys;
       setSavedDeployKeys(keys);
       setDeployEnv('');
+      setDeployMessage({ type: 'ok', text: t('integrations.secretsSaved') });
+    },
+    onError: (err: any) => {
+      setDeployMessage({ type: 'error', text: err?.message || t('integrations.saveSecretsError') });
     },
   });
 
@@ -2508,9 +2544,13 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                     variant="secondary"
                     data-testid="save-gitea-token-button"
                     onClick={() => saveGiteaTokenMutation.mutate()}
-                    disabled={!giteaToken}
+                    disabled={!giteaToken || saveGiteaTokenMutation.isPending}
+                    aria-busy={saveGiteaTokenMutation.isPending ? true : undefined}
                   >
-                    {t('integrations.saveToken')}
+                    {saveGiteaTokenMutation.isPending && (
+                      <Loader2 className="inline h-3 w-3 mr-1 animate-spin" />
+                    )}
+                    {saveGiteaTokenMutation.isPending ? t('integrations.savingToken') : t('integrations.saveToken')}
                   </Button>
                   <Button
                     type="button"
@@ -2519,14 +2559,36 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                     data-testid="sync-gitea-button"
                     onClick={() => giteaSyncMutation.mutate()}
                     disabled={Boolean(giteaStatus.data?.running) || giteaSyncMutation.isPending}
+                    aria-busy={Boolean(giteaStatus.data?.running || giteaSyncMutation.isPending) ? true : undefined}
                   >
+                    {Boolean(giteaStatus.data?.running || giteaSyncMutation.isPending) && (
+                      <Loader2 className="inline h-3 w-3 mr-1 animate-spin" />
+                    )}
                     {giteaStatus.data?.running
                       ? t('integrations.syncRunning', { step: giteaStatus.data.step || '…' })
+                      : giteaSyncMutation.isPending
+                      ? t('integrations.syncRunning', { step: '…' })
                       : t('integrations.syncNow')}
                   </Button>
                 </div>
               )}
             </Field>
+            {giteaMessage && (
+              <p
+                role="status"
+                data-testid="gitea-status-message"
+                className={`text-xs flex items-center gap-1.5 ${
+                  giteaMessage.type === 'ok' ? 'text-[var(--t-ok)]' : 'text-[var(--t-crit)]'
+                }`}
+              >
+                {giteaMessage.type === 'ok' ? (
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                )}
+                <span>{giteaMessage.text}</span>
+              </p>
+            )}
             {giteaStatus.data?.remote && (
               <p className="text-xs text-[var(--t-text-3)]" data-testid="gitea-repo-info">
                 {t('integrations.repo')}: {giteaStatus.data.remote.owner}/{giteaStatus.data.remote.repo} ({t('integrations.fromRemoteOrigin')})
@@ -2662,9 +2724,13 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                     variant="secondary"
                     data-testid="save-deploy-env-button"
                     onClick={() => saveDeployEnvMutation.mutate()}
-                    disabled={!deployEnv.trim()}
+                    disabled={!deployEnv.trim() || saveDeployEnvMutation.isPending}
+                    aria-busy={saveDeployEnvMutation.isPending ? true : undefined}
                   >
-                    {t('integrations.saveEnvSecrets')}
+                    {saveDeployEnvMutation.isPending && (
+                      <Loader2 className="inline h-3 w-3 mr-1 animate-spin" />
+                    )}
+                    {saveDeployEnvMutation.isPending ? t('integrations.savingSecrets') : t('integrations.saveEnvSecrets')}
                   </Button>
                   <Button
                     type="button"
@@ -2672,12 +2738,33 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                     variant="secondary"
                     data-testid="deploy-now-button"
                     onClick={() => deployNowMutation.mutate()}
+                    disabled={deployNowMutation.isPending}
+                    aria-busy={deployNowMutation.isPending ? true : undefined}
                   >
-                    {t('integrations.deployNow')}
+                    {deployNowMutation.isPending && (
+                      <Loader2 className="inline h-3 w-3 mr-1 animate-spin" />
+                    )}
+                    {deployNowMutation.isPending ? t('integrations.deploying') : t('integrations.deployNow')}
                   </Button>
                 </div>
               )}
             </Field>
+            {deployMessage && (
+              <p
+                role="status"
+                data-testid="deploy-status-message"
+                className={`text-xs flex items-center gap-1.5 ${
+                  deployMessage.type === 'ok' ? 'text-[var(--t-ok)]' : 'text-[var(--t-crit)]'
+                }`}
+              >
+                {deployMessage.type === 'ok' ? (
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                )}
+                <span>{deployMessage.text}</span>
+              </p>
+            )}
             {savedDeployKeys.length > 0 && (
               <p className="text-xs text-[var(--t-text-3)]" data-testid="saved-deploy-keys">
                 {t('integrations.savedKeys')}: {savedDeployKeys.join(', ')}

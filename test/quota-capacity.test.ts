@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { generateDigest } from '../src/brain/digest.js';
+import { generateDigest, isSystemIncident } from '../src/brain/digest.js';
 import { openDatabase, ProfileRepo, QuotaMarkRepo, TaskRepo } from '../src/db/index.js';
 import { QuotaService, formatRunnableCapacity } from '../src/quota/index.js';
 
@@ -148,5 +148,19 @@ describe('QuotaService capacity and snapshots', () => {
     quotaMarkRepo.mark('g1', 'gemini', now + 3600);
     digest = generateDigest({ taskRepo, profileRepo, quotaMarkRepo, quotaService, now: () => now * 1000 });
     expect(digest.quota.summary).toContain('Hệ thống tạm dừng thực thi task');
+  });
+
+  it('isSystemIncident gates claude.quota_exhausted on total capacity exhaustion', () => {
+    profileRepo.upsert({ name: 'g1', engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
+    const now = 1_000_000;
+    quotaMarkRepo.mark('g1', 'claude', now + 3600);
+
+    // Claude exhausted, but gemini still runnable:
+    expect(isSystemIncident('claude.quota_exhausted', { fallbackAvailable: false }, profileRepo, quotaMarkRepo, now * 1000)).toBe(false);
+
+    // All exhausted on g1:
+    quotaMarkRepo.mark('g1', 'gemini', now + 3600);
+    quotaMarkRepo.mark('g1', 'gpt', now + 3600);
+    expect(isSystemIncident('claude.quota_exhausted', { fallbackAvailable: false }, profileRepo, quotaMarkRepo, now * 1000)).toBe(true);
   });
 });

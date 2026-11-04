@@ -11,6 +11,7 @@
    - Cập nhật `UpdateConfigSchema` trong `src/services/index.ts` cho phép lưu cờ `disk` từ API/Web UI.
    - Thêm công tắc cấu hình "Thông báo sự cố đĩa" trong `TelegramCard` với đầy đủ bản dịch tiếng Việt (`vi.ts`) và tiếng Anh (`en.ts`).
    - Escape toàn bộ dữ liệu động (nhãn ổ, đường dẫn, slug task, thư mục cache) sang HTML entities an toàn trước khi gửi qua Telegram `parse_mode: 'HTML'`, ngăn chặn lỗi HTTP 400.
+   - Giải quyết xung đột merge với `integration` trong `src/notify.ts`, `test/telegram.test.ts`, `web/src/components/TelegramCard.tsx`, `web/src/locales/en.ts`, `web/src/locales/vi.ts`, bảo toàn đồng thời cấu hình disk notification và các cập nhật mới từ integration.
 
 3. **Thông báo khôi phục (recovery) & xử lý đa ổ đĩa**:
    - Khi nhận event `disk.ok` và có task được resume (`resumedCount > 0`), gửi thông báo `"✅ Đã đủ dung lượng, N task tiếp tục chạy"` trên cả desktop notification và Telegram.
@@ -30,19 +31,20 @@
 - **Lint**: `npm run lint` pass (0 errors, 26 warnings trong test).
 - **Typecheck**: `npm run typecheck` pass (0 errors).
 - **Backend tests**: `npm run test` pass:
-  - 112/112 test files passed
-  - 1374/1374 tests passed
+  - 113/113 test files passed
+  - 1390/1390 tests passed
 - **Web tests**: `npm run test:web` pass:
-  - 60/60 test files passed
-  - 479/479 tests passed
+  - 61/61 test files passed
+  - 492/492 tests passed
 - **Build**:
   - `npm run build` pass (tsc & protocol.md copy thành công).
   - `npm run build:web` pass (tsc & vite production build thành công).
 
 ## Việc chưa làm được / còn thiếu
-- Không có (toàn bộ yêu cầu task và các điểm feedback review đã được hoàn thành trọn vẹn).
+- Không có (toàn bộ yêu cầu task, feedback review và giải quyết xung đột merge đã được hoàn thành trọn vẹn).
 
 ## Danh sách commit
+- `4737714` Merge branch 'integration' into agenthub/h-disk-notify-visible
 - `dfd6270` fix(telegram): clear disk incident and deduplication on partial recovery
 - `4ea424f` fix(notify): clear disk incident and deduplication on partial recovery
 - `d658119` fix(scheduler): emit disk recovery per disk incident with path on partial recovery

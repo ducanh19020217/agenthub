@@ -180,6 +180,20 @@ describe('Integrations UI Suite', () => {
       await waitFor(() => expect(updateSpy).toHaveBeenCalledWith('proj-1', expect.objectContaining({ defaultBranch: 'dev-ss' })));
     });
 
+    it('warns when the default branch has no merge mapping and can use the repository folder', async () => {
+      const updateSpy = vi.spyOn(client, 'updateProject').mockResolvedValue({ ...mockProject, merge: { enabled: true, worktrees: { main: mockProject.path }, checks: [], timeoutSec: 600 } });
+      renderWithProviders(<ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />);
+
+      const gitSection = await screen.findByTestId('project-git-section');
+      expect(await within(gitSection).findByText(/chưa có worktree merge/i)).toBeInTheDocument();
+      fireEvent.click(within(gitSection).getByRole('button', { name: /dùng thư mục repo/i }));
+      fireEvent.click(screen.getByTestId('save-changes-button'));
+
+      await waitFor(() => expect(updateSpy).toHaveBeenCalledWith('proj-1', expect.objectContaining({
+        merge: { enabled: true, worktrees: { main: mockProject.path }, checks: [], timeoutSec: 600 },
+      })));
+    });
+
     it('confirms a default branch change when tasks are active', async () => {
       vi.mocked(client.getTasks).mockResolvedValue([{ id: 'task-1', status: 'running' } as Task]);
       const updateSpy = vi.spyOn(client, 'updateProject').mockResolvedValue(mockProject);

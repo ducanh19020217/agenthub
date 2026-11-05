@@ -43,7 +43,7 @@ import {
 import { useLocale } from '../context/LocaleContext';
 import { UI_Z_INDEX } from './ui/layers';
 import { InfoTooltip } from './tour/InfoTooltip';
-import { Department, Project, ProjectSettings, UpdateProjectInput, PresetLevel } from '../types/api';
+import { Department, Project, ProjectMerge, ProjectSettings, UpdateProjectInput, PresetLevel } from '../types/api';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   updateProject,
@@ -212,6 +212,17 @@ function normalizeProjectSettings(settings?: Partial<NonNullable<Project['settin
   };
 }
 
+function normalizeProjectMerge(project?: Project | null): ProjectMerge {
+  const raw = project?.merge;
+  const parsed = typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : raw;
+  return {
+    enabled: parsed?.enabled === true,
+    worktrees: parsed?.worktrees && typeof parsed.worktrees === 'object' ? parsed.worktrees : {},
+    checks: Array.isArray(parsed?.checks) ? parsed.checks.filter((item: unknown): item is string => typeof item === 'string') : [],
+    timeoutSec: typeof parsed?.timeoutSec === 'number' && parsed.timeoutSec > 0 ? parsed.timeoutSec : 600,
+  };
+}
+
 export function getProjectHooksString(proj: Project): string {
   if (!proj.hooks) return '';
   if (typeof proj.hooks === 'string') {
@@ -366,6 +377,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const [draftEnvTemplate, setDraftEnvTemplate] = useState<string>('');
   const [draftDepartmentId, setDraftDepartmentId] = useState('chung');
   const [draftDefaultBranch, setDraftDefaultBranch] = useState('main');
+  const [draftMerge, setDraftMerge] = useState<ProjectMerge>({ enabled: false, worktrees: {}, checks: [], timeoutSec: 600 });
   const [checklistDraft, setChecklistDraft] = useState('');
   const [showCommitExample, setShowCommitExample] = useState(false);
   const [giteaToken, setGiteaToken] = useState('');
@@ -510,6 +522,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     setStructuredChecks(parseChecksToStructured(targetProject.checks));
     setDraftDepartmentId(targetProject.departmentId || 'chung');
     setDraftDefaultBranch(targetProject.defaultBranch || 'main');
+    setDraftMerge(normalizeProjectMerge(targetProject));
     setDraftChecks(
       typeof targetProject.checks === 'string'
         ? targetProject.checks
@@ -849,6 +862,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     return '';
   }, [project]);
   const origEnv = useMemo(() => project?.envTemplate ?? '', [project]);
+  const origMerge = useMemo(() => normalizeProjectMerge(project), [project]);
+  const mergeChanged = useMemo(() => JSON.stringify(draftMerge) !== JSON.stringify(origMerge), [draftMerge, origMerge]);
 
   const brainChanged = useMemo(
     () =>
@@ -965,6 +980,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     if (hooksChanged) count++;
     if (reviewChanged) count++;
     if (envChanged) count++;
+    if (mergeChanged) count++;
     if (draftDepartmentId !== (project?.departmentId ?? 'chung')) count++;
     if (draftDefaultBranch !== (project?.defaultBranch || 'main')) count++;
     if (reviewerOverrideChanged) count++;
@@ -985,6 +1001,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     hooksChanged,
     reviewChanged,
     envChanged,
+    mergeChanged,
     draftDefaultBranch,
     reviewerOverrideChanged,
   ]);
@@ -1199,6 +1216,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
         : null;
     }
 
+    if (mergeChanged) payload.merge = draftMerge;
+
     if (draftDepartmentId !== (project.departmentId ?? 'chung')) {
       payload.departmentId = draftDepartmentId;
     }
@@ -1332,6 +1351,32 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
               <div>{t('projects.gitAheadBehind')}: {gitStatus?.aheadBehind ? `${gitStatus.aheadBehind.ahead} ↑ / ${gitStatus.aheadBehind.behind} ↓` : '—'}</div>
             </div>
             {gitStatus?.dirty.changed && <p role="alert" className="text-xs text-[var(--t-warn)]">{t('projects.gitDirtyWarning', { count: gitStatus.dirty.files })}</p>}
+            <div className="space-y-2 border-t border-[var(--t-border)] pt-3">
+              <div className="text-xs font-semibold text-[var(--t-text)]">{t('projects.gitMergeTitle')}</div>
+              {draftSettings.integration.enabled ? (
+                <p className="text-xs text-[var(--t-text-2)]">{t('projects.gitMergeIntegrationEnabled')}</p>
+              ) : draftMerge.worktrees[draftDefaultBranch] ? (
+                <p className="text-xs text-[var(--t-text-2)]">{t('projects.gitMergeConfigured', { branch: draftDefaultBranch, path: draftMerge.worktrees[draftDefaultBranch] })}</p>
+              ) : (
+                <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_10%,transparent)] p-2.5 text-xs text-[var(--t-crit)]">
+                  <span>{t('projects.gitMergeMissing', { branch: draftDefaultBranch })}</span>
+                  <Button type="button" size="sm" variant="secondary" onClick={() => setDraftMerge((prev) => ({ ...prev, enabled: true, worktrees: { ...prev.worktrees, [draftDefaultBranch]: project.path } }))}>
+                    {t('projects.gitMergeUseRepo')}
+                  </Button>
+                </div>
+              )}
+              <label className="block text-xs font-semibold text-[var(--t-text)]">
+                {t('projects.gitMergeChecksLabel')}
+                <span className="mt-1 block text-[11px] font-normal text-[var(--t-text-3)]">{t('projects.gitMergeChecksHint')}</span>
+                <textarea
+                  aria-label={t('projects.gitMergeChecksLabel')}
+                  rows={3}
+                  value={draftMerge.checks.join('\n')}
+                  onChange={(event) => setDraftMerge((prev) => ({ ...prev, checks: event.target.value.split('\n').map((line) => line.trim()).filter(Boolean) }))}
+                  className="mt-2 w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-2.5 text-xs font-mono focus:outline-hidden focus:ring-2 focus:ring-[var(--t-accent)]"
+                />
+              </label>
+            </div>
           </Card>
 
           {/* Section 1: Preset & Phòng ban */}

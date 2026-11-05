@@ -3,13 +3,13 @@ import crypto from 'node:crypto';
 import { promisify } from 'node:util';
 import type { AgentHubConfig, OpenProjectSource } from '../../config.js';
 import { projectSettings } from '../../projects/settings.js';
-import type { EventRepo, ProjectRepo, RunRepo, TaskRepo, TimesheetEntryRepo, TimesheetManualEntryRepo, TaskRow } from '../../db/index.js';
+import type { EventRepo, ProjectRepo, RunRepo, TaskRepo, TimesheetEntryRepo, TimesheetManualEntryRepo, TimesheetDayOverrideRepo, TaskRow } from '../../db/index.js';
 import { OpenProjectClient, OpenProjectError, parsePTHours, type OpenProjectWorkPackage } from './client.js';
 import { readOpenProjectKey } from './secrets.js';
 import { formatYYYYMMDD } from './daily-report.js';
 
 const execFileAsync = promisify(execFile);
-export interface TimesheetTicket { wpId: number; displayId: string; subject: string; hours: number; rawHours: number; estimateHours: number; comment: string; run: number; wait: number; chat: number; level: number; weight: number; kind: 'commit' | 'manual'; pinned: boolean; fixedHours?: number; manualIds?: string[]; }
+export interface TimesheetTicket { wpId: number; displayId: string; subject: string; hours: number; rawHours: number; estimateHours: number; comment: string; run: number; wait: number; chat: number; level: number; weight: number; kind: 'commit' | 'manual' | 'mixed'; pinned: boolean; fixedHours?: number; manualIds?: string[]; }
 export interface TimesheetPreview { sourceId: string; date: string; hours: number; entries: TimesheetTicket[]; withoutTicket: Array<{ taskId: string; subject: string }>; missingFromDate: number[]; overMinimum: boolean; fixedHours?: number; fixedOverHours?: boolean; estimateSkipped?: Array<{ wpId: number; displayId: string; reason: string }>; }
 
 function dateBounds(date: string): { start: string; end: string } { return { start: `${date} 00:00:00`, end: `${date} 23:59:59.999` }; }
@@ -48,7 +48,7 @@ export function allocateTimesheetHours(weights: Array<{ weight: number }>, total
   return values.map((value) => value * step);
 }
 
-export interface TimesheetServiceOptions { config: AgentHubConfig; projectRepo: ProjectRepo; taskRepo: TaskRepo; runRepo: RunRepo; eventRepo: EventRepo; entryRepo: TimesheetEntryRepo; manualRepo?: TimesheetManualEntryRepo; eventBus: { emit(type: string, taskId?: string, payload?: unknown): boolean }; fetchFn?: typeof fetch; now?: () => number; timerMs?: number; }
+export interface TimesheetServiceOptions { config: AgentHubConfig; projectRepo: ProjectRepo; taskRepo: TaskRepo; runRepo: RunRepo; eventRepo: EventRepo; entryRepo: TimesheetEntryRepo; manualRepo?: TimesheetManualEntryRepo; dayOverrideRepo?: TimesheetDayOverrideRepo; eventBus: { emit(type: string, taskId?: string, payload?: unknown): boolean }; fetchFn?: typeof fetch; now?: () => number; timerMs?: number; }
 
 export class OpenProjectTimesheetService {
   private timer?: NodeJS.Timeout;
@@ -84,11 +84,16 @@ export class OpenProjectTimesheetService {
     if (active < 0 || wait < 0 || active + wait <= 0 || active + wait > 24) throw new Error('Giờ làm/chờ phải không âm, tổng phải lớn hơn 0 và không quá 24 giờ');
     return this.manualRepo().update(id, { source_id: patch.sourceId ?? row.source_id, spent_on: patch.date ?? row.spent_on, description: patch.description?.trim() ?? row.description, active_hours: active, wait_hours: wait, level: patch.level ?? row.level, pinned: patch.pinned === undefined ? row.pinned : patch.pinned ? 1 : 0 });
   }
-  deleteManual(id: string): { ok: true } { this.manualRepo().delete(id); return { ok: true }; }
+  deleteManual(id: string): { ok: true } { if (!this.manualRepo().get(id)) throw new Error('Mục thủ công không tồn tại'); this.manualRepo().delete(id); return { ok: true }; }
+  setDayHours(sourceId: string, date: string, hours: number): { sourceId: string; date: string; hours: number } {
+    if (!Number.isFinite(hours) || hours < 8 || Math.abs(hours * 4 - Math.round(hours * 4)) > 1e-8) throw new Error('Tổng giờ phải từ 8 và là bội số 0.25');
+    this.source(sourceId); this.options.dayOverrideRepo?.upsert(sourceId, date, hours);
+    return { sourceId, date, hours };
+  }
   async checkScheduled(): Promise<void> { const now = this.now(); const date = new Date(now); const key = formatYYYYMMDD(date); for (const source of this.options.config.integrations.openproject.sources) { const cfg = source.timesheet; if (!cfg?.enabled || (cfg.weekdaysOnly !== false && (date.getDay() === 0 || date.getDay() === 6)) || this.lastRun.get(source.id) === key) continue; const hasPosted = typeof (this.options.eventRepo as Partial<EventRepo>).hasTimesheetPosted === 'function' && this.options.eventRepo.hasTimesheetPosted(source.id, key); if (hasPosted) { this.lastRun.set(source.id, key); continue; } if ((this.nextAttempt.get(source.id) || 0) > now) continue; const [h, m] = cfg.time.split(':').map(Number); const scheduled = new Date(date); scheduled.setHours(h, m, 0, 0); if (now < scheduled.getTime()) continue; try { await this.run(source.id, key); this.lastRun.set(source.id, key); this.failures.delete(source.id); this.nextAttempt.delete(source.id); } catch { const failure = (this.failures.get(source.id) || 0) + 1; this.failures.set(source.id, failure); const delay = Math.min(source.pollIntervalSec * 1000 * (2 ** failure), 30 * 60 * 1000); this.nextAttempt.set(source.id, now + delay); } } }
   async preview(sourceId: string, date = formatYYYYMMDD(new Date(this.now())), hoursOverride?: number): Promise<TimesheetPreview> {
-    const source = this.source(sourceId); const cfg = source.timesheet; if (!cfg) return { sourceId, date, hours: hoursOverride ?? 8, entries: [], withoutTicket: [], missingFromDate: [], overMinimum: false };
-    const weekday = new Date(`${date}T12:00:00`).getDay(); if (cfg.weekdaysOnly !== false && (weekday === 0 || weekday === 6)) return { sourceId, date, hours: hoursOverride ?? cfg.hours, entries: [], withoutTicket: [], missingFromDate: [], overMinimum: false };
+    const source = this.source(sourceId); const cfg = source.timesheet; const storedHours = this.options.dayOverrideRepo?.get(sourceId, date)?.hours; const dayHours = hoursOverride ?? storedHours ?? cfg?.hours ?? 8; if (!cfg) return { sourceId, date, hours: dayHours, entries: [], withoutTicket: [], missingFromDate: [], overMinimum: false };
+    const weekday = new Date(`${date}T12:00:00`).getDay(); if (cfg.weekdaysOnly !== false && (weekday === 0 || weekday === 6)) return { sourceId, date, hours: dayHours, entries: [], withoutTicket: [], missingFromDate: [], overMinimum: false };
     const key = readOpenProjectKey(this.options.config.hubHome, sourceId); if (!key) throw new Error('Nguồn chưa có API key');
     const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
     const projects = this.options.projectRepo.getAll().filter((project) => { try { return projectSettings(project).openproject?.enabled && projectSettings(project).openproject?.sourceId === sourceId; } catch { return false; } });
@@ -110,9 +115,9 @@ export class OpenProjectTimesheetService {
     const manualRows = this.options.manualRepo?.listForDate(sourceId, date) || [];
     for (const row of manualRows) {
       const wp = await client.findWorkPackage(row.wp_id) || await client.findWorkPackage(row.display_id);
-      if (!wp) continue;
+      if (!wp) { withoutTicket.push({ taskId: row.id, subject: row.description }); continue; }
       const current = tickets.get(wp.id) || { wpId: wp.id, displayId: wp.displayId || row.display_id, subject: wp.subject || row.description, hours: 0, rawHours: 0, estimateHours: 0, comment: '', run: 0, wait: 0, chat: 0, level: 0, weight: 0, kind: 'manual' as const, pinned: false, manualIds: [] };
-      current.kind = 'manual'; current.manualIds = [...(current.manualIds || []), row.id];
+      current.kind = current.kind === 'commit' ? 'mixed' : 'manual'; current.manualIds = [...(current.manualIds || []), row.id];
       current.comment = [current.comment, row.description].filter(Boolean).join(' · ').slice(0, 255);
       const factor = row.level === 'hard' ? 1.5 : 1;
       const raw = (row.active_hours + 0.5 * row.wait_hours) * factor;
@@ -125,7 +130,7 @@ export class OpenProjectTimesheetService {
     const entries = [...tickets.values()];
     const fixedHours = entries.reduce((sum, entry) => sum + (entry.fixedHours || 0), 0);
     const flexible = entries.filter((entry) => entry.weight > 0 || entry.run > 0 || entry.wait > 0 || entry.chat > 0);
-    const target = Math.max(0, (hoursOverride ?? cfg.hours) - fixedHours, flexible.length * cfg.minEntryHours);
+    const target = Math.max(0, dayHours - fixedHours, flexible.length * cfg.minEntryHours);
     const allocated = allocateTimesheetHours(flexible, target, cfg.minEntryHours, cfg.roundTo);
     let flexibleIndex = 0;
     entries.forEach((entry) => {
@@ -138,7 +143,7 @@ export class OpenProjectTimesheetService {
       entry.estimateHours = roundHours(pastRaw + entry.rawHours, cfg.roundTo);
     });
     const currentWpIds = new Set(entries.map((entry) => entry.wpId)); const missingFromDate = this.options.entryRepo.listForDate(sourceId, date).map((row) => row.wp_id).filter((id) => !currentWpIds.has(id));
-    return { sourceId, date, hours: hoursOverride ?? cfg.hours, entries, withoutTicket, missingFromDate, overMinimum: entries.length * cfg.minEntryHours + fixedHours > (hoursOverride ?? cfg.hours), fixedHours, fixedOverHours: fixedHours >= (hoursOverride ?? cfg.hours) };
+    return { sourceId, date, hours: dayHours, entries, withoutTicket, missingFromDate, overMinimum: entries.length * cfg.minEntryHours + fixedHours > dayHours, fixedHours, fixedOverHours: fixedHours >= dayHours };
   }
   private async commits(cwd: string, defaultBranch: string, branch: string, date: string): Promise<string[]> { const { start } = dateBounds(date); try { const range = branch === defaultBranch ? branch : `${defaultBranch}..${branch}`; const result = await execFileAsync('git', ['-C', cwd, 'log', range, `--since=${start}`, `--until=${date} 23:59:59.999`, '--format=%s']); return result.stdout.split('\n').map((x) => x.trim()).filter(Boolean); } catch { return []; } }
   async run(sourceId: string, date = formatYYYYMMDD(new Date(this.now())), hoursOverride?: number): Promise<TimesheetPreview> {

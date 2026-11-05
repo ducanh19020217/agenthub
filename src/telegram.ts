@@ -25,6 +25,7 @@ import { formatReset } from './time-format.js';
 import { NotificationDeduper } from './notification-dedupe.js';
 import { reviewerSettingsFromLegacy } from './reviewer-config.js';
 import { QuotaService, QuotaCapacitySnapshot } from './quota/index.js';
+import { formatYYYYMMDD } from './integrations/openproject/daily-report.js';
 
 export interface TelegramTimesheetCommand { ticket: string | 'new'; activeHours: number; waitHours: number; pinned: boolean; description: string; }
 export function parseTimesheetCommand(text: string): TelegramTimesheetCommand {
@@ -1370,7 +1371,7 @@ export class TelegramBotService {
         break;
 
       case '/gio': {
-        const timesheet = (this.service as unknown as { timesheetService?: { preview: (sourceId: string, date?: string) => Promise<{ hours: number; entries: Array<{ displayId: string; hours: number; description?: string }> }>; addManual: (input: unknown) => Promise<{ display_id?: string; description?: string }> } }).timesheetService;
+        const timesheet = this.service.timesheetService;
         const sourceId = this.config.integrations.openproject.sources.length === 1 ? this.config.integrations.openproject.sources[0].id : undefined;
         if (!timesheet || !sourceId) { await this.sendMessage(chatId, '❌ Cần bật timesheet và cấu hình đúng một nguồn OpenProject.'); break; }
         if (!argStr) {
@@ -1380,9 +1381,10 @@ export class TelegramBotService {
         }
         try {
           const parsed = parseTimesheetCommand(argStr);
-          const date = new Date().toISOString().slice(0, 10);
-          const result = await timesheet.addManual({ sourceId, date, ...(parsed.ticket === 'new' ? { createTicket: { subject: parsed.description } } : { ticket: parsed.ticket }), description: parsed.description, activeHours: parsed.activeHours, waitHours: parsed.waitHours, pinned: parsed.pinned });
-          await this.sendMessage(chatId, `✅ Đã thêm ${this.escapeHtml(String(result.display_id || parsed.ticket))}: ${this.escapeHtml(parsed.description)} (${formatHours(parsed.activeHours + parsed.waitHours)}h)`);
+          const date = formatYYYYMMDD(new Date());
+          const result = await timesheet.addManual({ sourceId, date, ...(parsed.ticket === 'new' ? { createTicket: { subject: parsed.description } } : { ticket: parsed.ticket }), description: parsed.description, activeHours: parsed.activeHours, waitHours: parsed.waitHours, pinned: parsed.pinned }) as { display_id?: string };
+          const preview = await timesheet.preview(sourceId, date);
+          await this.sendMessage(chatId, `✅ Đã thêm ${this.escapeHtml(String(result.display_id || parsed.ticket))}: ${this.escapeHtml(parsed.description)} (${formatHours(parsed.activeHours + parsed.waitHours)}h)\nTổng hiện tại: ${formatHours(preview.entries.reduce((sum, entry) => sum + entry.hours, 0))}h/${formatHours(preview.hours)}h${preview.fixedOverHours ? '\n⚠️ Giờ cố định đã vượt tổng ngày.' : ''}`);
         } catch (error) { await this.sendMessage(chatId, `❌ ${this.escapeHtml(error instanceof Error ? error.message : String(error))}`); }
         break;
       }

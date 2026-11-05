@@ -190,6 +190,7 @@ export async function createServer(
     dailyReport: options?.openProjectDailyReport || (service.dailyReportService ? (sourceId, date) => service.dailyReportService!.generateReport(sourceId, date ? parseDateNoon(date) : undefined, { overwrite: true }) : undefined),
     timesheetPreview: options?.openProjectTimesheetPreview || (service.timesheetService ? (sourceId, date) => service.timesheetService!.preview(sourceId, date) : undefined),
     timesheetRun: options?.openProjectTimesheetRun || (service.timesheetService ? (sourceId, date, hours) => service.timesheetService!.run(sourceId, date, hours) : undefined),
+    timesheetDaySet: service.timesheetService ? (sourceId, date, hours) => service.timesheetService!.setDayHours(sourceId, date, hours) : undefined,
     timesheetManualAdd: options?.timesheetManualAdd || (service.timesheetService ? (input) => service.timesheetService!.addManual(input as never) : undefined),
     timesheetManualUpdate: options?.timesheetManualUpdate || (service.timesheetService ? (id, input) => Promise.resolve(service.timesheetService!.updateManual(id, input as never)) : undefined),
     timesheetManualDelete: options?.timesheetManualDelete || (service.timesheetService ? (id) => Promise.resolve(service.timesheetService!.deleteManual(id)) : undefined),

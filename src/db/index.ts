@@ -986,6 +986,16 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_timesheet_manual_date ON timesheet_manual_entries(source_id, spent_on);
   `,
+  // Migration 67: per-day total-hour overrides for timesheet preview/writeback.
+  `
+  CREATE TABLE IF NOT EXISTS timesheet_day_overrides (
+    source_id TEXT NOT NULL,
+    spent_on TEXT NOT NULL,
+    hours REAL NOT NULL CHECK(hours >= 8),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source_id, spent_on)
+  );
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -3330,5 +3340,18 @@ export class TimesheetManualEntryRepo {
     return this.get(id)!;
   }
   delete(id: string): void { this.db.prepare('DELETE FROM timesheet_manual_entries WHERE id = ?').run(id); }
+}
+
+export interface TimesheetDayOverrideRow { source_id: string; spent_on: string; hours: number; updated_at: string; }
+export class TimesheetDayOverrideRepo {
+  constructor(private db: Database.Database) {}
+  get(sourceId: string, date: string): TimesheetDayOverrideRow | undefined {
+    return this.db.prepare('SELECT * FROM timesheet_day_overrides WHERE source_id = ? AND spent_on = ?').get(sourceId, date) as TimesheetDayOverrideRow | undefined;
+  }
+  upsert(sourceId: string, date: string, hours: number): TimesheetDayOverrideRow {
+    this.db.prepare(`INSERT INTO timesheet_day_overrides (source_id, spent_on, hours) VALUES (?, ?, ?)
+      ON CONFLICT(source_id, spent_on) DO UPDATE SET hours=excluded.hours, updated_at=datetime('now')`).run(sourceId, date, hours);
+    return this.get(sourceId, date)!;
+  }
 }
 

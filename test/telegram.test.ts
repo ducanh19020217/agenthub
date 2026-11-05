@@ -15,7 +15,27 @@ import {
   redactTelegramToken,
   slugify,
   generateTaskSlug,
+  parseTimesheetCommand,
 } from '../src/telegram.js';
+
+describe('Telegram timesheet parser', () => {
+  it('parses waiting, decimal and pinned hours', () => {
+    expect(parseTimesheetCommand('SIE-1 3.5h cho 2.5h co-dinh Cài lại máy')).toEqual({ ticket: 'SIE-1', activeHours: 3.5, waitHours: 2.5, pinned: true, description: 'Cài lại máy' });
+    expect(parseTimesheetCommand('new 1h Trao đổi khách')).toMatchObject({ ticket: 'new', activeHours: 1, waitHours: 0, pinned: false, description: 'Trao đổi khách' });
+  });
+
+  it('rejects missing descriptions and totals over 24 hours', () => {
+    expect(() => parseTimesheetCommand('OP-1 1h')).toThrow();
+    expect(() => parseTimesheetCommand('OP-1 20h cho 5h việc quá lâu')).toThrow(/24/);
+    expect(() => parseTimesheetCommand('OP-1 0h việc bằng không')).toThrow();
+  });
+
+  it('parses a standalone co-dinh flag and preserves ticket case', () => {
+    expect(parseTimesheetCommand('sie-42 2h co-dinh Cài đặt máy')).toEqual({
+      ticket: 'sie-42', activeHours: 2, waitHours: 0, pinned: true, description: 'Cài đặt máy',
+    });
+  });
+});
 
 interface RecordedFetchCall {
   url: string;

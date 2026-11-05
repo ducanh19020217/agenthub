@@ -26,6 +26,17 @@ import { NotificationDeduper } from './notification-dedupe.js';
 import { reviewerSettingsFromLegacy } from './reviewer-config.js';
 import { QuotaService, QuotaCapacitySnapshot } from './quota/index.js';
 import { autoMergeReasonLabel, firstCheckError } from './auto-merge-notify.js';
+import { formatYYYYMMDD } from './integrations/openproject/daily-report.js';
+
+export interface TelegramTimesheetCommand { ticket: string | 'new'; activeHours: number; waitHours: number; pinned: boolean; description: string; }
+export function parseTimesheetCommand(text: string): TelegramTimesheetCommand {
+  const match = text.trim().match(/^(new|[A-Za-z0-9_-]+)\s+(\d+(?:\.\d+)?)h(?:\s+cho\s+(\d+(?:\.\d+)?)h)?(?:\s+(co-dinh))?\s+(.+)$/i);
+  if (!match) throw new Error('Cú pháp: /gio <mã ticket|new> <giờ>h [cho <giờ>h] [co-dinh] <mô tả>');
+  const activeHours = Number(match[2]); const waitHours = Number(match[3] || 0);
+  if (activeHours < 0 || waitHours < 0 || activeHours + waitHours <= 0 || activeHours + waitHours > 24) throw new Error('Tổng giờ phải lớn hơn 0 và không quá 24 giờ');
+  return { ticket: match[1].toLowerCase() === 'new' ? 'new' : match[1], activeHours, waitHours, pinned: Boolean(match[4]), description: match[5].trim() };
+}
+
 
 const WAITING_QUOTA_BATCH_DELAY_MS = 100;
 
@@ -219,6 +230,7 @@ export function readTelegramToken(tokenPath: string): string | null {
 
 /** Shown by Telegram when the user types "/" (registered with setMyCommands on start). */
 export const TELEGRAM_BOT_COMMANDS: Array<{ command: string; description: string }> = [
+  { command: 'gio', description: 'Thêm/xem bảng giờ: /gio <ticket|new> <giờ>h [cho <giờ>h] [co-dinh] <mô tả>' },
   { command: 'use', description: 'Chọn dự án: /use <dự án> · xem dự án đang chọn: /use' },
   { command: 'brain', description: 'Bộ não: /brain · /brain trust [dự án] standard|trusted|full|inherit' },
   { command: 'digest', description: 'Tóm tắt tình hình hệ thống và quota' },
@@ -1359,6 +1371,25 @@ export class TelegramBotService {
       case '/status':
         await this.handleStatusCommand(chatId);
         break;
+
+      case '/gio': {
+        const timesheet = this.service.timesheetService;
+        const sourceId = this.config.integrations.openproject.sources.length === 1 ? this.config.integrations.openproject.sources[0].id : undefined;
+        if (!timesheet || !sourceId) { await this.sendMessage(chatId, '❌ Cần bật timesheet và cấu hình đúng một nguồn OpenProject.'); break; }
+        if (!argStr) {
+          const preview = await timesheet.preview(sourceId);
+          await this.sendMessage(chatId, `🕒 Hôm nay: ${formatHours(preview.hours)}h\n${preview.entries.map((entry) => `[${entry.displayId}] ${formatHours(entry.hours)}h`).join('\n') || 'Chưa có việc.'}`);
+          break;
+        }
+        try {
+          const parsed = parseTimesheetCommand(argStr);
+          const date = formatYYYYMMDD(new Date());
+          const result = await timesheet.addManual({ sourceId, date, ...(parsed.ticket === 'new' ? { createTicket: { subject: parsed.description } } : { ticket: parsed.ticket }), description: parsed.description, activeHours: parsed.activeHours, waitHours: parsed.waitHours, pinned: parsed.pinned }) as { display_id?: string };
+          const preview = await timesheet.preview(sourceId, date);
+          await this.sendMessage(chatId, `✅ Đã thêm ${this.escapeHtml(String(result.display_id || parsed.ticket))}: ${this.escapeHtml(parsed.description)} (${formatHours(parsed.activeHours + parsed.waitHours)}h)\nTổng hiện tại: ${formatHours(preview.entries.reduce((sum, entry) => sum + entry.hours, 0))}h/${formatHours(preview.hours)}h${preview.fixedOverHours ? '\n⚠️ Giờ cố định đã vượt tổng ngày.' : ''}`);
+        } catch (error) { await this.sendMessage(chatId, `❌ ${this.escapeHtml(error instanceof Error ? error.message : String(error))}`); }
+        break;
+      }
 
       case '/focus':
         await this.handleFocusCommand(chatId, argStr);

@@ -26,6 +26,8 @@ import {
   CiRepo,
   TrackerItemRepo,
   TimesheetEntryRepo,
+  TimesheetManualEntryRepo,
+  TimesheetDayOverrideRepo,
 } from './db/index.js';
 import { CiWatchService } from './ci.js';
 import { OpenProjectIntakeService } from './integrations/openproject/intake.js';
@@ -110,6 +112,7 @@ export interface DaemonContext {
   ciService: CiWatchService;
   trackerRepo: TrackerItemRepo;
   timesheetEntryRepo: TimesheetEntryRepo;
+  timesheetManualRepo: TimesheetManualEntryRepo;
   intakeService: OpenProjectIntakeService;
   writebackService: OpenProjectWritebackService;
   dailyReportService: DailyReportService;
@@ -150,6 +153,8 @@ export function createContext(
   const taskRepo = new TaskRepo(db);
   const trackerRepo = new TrackerItemRepo(db);
   const timesheetEntryRepo = new TimesheetEntryRepo(db);
+  const timesheetManualRepo = new TimesheetManualEntryRepo(db);
+  const timesheetDayOverrideRepo = new TimesheetDayOverrideRepo(db);
   const runRepo = new RunRepo(db);
   const runMetricsRepo = new RunMetricsRepo(db);
   const reviewRepo = new ReviewRepo(db);
@@ -415,7 +420,7 @@ export function createContext(
     eventBus: scheduler.getEventBus(),
   });
   service.dailyReportService = dailyReportService;
-  const timesheetService = new OpenProjectTimesheetService({ config, projectRepo, taskRepo, runRepo, eventRepo, entryRepo: timesheetEntryRepo, eventBus: scheduler.getEventBus() });
+  const timesheetService = new OpenProjectTimesheetService({ config, projectRepo, taskRepo, runRepo, eventRepo, entryRepo: timesheetEntryRepo, manualRepo: timesheetManualRepo, dayOverrideRepo: timesheetDayOverrideRepo, eventBus: scheduler.getEventBus() });
   service.timesheetService = timesheetService;
 
   const giteaSyncService = new GiteaSyncService({
@@ -499,6 +504,7 @@ export function createContext(
     dailyReportService,
     timesheetService,
     timesheetEntryRepo,
+    timesheetManualRepo,
     giteaSyncService,
     perfCollector,
   };

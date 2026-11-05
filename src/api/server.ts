@@ -41,6 +41,9 @@ export async function createServer(
     openProjectDailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
     openProjectTimesheetPreview?: (sourceId: string, date?: string) => Promise<unknown>;
     openProjectTimesheetRun?: (sourceId: string, date?: string, hours?: number) => Promise<unknown>;
+    timesheetManualAdd?: (input: unknown) => Promise<unknown>;
+    timesheetManualUpdate?: (id: string, input: unknown) => Promise<unknown>;
+    timesheetManualDelete?: (id: string) => Promise<unknown>;
   },
 ): Promise<FastifyInstance> {
   const fastify = Fastify({ logger: false, forceCloseConnections: true });
@@ -187,6 +190,10 @@ export async function createServer(
     dailyReport: options?.openProjectDailyReport || (service.dailyReportService ? (sourceId, date) => service.dailyReportService!.generateReport(sourceId, date ? parseDateNoon(date) : undefined, { overwrite: true }) : undefined),
     timesheetPreview: options?.openProjectTimesheetPreview || (service.timesheetService ? (sourceId, date) => service.timesheetService!.preview(sourceId, date) : undefined),
     timesheetRun: options?.openProjectTimesheetRun || (service.timesheetService ? (sourceId, date, hours) => service.timesheetService!.run(sourceId, date, hours) : undefined),
+    timesheetDaySet: service.timesheetService ? (sourceId, date, hours) => service.timesheetService!.setDayHours(sourceId, date, hours) : undefined,
+    timesheetManualAdd: options?.timesheetManualAdd || (service.timesheetService ? (input) => service.timesheetService!.addManual(input as never) : undefined),
+    timesheetManualUpdate: options?.timesheetManualUpdate || (service.timesheetService ? (id, input) => Promise.resolve(service.timesheetService!.updateManual(id, input as never)) : undefined),
+    timesheetManualDelete: options?.timesheetManualDelete || (service.timesheetService ? (id) => Promise.resolve(service.timesheetService!.deleteManual(id)) : undefined),
     decision: (sourceId, wpId, action, note) => service.decideOpenProjectTicket(sourceId, wpId, action, note),
     triageInput: (sourceId, wpId, content) => service.submitOpenProjectTriageInput(sourceId, wpId, content),
     linkTicket: (sourceId, wpId, displayId, taskId) => service.linkOpenProjectTicket(sourceId, wpId, displayId, taskId),

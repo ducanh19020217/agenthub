@@ -966,6 +966,26 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE timesheet_entries_new RENAME TO timesheet_entries;
   PRAGMA foreign_keys = ON;
   `,
+  // Migration 66: manually entered OpenProject timesheet work.
+  `
+  CREATE TABLE IF NOT EXISTS timesheet_manual_entries (
+    id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    spent_on TEXT NOT NULL,
+    wp_id INTEGER NOT NULL,
+    display_id TEXT NOT NULL,
+    description TEXT NOT NULL,
+    active_hours REAL NOT NULL CHECK(active_hours >= 0),
+    wait_hours REAL NOT NULL CHECK(wait_hours >= 0),
+    level TEXT NOT NULL DEFAULT 'easy' CHECK(level IN ('easy', 'hard')),
+    pinned INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK(active_hours + wait_hours > 0),
+    CHECK(active_hours + wait_hours <= 24)
+  );
+  CREATE INDEX IF NOT EXISTS idx_timesheet_manual_date ON timesheet_manual_entries(source_id, spent_on);
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -3279,5 +3299,36 @@ export class TimesheetEntryRepo {
       ON CONFLICT(source_id, spent_on, wp_id) DO UPDATE SET entry_id=excluded.entry_id, hours=excluded.hours, raw_hours=excluded.raw_hours, written_estimate=excluded.written_estimate, updated_at=datetime('now')`)
       .run(row.source_id, row.spent_on, row.wp_id, row.entry_id, row.hours, row.raw_hours ?? null, row.written_estimate ?? null);
   }
+}
+
+export interface TimesheetManualEntryRow {
+  id: string; source_id: string; spent_on: string; wp_id: number; display_id: string;
+  description: string; active_hours: number; wait_hours: number; level: 'easy' | 'hard';
+  pinned: number; created_at: string; updated_at: string;
+}
+
+export class TimesheetManualEntryRepo {
+  constructor(private db: Database.Database) {}
+  get(id: string): TimesheetManualEntryRow | undefined {
+    return this.db.prepare('SELECT * FROM timesheet_manual_entries WHERE id = ?').get(id) as TimesheetManualEntryRow | undefined;
+  }
+  listForDate(sourceId: string, date: string): TimesheetManualEntryRow[] {
+    return this.db.prepare('SELECT * FROM timesheet_manual_entries WHERE source_id = ? AND spent_on = ? ORDER BY created_at, id').all(sourceId, date) as TimesheetManualEntryRow[];
+  }
+  insert(row: Omit<TimesheetManualEntryRow, 'created_at' | 'updated_at'>): TimesheetManualEntryRow {
+    this.db.prepare(`INSERT INTO timesheet_manual_entries
+      (id, source_id, spent_on, wp_id, display_id, description, active_hours, wait_hours, level, pinned)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(row.id, row.source_id, row.spent_on, row.wp_id, row.display_id, row.description, row.active_hours, row.wait_hours, row.level, row.pinned ? 1 : 0);
+    return this.get(row.id)!;
+  }
+  update(id: string, patch: Partial<Omit<TimesheetManualEntryRow, 'id' | 'created_at' | 'updated_at'>>): TimesheetManualEntryRow {
+    const current = this.get(id);
+    if (!current) throw new Error('Mục thủ công không tồn tại');
+    const next = { ...current, ...patch };
+    this.db.prepare(`UPDATE timesheet_manual_entries SET source_id=?, spent_on=?, wp_id=?, display_id=?, description=?, active_hours=?, wait_hours=?, level=?, pinned=?, updated_at=datetime('now') WHERE id=?`)
+      .run(next.source_id, next.spent_on, next.wp_id, next.display_id, next.description, next.active_hours, next.wait_hours, next.level, next.pinned ? 1 : 0, id);
+    return this.get(id)!;
+  }
+  delete(id: string): void { this.db.prepare('DELETE FROM timesheet_manual_entries WHERE id = ?').run(id); }
 }
 

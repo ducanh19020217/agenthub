@@ -57,6 +57,9 @@ export interface RegisterOpenProjectRoutesOptions {
   dailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
   timesheetPreview?: (sourceId: string, date?: string) => Promise<unknown>;
   timesheetRun?: (sourceId: string, date?: string, hours?: number) => Promise<unknown>;
+  timesheetManualAdd?: (input: unknown) => Promise<unknown>;
+  timesheetManualUpdate?: (id: string, input: unknown) => Promise<unknown>;
+  timesheetManualDelete?: (id: string) => Promise<unknown>;
   decision?: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>;
   triageInput?: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>;
 }
@@ -184,6 +187,29 @@ export function registerOpenProjectRoutes(
   fastify.post('/api/integrations/openproject/sources/:id/timesheet/run', async (req: FastifyRequest) => {
     const { id } = idParams.parse(req.params); if (!options.timesheetRun) throw new HttpError(503, 'unavailable', 'Timesheet chưa sẵn sàng');
     const body = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), hours: z.number().min(8).refine((value) => Math.abs(value * 4 - Math.round(value * 4)) < 1e-8, 'hours must be a multiple of 0.25').optional() }).parse(req.body || {}); return options.timesheetRun(id, body.date, body.hours);
+  });
+  const manualBody = z.object({ sourceId: z.string().min(1).optional(), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), ticket: z.string().trim().min(1).optional(), wpId: z.number().int().positive().optional(), createTicket: z.object({ subject: z.string().trim().min(1), parent: z.union([z.string().trim().min(1), z.number().int().positive()]).optional() }).optional(), description: z.string().trim().min(1).max(255), activeHours: z.number().min(0).max(24), waitHours: z.number().min(0).max(24).optional(), level: z.enum(['easy', 'hard']).optional(), pinned: z.boolean().optional() }).refine((body) => Boolean(body.ticket || body.wpId || body.createTicket), 'Cần chọn ticket hoặc tạo ticket mới');
+  fastify.get('/api/timesheet', async (req: FastifyRequest) => {
+    if (!options.timesheetPreview) throw new HttpError(503, 'unavailable', 'Timesheet chưa sẵn sàng');
+    const query = z.object({ sourceId: z.string().min(1), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).parse(req.query);
+    return options.timesheetPreview(query.sourceId, query.date);
+  });
+  fastify.post('/api/timesheet/manual', async (req: FastifyRequest) => {
+    if (!options.timesheetManualAdd) throw new HttpError(503, 'unavailable', 'Timesheet thủ công chưa sẵn sàng');
+    const body = manualBody.parse(req.body || {}); return options.timesheetManualAdd(body);
+  });
+  fastify.patch('/api/timesheet/manual/:manualId', async (req: FastifyRequest) => {
+    if (!options.timesheetManualUpdate) throw new HttpError(503, 'unavailable', 'Timesheet thủ công chưa sẵn sàng');
+    const params = z.object({ manualId: z.string().min(1) }).parse(req.params); return options.timesheetManualUpdate(params.manualId, req.body || {});
+  });
+  fastify.delete('/api/timesheet/manual/:manualId', async (req: FastifyRequest) => {
+    if (!options.timesheetManualDelete) throw new HttpError(503, 'unavailable', 'Timesheet thủ công chưa sẵn sàng');
+    const params = z.object({ manualId: z.string().min(1) }).parse(req.params); return options.timesheetManualDelete(params.manualId);
+  });
+  fastify.patch('/api/timesheet/day', async (req: FastifyRequest) => {
+    if (!options.timesheetRun) throw new HttpError(503, 'unavailable', 'Timesheet chưa sẵn sàng');
+    const body = z.object({ sourceId: z.string().min(1), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), hours: z.number().min(8).refine((value) => Math.abs(value * 4 - Math.round(value * 4)) < 1e-8, 'hours must be a multiple of 0.25') }).parse(req.body || {});
+    return options.timesheetRun(body.sourceId, body.date, body.hours);
   });
 
   fastify.get('/api/integrations/openproject/sources/:id/work-packages/:wp', async (req: FastifyRequest) => {

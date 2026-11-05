@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TaskDetailPage } from '../pages/TaskDetailPage';
@@ -342,6 +342,26 @@ describe('TaskDetailPage', () => {
 
     expect(rerunSpy).toHaveBeenCalledWith('proj-1~t1');
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['task', 'proj-1~t1'] });
+  });
+
+  it('hiển thị badge cần duyệt tay và các nút Merge / chạy lại check', async () => {
+    const reviewSpy = vi.spyOn(client, 'reviewTask').mockResolvedValue({ ...baseTask, status: 'done' });
+    const rerunSpy = vi.spyOn(client, 'rerunChecks').mockResolvedValue({ passed: true, failed: [] });
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'review',
+      mergeAvailable: true,
+      autoMergeSkippedReason: 'checks_failed',
+      autoMergeSkippedRetried: true,
+      checks: [{ name: 'test', ok: false, exitCode: 1, durationMs: 100, outputTail: 'Error: failed' }],
+    });
+
+    renderPage();
+    expect(await screen.findByTestId('task-manual-approval')).toHaveTextContent('Cần duyệt tay: check thất bại');
+    fireEvent.click(screen.getByRole('button', { name: /Duyệt & merge/i }));
+    await waitFor(() => expect(reviewSpy).toHaveBeenCalledWith('proj-1~t1', { verdict: 'approved', merge: true }));
+    fireEvent.click(screen.getByRole('button', { name: /Chạy lại kiểm tra/i }));
+    await waitFor(() => expect(rerunSpy).toHaveBeenCalledWith('proj-1~t1'));
   });
 
   it('7. Badge "Chờ người duyệt" khi reviewerEscalated: hiển thị cảnh báo kèm lý do', async () => {

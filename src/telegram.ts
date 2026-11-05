@@ -222,6 +222,9 @@ export const TELEGRAM_BOT_COMMANDS: Array<{ command: string; description: string
   { command: 'brain', description: 'Bộ não: /brain · /brain trust [dự án] standard|trusted|full|inherit' },
   { command: 'digest', description: 'Tóm tắt tình hình hệ thống và quota' },
   { command: 'plans', description: '5 kế hoạch gần nhất và tiến độ' },
+  { command: 'ci', description: 'Trạng thái CI gần nhất và job lỗi: /ci [dự án]' },
+  { command: 'knowledge', description: 'Kiến thức ghim và checklist của dự án đang chọn' },
+  { command: 'directives', description: 'Chỉ thị cho bộ não: /directives · add <nội dung> · del <id>' },
   { command: 'status', description: 'Tình hình hub: task, worker, quota' },
   { command: 'focus', description: 'Tập trung tài nguyên cho một dự án: /focus <dự án>|off' },
   { command: 'shutdown', description: 'Tắt AgentHub (bật lại từ máy bằng agenthub start)' },
@@ -4865,6 +4868,7 @@ export class TelegramBotService {
 /ci [dự án] - Xem trạng thái CI GitHub Actions gần nhất và job lỗi
 /brain - Xem Claude đang làm gì và bộ não từng dự án · /brain mode [dự án] off|suggest|auto|external|inherit
 /knowledge - Liệt kê kiến thức ghim và checklist của project đang chọn
+/directives - Xem chỉ thị cho bộ não của project đang chọn · /directives add &lt;nội dung&gt; · /directives del &lt;id&gt;
 /tasks [trạng thái] - Xem danh sách task (vd: /tasks review, /tasks running)
 /task &lt;id&gt; - Xem chi tiết task, kết quả checks và link dashboard
 /newtask &lt;mô tả chung&gt; - Giao một yêu cầu mới cho Claude tự phân tích và tạo task

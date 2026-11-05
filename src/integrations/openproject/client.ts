@@ -32,6 +32,7 @@ export interface OpenProjectWorkPackage {
     html?: string;
   };
   lockVersion: number;
+  estimatedTime?: string | null;
   updatedAt?: string;
   createdAt?: string;
   _links?: {
@@ -343,5 +344,28 @@ export class OpenProjectClient {
       }
     }
     throw new Error('Failed to set status after retries');
+  }
+
+  /**
+   * Ghi estimatedTime lên work package. Retry tối đa 3 lần khi gặp 409.
+   * Trả về work package mới nhất (có estimatedTime thực tế từ server).
+   * Ném lỗi nếu 422 hoặc lỗi khác.
+   */
+  async setEstimate(id: number | string, isoDuration: string): Promise<OpenProjectWorkPackage> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const wp = await this.getWorkPackage(id);
+      try {
+        return await this.request<OpenProjectWorkPackage>(
+          `/api/v3/work_packages/${encodeURIComponent(String(id))}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({ lockVersion: wp.lockVersion, estimatedTime: isoDuration }),
+          },
+        );
+      } catch (error) {
+        if (!(error instanceof OpenProjectError) || error.status !== 409 || attempt === 2) throw error;
+      }
+    }
+    throw new Error('Failed to set estimate after retries');
   }
 }

@@ -324,6 +324,7 @@ export const TimesheetConfigSchema = z.object({
   activityId: z.number().int().positive().nullable().default(null),
   minEntryHours: z.number().positive().refine((value) => Math.abs(value * 4 - Math.round(value * 4)) < 1e-8, 'minEntryHours must be a multiple of 0.25').default(0.5),
   roundTo: z.number().positive().refine((value) => Math.abs(value * 4 - Math.round(value * 4)) < 1e-8, 'roundTo must be a multiple of 0.25').default(0.25),
+  writeEstimate: z.boolean().default(true),
 }).superRefine((value, ctx) => {
   if (value.enabled && value.activityId == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['activityId'], message: 'activityId is required when timesheet is enabled' });
   if (Math.abs(value.hours * 4 - Math.round(value.hours * 4)) > 1e-8) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['hours'], message: 'hours must be a multiple of 0.25' });

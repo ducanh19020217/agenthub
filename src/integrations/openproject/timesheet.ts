@@ -3,13 +3,13 @@ import { promisify } from 'node:util';
 import type { AgentHubConfig, OpenProjectSource } from '../../config.js';
 import { projectSettings } from '../../projects/settings.js';
 import type { EventRepo, ProjectRepo, RunRepo, TaskRepo, TimesheetEntryRepo, TaskRow } from '../../db/index.js';
-import { OpenProjectClient, type OpenProjectWorkPackage } from './client.js';
+import { OpenProjectClient, OpenProjectError, type OpenProjectWorkPackage } from './client.js';
 import { readOpenProjectKey } from './secrets.js';
 import { formatYYYYMMDD } from './daily-report.js';
 
 const execFileAsync = promisify(execFile);
-export interface TimesheetTicket { wpId: number; displayId: string; subject: string; hours: number; comment: string; run: number; wait: number; chat: number; level: number; weight: number; }
-export interface TimesheetPreview { sourceId: string; date: string; hours: number; entries: TimesheetTicket[]; withoutTicket: Array<{ taskId: string; subject: string }>; missingFromDate: number[]; overMinimum: boolean; }
+export interface TimesheetTicket { wpId: number; displayId: string; subject: string; hours: number; rawHours: number; comment: string; run: number; wait: number; chat: number; level: number; weight: number; }
+export interface TimesheetPreview { sourceId: string; date: string; hours: number; entries: TimesheetTicket[]; withoutTicket: Array<{ taskId: string; subject: string }>; missingFromDate: number[]; overMinimum: boolean; estimateSkipped?: Array<{ wpId: number; displayId: string; reason: string }>; }
 
 function dateBounds(date: string): { start: string; end: string } { return { start: `${date} 00:00:00`, end: `${date} 23:59:59.999` }; }
 function dayMs(date: string): { start: number; end: number } { const start = new Date(`${date}T00:00:00`).getTime(); return { start, end: start + 86400000 }; }
@@ -25,6 +25,7 @@ function subjectFromCommits(commits: string[], language = 'vi'): string {
   return (subject || fallback).slice(0, 255);
 }
 function taskLevel(task: TaskRow): number { return task.level === 'hard' ? 1.5 : 1; }
+function roundHours(raw: number, roundTo: number): number { return Math.max(roundTo, Math.round(raw / roundTo) * roundTo); }
 
 export function allocateTimesheetHours(weights: Array<{ weight: number }>, total: number, min: number, step: number): number[] {
   if (!weights.length) return [];
@@ -79,13 +80,85 @@ export class OpenProjectTimesheetService {
       const chat = (events.filter((event) => /review|comment|decision|blocked|question|changes_requested|ticket.*(created|comment)|comment.*(created|added)/i.test(event.type)).length + (payloadText.includes('## Cần quyết định') ? 1 : 0)) * 10;
       const waitStarts = events.filter((event) => /checking|review\.waiting|review\.gate_started|merge\.waiting|wait/i.test(event.type)).map((event) => new Date(event.ts).getTime());
       const wait = Math.min(runMinutes, waitStarts.reduce((sum, start, index) => { const end = waitStarts[index + 1] || day.end; return sum + Math.max(0, Math.min(day.end, end) - Math.max(day.start, start)) / 60000; }, 0));
-      const level = taskLevel(task); const current = tickets.get(wp.id) || { wpId: wp.id, displayId: wp.displayId || String(wp.id), subject: wp.subject || '', hours: 0, comment: subjectFromCommits(commits, source.language), run: 0, wait: 0, chat: 0, level: 0, weight: 0 };
+      const level = taskLevel(task); const current = tickets.get(wp.id) || { wpId: wp.id, displayId: wp.displayId || String(wp.id), subject: wp.subject || '', hours: 0, rawHours: 0, comment: subjectFromCommits(commits, source.language), run: 0, wait: 0, chat: 0, level: 0, weight: 0 };
       current.run += runMinutes; current.wait += wait; current.chat += chat; current.weight += (runMinutes + 0.5 * wait + chat) * level; const base = current.run + 0.5 * current.wait + current.chat; current.level = base ? current.weight / base : level; current.comment = subjectFromCommits([current.comment, ...commits], source.language); tickets.set(wp.id, current);
     }
-    const entries = [...tickets.values()]; const allocated = allocateTimesheetHours(entries, hoursOverride ?? cfg.hours, cfg.minEntryHours, cfg.roundTo); entries.forEach((entry, index) => { entry.hours = allocated[index]; });
+    const entries = [...tickets.values()]; const allocated = allocateTimesheetHours(entries, hoursOverride ?? cfg.hours, cfg.minEntryHours, cfg.roundTo); entries.forEach((entry, index) => {
+      entry.hours = allocated[index];
+      // rawHours = (run + 0.5*wait + chat) * level in hours, rounded up to roundTo
+      const rawMinutes = entry.run + 0.5 * entry.wait + entry.chat;
+      entry.rawHours = roundHours((rawMinutes * entry.level) / 60, cfg.roundTo);
+    });
     const currentWpIds = new Set(entries.map((entry) => entry.wpId)); const missingFromDate = this.options.entryRepo.listForDate(sourceId, date).map((row) => row.wp_id).filter((id) => !currentWpIds.has(id));
     return { sourceId, date, hours: hoursOverride ?? cfg.hours, entries, withoutTicket, missingFromDate, overMinimum: entries.length * cfg.minEntryHours > (hoursOverride ?? cfg.hours) };
   }
   private async commits(cwd: string, defaultBranch: string, branch: string, date: string): Promise<string[]> { const { start } = dateBounds(date); try { const range = branch === defaultBranch ? branch : `${defaultBranch}..${branch}`; const result = await execFileAsync('git', ['-C', cwd, 'log', range, `--since=${start}`, `--until=${date} 23:59:59.999`, '--format=%s']); return result.stdout.split('\n').map((x) => x.trim()).filter(Boolean); } catch { return []; } }
-  async run(sourceId: string, date = formatYYYYMMDD(new Date(this.now())), hoursOverride?: number): Promise<TimesheetPreview> { const source = this.source(sourceId); const cfg = source.timesheet; const preview = await this.preview(sourceId, date, hoursOverride); if (!cfg?.enabled || cfg.activityId == null) return preview; const key = readOpenProjectKey(this.options.config.hubHome, sourceId); if (!key) throw new Error('Nguồn chưa có API key'); const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn }); const errors: string[] = []; const posted: TimesheetTicket[] = []; for (const entry of preview.entries) { try { const input = { hours: isoDuration(entry.hours), spentOn: date, comment: entry.comment, workPackageId: entry.wpId, activityId: cfg.activityId }; const stored = this.options.entryRepo.get(sourceId, date, entry.wpId); const result = stored ? await client.updateTimeEntry(stored.entry_id, input) : await client.createTimeEntry(input); this.options.entryRepo.upsert({ source_id: sourceId, spent_on: date, wp_id: entry.wpId, entry_id: result.id, hours: entry.hours }); posted.push(entry); } catch (error) { const message = error instanceof Error ? error.message : String(error); errors.push(message.replaceAll(key, '[REDACTED]')); } } if (errors.length) { this.options.eventBus.emit('tracker.timesheet.failed', undefined, { sourceId, date, error: errors.join('; '), posted: posted.length, entries: posted, withoutTicket: preview.withoutTicket, missingFromDate: preview.missingFromDate }); throw new Error(errors.join('; ')); } this.options.eventBus.emit('tracker.timesheet.posted', undefined, { sourceId, date, hours: preview.hours, entries: preview.entries, withoutTicket: preview.withoutTicket, missingFromDate: preview.missingFromDate, overMinimum: preview.overMinimum }); return preview; }
+  async run(sourceId: string, date = formatYYYYMMDD(new Date(this.now())), hoursOverride?: number): Promise<TimesheetPreview> {
+    const source = this.source(sourceId); const cfg = source.timesheet; const preview = await this.preview(sourceId, date, hoursOverride);
+    if (!cfg?.enabled || cfg.activityId == null) return preview;
+    const key = readOpenProjectKey(this.options.config.hubHome, sourceId); if (!key) throw new Error('Nguồn chưa có API key');
+    const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
+    const errors: string[] = []; const posted: TimesheetTicket[] = []; const estimateSkipped: Array<{ wpId: number; displayId: string; reason: string }> = [];
+    for (const entry of preview.entries) {
+      let spentOk = false;
+      try {
+        const input = { hours: isoDuration(entry.hours), spentOn: date, comment: entry.comment, workPackageId: entry.wpId, activityId: cfg.activityId! };
+        const stored = this.options.entryRepo.get(sourceId, date, entry.wpId);
+        const result = stored ? await client.updateTimeEntry(stored.entry_id, input) : await client.createTimeEntry(input);
+        // Persist raw_hours for this day; keep written_estimate from stored row until we update it below
+        this.options.entryRepo.upsert({ source_id: sourceId, spent_on: date, wp_id: entry.wpId, entry_id: result.id, hours: entry.hours, raw_hours: entry.rawHours, written_estimate: stored?.written_estimate ?? null });
+        posted.push(entry);
+        spentOk = true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        errors.push(message.replaceAll(key, '[REDACTED]'));
+      }
+      // Write estimate — only if spent time succeeded (don't mask time entry errors)
+      if (spentOk && cfg.writeEstimate !== false) {
+        try {
+          const pastRaw = this.options.entryRepo.sumRawHours(sourceId, entry.wpId, date);
+          const totalEstimate = roundHours(pastRaw + entry.rawHours, cfg.roundTo);
+          const estimateDuration = isoDuration(totalEstimate);
+          // prevWritten: giá trị written_estimate gần nhất hub đã ghi cho WP này (qua mọi ngày)
+          const prevWritten = this.options.entryRepo.lastWrittenEstimate(sourceId, entry.wpId);
+          // Fetch current WP to check existing estimatedTime
+          const wp = await client.getWorkPackage(entry.wpId);
+          const opEstimate = wp.estimatedTime ?? null; // e.g. "PT6H15M" or null
+          const opEstimateHours = opEstimate ? parsePTHours(opEstimate) : null;
+          const canWrite = opEstimateHours === null || (prevWritten !== null && Math.abs(opEstimateHours - prevWritten) < 1e-6);
+          if (!canWrite) {
+            estimateSkipped.push({ wpId: entry.wpId, displayId: entry.displayId, reason: 'estimate đã do người khác đặt' });
+          } else {
+            try {
+              await client.setEstimate(entry.wpId, estimateDuration);
+              // Update written_estimate in DB
+              const freshStored = this.options.entryRepo.get(sourceId, date, entry.wpId);
+              if (freshStored) {
+                this.options.entryRepo.upsert({ ...freshStored, written_estimate: totalEstimate });
+              }
+            } catch (estError) {
+              const estMsg = estError instanceof Error ? estError.message : String(estError);
+              if (estError instanceof OpenProjectError && estError.status === 422) {
+                estimateSkipped.push({ wpId: entry.wpId, displayId: entry.displayId, reason: `OP trả về 422: ${estMsg}` });
+              } else {
+                estimateSkipped.push({ wpId: entry.wpId, displayId: entry.displayId, reason: estMsg });
+              }
+            }
+          }
+        } catch {
+          // estimate errors do not block spent time
+        }
+      }
+    }
+    if (errors.length) { this.options.eventBus.emit('tracker.timesheet.failed', undefined, { sourceId, date, error: errors.join('; '), posted: posted.length, entries: posted, withoutTicket: preview.withoutTicket, missingFromDate: preview.missingFromDate }); throw new Error(errors.join('; ')); }
+    this.options.eventBus.emit('tracker.timesheet.posted', undefined, { sourceId, date, hours: preview.hours, entries: preview.entries, withoutTicket: preview.withoutTicket, missingFromDate: preview.missingFromDate, overMinimum: preview.overMinimum, estimateSkipped });
+    return { ...preview, estimateSkipped };
+  }
+}
+
+/** Parse ISO 8601 duration string (PT#H#M) to hours. Returns null if unparseable. */
+function parsePTHours(duration: string): number | null {
+  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?$/.exec(duration);
+  if (!m) return null;
+  return (parseInt(m[1] || '0', 10)) + (parseInt(m[2] || '0', 10)) / 60;
 }

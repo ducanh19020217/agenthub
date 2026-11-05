@@ -33,12 +33,14 @@ import {
   TaskBatchRow,
   CiRepo,
   BlockingDiskInfo,
+  TrackerItemRepo,
 } from '../db/index.js';
 import type { CiWatchService } from '../ci.js';
 import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
 import type { DailyReportService } from '../integrations/openproject/daily-report.js';
 import type { GiteaSyncService } from '../integrations/gitea/service.js';
 import { isGiteaTokenConfigured, saveGiteaToken } from '../integrations/gitea/secrets.js';
+import { parseRemote } from '../integrations/gitea/client.js';
 import { BulletinService } from '../bulletin.js';
 import { parseCodexTokenItem, writeCodexAuthFile } from '../profiles/codexToken.js';
 import { defaultWakeupRunner, planWakeup, wakeupCommands, wakeupCwd, wakeupSucceeded, type WakeupRunner } from '../quota/wakeup.js';
@@ -69,6 +71,7 @@ import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } fr
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
 import { ReviewChainSchema, parseReviewChain, type ReviewChainStep } from '../review-chain.js';
+import { isAutoReviewer } from '../reviewer.js';
 import { isKnownModel } from '../quota/index.js';
 import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, ReviewerOrderSchema, reviewerSettingsFromLegacy } from '../reviewer-config.js';
 import { SetupManager } from '../tools/setup.js';
@@ -80,6 +83,9 @@ import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../pres
 import type { SetupTools } from '../setup-tools.js';
 import { computeEffectiveConfig } from '../effective-config.js';
 import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
+import { OpenProjectClient, type OpenProjectWorkPackage } from '../integrations/openproject/client.js';
+import { readOpenProjectKey } from '../integrations/openproject/secrets.js';
+import { writeTicketDirectory } from '../integrations/openproject/ticket.js';
 
 const execFileAsync = promisify(execFile);
 const CODEX_EMAIL_RECHECK_MS = 10 * 60 * 1000;
@@ -358,9 +364,11 @@ export const CreateTaskSchema = z.object({
   batchId: z.string().optional(),
   sessionId: z.string().optional(),
   goal: z.string().optional(),
+  createTicket: z.object({ sourceId: z.string().min(1).optional() }).optional(),
 });
 
 export const BatchTaskInputSchema = z.object({
+  project: z.string().optional(),
   slug: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/),
   title: z.string().min(1),
   body: z.string().optional(),
@@ -646,6 +654,7 @@ export const UpdateConfigSchema = z.object({
       quotaAllExhausted: z.boolean().optional(),
       fallback: z.boolean().optional(),
       brainWaiting: z.boolean().optional(),
+      disk: z.boolean().optional(),
     }).optional(),
   }).optional(),
   updates: z.object({
@@ -757,6 +766,11 @@ export function formatEventSummary(
       return `${taskLabel} bắt đầu chạy`;
     }
 
+    case 'task.auto_closed':
+      return p.reason === 'merged_elsewhere'
+        ? `${taskLabel} tự động hoàn thành (đã merge qua nhánh khác)`
+        : `${taskLabel} đã tự động đóng`;
+
     case 'task.blocked':
       return `${taskLabel} bị chặn`;
 
@@ -764,7 +778,9 @@ export function formatEventSummary(
       return `${taskLabel} thất bại`;
 
     case 'task.done':
-      return `${taskLabel} hoàn thành`;
+      return p.reason === 'merged_elsewhere'
+        ? `${taskLabel} hoàn thành (đã merge qua nhánh khác)`
+        : `${taskLabel} hoàn thành`;
 
     case 'task.cancelled':
       return `${taskLabel} đã bị hủy`;
@@ -944,6 +960,9 @@ export interface TokenImportResult {
 }
 
 export class AppService {
+  private trackerRepo?: TrackerItemRepo;
+  private triageDecisionHandler?: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>;
+  private triageInputHandler?: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>;
   public deployService?: DeployService;
   public remoteDeployService?: RemoteDeployService;
   public ciRepo?: CiRepo;
@@ -990,6 +1009,24 @@ export class AppService {
   ) {}
 
   setSetupTools(tools: SetupTools): void { this.setupTools = tools; }
+  setTrackerRepo(repo: TrackerItemRepo): void { this.trackerRepo = repo; }
+  setTriageDecisionHandler(handler: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>): void { this.triageDecisionHandler = handler; }
+  async decideOpenProjectTicket(sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string): Promise<{ action: string; taskIds: string[] }> {
+    if (!this.triageDecisionHandler) throw new HttpError(503, 'unavailable', 'OpenProject triage chưa sẵn sàng');
+    return this.triageDecisionHandler(sourceId, wpId, action, note);
+  }
+  setTriageInputHandler(handler: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>): void { this.triageInputHandler = handler; }
+  async submitOpenProjectTriageInput(sourceId: string, wpId: number, content: string): Promise<{ taskId: string }> {
+    if (!this.triageInputHandler) throw new HttpError(503, 'unavailable', 'OpenProject triage chưa sẵn sàng');
+    return this.triageInputHandler(sourceId, wpId, content);
+  }
+  private openProjectTicketUrl(task: TaskRow): string | null {
+    if (!task.externalRef || !this.trackerRepo) return task.externalRef?.startsWith('http') ? task.externalRef : null;
+    const item = this.trackerRepo.listForTask(task.id).find((row) => row.display_id === task.externalRef);
+    if (!item) return task.externalRef.startsWith('http') ? task.externalRef : null;
+    const source = this.config.integrations.openproject.sources.find((candidate) => candidate.id === item.source_id);
+    return source ? `${source.url.replace(/\/+$/, '')}/work_packages/${item.wp_id}` : null;
+  }
   getSetupTools(): SetupTools { if (!this.setupTools) throw new HttpError(503, 'unavailable', 'Setup tools chưa sẵn sàng'); return this.setupTools; }
 
   private validateOpenProjectBinding(projectId: string, settings: ReturnType<typeof projectSettings>): void {
@@ -1907,9 +1944,30 @@ export class AppService {
   }
 
   getGiteaStatus(id: string) {
-    this.getProject(id);
-    return this.giteaSyncService?.getStatus(id) || {
+    const project = this.getProject(id);
+    if (this.giteaSyncService) {
+      return this.giteaSyncService.getStatus(id);
+    }
+    let remote: { owner: string; repo: string; host?: string } | null = null;
+    if (project?.path) {
+      try {
+        const cleanPath = (process.env.PATH || '')
+          .split(path.delimiter)
+          .filter((entry) => !entry.includes(`${path.sep}shims${path.sep}worker`))
+          .join(path.delimiter);
+        const remoteUrl = execFileSync('git', ['-C', project.path, 'remote', 'get-url', 'origin'], {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: cleanPath },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }).trim();
+        remote = parseRemote(remoteUrl);
+      } catch {
+        remote = null;
+      }
+    }
+    return {
       tokenConfigured: isGiteaTokenConfigured(this.config.hubHome, id),
+      remote,
     };
   }
 
@@ -1930,7 +1988,7 @@ export class AppService {
     if (!this.giteaSyncService) {
       throw new HttpError(503, 'unavailable', 'Gitea sync service chưa sẵn sàng');
     }
-    return this.giteaSyncService.syncProject(id);
+    return this.giteaSyncService.startSync(id);
   }
 
   getRemoteDeployStatus(id: string): RemoteDeployStatus | null {
@@ -3348,6 +3406,7 @@ export class AppService {
       const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
       return {
         ...apiTask(task, blockingDisk),
+        externalUrl: this.openProjectTicketUrl(task),
         blockingDisk,
         reviewChain,
         reviewRound,
@@ -3374,12 +3433,25 @@ export class AppService {
   }
 
   listTasks(filter?: { project?: string; status?: string }): TaskRow[] {
-    return this.decorateTasks(this.taskRepo.list(filter));
+    return this.decorateTriageTasks(this.decorateTasks(this.taskRepo.list(filter)));
   }
 
   listTasksPage(filter?: { project?: string; status?: string; search?: string; limit?: string | number; cursor?: string; offset?: string | number; sort?: string; order?: string }): PageResult<TaskRow> {
     const page = this.taskRepo.page(filter);
-    return { ...page, items: this.decorateTasks(page.items) };
+    return { ...page, items: this.decorateTriageTasks(this.decorateTasks(page.items)) };
+  }
+
+  private decorateTriageTasks(tasks: TaskRow[]): TaskRow[] {
+    if (!this.trackerRepo) return tasks;
+    return tasks.map((task) => {
+      const row = this.trackerRepo!.listForTask(task.id).find((item) => item.display_id === task.externalRef);
+      if (!row) return task;
+      try {
+        const writeback = JSON.parse(row.writeback) as { triage?: unknown; decision?: unknown };
+        if (!writeback.triage) return task;
+        return { ...task, triage: { sourceId: row.source_id, wpId: row.wp_id, displayId: row.display_id, analysis: (writeback.triage as { analysis?: unknown }).analysis, decision: writeback.decision || null } } as TaskRow;
+      } catch { return task; }
+    });
   }
 
   getTasksGraph(options?: { project?: string; includeDone?: string | boolean }) {
@@ -3491,10 +3563,19 @@ export class AppService {
       : (isFallback ? fallbackReviewer : (reviews.at(-1)?.actor === 'claude-reviewer' ? 'claude' : (activeReviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex')));
 
     const blockingDisk = this.getBlockingDiskForTask(task);
+    const tracker = this.trackerRepo?.listForTask(task.id).find((row) => row.display_id === task.externalRef);
+    let triage: unknown = null;
+    if (tracker) {
+      try {
+        const writeback = JSON.parse(tracker.writeback) as { triage?: unknown; decision?: unknown };
+        triage = { sourceId: tracker.source_id, wpId: tracker.wp_id, displayId: tracker.display_id, ...(writeback.triage ? { analysis: (writeback.triage as { analysis?: unknown }).analysis } : {}), decision: writeback.decision || null };
+      } catch { triage = null; }
+    }
     const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
     const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
     return {
       ...apiTask(task, blockingDisk),
+      externalUrl: this.openProjectTicketUrl(task),
       blockingDisk,
       reviewer,
       events,
@@ -3528,13 +3609,98 @@ export class AppService {
       worktreePath: task.worktreePath,
       checks: this.scheduler.getCheckResults(taskId),
       sourceRef: task.sourceRef ? JSON.parse(task.sourceRef) : null,
+      triage,
       derivedTasks: this.taskRepo.getDerivedFrom(taskId).map((t) => apiTask(t, this.getBlockingDiskForTask(t))),
       claudeCost: (() => { const measured = this.claudeSessionRepo?.taskCost(taskId); return measured ? { measured: measured.effectiveTokens > 0, ...measured } : { measured: false, effectiveTokens: 0, sessions: 0 }; })(),
     };
   }
 
+  private async prepareOpenProjectTicket(parsed: z.infer<typeof CreateTaskSchema>, project: ProjectRow): Promise<{
+    sourceId: string;
+    wp: OpenProjectWorkPackage;
+    displayId: string;
+    url: string;
+    activities: Awaited<ReturnType<OpenProjectClient['listActivities']>>;
+  } | null> {
+    if (!parsed.createTicket) return null;
+    const projectOpenProject = projectSettings(project).openproject;
+    const sourceId = parsed.createTicket.sourceId || (projectOpenProject.enabled ? projectOpenProject.sourceId : null);
+    if (!sourceId) throw new HttpError(400, 'bad_request', 'Project chưa bật nguồn OpenProject để tạo ticket');
+    const source = this.config.integrations.openproject.sources.find((item) => item.id === sourceId);
+    if (!source) throw new HttpError(400, 'bad_request', `Nguồn OpenProject "${sourceId}" không tồn tại`);
+    const key = readOpenProjectKey(this.config.hubHome, source.id);
+    if (!key) throw new HttpError(400, 'bad_request', `Nguồn OpenProject "${source.id}" chưa có API key`);
+    if (!this.trackerRepo) throw new HttpError(503, 'unavailable', 'OpenProject tracker chưa sẵn sàng');
+    const taskId = `${parsed.project}/${parsed.slug}`;
+    if (this.taskRepo.get(taskId)) throw new HttpError(409, 'conflict', `Task "${taskId}" đã tồn tại`);
+    this.validateOpenProjectTaskDependencies(parsed);
+    const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key });
+    const description = (parsed.body || '').trim();
+    const result = await client.createWorkPackage({
+      subject: parsed.title,
+      descriptionMarkdown: description.length > 30000 ? `${description.slice(0, 29997)}...` : description,
+      typeId: source.createTypeId ?? undefined,
+      assigneeMe: true,
+      statusId: source.createStatusId ?? undefined,
+    });
+    // Claim the ticket before any further network or filesystem work. Intake
+    // treats this marker as in-flight and therefore cannot create a duplicate.
+    this.trackerRepo.upsert({
+      source_id: source.id,
+      wp_id: result.id,
+      display_id: result.displayId,
+      status_id: null,
+      updated_at: new Date().toISOString(),
+      last_comment_id: null,
+      task_ids: '[]',
+      writeback: JSON.stringify({ createPending: true }),
+    });
+    try {
+      const wp = await client.getWorkPackage(result.id);
+      const activities = await client.listActivities(result.id);
+      await writeTicketDirectory(client, wp, activities, path.join(this.config.hubHome, 'tracker', source.id, String(result.id)), source.url);
+      return { sourceId: source.id, wp, displayId: result.displayId, url: result.url, activities };
+    } catch (error) {
+      this.trackerRepo.delete(source.id, result.id);
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new HttpError(502, 'bad_gateway', `Đã tạo ticket ${result.displayId} nhưng không thể hoàn tất liên kết: ${reason}`);
+    }
+  }
+
+  private validateOpenProjectTaskDependencies(parsed: z.infer<typeof CreateTaskSchema>): void {
+    for (const dependency of parsed.dependsOn || []) {
+      const normalized = toTaskId(dependency);
+      const dependencyId = normalized.includes('/') ? normalized : `${parsed.project}/${normalized}`;
+      const task = this.taskRepo.get(dependencyId);
+      if (!task || task.projectId !== parsed.project) {
+        throw new HttpError(422, 'unprocessable_entity', `Task phụ thuộc "${dependency}" không tồn tại trong project "${parsed.project}"`);
+      }
+    }
+  }
+
+  private recordOpenProjectTicket(prepared: NonNullable<Awaited<ReturnType<AppService['prepareOpenProjectTicket']>>>, taskId: string): void {
+    if (!this.trackerRepo) throw new HttpError(503, 'unavailable', 'OpenProject tracker chưa sẵn sàng');
+    const statusHref = prepared.wp._links?.status?.href || '';
+    const statusValue = Number(statusHref.split('/').at(-1));
+    const statusId = Number.isInteger(statusValue) ? statusValue : null;
+    const lastCommentId = prepared.activities.reduce((max, item) => Math.max(max, item.id || 0), 0) || null;
+    this.trackerRepo.upsert({
+      source_id: prepared.sourceId,
+      wp_id: prepared.wp.id,
+      display_id: prepared.displayId,
+      status_id: statusId,
+      updated_at: prepared.wp.updatedAt || new Date().toISOString(),
+      last_comment_id: lastCommentId,
+      task_ids: JSON.stringify([taskId]),
+      writeback: '{}',
+    });
+  }
+
   createTask(raw: unknown): TaskRow {
     const parsed = CreateTaskSchema.parse(raw);
+    if (parsed.createTicket) {
+      throw new HttpError(400, 'bad_request', 'createTicket phải được xử lý qua luồng tạo task kèm ticket');
+    }
     const project = this.projectRepo.get(parsed.project);
     if (!project) {
       throw new HttpError(404, 'not_found', `Project "${parsed.project}" không tồn tại`);
@@ -3635,6 +3801,32 @@ export class AppService {
     }
 
     return this.taskRepo.get(taskId)!;
+  }
+
+  async createTaskWithTicket(raw: unknown): Promise<TaskRow> {
+    const parsed = CreateTaskSchema.parse(raw);
+    if (!parsed.createTicket) return this.createTask(raw);
+    const project = this.projectRepo.get(parsed.project);
+    if (!project) throw new HttpError(404, 'not_found', `Project "${parsed.project}" không tồn tại`);
+    const prepared = await this.prepareOpenProjectTicket(parsed, project);
+    if (!prepared) return this.createTask(raw);
+    let taskCreatedByThisRequest = false;
+    try {
+      const task = this.createTask({
+        ...parsed,
+        title: `[${prepared.displayId}] ${parsed.title}`,
+        externalRef: prepared.displayId,
+        createTicket: undefined,
+      });
+      taskCreatedByThisRequest = true;
+      this.recordOpenProjectTicket(prepared, task.id);
+      return task;
+    } catch (error) {
+      this.trackerRepo?.delete(prepared.sourceId, prepared.wp.id);
+      if (taskCreatedByThisRequest) this.taskRepo.delete(`${parsed.project}/${parsed.slug}`);
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new HttpError(502, 'bad_gateway', `Đã tạo ticket ${prepared.displayId} nhưng không thể tạo task liên kết: ${reason}`);
+    }
   }
 
   captureTask(raw: unknown): TaskRow {
@@ -3841,11 +4033,17 @@ export class AppService {
 
     const slugs = new Set<string>();
     for (const t of parsed.tasks) {
-      if (slugs.has(t.slug)) {
-        throw new HttpError(400, 'bad_request', `Trùng slug "${t.slug}" trong cùng đợt`);
+      const taskProject = t.project || parsed.project;
+      const targetProject = this.projectRepo.get(taskProject);
+      if (!targetProject) {
+        throw new HttpError(404, 'not_found', `Project "${taskProject}" không tồn tại`);
       }
-      slugs.add(t.slug);
-      const taskId = `${parsed.project}/${t.slug}`;
+      const slugKey = `${taskProject}/${t.slug}`;
+      if (slugs.has(slugKey)) {
+        throw new HttpError(400, 'bad_request', `Trùng slug "${t.slug}" trong cùng đợt và project "${taskProject}"`);
+      }
+      slugs.add(slugKey);
+      const taskId = slugKey;
       if (this.taskRepo.get(taskId)) {
         throw new HttpError(409, 'conflict', `Task "${taskId}" đã tồn tại`);
       }
@@ -3866,17 +4064,18 @@ export class AppService {
     const taskDepsToPopulate: Array<{ taskId: string; deps: string[] }> = [];
 
     for (const t of parsed.tasks) {
-      const taskId = `${parsed.project}/${t.slug}`;
+      const taskProject = t.project || parsed.project;
+      const taskId = `${taskProject}/${t.slug}`;
       const normalizedDeps: string[] = (t.dependsOn || []).map((dep) => {
         if (!dep.includes('/') && !dep.includes('~')) {
-          return `${parsed.project}/${dep}`;
+          return `${taskProject}/${dep}`;
         }
         return toTaskId(dep);
       });
 
       this.taskRepo.insert({
         id: taskId,
-        projectId: parsed.project,
+        projectId: taskProject,
         slug: t.slug,
         title: t.title,
         body: t.body,
@@ -4127,6 +4326,67 @@ export class AppService {
     return this.taskRepo.get(taskId)!;
   }
 
+  async splitTask(idParam: string): Promise<{ ok: boolean; taskId: string; task: TaskRow }> {
+    const taskId = toTaskId(idParam);
+    const task = this.taskRepo.get(taskId);
+    if (!task) {
+      throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    }
+    if (!task.externalRef) {
+      throw new HttpError(400, 'bad_request', 'Task không gắn với ticket tracker ngoài');
+    }
+    if (task.status !== 'queued' && task.status !== 'blocked') {
+      throw new HttpError(400, 'bad_request', `Chỉ có thể chia việc khi task chưa chạy hoặc bị chặn (hiện tại: ${task.status})`);
+    }
+    if (task.slug.endsWith('-plan')) {
+      throw new HttpError(400, 'bad_request', 'Task đã là task lập kế hoạch chia việc');
+    }
+    const tracker = this.trackerRepo?.listAll().find((r) => r.display_id === task.externalRef);
+    if (!tracker) {
+      throw new HttpError(404, 'not_found', `Không tìm thấy tracker ticket cho ${task.externalRef}`);
+    }
+    const source = this.config.integrations?.openproject?.sources?.find((s) => s.id === tracker.source_id);
+    const splitConf = source?.split || { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true };
+
+    this.cancelTask(toRouteId(task.id));
+
+    const primary = this.projectRepo.getAll().find((p) => {
+      const settings = projectSettings(p).openproject;
+      return settings.enabled && settings.role === 'primary' && settings.sourceId === tracker.source_id;
+    }) || this.projectRepo.get(task.projectId);
+    if (!primary) {
+      throw new HttpError(404, 'not_found', 'Không tìm thấy project cho task kế hoạch');
+    }
+
+    const base = `op-${tracker.display_id.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-plan`;
+    let slug = base;
+    let n = 1;
+    while (this.taskRepo.get(`${primary.id}/${slug}`)) slug = `${base}-r${++n}`;
+
+    const planTask = this.createTask({
+      project: primary.id,
+      slug,
+      title: `[${tracker.display_id}] Lập kế hoạch chia việc`,
+      level: 'hard',
+      externalRef: tracker.display_id,
+      start: true,
+      body: `Ticket: [${tracker.display_id}]\n\nKhông sửa code, không commit. Đọc toàn bộ ticket trong .agenthub/context/ticket/ và code repo. Viết .agenthub/DONE có mục ## Chia việc theo src/protocol.md. Tối đa ${splitConf.maxParts} phần, tối thiểu 2.`,
+    });
+
+    let currentIds: string[] = [];
+    try {
+      const parsed = JSON.parse(tracker.task_ids);
+      if (Array.isArray(parsed)) currentIds = parsed.filter((x): x is string => typeof x === 'string');
+    } catch { currentIds = []; }
+
+    this.trackerRepo?.upsert({
+      ...tracker,
+      task_ids: JSON.stringify([...new Set([...currentIds, planTask.id])]),
+    });
+
+    return { ok: true, taskId: planTask.id, task: planTask };
+  }
+
   pauseTask(idParam: string, reason: 'manual' | 'load' | 'brain_load' = 'manual'): { ok: boolean; paused: boolean } {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
@@ -4173,9 +4433,29 @@ export class AppService {
     try {
 
     let mergeResult: { mergeCommit: string; checks: string[] } | undefined;
-    if (parsed.verdict === 'approved' && parsed.merge) {
+    const isPlan = task.slug.endsWith('-plan');
+    let shouldMerge = parsed.verdict === 'approved' && Boolean(parsed.merge) && !isPlan;
+    if (shouldMerge && task.worktreePath) {
+      const project = this.projectRepo.get(task.projectId);
+      if (project) {
+        let hasDiff = Boolean(task.diffStat && task.diffStat.trim());
+        if (!hasDiff) {
+          try {
+            const base = task.baseRef || project.defaultBranch || 'main';
+            const branch = task.branch || `agenthub/${task.slug}`;
+            execFileSync('git', ['diff', '--quiet', `${base}...${branch}`], { cwd: task.worktreePath, stdio: 'pipe' });
+            hasDiff = false;
+          } catch {
+            hasDiff = true;
+          }
+        }
+        if (!hasDiff) shouldMerge = false;
+      }
+    }
+    if (shouldMerge) {
       const project = this.projectRepo.get(task.projectId);
       if (!project) throw new HttpError(404, 'not_found', `Project "${task.projectId}" không tồn tại`);
+      this.scheduler.setTaskMerging(taskId, true);
       try {
         mergeResult = await mergeTaskIntoBase(task, project, {
           hubHome: this.config.hubHome,
@@ -4212,6 +4492,8 @@ export class AppService {
           throw new HttpError(error.statusCode, error.error, error.message);
         }
         throw error;
+      } finally {
+        this.scheduler.setTaskMerging(taskId, false);
       }
     }
 
@@ -4248,7 +4530,7 @@ export class AppService {
   }
 
   /**
-   * Merges a task whose review chain finished on a Codex approval, when the project opted in with
+   * Merges a task whose review chain finished on an automated gate approval, when the project opted in with
    * `integration.autoMerge` or `review.autoMerge`. A merged task then self-deploys through the usual task.merged hook.
    */
   async autoMergeReviewedTask(taskId: string): Promise<void> {
@@ -4258,13 +4540,31 @@ export class AppService {
     if (!project) return;
     const settings = projectSettings(project);
     if (!(settings.review.autoMerge || settings.integration.autoMerge)) return;
-    const chain = project.review
-      ? (() => { try { return (JSON.parse(project.review) as { chain?: Array<{ reviewer?: string }> }).chain || []; } catch { return []; } })()
-      : project.reviewChain
-        ? (() => { try { return JSON.parse(project.reviewChain) as Array<{ reviewer?: string }>; } catch { return []; } })()
+    const rawChain = project.review
+      ? (() => {
+          try {
+            const val = JSON.parse(project.review) as { chain?: unknown };
+            return val.chain;
+          } catch {
+            return [];
+          }
+        })()
+      : project.reviewChain;
+    const chain: ReviewChainStep[] = Array.isArray(rawChain)
+      ? (() => {
+          const res = ReviewChainSchema.safeParse(rawChain);
+          return res.success ? res.data : [];
+        })()
+      : typeof rawChain === 'string'
+        ? parseReviewChain(rawChain)
         : [];
+    if (!chain.length) return;
+    const lastStep = chain.at(-1);
+    if (!lastStep || lastStep.mode !== 'gate') return;
+    if ((task.reviewStep ?? 0) < chain.length) return;
+    if (task.reviewerEscalated) return;
     const last = this.reviewRepo.getByTask(taskId).at(-1);
-    if (!chain.length || !chain.at(-1)?.reviewer?.startsWith('codex:') || !last || last.actor !== 'codex-reviewer' || last.verdict !== 'approved') return;
+    if (!last || !isAutoReviewer(last.actor) || last.verdict !== 'approved') return;
     const checks = this.scheduler.getCheckResults(taskId);
     if (checks.length === 0 || checks.some((c) => !c.ok)) return;
     if (this.failedAutoMerges.has(taskId)) return;
@@ -4280,7 +4580,7 @@ export class AppService {
         verdict: 'approved',
         merge: true,
         by: 'auto-merge',
-        feedback: 'Tự merge sau khi Codex reviewer chấp thuận.',
+        feedback: `Tự merge sau khi reviewer tự động (${last.actor}) chấp thuận.`,
       });
       this.failedAutoMerges.delete(taskId);
     } catch (error) {
@@ -4293,27 +4593,62 @@ export class AppService {
       const conflictCount = isConflict
         ? this.eventRepo.getByTask(taskId).filter((event) => event.type === 'merge.conflict').length + 1
         : undefined;
-      if (isConflict && conflictCount !== undefined && conflictCount <= 3) {
+      const rawMessage = error instanceof Error ? error.message : String(error);
+
+      let autoRetried = false;
+      let filesText = rawMessage;
+      if (isConflict) {
+        const match = rawMessage.match(/Xung đột merge ở:\s*(.+)/i);
+        if (match && match[1].trim()) {
+          filesText = match[1].trim();
+        }
         const current = this.taskRepo.get(taskId);
-        const files = error instanceof Error ? error.message : String(error);
-        const note = `\n\n## Tự xử lý xung đột merge lần ${conflictCount}\n\nCác file/chi tiết xung đột: ${files}\nCác nhánh đã merge trước đó có thể cũng sửa các file này. Hãy chạy \`git merge <base>\`, giữ thay đổi của cả hai bên rồi chạy đầy đủ checks trước khi commit.`;
-        this.taskRepo.update(taskId, {
-          status: 'queued',
-          resume: 1,
-          body: `${current?.body || ''}${note}`,
-          notBefore: null,
-        });
-        this.scheduler.getEventBus().emit('task.queued', taskId, {
-          reason: 'merge_conflict_auto_retry',
-          conflictCount,
-          feedback: note.trim(),
-        });
+        let baseBranchExists = true;
+        const baseBranch = current?.baseRef || project?.defaultBranch;
+        if (project?.path && baseBranch && fs.existsSync(project.path)) {
+          try {
+            execFileSync('git', ['-C', project.path, 'rev-parse', '--verify', '--quiet', baseBranch], { stdio: 'ignore' });
+          } catch {
+            baseBranchExists = false;
+          }
+        }
+        const canAutoRetry = Boolean(
+          current &&
+          current.status !== 'cancelled' &&
+          baseBranchExists &&
+          conflictCount !== undefined &&
+          conflictCount <= 3
+        );
+        if (canAutoRetry && current) {
+          const note = `\n\n## Tự xử lý xung đột merge lần ${conflictCount}\n\nCác file/chi tiết xung đột: ${filesText}\nCác nhánh đã merge trước đó có thể cũng sửa các file này. Hãy chạy \`git merge <base>\`, giữ thay đổi của cả hai bên rồi chạy đầy đủ checks trước khi commit.`;
+          this.taskRepo.update(taskId, {
+            status: 'queued',
+            resume: 1,
+            body: `${current.body || ''}${note}`,
+            notBefore: null,
+          });
+          this.scheduler.getEventBus().emit('task.queued', taskId, {
+            reason: 'merge_conflict_auto_retry',
+            conflictCount,
+            feedback: note.trim(),
+          });
+          autoRetried = true;
+        }
       }
+
+      const fixTask = !isConflict
+        ? this.taskRepo.getDerivedFrom(taskId).find((t) =>
+            /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+          )
+        : null;
+      const autoFixCreated = Boolean(fixTask);
+
       this.scheduler.getEventBus().emit(isConflict ? 'merge.conflict' : 'merge.failed', taskId, {
         actor: 'auto-merge',
-        message: error instanceof Error ? error.message : String(error),
+        message: rawMessage,
         environment: isEnvironment || undefined,
         ...(conflictCount === undefined ? {} : { conflictCount }),
+        ...(isConflict ? { autoRetried, files: filesText } : { autoFixCreated }),
       });
     }
   }
@@ -4428,6 +4763,10 @@ export class AppService {
       }
     }
     return cancelled;
+  }
+
+  async autoCloseMergedTasks(): Promise<number> {
+    return this.scheduler.autoCloseMergedTasks();
   }
 
   retryTask(idParam: string, raw: unknown): TaskRow {

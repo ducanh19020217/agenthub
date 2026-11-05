@@ -22,6 +22,7 @@ import {
   TrackerItemRepo,
 } from '../db/index.js';
 import { projectSettings } from '../projects/settings.js';
+import { isTriageTaskSlug, parseTriageAnalysis } from '../integrations/openproject/triage.js';
 import { renderCommitTemplate, renderTaskBranch } from '../commit-convention.js';
 import { isProjectWorktreeRootAccessible, projectWorktreeRoot, projectWorktreeRoots } from '../projects/paths.js';
 import { Engine, AgyEngine, CodexEngine } from '../engines/index.js';
@@ -40,7 +41,7 @@ import { parseCodexTokens, parseShortstat, recalculateTaskLines, measureTaskLine
 const execFileAsync = promisify(execFile);
 import { ClaudeFailoverState } from '../chat/failover.js';
 import { ensureIntegrationNodeModules, ensureIntegrationWorktree } from '../projects/integration.js';
-import { buildReviewerPrompt, parseReviewerOutput, ReviewerVerdict } from '../reviewer.js';
+import { buildReviewerPrompt, parseReviewerOutput, ReviewerVerdict, isAutoReviewer, type ReviewerActor } from '../reviewer.js';
 import { CLAUDE_REVIEW_ENGINE_KEY } from '../engines/claude-review.js';
 import { parseReviewChain, reviewerModel, type ReviewChainStep } from '../review-chain.js';
 import { isOrphanProcess, listAllWorktreeProcesses, reap, reapSyncForWorktree } from '../reaper.js';
@@ -206,12 +207,6 @@ interface StartingTask {
   profileName: string;
 }
 
-type ReviewerActor = 'codex-reviewer' | 'claude-reviewer';
-
-/** Automated reviewers whose verdicts drive gates, round limits and auto-merge. */
-function isAutoReviewer(by: string | undefined): by is ReviewerActor {
-  return by === 'codex-reviewer' || by === 'claude-reviewer';
-}
 
 type ReviewSource = 'content' | 'operational';
 
@@ -268,6 +263,9 @@ export class Scheduler {
   private inTick = false;
   private skipSchedulingOnce = false;
   private diskLow = false;
+  private lastDiskLowEmit = 0;
+  private diskBlockedEmitted = false;
+  private diskIncidents = new Map<string, { lastLowEmit: number; blockedEmitted: boolean }>();
   private dockerDiskLow = false;
   private tasksWaitingForDisk = new Set<string>();
   private unavailableProjects = new Set<string>();
@@ -295,6 +293,9 @@ export class Scheduler {
   private reviewerErrorCounts = new Map<string, number>();
   private reviewerFallbackNotified = new Set<string>();
   private lastOrphanScan = 0;
+  private lastMergedTasksCheck = 0;
+  private autoClosingMerged = false;
+  private mergingTasks = new Set<string>();
   private readonly worktreeCleanupRetryAt = new Map<string, number>();
   private readonly worktreeCleanupLogged = new Set<string>();
   private readonly dirtyWorktreeLogged = new Set<string>();
@@ -1148,6 +1149,33 @@ export class Scheduler {
         }
       }
       if (this.stopped) return;
+      if (isTriageTaskSlug(currentTask.slug)) {
+        let codeChanged = Boolean(currentTask.diffStat && currentTask.diffStat.trim());
+        if (!codeChanged && currentTask.worktreePath && project?.path) {
+          try {
+            const status = await execFileAsync('git', ['status', '--porcelain'], { cwd: currentTask.worktreePath, timeout: 10_000 });
+            const base = currentTask.baseRef || project.defaultBranch || 'main';
+            const branch = currentTask.branch || `agenthub/${currentTask.slug}`;
+            const diff = await execFileAsync('git', ['diff', '--quiet', `${base}...${branch}`], { cwd: currentTask.worktreePath, timeout: 10_000 }).then(() => '').catch(() => 'changed');
+            codeChanged = Boolean(status.stdout.trim() || diff);
+          } catch { codeChanged = true; }
+        }
+        const parsedTriage = parseTriageAnalysis(currentTask.doneReport || '');
+        if (codeChanged) {
+          const blockedReport = '## Phân tích\n\nTriage không hợp lệ: worker đã tạo thay đổi code. Task triage bị chặn để người dùng kiểm tra.';
+          this.taskRepo.update(taskId, { status: 'blocked', blockedReport, transientRetries: 0, notBefore: null });
+          this.eventBus.emit('tracker.triage_invalid', taskId, { reason: 'code_changes' });
+        } else if (!parsedTriage.analysis) {
+          const blockedReport = `## Phân tích\n\nTriage không hợp lệ: ${parsedTriage.errors.join('; ')}. Worker phải bổ sung DONE đúng định dạng.`;
+          this.taskRepo.update(taskId, { status: 'blocked', blockedReport, transientRetries: 0, notBefore: null });
+          this.eventBus.emit('tracker.triage_invalid', taskId, { reason: 'invalid_report', errors: parsedTriage.errors });
+        } else {
+          this.taskRepo.update(taskId, { status: 'done', transientRetries: 0, notBefore: null, reviewStep: 0 });
+          this.eventBus.emit('task.done', taskId, { triage: true });
+        }
+        if (!this.stopped) this.triggerTick();
+        return;
+      }
       this.taskRepo.update(taskId, { status: 'review', transientRetries: 0, notBefore: null, reviewStep: 0 });
       if (this.reviewChainForTask(currentTask).length === 0) {
         this.emitReviewReadyIfReview(taskId, {
@@ -1267,41 +1295,123 @@ export class Scheduler {
           }
         }
       }
-    // 0. Check disk space: if sufficient, resume any tasks waiting for disk
+    // 0. Check disk space: resume tasks whose blocking disk is now free, and report low disks / recoveries
     const disks = this.getMonitoredDisks();
-    const blockedDisk = disks.find((disk) => disk.low);
-    if (blockedDisk) {
-      this.markDiskLow(blockedDisk);
-      const dockerDisk = disks.find((disk) => disk.label === 'Docker' && disk.low);
-      if (dockerDisk && this.running.size > 0) this.markDockerDiskLow(dockerDisk);
-    } else {
-      const diskSpace = disks.find((disk) => disk.source === 'worktrees')!;
+    const lowDisks = disks.filter((disk) => disk.low);
+
+    const dockerDisk = disks.find((disk) => disk.label === 'Docker' && disk.low);
+    if (dockerDisk && this.running.size > 0) {
+      this.markDockerDiskLow(dockerDisk);
+    } else if (!dockerDisk) {
       this.dockerDiskLow = false;
-      const recovered = diskSpace ? diskSpace.freeGB >= diskSpace.minFreeGB + 1 : true;
-      if (this.diskLow && recovered) {
-        this.diskLow = false;
-        this.eventBus.emit('disk.ok', undefined, {
-          freeGB: diskSpace?.freeGB ?? 0,
-          minFreeGB: this.config.disk.minFreeGB,
-        });
-      }
-      if (this.recheckWaitingOnDiskOk) {
-        // tasksWaitingForDisk chỉ nằm trong bộ nhớ: sau khi daemon restart, task đã vào
-        // waiting_quota vì đĩa sẽ kẹt mãi. Đánh thức lại một lần; task thật sự hết quota
-        // sẽ được dispatch đưa về waiting_quota như cũ.
-        this.recheckWaitingOnDiskOk = false;
-        this.wakeWaitingQuotaTasks('startup_recheck');
-      }
     }
 
     // Resume disk waiters individually if their specific blocking disk is now free
     const diskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
+    const resumedTasks: TaskRow[] = [];
     for (const t of diskWaiters) {
       if (!this.projectRepo.get(t.projectId)) continue;
       if (!this.getBlockingDiskForTask(t)) {
         this.tasksWaitingForDisk.delete(t.id);
         this.taskRepo.updateStatus(t.id, 'queued');
         this.eventBus.emit('task.queued', t.id, { reason: 'disk_ready' });
+        resumedTasks.push(t);
+      }
+    }
+
+    // Collect incident keys for disks that were low and are now recovered
+    const recoveredDiskKeys: string[] = [];
+    for (const [key] of this.diskIncidents) {
+      if (!lowDisks.some((d) => this.getDiskIncidentKey(d.path) === key)) {
+        recoveredDiskKeys.push(key);
+      }
+    }
+
+    const defaultDisk = disks.find((disk) => disk.source === 'worktrees');
+    const recovered = defaultDisk ? defaultDisk.freeGB >= defaultDisk.minFreeGB + 1 : true;
+    const allDisksOk = lowDisks.length === 0;
+
+    if (allDisksOk && this.diskLow && recovered) {
+      this.diskLow = false;
+      this.lastDiskLowEmit = 0;
+      this.diskBlockedEmitted = false;
+      this.diskIncidents.clear();
+      const remainingDiskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk').length;
+      this.eventBus.emit('disk.ok', undefined, {
+        label: defaultDisk?.label ?? 'Worktrees',
+        path: defaultDisk?.path ?? this.config.worktreesDir,
+        freeGB: defaultDisk?.freeGB ?? 0,
+        minFreeGB: this.config.disk.minFreeGB,
+        resumedCount: resumedTasks.length,
+        remainingCount: remainingDiskWaiters,
+        tasks: resumedTasks.map((t) => t.slug || t.title || t.id),
+      });
+    } else {
+      const getTaskDiskKey = (t: TaskRow): string => {
+        return this.getDiskIncidentKey(this.getTaskDiskPath(t));
+      };
+
+      const affectedKeys = new Set<string>([
+        ...recoveredDiskKeys,
+        ...resumedTasks.map(getTaskDiskKey),
+      ]);
+
+      const remainingDiskWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk').length;
+
+      for (const diskKey of affectedKeys) {
+        const disk = disks.find((d) => this.getDiskIncidentKey(d.path) === diskKey)
+          ?? disks.find((d) => d.path === diskKey);
+        const diskPath = disk?.path ?? diskKey;
+        const diskLabel = disk?.label ?? 'Worktrees';
+        const diskFreeGB = disk?.freeGB ?? defaultDisk?.freeGB ?? 0;
+        const diskMinFreeGB = disk?.minFreeGB ?? this.config.disk.minFreeGB;
+
+        const tasksForThisDisk = resumedTasks.filter((t) => {
+          const tKey = getTaskDiskKey(t);
+          if (disk?.source === 'hub_home') {
+            return tKey === diskKey || !affectedKeys.has(tKey);
+          }
+          return tKey === diskKey;
+        });
+
+        this.diskIncidents.delete(diskKey);
+
+        this.eventBus.emit('disk.ok', undefined, {
+          label: diskLabel,
+          path: diskPath,
+          freeGB: diskFreeGB,
+          minFreeGB: diskMinFreeGB,
+          resumedCount: tasksForThisDisk.length,
+          remainingCount: remainingDiskWaiters,
+          tasks: tasksForThisDisk.map((t) => t.slug || t.title || t.id),
+        });
+      }
+    }
+
+    if (allDisksOk && this.recheckWaitingOnDiskOk) {
+      this.recheckWaitingOnDiskOk = false;
+      this.wakeWaitingQuotaTasks('startup_recheck');
+    }
+
+    if (lowDisks.length > 0) {
+      this.diskLow = true;
+      const hasQueuedTasks = this.taskRepo.getByStatus('queued').length > 0;
+      const seenDiskKeys = new Set<string>();
+      for (const lowDisk of lowDisks) {
+        const diskKey = this.getDiskIncidentKey(lowDisk.path);
+        if (seenDiskKeys.has(diskKey)) continue;
+        seenDiskKeys.add(diskKey);
+
+        const diskWaitersForThisDisk = this.taskRepo.getByStatus('waiting_quota').filter((t) => {
+          if (t.waitReason !== 'disk') return false;
+          const blocking = this.getBlockingDiskForTask(t);
+          if (!blocking) return false;
+          if (lowDisk.source === 'hub_home') return blocking.source === 'hub_home';
+          return this.getDiskIncidentKey(blocking.path) === diskKey;
+        });
+        if (lowDisk.source === 'hub_home' || diskWaitersForThisDisk.length > 0 || !hasQueuedTasks) {
+          this.markDiskLow(lowDisk);
+        }
       }
     }
 
@@ -1393,6 +1503,13 @@ export class Scheduler {
     // 3b. Prune expired worktrees before dispatching tasks. When disk is low,
     // this gives cleanup a chance to free space before queued work is parked.
     this.cleanExpiredWorktrees();
+
+    // Auto-close tasks that have already been merged elsewhere (e.g. into integration or default branch)
+    const nowMergedCheck = Date.now();
+    if (nowMergedCheck - this.lastMergedTasksCheck >= 10 * 60 * 1000) {
+      this.lastMergedTasksCheck = nowMergedCheck;
+      void this.autoCloseMergedTasks().catch(() => {});
+    }
 
     // 3c. Start new tasks if possible
     this.scheduleNewTasks();
@@ -2238,6 +2355,7 @@ export class Scheduler {
       const departmentId = this.projectRepo.get(running.projectId)?.departmentId || 'chung';
       fairUsage.set(departmentId, (fairUsage.get(departmentId) || 0) + 1);
     }
+    const blockedDisksInTick = new Map<string, MonitoredDisk>();
     const remainingTasks = [...schedulableTasks];
     while (remainingTasks.length > 0) {
       remainingTasks.sort((a, b) => {
@@ -2295,7 +2413,7 @@ export class Scheduler {
           this.tasksWaitingForDisk.add(task.id);
           this.taskRepo.updateStatus(task.id, 'waiting_quota', 'disk');
           this.eventBus.emit('task.waiting_quota', task.id, { reason: 'disk', label: disk.label, path: disk.path, freeGB: disk.freeGB, minFreeGB: disk.minFreeGB, message: this.diskWaitMessage(disk) });
-          this.markDiskLow(disk);
+          blockedDisksInTick.set(this.getDiskIncidentKey(disk.path), disk);
           continue;
         }
         const departmentId = this.departmentIdForTask(task);
@@ -2327,6 +2445,21 @@ export class Scheduler {
             message: `Gán tài khoản cho phòng ${department?.name || this.departmentIdForTask(task)} hoặc bỏ gán`,
           } : {}),
         });
+      }
+    }
+
+    if (blockedDisksInTick.size > 0) {
+      for (const disk of blockedDisksInTick.values()) {
+        this.markDiskLow(disk);
+      }
+    } else {
+      const seenDiskKeys = new Set<string>();
+      const lowDisks = this.getMonitoredDisks().filter((d) => d.low);
+      for (const lowDisk of lowDisks) {
+        const diskKey = this.getDiskIncidentKey(lowDisk.path);
+        if (seenDiskKeys.has(diskKey)) continue;
+        seenDiskKeys.add(diskKey);
+        this.markDiskLow(lowDisk);
       }
     }
   }
@@ -2384,20 +2517,29 @@ export class Scheduler {
       const model = reviewerModel(step || { reviewer: defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna', mode: 'gate' }) || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna');
       const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
       // Same model as the worker: still review, but from another Codex account in a fresh session.
+      const isPlan = task.slug.endsWith('-plan');
+      const preferDifferentEngine = isPlan ? lastWorker?.engine : undefined;
       const picked = chain.length > 0
         ? this.pickChainReviewer(task, step, model, lastWorker?.profileName)
-        : this.pickReviewer(task, lastWorker?.model === model ? lastWorker.profileName : undefined);
+        : this.pickReviewer(task, lastWorker?.model === model ? lastWorker.profileName : undefined, preferDifferentEngine);
       if ('wait' in picked) continue;
       this.startReview(task, picked.profile.name, picked.engine, picked.model, picked.engine.id === 'claude' ? 'claude-reviewer' : 'codex-reviewer');
     }
   }
 
   /** Pick the first reviewer that can run, applying project overrides and fallback policy. */
-  private pickReviewer(task: TaskRow, avoidProfile?: string): ReviewerPick {
+  private pickReviewer(task: TaskRow, avoidProfile?: string, preferDifferentEngine?: string): ReviewerPick {
     const project = this.projectRepo.get(task.projectId);
     const settings = projectSettings(project);
     const legacy = reviewerSettingsFromLegacy(this.config.reviewer as unknown as Record<string, unknown>);
-    const order: ReviewerOrderItem[] = settings.review?.order ?? legacy.order;
+    let order: ReviewerOrderItem[] = settings.review?.order ?? legacy.order;
+    if (preferDifferentEngine && order.length > 1) {
+      order = [...order].sort((a, b) => {
+        const aDiff = a.engine !== preferDifferentEngine ? 1 : 0;
+        const bDiff = b.engine !== preferDifferentEngine ? 1 : 0;
+        return bDiff - aDiff;
+      });
+    }
     const fallback: ReviewerFallback = {
       ...legacy.fallback,
       ...(settings.review?.fallback || {}),
@@ -2583,7 +2725,9 @@ export class Scheduler {
     // This counter is task-scoped. Keep it across chain steps so alternating
     // reviewers cannot reset the content-review limit.
     this.taskRepo.update(task.id, { reviewStep: nextStep });
+    task.reviewStep = nextStep;
     if (nextStep >= chain.length || chain[nextStep]?.mode === 'final') {
+      this.markReviewNotified(task, 'complete');
       this.emitReviewReadyIfReview(task.id, { reviewChainComplete: true, reviewStep: nextStep, reason });
     } else {
       this.eventBus.emit('review.gate_completed', task.id, { reviewStep: nextStep, reason });
@@ -2812,7 +2956,15 @@ export class Scheduler {
         profile,
         model: reviewerModel,
         cwd: task.worktreePath,
-        prompt: buildReviewerPrompt(task.body || task.title, task.worktreePath, checks, project ? projectSettings(project).reviewChecklist : [], project?.path, previousReviews),
+        prompt: buildReviewerPrompt(
+          task.body || task.title,
+          task.worktreePath,
+          checks,
+          project ? projectSettings(project).reviewChecklist : [],
+          project?.path,
+          previousReviews,
+          task.slug.endsWith('-plan'),
+        ),
         logPath,
         outputPath,
         readOnly: true,
@@ -3669,13 +3821,42 @@ export class Scheduler {
   }
 
   /**
-   * Cancel a running task
+   * Cancel a running or pending/idle task
    */
   cancelTask(taskId: string): void {
     const rt = this.running.get(taskId);
     if (rt) {
       this.killTask(taskId, 'cancelled');
     } else {
+      const task = this.taskRepo.get(taskId);
+      if (task?.status === 'done' || task?.status === 'cancelled') return;
+
+      const reviewerRun = this.reviewerRuns.get(taskId);
+      if (reviewerRun) {
+        clearTimeout(reviewerRun.timeout);
+        if (reviewerRun.exitTimeout) clearTimeout(reviewerRun.exitTimeout);
+        if (reviewerRun.pid) {
+          try {
+            process.kill(-reviewerRun.pid, 'SIGKILL');
+          } catch {
+            try {
+              process.kill(reviewerRun.pid, 'SIGKILL');
+            } catch {
+              // ignore
+            }
+          }
+        }
+        if (reviewerRun.lockFile) {
+          this.locks.release(reviewerRun.profileName, reviewerRun.lockFile);
+        }
+        this.locks.invalidate(reviewerRun.profileName);
+        this.reviewerRuns.delete(taskId);
+      }
+      this.reviewNotified.delete(taskId);
+      this.reviewWaitingNotified.delete(taskId);
+      this.reviewerFallbackNotified.delete(taskId);
+      this.reviewerErrorCounts.delete(taskId);
+      this.resetReviewerEscalation(taskId);
       this.taskRepo.updateStatus(taskId, 'cancelled');
       this.eventBus.emit('task.cancelled', taskId);
     }
@@ -3867,6 +4048,20 @@ export class Scheduler {
     return this.diskReader;
   }
 
+  private getTaskDiskPath(task: TaskRow): string {
+    const project = this.projectRepo.get(task.projectId);
+    return project ? projectWorktreeRoot(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir;
+  }
+
+  private getDiskIncidentKey(diskPath: string): string {
+    const resolved = path.resolve(diskPath);
+    const worktreesResolved = path.resolve(this.config.worktreesDir);
+    if (resolved === worktreesResolved || resolved.startsWith(worktreesResolved + path.sep)) {
+      return worktreesResolved;
+    }
+    return resolved;
+  }
+
   private getHubHomeDisk(): MonitoredDisk {
     const space = this.diskReader(this.config.hubHome);
     const minFreeGB = this.config.disk.hubHomeMinFreeGB ?? 1;
@@ -3927,14 +4122,44 @@ export class Scheduler {
   }
 
   private markDiskLow(disk: MonitoredDisk): void {
-    if (this.diskLow) return;
+    const now = Date.now();
+    const diskKey = this.getDiskIncidentKey(disk.path);
+    const incident = this.diskIncidents.get(diskKey) || { lastLowEmit: 0, blockedEmitted: false };
+
+    const waitingTasks = this.taskRepo.getByStatus('waiting_quota').filter((t) => {
+      if (t.waitReason !== 'disk') return false;
+      const blocking = this.getBlockingDiskForTask(t);
+      if (!blocking) return false;
+      if (disk.source === 'hub_home') return blocking.source === 'hub_home';
+      return this.getDiskIncidentKey(blocking.path) === diskKey;
+    });
+    const isBlocking = disk.source === 'hub_home' || waitingTasks.length > 0;
+
+    if (incident.lastLowEmit > 0) {
+      if (isBlocking && !incident.blockedEmitted) {
+        // Transition to blocking incident: must emit immediately
+      } else if (now - incident.lastLowEmit < 60 * 60_000) {
+        return;
+      }
+    }
     this.diskLow = true;
+    incident.lastLowEmit = now;
+    if (isBlocking) {
+      incident.blockedEmitted = true;
+      this.diskBlockedEmitted = true;
+    }
+    this.diskIncidents.set(diskKey, incident);
+    this.lastDiskLowEmit = now;
     pruneNodeModulesCache(this.config.cacheDir, { maxEntries: this.config.cacheMaxEntries, maxBytes: this.config.cacheMaxGB * 1024 ** 3 });
     const cache = nodeModulesCacheSummary(this.config.cacheDir);
     this.eventBus.emit('disk.low', undefined, {
       label: disk.label,
+      path: disk.path,
       freeGB: disk.freeGB,
       minFreeGB: disk.minFreeGB,
+      source: disk.source,
+      isBlocking,
+      tasks: waitingTasks.map((t) => t.slug || t.title || t.id),
       cacheDir: cache.path,
       cacheEntries: cache.entries,
       cacheBytes: cache.bytes,
@@ -4109,5 +4334,203 @@ export class Scheduler {
         }
       }
     }
+  }
+
+  setTaskMerging(taskId: string, merging: boolean): void {
+    if (merging) {
+      this.mergingTasks.add(taskId);
+    } else {
+      this.mergingTasks.delete(taskId);
+    }
+  }
+
+  isTaskMerging(taskId: string): boolean {
+    return this.mergingTasks.has(taskId);
+  }
+
+  /**
+   * Auto-closes tasks that have already been merged elsewhere into the project's target branch.
+   * Targets blocked, review, or failed tasks that have at least one commit on their branch
+   * and whose branch is an ancestor of the target branch (integration if enabled, otherwise defaultBranch).
+   */
+  async autoCloseMergedTasks(): Promise<number> {
+    if (this.autoClosingMerged) return 0;
+    this.autoClosingMerged = true;
+    this.lastMergedTasksCheck = Date.now();
+    let closedCount = 0;
+
+    try {
+      const candidates = [
+        ...this.taskRepo.getByStatus('blocked'),
+        ...this.taskRepo.getByStatus('review'),
+        ...this.taskRepo.getByStatus('failed'),
+      ];
+
+      for (const task of candidates) {
+        if (!task.branch) continue;
+        // Do not touch tasks that are actively running, starting, queued, or checking
+        if (task.status === 'running' || task.status === 'queued' || task.status === 'checking') continue;
+        if (this.running.has(task.id) || this.starting.has(task.id) || this.checkingActive.has(task.id)) continue;
+
+        // Skip tasks that currently have an active reviewer or merge running
+        if (this.reviewerRuns.has(task.id) || this.mergingTasks.has(task.id)) continue;
+
+        const now = Date.now();
+        // Skip review tasks updated within the last 15 minutes to avoid race conditions with reviews/merges
+        if (task.status === 'review') {
+          const updatedAtMs = parseDbTime(task.updatedAt || task.createdAt);
+          if (Number.isFinite(updatedAtMs) && now - updatedAtMs < 15 * 60 * 1000) {
+            continue;
+          }
+        }
+
+        // Skip failed tasks older than 30 days
+        if (task.status === 'failed') {
+          const taskTimeMs = parseDbTime(task.updatedAt || task.createdAt);
+          if (Number.isFinite(taskTimeMs) && now - taskTimeMs > 30 * 24 * 60 * 60 * 1000) {
+            continue;
+          }
+        }
+
+        const project = this.projectRepo.get(task.projectId);
+        if (!project || !fs.existsSync(project.path)) continue;
+
+        const localBranch = task.branch.replace(/^refs\/heads\//, '');
+        // 1. Check if branch exists in the project git repo
+        try {
+          await execFileAsync('git', ['-C', project.path, 'rev-parse', '--verify', `refs/heads/${localBranch}`], {
+            timeout: 10_000,
+          });
+        } catch {
+          continue;
+        }
+
+        // 2. Target branch: integration branch if enabled, otherwise default branch
+        const settings = projectSettings(project);
+        const targetBranch = settings.integration?.enabled
+          ? (settings.integration.branch || 'agenthub/integration')
+          : project.defaultBranch;
+
+        // Check if task.branch is an ancestor of targetBranch (or defaultBranch if integration is enabled)
+        let matchedTargetBranch: string | null = null;
+        try {
+          await execFileAsync('git', ['-C', project.path, 'merge-base', '--is-ancestor', `refs/heads/${localBranch}`, targetBranch], {
+            timeout: 15_000,
+          });
+          matchedTargetBranch = targetBranch;
+        } catch {
+          if (settings.integration?.enabled && targetBranch !== project.defaultBranch) {
+            try {
+              await execFileAsync('git', ['-C', project.path, 'merge-base', '--is-ancestor', `refs/heads/${localBranch}`, project.defaultBranch], {
+                timeout: 15_000,
+              });
+              matchedTargetBranch = project.defaultBranch;
+            } catch {
+              matchedTargetBranch = null;
+            }
+          }
+        }
+
+        if (!matchedTargetBranch) continue;
+
+        // 3. Must have at least 1 commit compared to base lúc tạo.
+        // If the branch was merged into matchedTargetBranch, find the merge commit bringing it in
+        // and verify that the branch contributed at least 1 commit not present on the trunk prior to merge.
+        let hasCommits = false;
+        const branchesToCheck = [matchedTargetBranch];
+        if (settings.integration?.enabled && matchedTargetBranch !== project.defaultBranch) {
+          branchesToCheck.push(project.defaultBranch);
+        }
+
+        for (const branchToCheck of branchesToCheck) {
+          try {
+            const { stdout: mergesStr } = await execFileAsync(
+              'git',
+              ['-C', project.path, 'rev-list', '--merges', '--ancestry-path', `refs/heads/${localBranch}..${branchToCheck}`],
+              { timeout: 15_000, encoding: 'utf8' },
+            );
+
+            const merges = mergesStr.trim() ? mergesStr.trim().split('\n').map((m) => m.trim()).filter(Boolean) : [];
+            for (const mergeCommit of merges) {
+              try {
+                const { stdout: countStr } = await execFileAsync(
+                  'git',
+                  ['-C', project.path, 'rev-list', '--count', `${mergeCommit}^1..refs/heads/${localBranch}`],
+                  { timeout: 15_000, encoding: 'utf8' },
+                );
+                const count = parseInt(countStr.trim(), 10);
+                if (Number.isFinite(count) && count > 0) {
+                  hasCommits = true;
+                  break;
+                }
+              } catch {
+                // ignore and check next merge
+              }
+            }
+            if (hasCommits) break;
+          } catch {
+            // ignore
+          }
+        }
+
+        if (!hasCommits) continue;
+
+        // Clean up any reviewer runs/state if task was in review
+        const reviewerRun = this.reviewerRuns.get(task.id);
+        if (reviewerRun) {
+          clearTimeout(reviewerRun.timeout);
+          if (reviewerRun.exitTimeout) clearTimeout(reviewerRun.exitTimeout);
+          if (reviewerRun.pid) {
+            try {
+              process.kill(-reviewerRun.pid, 'SIGKILL');
+            } catch {
+              try {
+                process.kill(reviewerRun.pid, 'SIGKILL');
+              } catch {
+                // ignore
+              }
+            }
+          }
+          if (reviewerRun.lockFile) {
+            this.locks.release(reviewerRun.profileName, reviewerRun.lockFile);
+          }
+          this.locks.invalidate(reviewerRun.profileName);
+          this.reviewerRuns.delete(task.id);
+        }
+        this.reviewNotified.delete(task.id);
+        this.reviewWaitingNotified.delete(task.id);
+        this.reviewerFallbackNotified.delete(task.id);
+        this.reviewerErrorCounts.delete(task.id);
+        this.resetReviewerEscalation(task.id);
+
+        // Transition to done
+        this.taskRepo.updateStatus(task.id, 'done');
+        if (this.runMetricsRepo) {
+          recalculateTaskLines(
+            this.taskRepo,
+            this.projectRepo,
+            this.runRepo,
+            this.runMetricsRepo,
+            task.id,
+          ).catch(() => {});
+        }
+
+        this.eventBus.emit('task.auto_closed', task.id, {
+          reason: 'merged_elsewhere',
+          branch: task.branch,
+          targetBranch: matchedTargetBranch,
+        });
+        this.eventBus.emit('task.done', task.id, {
+          reason: 'merged_elsewhere',
+          autoClosed: true,
+        });
+
+        closedCount++;
+      }
+    } finally {
+      this.autoClosingMerged = false;
+    }
+
+    return closedCount;
   }
 }

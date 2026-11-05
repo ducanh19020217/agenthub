@@ -78,6 +78,17 @@ describe('NotificationService (Desktop Notifications)', () => {
     notifier.stop();
   });
 
+  it('notifies triage-ready at normal urgency, including auto-dispatch state', () => {
+    const notifier = new NotificationService({ eventBus, config, exec: fakeExec });
+    notifier.start();
+    eventBus.emit('tracker.triage_ready', 'proj/op-op-1-triage', { displayId: 'OP-1', autoDispatch: false });
+    eventBus.emit('tracker.triage_ready', 'proj/op-op-2-triage', { displayId: 'OP-2', autoDispatch: true });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[0].args).toEqual(['-t', '10000', '-a', 'AgentHub', 'AgentHub: OpenProject ticket OP-1 đã phân tích, chờ quyết định']);
+    expect(execCalls[1].args).toEqual(['-t', '10000', '-a', 'AgentHub', 'AgentHub: OpenProject ticket OP-2 đã phân tích, chờ quyết định (đã tự giao)']);
+    notifier.stop();
+  });
+
   it('suppresses account-specific quota notifications even at all level', () => {
     const notifier = new NotificationService({ eventBus, config, profileRepo, quotaMarkRepo, exec: fakeExec });
     notifier.start();
@@ -323,6 +334,176 @@ describe('NotificationService (Desktop Notifications)', () => {
     eventBus.emit('disk.low', undefined, { freeGB: 0.25, minFreeGB: 3 });
 
     expect(execCalls).toHaveLength(2);
+    notifier.stop();
+  });
+
+  it('sends critical notification with waiting tasks when disk blocks dispatch, repeats after 60m, and notifies recovery', () => {
+    config.notifications.desktopLevel = 'critical';
+    taskRepo.insert({ id: 'proj/a', projectId: 'proj', slug: 'a', title: 'Task A', status: 'waiting_quota', waitReason: 'disk', level: 'easy' });
+    taskRepo.insert({ id: 'proj/b', projectId: 'proj', slug: 'b', title: 'Task B', status: 'waiting_quota', waitReason: 'disk', level: 'easy' });
+    taskRepo.insert({ id: 'proj/c', projectId: 'proj', slug: 'c', title: 'Task C', status: 'waiting_quota', waitReason: 'disk', level: 'easy' });
+
+    let current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    // 1. Emit disk.low: blocks dispatch -> critical urgency notification
+    eventBus.emit('disk.low', undefined, {
+      label: 'Worktrees',
+      path: '/worktrees',
+      freeGB: 1.4,
+      minFreeGB: 1.5,
+      cacheDir: '/cache',
+      cacheBytes: 2.5 * 1024 ** 3,
+    });
+
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args).toContain('critical');
+    const msg = execCalls[0].args.at(-1)!;
+    expect(msg).toContain('💾 Hết dung lượng: Worktrees (/worktrees) còn 1.4 GB, cần 1.5 GB.');
+    expect(msg).toContain('3 task đang phải chờ: a, b, c.');
+    expect(msg).toContain('Gợi ý: dọn thùng rác hoặc cache node_modules (/cache, 2.5 GB).');
+
+    // 2. 30 minutes later: still within 60 minutes -> throttled
+    current += 30 * 60_000;
+    eventBus.emit('disk.low', undefined, {
+      label: 'Worktrees',
+      path: '/worktrees',
+      freeGB: 1.4,
+      minFreeGB: 1.5,
+    });
+    expect(execCalls).toHaveLength(1);
+
+    // 3. 61 minutes later: 60m reminder fires
+    current += 31 * 60_000;
+    eventBus.emit('disk.low', undefined, {
+      label: 'Worktrees',
+      path: '/worktrees',
+      freeGB: 1.4,
+      minFreeGB: 1.5,
+    });
+    expect(execCalls).toHaveLength(2);
+
+    // 4. Recovery: disk.ok with resumed tasks
+    eventBus.emit('disk.ok', undefined, { freeGB: 10, minFreeGB: 1.5, resumedCount: 3 });
+    expect(execCalls).toHaveLength(3);
+    expect(execCalls[2].args.at(-1)).toBe('✅ Đã đủ dung lượng, 3 task tiếp tục chạy');
+
+    notifier.stop();
+  });
+
+  it('does not send recovery notification on disk.ok if there was no prior blocking notification', () => {
+    config.notifications.desktopLevel = 'all';
+    const current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    eventBus.emit('disk.ok', undefined, { freeGB: 10, resumedCount: 2 });
+    expect(execCalls).toHaveLength(0);
+
+    notifier.stop();
+  });
+
+  it('resets incident state on disk.ok even when resumedCount is 0', () => {
+    config.notifications.desktopLevel = 'critical';
+    let current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    // 1. First blocking incident (e.g. hub home is low)
+    eventBus.emit('disk.low', undefined, {
+      label: 'Ổ chứa dữ liệu hub (~/.agenthub)',
+      path: '/home/hub',
+      source: 'hub_home',
+      freeGB: 0.5,
+      minFreeGB: 1,
+      isBlocking: true,
+      tasks: [],
+    });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('Hết dung lượng');
+
+    // 2. Recovery with resumedCount = 0 (no waiting tasks resumed)
+    eventBus.emit('disk.ok', undefined, { freeGB: 5, minFreeGB: 1, resumedCount: 0 });
+    // No recovery notification sent when resumedCount = 0
+    expect(execCalls).toHaveLength(1);
+
+    // 3. Subsequent incident 5 minutes later (< 60 mins): should notify immediately because state was reset
+    current += 5 * 60_000;
+    eventBus.emit('disk.low', undefined, {
+      label: 'Ổ chứa dữ liệu hub (~/.agenthub)',
+      path: '/home/hub',
+      source: 'hub_home',
+      freeGB: 0.4,
+      minFreeGB: 1,
+      isBlocking: true,
+      tasks: [],
+    });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('Hết dung lượng');
+
+    notifier.stop();
+  });
+
+  it('notifies recovery sequentially when multiple disks recover at different times', () => {
+    config.notifications.desktopLevel = 'critical';
+    let current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    // 1. Two separate disk blocking alerts
+    eventBus.emit('disk.low', undefined, { label: 'Drive A', path: '/drive-a', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-a'] });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('Drive A');
+
+    eventBus.emit('disk.low', undefined, { label: 'Drive B', path: '/drive-b', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-b'] });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('Drive B');
+
+    // 2. Drive A recovers first (1 task resumed, 1 remaining)
+    eventBus.emit('disk.ok', undefined, { path: '/drive-a', freeGB: 10, minFreeGB: 3, resumedCount: 1, remainingCount: 1, tasks: ['t-a'] });
+    expect(execCalls).toHaveLength(3);
+    expect(execCalls[2].args.at(-1)).toBe('✅ Đã đủ dung lượng, 1 task tiếp tục chạy');
+
+    // 3. Drive B recovers afterwards (31m later to clear dedupe, 1 task resumed, 0 remaining)
+    current += 31 * 60_000;
+    eventBus.emit('disk.ok', undefined, { path: '/drive-b', freeGB: 10, minFreeGB: 3, resumedCount: 1, remainingCount: 0, tasks: ['t-b'] });
+    expect(execCalls).toHaveLength(4);
+    expect(execCalls[3].args.at(-1)).toBe('✅ Đã đủ dung lượng, 1 task tiếp tục chạy');
+
+    notifier.stop();
+  });
+
+  it('notifies a new blocking incident after partial recovery without 60m throttle', () => {
+    config.notifications.desktopLevel = 'critical';
+    let current = 1_000_000;
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec, now: () => current });
+    notifier.start();
+
+    // 1. Two separate disk blocking alerts
+    eventBus.emit('disk.low', undefined, { label: 'Drive A', path: '/drive-a', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-a'] });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('Drive A');
+
+    eventBus.emit('disk.low', undefined, { label: 'Drive B', path: '/drive-b', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-b'] });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('Drive B');
+
+    // 2. Drive A recovers first (1 task resumed, 1 remaining on Drive B)
+    eventBus.emit('disk.ok', undefined, { path: '/drive-a', freeGB: 10, minFreeGB: 3, resumedCount: 1, remainingCount: 1, tasks: ['t-a'] });
+    expect(execCalls).toHaveLength(3);
+    expect(execCalls[2].args.at(-1)).toBe('✅ Đã đủ dung lượng, 1 task tiếp tục chạy');
+
+    // 3. 5 minutes later, Drive A becomes low again (< 60m since first alert)
+    current += 5 * 60_000;
+    eventBus.emit('disk.low', undefined, { label: 'Drive A', path: '/drive-a', freeGB: 0.4, minFreeGB: 3, isBlocking: true, tasks: ['t-a'] });
+    expect(execCalls).toHaveLength(4);
+    expect(execCalls[3].args.at(-1)).toContain('Drive A');
+
+    // 4. Meanwhile Drive B emitting disk.low at 5m remains throttled
+    eventBus.emit('disk.low', undefined, { label: 'Drive B', path: '/drive-b', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-b'] });
+    expect(execCalls).toHaveLength(4);
+
     notifier.stop();
   });
 
@@ -989,6 +1170,83 @@ describe('NotificationService (Desktop Notifications)', () => {
     eventBus.emit('daily_report.failed', undefined, { sourceId: 'demo-source', error: 'Network error' });
     expect(execCalls).toHaveLength(2);
     expect(execCalls[1].args.at(-1)).toContain('tạo báo cáo ngày (demo-source) thất bại');
+
+    notifier.stop();
+  });
+
+  it('suppresses routine merge conflict and auto-fix notifications on desktop', () => {
+    config.notifications.desktopLevel = 'important';
+    const notifier = new NotificationService({
+      eventBus,
+      config,
+      taskRepo,
+      profileRepo,
+      quotaMarkRepo,
+      projectRepo,
+      exec: fakeExec,
+    });
+    notifier.start();
+
+    // 1. Conflict 1 to 3 auto-reassigned: no desktop notification
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 1, autoRetried: true, message: 'Xung đột merge ở: a.ts' });
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 2, autoRetried: true, message: 'Xung đột merge ở: a.ts' });
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 3, autoRetried: true, message: 'Xung đột merge ở: a.ts' });
+    expect(execCalls).toHaveLength(0);
+
+    // 2. Conflict 4: sends exactly one notification
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 4, autoRetried: false, files: 'a.ts, b.ts' });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('⚠️ proj/task-1 xung đột merge lần thứ 4, cần xem: a.ts, b.ts');
+
+    // Duplicate event on same task: no second notification
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 5, autoRetried: false, files: 'a.ts, b.ts' });
+    expect(execCalls).toHaveLength(1);
+
+    // Contradictory payload: conflictCount > 3 but autoRetried is true must still notify
+    eventBus.emit('merge.conflict', 'proj/task-contradictory', { conflictCount: 4, autoRetried: true, files: 'c.ts' });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('⚠️ proj/task-contradictory xung đột merge lần thứ 4, cần xem: c.ts');
+
+    // 3. Cannot auto-reassign: sends notification
+    eventBus.emit('merge.conflict', 'proj/task-cancelled', { conflictCount: 1, autoRetried: false, message: 'Xung đột merge ở: bad.ts' });
+    expect(execCalls).toHaveLength(3);
+    expect(execCalls[2].args.at(-1)).toContain('⚠️ proj/task-cancelled xung đột merge lần thứ 1, cần xem: bad.ts');
+
+    // 4. merge.failed with fix task: no notification
+    eventBus.emit('merge.failed', 'proj/task-postcheck', { autoFixCreated: true, message: 'Checks sau merge thất bại' });
+    expect(execCalls).toHaveLength(3);
+
+    // 5. merge.failed due to environment error: sends notification
+    eventBus.emit('merge.failed', 'proj/task-env', { environment: true, message: 'Thiếu dependency' });
+    expect(execCalls).toHaveLength(4);
+    expect(execCalls[3].args.at(-1)).toContain('Lỗi môi trường khi tự động gộp: proj/task-env');
+
+    // 6. -fix-merge draft task: no notification
+    taskRepo.insert({
+      id: 'proj/task-postcheck-fix-merge',
+      projectId: 'proj',
+      slug: 'task-postcheck-fix-merge',
+      title: 'Fix merge',
+      status: 'draft',
+      sourceRef: JSON.stringify({ checkName: 'merge' }),
+    });
+    eventBus.emit('task.queued', 'proj/task-postcheck-fix-merge');
+    expect(execCalls).toHaveLength(4);
+
+    // 7. Restart persistence: a new NotificationService instance with the same taskRepo does not re-notify already alerted tasks
+    const restartedNotifier = new NotificationService({
+      eventBus,
+      config,
+      taskRepo,
+      profileRepo,
+      quotaMarkRepo,
+      projectRepo,
+      exec: fakeExec,
+    });
+    restartedNotifier.start();
+    eventBus.emit('merge.conflict', 'proj/task-1', { conflictCount: 6, autoRetried: false, files: 'a.ts' });
+    expect(execCalls).toHaveLength(4);
+    restartedNotifier.stop();
 
     notifier.stop();
   });

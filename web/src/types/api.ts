@@ -247,11 +247,42 @@ export interface OpenProjectSource {
   id: string; url: string; project: string; keyConfigured?: boolean;
   pollIntervalSec: number; watchStatusIds: number[]; reopenedStatusIds: number[];
   resolvedStatusId: number | null; reviewStatusId: number | null; openStatusIds: number[];
+  createTypeId?: number | null; createStatusId?: number | null;
   minTicketNumber: number; autoStart: boolean; autoResolve: boolean; language: string;
+  triage?: 'off' | 'approve' | 'auto'; triageModelChain?: string[]; feedbackStatusId?: number | null;
+  split?: OpenProjectSplitConfig;
   dailyReport?: { time: string; weekdaysOnly: boolean; dir?: string; maxItems: number; telegram: boolean };
 }
-export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured'> { key?: string; }
-export interface GiteaStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
+export interface OpenProjectSplitConfig { typeIds: number[]; keyword: string | null; workerMayRequest: boolean; maxParts: number; createChildTickets: boolean; }
+export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured' | 'split'> { split: OpenProjectSplitConfig; key?: string; }
+export interface OpenProjectStatusDto {
+  id: number;
+  name: string;
+  isClosed: boolean;
+  position: number;
+}
+export interface OpenProjectTypeDto { id: number; name: string; position: number; }
+export interface OpenProjectSyncResult { imported: number; comments: number; baseline: number; watched: number; }
+export interface GiteaStatus {
+  projectId?: string;
+  status?: 'ok' | 'started' | 'skipped' | 'succeeded' | 'failed' | 'conflict' | string;
+  running?: boolean;
+  step?: 'fetch' | 'worktree' | 'merge' | 'checks' | 'push' | 'pr' | 'merge-pr' | string;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+  reason?: string;
+  url?: string;
+  prNumber?: number;
+  commit?: string;
+  tokenConfigured?: boolean;
+  remote?: {
+    owner: string;
+    repo: string;
+    host?: string;
+  } | null;
+  last?: GiteaStatus;
+}
 export interface RemoteDeployStatus { projectId: string; status: string; startedAt?: string; finishedAt?: string; error?: string; }
 
 export interface KnowledgeEntry {
@@ -317,6 +348,7 @@ export interface Task {
   slug: string;
   title: string;
   externalRef?: string | null;
+  externalUrl?: string | null;
   body?: string;
   level: TaskLevel;
   modelChain?: string | string[] | null;
@@ -369,6 +401,7 @@ export interface Task {
     excerptHash: string;
   } | null;
   batchId?: string | null;
+  triage?: { sourceId: string; wpId: number; displayId: string; analysis?: { conclusion?: string; size?: string; repo?: string[]; summary?: string; evidence?: string; cause?: string; proposal?: string; risks?: string; questions?: string; manualAssessment?: string; serverChecklist?: string; draftReply?: string; manualAlongside?: string; perRepo?: string }; decision?: { action?: string } | null } | null;
 }
 
 export type BatchStatus = 'draft' | 'dispatched' | 'discarded';
@@ -983,6 +1016,7 @@ export interface CreateTaskInput {
   branch?: string;
   modelChain?: string[];
   start?: boolean;
+  createTicket?: { sourceId?: string };
 }
 
 export interface CaptureTaskInput {

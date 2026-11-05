@@ -26,11 +26,15 @@ const SENSITIVE_FILES = ['config.json', 'token'];
 const SENSITIVE_DIRS = ['secrets', 'profiles'];
 const SENSITIVE_TABLES = ['projects', 'profiles', 'departments', 'permission_rules', 'chat_permissions'];
 
-// Runtime entries that the daemon or deploy process may create in the real hub
-// home while tests are running. Only specific deploy/web entries are allowed.
+// Runtime entries (directories and files) that the daemon or deploy process may
+// create in the real hub home while tests are running. These include daemon
+// runtime directories (reports, tracker, logs) and deploy/web runtime entries.
 const ALLOWED_HUB_RUNTIME_ENTRIES = new Set([
   'deploy-push-state.json',
   'deploy-restart.json',
+  'logs',
+  'reports',
+  'tracker',
   'web',
 ]);
 

@@ -94,6 +94,7 @@ export interface TelegramUpdate {
     message_thread_id?: number;
     date: number;
     text?: string;
+    reply_to_message?: { message_id: number; text?: string };
   };
   callback_query?: {
     id: string;
@@ -144,6 +145,7 @@ export interface TelegramServiceOptions {
 
 export type PendingChatState =
   | { action: 'reject_feedback'; taskId: string }
+  | { action: 'triage_note'; sourceId: string; wpId: number; decision: 'ask' | 'skip' }
   | { action: 'newtask_description'; projectId?: string }
   | { action: 'newtask_project_description'; description: string; externalRef?: string }
   | { action: 'newtask_project' }
@@ -261,6 +263,9 @@ export class TelegramBotService {
   private ciRepo?: CiRepo;
   private lastSentCi = new Map<string, number>();
   private lastSentDisk = new Map<'low' | 'ok', number>();
+  private diskBlockedNotified = false;
+  private lastSentDiskBlocked = 0;
+  private lastSentDiskBlockedByPath = new Map<string, number>();
   private lastSentLoadSummary = 0;
   private lastBroadcast = new Map<string, number>();
   private fetchFn: typeof fetch;
@@ -290,6 +295,7 @@ export class TelegramBotService {
 
   // Pending user input state per chat (e.g. entering feedback for reject)
   private chatStates = new Map<number, PendingChatState>();
+  private triageReplies = new Map<string, { sourceId: string; wpId: number }>();
 
   // Anti-flood: message queue per chat and last send timestamp
   private chatQueues = new Map<number, SendQueueItem[]>();
@@ -306,6 +312,7 @@ export class TelegramBotService {
   private brainWaitingNotified = new Set<string>();
   private focusDigest = new Map<string, number>();
   private reviewFallbackNotified = new Set<string>();
+  private mergeConflictNotified = new Set<string>();
 
   // Bound handler for EventBus
   private boundEventHandler: ((type: string, taskId?: string, payload?: unknown) => void) | null = null;
@@ -1123,6 +1130,19 @@ export class TelegramBotService {
     }
 
     // 2. Allowed chat - check if user has a pending state (e.g. entering feedback for reject)
+    if (msg.reply_to_message?.text && rawText) {
+      const displayId = msg.reply_to_message.text.match(/\[([^\]]+)\]/)?.[1];
+      const target = displayId ? this.triageReplies.get(displayId) : undefined;
+      if (target) {
+        try {
+          const result = await this.service.submitOpenProjectTriageInput(target.sourceId, target.wpId, rawText);
+          await this.sendMessage(chatId, `✅ Đã tạo lượt triage bổ sung: <code>${this.escapeHtml(result.taskId)}</code>`);
+        } catch (error) {
+          await this.sendMessage(chatId, `❌ Không thể gửi thêm thông tin: ${this.escapeHtml(error instanceof Error ? error.message : String(error))}`);
+        }
+        return;
+      }
+    }
     const pendingState = this.chatStates.get(chatId);
     if (pendingState) {
       if (rawText.toLowerCase() === '/cancel') {
@@ -1144,6 +1164,21 @@ export class TelegramBotService {
         } catch (err: unknown) {
           const errMsg = err instanceof Error ? err.message : String(err);
           await this.sendMessage(chatId, `❌ Lỗi khi trả về task ${taskId}: ${errMsg}`);
+        }
+        return;
+      }
+
+      if (pendingState.action === 'triage_note') {
+        this.chatStates.delete(chatId);
+        if (!rawText) {
+          await this.sendMessage(chatId, 'Vui lòng nhập lý do hoặc /cancel.');
+          return;
+        }
+        try {
+          const result = await this.service.decideOpenProjectTicket(pendingState.sourceId, pendingState.wpId, pendingState.decision, rawText);
+          await this.sendMessage(chatId, `✅ Đã chọn <b>${pendingState.decision}</b>${result.taskIds.length ? `\nTask: <code>${this.escapeHtml(result.taskIds.join(', '))}</code>` : ''}`);
+        } catch (error) {
+          await this.sendMessage(chatId, `❌ Không thể quyết định triage: ${this.escapeHtml(error instanceof Error ? error.message : String(error))}`);
         }
         return;
       }
@@ -2338,6 +2373,36 @@ export class TelegramBotService {
         });
         break;
       }
+      case 'triage': {
+        if (!['do', 'split', 'ask', 'skip', 'skip-note', 'manual'].includes(action)) {
+          await this.answerCallbackQuery(query.id, 'Lựa chọn không hợp lệ.');
+          return;
+        }
+        const parts = taskIdOrParam.split(':');
+        const sourceId = parts.slice(0, -1).join(':');
+        const wpIdText = parts.at(-1) || '';
+        const wpId = Number(wpIdText);
+        if (!sourceId || !Number.isSafeInteger(wpId) || wpId <= 0) {
+          await this.answerCallbackQuery(query.id, 'Mã ticket không hợp lệ.');
+          return;
+        }
+        if (action === 'ask' || action === 'skip-note') {
+          this.chatStates.set(chatId, { action: 'triage_note', sourceId, wpId, decision: action === 'ask' ? 'ask' : 'skip' });
+          await this.answerCallbackQuery(query.id, 'Hãy nhập ghi chú hoặc lý do.');
+          await this.sendMessage(chatId, action === 'ask' ? 'Nhập ghi chú bổ sung cho tester, hoặc /cancel:' : 'Nhập lý do không xử lý (hoặc /cancel):');
+          return;
+        }
+        const resolvedAction = action as 'do' | 'split' | 'skip' | 'manual';
+        try {
+          const result = await this.service.decideOpenProjectTicket(sourceId, wpId, resolvedAction);
+          await this.answerCallbackQuery(query.id, `Đã chọn: ${resolvedAction}`);
+          await this.sendMessage(chatId, `🔗 ${this.escapeHtml(sourceId)}/${wpId}: đã chọn <b>${this.escapeHtml(resolvedAction)}</b>${result.taskIds.length ? `\nTask: <code>${this.escapeHtml(result.taskIds.join(', '))}</code>` : ''}`);
+        } catch (error) {
+          await this.answerCallbackQuery(query.id, 'Không thể thực hiện quyết định.');
+          await this.sendMessage(chatId, `❌ Không thể quyết định triage: ${this.escapeHtml(error instanceof Error ? error.message : String(error))}`);
+        }
+        break;
+      }
       case 'chatlimit': {
         if (!this.chatService) { await this.answerCallbackQuery(query.id, 'Chat chưa sẵn sàng.'); return; }
         const result = action === 'cancel' ? this.chatService.cancelLimitRetry(taskIdOrParam) : this.chatService.retryLimitNow(taskIdOrParam);
@@ -2569,6 +2634,10 @@ export class TelegramBotService {
               { text: '💾 Lưu nháp', callback_data: 'newtask:confirm:draft' },
               { text: '❌ Huỷ', callback_data: 'newtask:confirm:cancel' },
             ],
+            [
+              { text: '🎫 Giao + ticket OP', callback_data: 'newtask:confirm:queued_ticket' },
+              { text: '🎫 Nháp + ticket OP', callback_data: 'newtask:confirm:draft_ticket' },
+            ],
           ];
 
           const summaryText =
@@ -2600,9 +2669,10 @@ export class TelegramBotService {
             return;
           }
 
-          const start = choice === 'queued';
+          const withTicket = choice.endsWith('_ticket');
+          const start = choice === 'queued' || choice === 'queued_ticket';
           try {
-            const task = this.service.createTask({
+            const taskInput = {
               project: state.projectId,
               slug: state.slug,
               title: state.title,
@@ -2610,7 +2680,9 @@ export class TelegramBotService {
               level: state.level,
               modelChain: state.modelChain,
               start,
-            });
+              ...(withTicket ? { createTicket: {} } : {}),
+            };
+            const task = withTicket ? await this.service.createTaskWithTicket(taskInput) : this.service.createTask(taskInput);
             this.chatStates.delete(chatId);
             if (start) {
               await this.answerCallbackQuery(query.id, 'Đã giao việc!');
@@ -3615,6 +3687,35 @@ export class TelegramBotService {
     }
     if ((type === 'quota.cleared' || type === 'task.queued') && this.taskRepo) this.queueWaitingQuotaCheck(notifyAllExhausted);
 
+    if (type === 'merge.conflict') {
+      const conflictCount = typeof p.conflictCount === 'number' ? p.conflictCount : undefined;
+      const isRoutine = (conflictCount === undefined || conflictCount <= 3) && (
+        p.autoRetried === true || (
+          p.autoRetried === undefined &&
+          (() => {
+            if (!taskId || !this.taskRepo) return true;
+            const task = this.taskRepo.get(taskId);
+            return task && task.status !== 'cancelled';
+          })()
+        )
+      );
+      if (isRoutine) return;
+    }
+
+    if (type === 'merge.failed') {
+      if (p.autoFixCreated === true) return;
+      if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+        /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+      )) {
+        return;
+      }
+    }
+
+    if (taskId && /-fix-merge(?:-\d+)?$/.test(taskId)) {
+      const task = this.taskRepo?.get(taskId);
+      if (!task || task.status === 'draft') return;
+    }
+
     const now = this.now();
     if (type === 'quota.exhausted' || type === 'claude.quota_exhausted') {
       const snapshot = this.quotaCapacity();
@@ -3671,6 +3772,7 @@ export class TelegramBotService {
       const isAllowedInAuto =
         type === 'brain.notify' ||
         type === 'disk.low' ||
+        type === 'disk.ok' ||
         type === 'disk.docker_low' ||
         type === 'claude.quota_exhausted' ||
         type === 'hub.restart_failed' ||
@@ -3703,6 +3805,11 @@ export class TelegramBotService {
               ? p.decisionId
               : `dec-${now}-${Math.random().toString(36).slice(2, 8)}`;
           this.decisionTracker.recordDecision(decisionId, text, allowedChats, now, taskId);
+        }
+
+        if (type === 'merge.conflict') {
+          if (!taskId || this.isMergeConflictNotified(taskId)) return;
+          this.markMergeConflictNotified(taskId);
         }
 
         const desc = this.describeEventForQuietHours(type, taskId, p);
@@ -3958,14 +4065,39 @@ export class TelegramBotService {
       }
 
       case 'tracker.ticket_imported':
+      case 'tracker.triage_started':
       case 'tracker.comment':
       case 'tracker.poll_failed':
       case 'tracker.resolved':
       case 'tracker.review_requested':
       case 'tracker.writeback_failed': {
         const ref = typeof p.displayId === 'string' ? p.displayId : typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
-        const label = type === 'tracker.ticket_imported' ? 'đã nhập ticket thành task' : type === 'tracker.comment' ? 'có comment mới' : type === 'tracker.poll_failed' ? 'đồng bộ thất bại' : type === 'tracker.resolved' ? 'đã resolve' : type === 'tracker.review_requested' ? 'cần quyết định' : 'ghi ngược thất bại';
+        const label = type === 'tracker.ticket_imported' ? 'đã nhập ticket thành task' : type === 'tracker.triage_started' ? 'đã tạo task phân tích' : type === 'tracker.comment' ? 'có comment mới' : type === 'tracker.poll_failed' ? 'đồng bộ thất bại' : type === 'tracker.resolved' ? 'đã resolve' : type === 'tracker.review_requested' ? 'cần quyết định' : 'ghi ngược thất bại';
         this.broadcastMessage(`${prefix}🔗 <b>${this.escapeHtml(ref)}</b> ${label}.`);
+        break;
+      }
+      case 'tracker.triage_ready': {
+        const sourceId = typeof p.sourceId === 'string' ? p.sourceId : '';
+        const wpId = typeof p.wpId === 'number' ? p.wpId : 0;
+        const analysis = p.analysis && typeof p.analysis === 'object' ? p.analysis as { conclusion?: string; size?: string; summary?: string } : {};
+        if (p.autoDispatch === true) {
+          this.broadcastMessage(`${prefix}✅ <b>[${this.escapeHtml(String(p.displayId || 'ticket'))}] Đã tự giao</b>\nKết luận: ${this.escapeHtml(String(analysis.conclusion || ''))}\nĐộ lớn: ${this.escapeHtml(String(analysis.size || ''))}`);
+          break;
+        }
+        const rows: InlineKeyboardButton[][] = [[
+          { text: analysis.conclusion === 'việc thủ công' ? '🙋 Tôi tự làm' : '✅ Làm', callback_data: `triage:${analysis.conclusion === 'việc thủ công' ? 'manual' : 'do'}:${sourceId}:${wpId}` },
+          ...((analysis.size === 'lớn' || analysis.size === 'lớn (cần chia)') ? [{ text: '🧩 Làm + chia', callback_data: `triage:split:${sourceId}:${wpId}` }] : []),
+        ], [
+          { text: '❓ Hỏi tester', callback_data: `triage:ask:${sourceId}:${wpId}` },
+          { text: '🚫 Không làm', callback_data: `triage:skip:${sourceId}:${wpId}` },
+          { text: '🚫 Không làm + lý do', callback_data: `triage:skip-note:${sourceId}:${wpId}` },
+        ]];
+        const summary = String(analysis.summary || '').slice(0, 900);
+        const ticketUrl = typeof p.ticketUrl === 'string' ? `\n<a href="${this.escapeHtml(p.ticketUrl)}">Mở ticket</a>` : '';
+        const dashboardUrl = typeof p.taskId === 'string' ? `\n<a href="${this.escapeHtml(this.getDashboardUrl(`#/tasks/${toRouteId(p.taskId)}`))}">Mở trên hub</a>` : '';
+        const displayId = String(p.displayId || 'ticket');
+        if (sourceId && Number.isSafeInteger(wpId) && wpId > 0) this.triageReplies.set(displayId, { sourceId, wpId });
+        this.broadcastMessage(`${prefix}🔎 <b>[${this.escapeHtml(displayId)}] Phân tích xong</b>\nKết luận: ${this.escapeHtml(String(analysis.conclusion || ''))}\nĐộ lớn: ${this.escapeHtml(String(analysis.size || ''))}\n${this.escapeHtml(summary)}\n<i>Trả lời tin nhắn này để gửi thêm thông tin</i>${ticketUrl}${dashboardUrl}`, { inline_keyboard: rows });
         break;
       }
 
@@ -4022,13 +4154,23 @@ export class TelegramBotService {
       }
 
       case 'merge.conflict': {
-        const message = typeof p.message === 'string' ? p.message : 'Xung đột khi merge tự động';
-        const taskLabel = taskId || 'Task';
-        this.broadcastMessage(`${prefix}⚠️ <b>Xung đột tự động gộp: ${this.escapeHtml(taskLabel)}</b>\n${this.escapeHtml(message)}`);
+        if (!taskId) return;
+        if (this.isMergeConflictNotified(taskId)) return;
+        this.markMergeConflictNotified(taskId);
+
+        const count = typeof p.conflictCount === 'number' ? p.conflictCount : 1;
+        const filesText = this.extractConflictFiles(p);
+        this.broadcastMessage(`${prefix}⚠️ ${this.escapeHtml(taskId)} xung đột merge lần thứ ${count}, cần xem: ${this.escapeHtml(filesText)}`);
         break;
       }
 
       case 'merge.failed': {
+        if (p.autoFixCreated === true) return;
+        if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+          /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+        )) {
+          return;
+        }
         const message = typeof p.message === 'string' ? p.message : 'Lỗi khi merge tự động';
         const taskLabel = taskId || 'Task';
         const title = p.environment ? 'Lỗi môi trường khi tự động gộp' : 'Lỗi tự động gộp';
@@ -4095,7 +4237,54 @@ export class TelegramBotService {
       }
 
       case 'disk.low': {
-        if (!notify.fallback) return;
+        const notifyDisk = this.config.telegram?.notify?.disk !== false;
+        if (!notifyDisk) return;
+
+        const isHubHomeLow = p.source === 'hub_home'
+          || p.label === 'Ổ chứa dữ liệu hub (~/.agenthub)'
+          || p.label === 'Dữ liệu hub (~/.agenthub)';
+
+        let waitingTasks: Array<{ id: string; slug?: string; title?: string }> = [];
+        if (Array.isArray(p.tasks)) {
+          waitingTasks = p.tasks.map((item) => typeof item === 'string' ? { id: item, slug: item, title: item } : item as { id: string; slug?: string; title?: string });
+        } else if (this.taskRepo) {
+          waitingTasks = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
+        }
+
+        const isBlocking = isHubHomeLow || waitingTasks.length > 0 || p.isBlocking === true;
+
+        if (isBlocking) {
+          const diskKey = typeof p.path === 'string' && p.path ? path.resolve(p.path) : (typeof p.label === 'string' ? p.label : 'default');
+          const lastSent = this.lastSentDiskBlockedByPath.get(diskKey) ?? 0;
+          if (lastSent > 0 && now - lastSent < 60 * 60_000) return;
+          this.diskBlockedNotified = true;
+          this.lastSentDiskBlocked = now;
+          this.lastSentDiskBlockedByPath.set(diskKey, now);
+          this.lastSentDisk.set('low', now);
+
+          const label = typeof p.label === 'string' && p.label ? this.escapeHtml(p.label) : 'Ổ đĩa';
+          const pathStr = typeof p.path === 'string' && p.path ? ` (${this.escapeHtml(p.path)})` : '';
+          const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
+          const minFreeGB = typeof p.minFreeGB === 'number' ? p.minFreeGB : 0;
+          const taskNames = waitingTasks.map((t) => t.slug || t.title || t.id).filter(Boolean);
+          const taskListStr = taskNames.length > 0
+            ? ` ${taskNames.length} task đang phải chờ: ${taskNames.map((name) => this.escapeHtml(name)).join(', ')}.`
+            : '';
+
+          const rawCacheDir = typeof p.cacheDir === 'string' && p.cacheDir ? p.cacheDir : this.config.cacheDir;
+          const cacheBytes = typeof p.cacheBytes === 'number' ? p.cacheBytes : 0;
+          const cacheGB = cacheBytes > 0
+            ? `${(cacheBytes / (1024 ** 3)).toFixed(1)} GB`
+            : typeof p.cacheGB === 'number' ? `${p.cacheGB} GB` : '';
+          const cacheDir = rawCacheDir ? this.escapeHtml(rawCacheDir) : '';
+          const cacheSuggestion = cacheDir
+            ? ` Gợi ý: dọn thùng rác hoặc cache node_modules (${cacheDir}${cacheGB ? `, ${cacheGB}` : ''}).`
+            : ' Gợi ý: dọn thùng rác hoặc cache node_modules.';
+
+          this.broadcastMessage(`💾 Hết dung lượng: ${label}${pathStr} còn ${freeGB} GB, cần ${minFreeGB} GB.${taskListStr}${cacheSuggestion}`);
+          break;
+        }
+
         const last = this.lastSentDisk.get('low');
         if (last !== undefined && now - last < 60 * 60_000) return;
         this.lastSentDisk.set('low', now);
@@ -4110,7 +4299,53 @@ export class TelegramBotService {
       }
 
       case 'disk.ok': {
-        if (!notify.fallback) return;
+        const notifyDisk = this.config.telegram?.notify?.disk !== false;
+        if (!notifyDisk) return;
+
+        const resumedCount = typeof p.resumedCount === 'number'
+          ? p.resumedCount
+          : Array.isArray(p.tasks)
+          ? p.tasks.length
+          : 0;
+
+        if (this.diskBlockedNotified) {
+          this.lastSentDisk.set('ok', now);
+          if (resumedCount > 0) {
+            this.broadcastMessage(`✅ Đã đủ dung lượng, ${resumedCount} task tiếp tục chạy`);
+          }
+          if (typeof p.remainingCount === 'number' && p.remainingCount > 0) {
+            if (typeof p.path === 'string' && p.path) {
+              const resolved = path.resolve(p.path);
+              this.lastSentDiskBlockedByPath.delete(resolved);
+              for (const key of Array.from(this.lastSentDiskBlockedByPath.keys())) {
+                if (key === resolved || key.startsWith(resolved + path.sep) || resolved.startsWith(key + path.sep)) {
+                  this.lastSentDiskBlockedByPath.delete(key);
+                }
+              }
+              for (const key of Array.from(this.lastBroadcast.keys())) {
+                if (key.includes(p.path) || key.includes(resolved)) {
+                  this.lastBroadcast.delete(key);
+                }
+              }
+            }
+            if (typeof p.label === 'string' && p.label) {
+              this.lastSentDiskBlockedByPath.delete(p.label);
+            }
+            if (this.lastSentDiskBlockedByPath.size === 0) {
+              this.diskBlockedNotified = false;
+            }
+          } else {
+            this.diskBlockedNotified = false;
+            this.lastSentDiskBlockedByPath.clear();
+            for (const key of Array.from(this.lastBroadcast.keys())) {
+              if (key.includes('💾 Hết dung lượng')) {
+                this.lastBroadcast.delete(key);
+              }
+            }
+          }
+          break;
+        }
+
         const last = this.lastSentDisk.get('ok');
         if (last !== undefined && now - last < 60 * 60_000) return;
         this.lastSentDisk.set('ok', now);
@@ -4575,8 +4810,11 @@ export class TelegramBotService {
         return `${prefix}Đồng bộ Gitea thất bại: ${p?.error || ''}`;
       case 'gitea.sync.conflict':
         return `${prefix}Xung đột khi đồng bộ Gitea`;
-      case 'merge.conflict':
-        return `${prefix}Xung đột khi merge tự động (${taskId || 'task'})`;
+      case 'merge.conflict': {
+        const count = typeof p?.conflictCount === 'number' ? p.conflictCount : 1;
+        const filesText = this.extractConflictFiles((p && typeof p === 'object' ? p : {}) as Record<string, unknown>);
+        return `${prefix}⚠️ ${taskId || 'task'} xung đột merge lần thứ ${count}, cần xem: ${filesText}`;
+      }
       case 'merge.failed':
         return `${prefix}Lỗi khi merge tự động (${taskId || 'task'})`;
       case 'review.fallback':
@@ -4588,6 +4826,31 @@ export class TelegramBotService {
       default:
         return taskId ? `${prefix}${type} (${taskId})` : type;
     }
+  }
+
+  private extractConflictFiles(p: Record<string, unknown>): string {
+    if (typeof p.files === 'string' && p.files.trim()) return p.files.trim();
+    if (Array.isArray(p.files) && p.files.length > 0) return p.files.join(', ');
+    if (typeof p.message === 'string') {
+      const match = p.message.match(/Xung đột merge ở:\s*(.+)/i);
+      if (match && match[1].trim()) return match[1].trim();
+      return p.message.trim();
+    }
+    return '(không rõ file)';
+  }
+
+  private isMergeConflictNotified(taskId: string): boolean {
+    if (this.mergeConflictNotified.has(taskId)) return true;
+    if (this.taskRepo?.isNotificationSent('telegram', 'merge.conflict', taskId)) {
+      this.mergeConflictNotified.add(taskId);
+      return true;
+    }
+    return false;
+  }
+
+  private markMergeConflictNotified(taskId: string): void {
+    this.mergeConflictNotified.add(taskId);
+    this.taskRepo?.markNotificationSent('telegram', 'merge.conflict', taskId);
   }
 
   private renderHelp(): string {

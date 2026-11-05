@@ -175,6 +175,7 @@ export interface TelegramNotifyConfig {
   quotaAllExhausted: boolean;
   fallback: boolean;
   brainWaiting?: boolean;
+  disk?: boolean;
 }
 
 export interface TelegramChat {
@@ -231,6 +232,7 @@ export const DEFAULT_TELEGRAM_NOTIFY: TelegramNotifyConfig = {
   quotaAllExhausted: true,
   fallback: true,
   brainWaiting: true,
+  disk: true,
 };
 
 export const DEFAULT_STALL_CONFIG: StallConfig = {
@@ -332,6 +334,14 @@ export const DailyReportConfigSchema = z.object({
   telegram: z.boolean().default(false),
 });
 
+export const OpenProjectSplitConfigSchema = z.object({
+  typeIds: z.array(z.number().int()).default([]),
+  keyword: z.string().nullable().default('[chia]'),
+  workerMayRequest: z.boolean().default(true),
+  maxParts: z.number().int().min(2).max(5).default(5),
+  createChildTickets: z.boolean().default(true),
+});
+
 export type DailyReportConfig = z.infer<typeof DailyReportConfigSchema>;
 
 export const OpenProjectSourceSchema = z.object({
@@ -341,13 +351,19 @@ export const OpenProjectSourceSchema = z.object({
   pollIntervalSec: z.number().int().positive().default(120),
   watchStatusIds: z.array(z.number().int()).default([]),
   reopenedStatusIds: z.array(z.number().int()).default([]),
+  createTypeId: z.number().int().nullable().default(null),
+  createStatusId: z.number().int().nullable().default(null),
   resolvedStatusId: z.number().int().nullable().default(null),
   reviewStatusId: z.number().int().nullable().default(null),
   openStatusIds: z.array(z.number().int()).default([]),
   minTicketNumber: z.number().int().min(0).default(0),
   autoStart: z.boolean().default(true),
   autoResolve: z.boolean().default(true),
+  triage: z.enum(['off', 'approve', 'auto']).default('off'),
+  triageModelChain: z.array(z.string().min(1)).optional(),
+  feedbackStatusId: z.number().int().nullable().default(null),
   language: z.string().default('vi'),
+  split: OpenProjectSplitConfigSchema.default({}),
   dailyReport: DailyReportConfigSchema.optional(),
 });
 
@@ -1150,6 +1166,7 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
       quotaAllExhausted: rawTelegramNotify.quotaAllExhausted !== false,
       fallback: rawTelegramNotify.fallback !== false,
       brainWaiting: rawTelegramNotify.brainWaiting !== false,
+      disk: rawTelegramNotify.disk !== false,
     },
   };
 

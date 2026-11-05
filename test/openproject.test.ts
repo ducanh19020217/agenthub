@@ -45,9 +45,11 @@ import { AppService } from '../src/services/index.js';
 
 describe('OpenProject Integration', () => {
   let tmpDir: string;
+  let prevHome: string | undefined;
   let config: AgentHubConfig;
 
   beforeEach(() => {
+    prevHome = process.env.AGENTHUB_HOME;
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-op-test-'));
     process.env.AGENTHUB_HOME = tmpDir;
     config = loadConfig(tmpDir);
@@ -55,6 +57,8 @@ describe('OpenProject Integration', () => {
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (prevHome !== undefined) process.env.AGENTHUB_HOME = prevHome;
+    else delete process.env.AGENTHUB_HOME;
     vi.restoreAllMocks();
   });
 
@@ -206,6 +210,27 @@ describe('OpenProject Integration', () => {
       await expect(client.setStatus(123, 95)).rejects.toThrow(OpenProjectError);
     });
 
+    it('sets parent and retries with a fresh lock version after 409', async () => {
+      let patchAttempts = 0;
+      let getAttempts = 0;
+      const fakeFetch = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+        if (init?.method === 'PATCH') {
+          patchAttempts++;
+          if (patchAttempts === 1) return new Response('{}', { status: 409 });
+          return new Response(JSON.stringify({ id: 123, lockVersion: 8, _links: { parent: { href: '/api/v3/work_packages/25' } } }), { status: 200 });
+        }
+        getAttempts++;
+        return new Response(JSON.stringify({ id: 123, lockVersion: getAttempts, _links: {} }), { status: 200 });
+      });
+      const client = new OpenProjectClient({ baseUrl: 'https://op.example.com', apiKey: 'key', fetch: fakeFetch as unknown as typeof globalThis.fetch });
+
+      await client.setParent(123, 25);
+      const patches = fakeFetch.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH');
+      expect(patches).toHaveLength(2);
+      expect(JSON.parse(String(patches[0][1]?.body))).toEqual({ lockVersion: 1, _links: { parent: { href: '/api/v3/work_packages/25' } } });
+      expect(JSON.parse(String(patches[1][1]?.body))).toEqual({ lockVersion: 2, _links: { parent: { href: '/api/v3/work_packages/25' } } });
+    });
+
     it('caches getUserName responses by href', async () => {
       let fetchCount = 0;
       const fakeFetch = vi.fn().mockImplementation(async () => {
@@ -262,6 +287,86 @@ describe('OpenProject Integration', () => {
       const comment = await client.addComment(123, 'Testing 1 2 3');
       expect(comment.id).toBe(99);
       expect(JSON.parse(postedBody)).toEqual({ comment: { raw: 'Testing 1 2 3' } });
+    });
+
+    it('listStatuses calls /api/v3/statuses?pageSize=100 with auth headers', async () => {
+      let requestedUrl = '';
+      const fakeFetch = vi.fn().mockImplementation(async (url: string | URL) => {
+        requestedUrl = url.toString();
+        return new Response(
+          JSON.stringify({
+            _embedded: {
+              elements: [
+                { id: 2, name: 'Closed', isClosed: true, position: 2 },
+                { id: 1, name: 'New', isClosed: false, position: 1 },
+              ],
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/hal+json' } },
+        );
+      });
+
+      const client = new OpenProjectClient({
+        baseUrl: 'https://op.example.com',
+        apiKey: 'secret-key',
+        fetch: fakeFetch as unknown as typeof globalThis.fetch,
+      });
+
+      const res = await client.listStatuses();
+      expect(requestedUrl).toBe('https://op.example.com/api/v3/statuses?pageSize=100');
+      expect(res._embedded?.elements).toHaveLength(2);
+      expect(res._embedded?.elements?.[0].name).toBe('Closed');
+    });
+
+    it('createWorkPackage sends markdown, type, assignee, parent and status links', async () => {
+      const calls: Array<{ url: string; init?: RequestInit }> = [];
+      const fakeFetch = vi.fn().mockImplementation(async (url: string | URL, init?: RequestInit) => {
+        calls.push({ url: url.toString(), init });
+        if (url.toString().endsWith('/users/me')) {
+          return new Response(JSON.stringify({ id: 7, name: 'Me' }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ id: 88, displayId: 'OP-88' }), { status: 201 });
+      });
+      const client = new OpenProjectClient({
+        baseUrl: 'https://op.example.com/', project: 'my project', apiKey: 'key',
+        fetch: fakeFetch as unknown as typeof globalThis.fetch,
+      });
+
+      await expect(client.createWorkPackage({
+        subject: 'New task', descriptionMarkdown: '# Body', typeId: 3, parentId: 12, assigneeMe: true, statusId: 4,
+      })).resolves.toEqual({ id: 88, displayId: 'OP-88', url: 'https://op.example.com/work_packages/88' });
+      const post = calls.find((call) => call.init?.method === 'POST');
+      expect(post?.url).toBe('https://op.example.com/api/v3/projects/my%20project/work_packages');
+      expect(JSON.parse(String(post?.init?.body))).toEqual({
+        subject: 'New task', description: { format: 'markdown', raw: '# Body' },
+        _links: {
+          type: { href: '/api/v3/types/3' }, assignee: { href: '/api/v3/users/7' },
+          parent: { href: '/api/v3/work_packages/12' }, status: { href: '/api/v3/statuses/4' },
+        },
+      });
+    });
+
+    it('createWorkPackage exposes useful OpenProject 422 messages', async () => {
+      const fakeFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        _embedded: { errors: [{ message: 'Type is required' }, { message: 'Status is invalid' }] },
+      }), { status: 422, headers: { 'Content-Type': 'application/json' } }));
+      const client = new OpenProjectClient({
+        baseUrl: 'https://op.example.com', project: 'p', apiKey: 'key',
+        fetch: fakeFetch as unknown as typeof globalThis.fetch,
+      });
+      await expect(client.createWorkPackage({ subject: 'Task', descriptionMarkdown: '' }))
+        .rejects.toThrow('Type is required; Status is invalid');
+    });
+
+    it('listTypes calls the project types endpoint', async () => {
+      let url = '';
+      const fakeFetch = vi.fn().mockImplementation(async (target: string | URL) => {
+        url = target.toString();
+        return new Response(JSON.stringify({ _embedded: { elements: [{ id: 3, name: 'Task', position: 1 }] } }), { status: 200 });
+      });
+      const client = new OpenProjectClient({ baseUrl: 'https://op.example.com', project: 'p', apiKey: 'key', fetch: fakeFetch as unknown as typeof globalThis.fetch });
+      await expect(client.listTypes()).resolves.toMatchObject({ _embedded: { elements: [{ id: 3, name: 'Task' }] } });
+      expect(url).toBe('https://op.example.com/api/v3/projects/p/types');
     });
   });
 
@@ -770,6 +875,139 @@ describe('OpenProject Integration', () => {
       expect(failRes.statusCode).toBe(502);
       expect(failRes.body).not.toContain('my-api-key');
     });
+
+    it('GET /api/integrations/openproject/sources/:id/statuses returns sorted statuses and handles missing key / errors', async () => {
+      config.integrations.openproject.sources = [
+        OpenProjectSourceSchema.parse({
+          id: 'src-status',
+          url: 'https://op.example.com',
+          project: '123',
+        }),
+      ];
+
+      // Missing key -> 400
+      const noKeyRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/openproject/sources/src-status/statuses',
+      });
+      expect(noKeyRes.statusCode).toBe(400);
+
+      // Nonexistent source -> 404
+      const notFoundRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/openproject/sources/nonexistent/statuses',
+      });
+      expect(notFoundRes.statusCode).toBe(404);
+
+      // Save key
+      saveOpenProjectKey(tmpDir, 'src-status', 'status-api-key');
+
+      // Mock fetch success: unsorted elements
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            _embedded: {
+              elements: [
+                { id: 12, name: 'Closed', isClosed: true, position: 3 },
+                { id: 1, name: 'New', isClosed: false, position: 1 },
+                { id: 7, name: 'In progress', isClosed: false, position: 2 },
+              ],
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/hal+json' } },
+        ),
+      );
+
+      const successRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/openproject/sources/src-status/statuses',
+      });
+      expect(successRes.statusCode).toBe(200);
+      const statuses = JSON.parse(successRes.body);
+      expect(statuses).toEqual([
+        { id: 1, name: 'New', isClosed: false, position: 1 },
+        { id: 7, name: 'In progress', isClosed: false, position: 2 },
+        { id: 12, name: 'Closed', isClosed: true, position: 3 },
+      ]);
+
+      // Mock fetch failure -> 502 without leaking key
+      fetchSpy.mockResolvedValue(new Response('Server error', { status: 500 }));
+      const failRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/openproject/sources/src-status/statuses',
+      });
+      expect(failRes.statusCode).toBe(502);
+      expect(failRes.body).not.toContain('status-api-key');
+    });
+
+    it('GET /api/integrations/openproject/sources/:id/types returns sorted types', async () => {
+      config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'src-types', url: 'https://op.example.com', project: '123' })];
+      saveOpenProjectKey(tmpDir, 'src-types', 'types-api-key');
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+        _embedded: { elements: [{ id: 9, name: 'Bug', position: 2 }, { id: 3, name: 'Task', position: 1 }] },
+      }), { status: 200, headers: { 'Content-Type': 'application/hal+json' } }));
+      const response = await app.inject({ method: 'GET', url: '/api/integrations/openproject/sources/src-types/types' });
+      expect(response.statusCode).toBe(200);
+      expect(JSON.parse(response.body)).toEqual([
+        { id: 3, name: 'Task', position: 1 }, { id: 9, name: 'Bug', position: 2 },
+      ]);
+    });
+
+    it('updates a ticket by display id in comment, parent, status order and maps status names', async () => {
+      config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'src-update', url: 'https://op.example.com', project: '123' })];
+      saveOpenProjectKey(tmpDir, 'src-update', 'update-key');
+      const calls: Array<{ url: string; method: string; body?: string }> = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: string | URL, init?: RequestInit) => {
+        const url = input.toString();
+        calls.push({ url, method: init?.method || 'GET', body: init?.body ? String(init.body) : undefined });
+        if (url.includes('/projects/123/work_packages?')) {
+          return new Response(JSON.stringify({ total: 2, _embedded: { elements: [
+            { id: 27, displayId: 'SIE-27', subject: 'Child', lockVersion: 1 },
+            { id: 25, displayId: 'SIE-25', subject: 'Parent', lockVersion: 1 },
+          ] } }), { status: 200 });
+        }
+        if (url.endsWith('/statuses?pageSize=100')) {
+          return new Response(JSON.stringify({ _embedded: { elements: [{ id: 5, name: 'Done' }, { id: 1, name: 'New' }] } }), { status: 200 });
+        }
+        if (url.endsWith('/activities') && init?.method === 'POST') return new Response(JSON.stringify({ id: 1 }), { status: 201 });
+        if (url.endsWith('/work_packages/27') && init?.method === 'PATCH') {
+          const body = JSON.parse(String(init.body));
+          return new Response(JSON.stringify({ id: 27, displayId: 'SIE-27', lockVersion: 2, status: body._links.status ? { title: 'Done' } : undefined, _links: { parent: { title: 'SIE-25' }, status: { title: 'Done' } } }), { status: 200 });
+        }
+        if (url.endsWith('/work_packages/27')) return new Response(JSON.stringify({ id: 27, displayId: 'SIE-27', lockVersion: 1 }), { status: 200 });
+        throw new Error(`unexpected URL ${url}`);
+      });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/integrations/openproject/sources/src-update/work-packages/SIE-27/update',
+        payload: { comment: 'Đã xử lý', parent: 'SIE-25', status: 'done' },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(JSON.parse(response.body)).toEqual({ id: 27, displayId: 'SIE-27', status: 'Done', parent: 'SIE-25', url: 'https://op.example.com/work_packages/27' });
+      expect(calls.filter((call) => call.method === 'POST' || call.method === 'PATCH').map((call) => call.method + ':' + call.url.split('/').pop())).toEqual([
+        'POST:activities', 'PATCH:27', 'PATCH:27',
+      ]);
+    });
+
+    it('rejects an unknown status with the valid names and blocks a work package from another project', async () => {
+      config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'src-scope', url: 'https://op.example.com', project: '123' })];
+      saveOpenProjectKey(tmpDir, 'src-scope', 'scope-key');
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: string | URL) => {
+        const url = input.toString();
+        if (url.endsWith('/work_packages/99')) return new Response(JSON.stringify({ id: 99, lockVersion: 1, _links: { project: { href: '/api/v3/projects/other', title: 'other' } } }), { status: 200 });
+        if (url.includes('/projects/123/work_packages?')) return new Response(JSON.stringify({ total: 1, _embedded: { elements: [{ id: 27, displayId: 'SIE-27', lockVersion: 1 }] } }), { status: 200 });
+        if (url.endsWith('/statuses?pageSize=100')) return new Response(JSON.stringify({ _embedded: { elements: [{ id: 5, name: 'Done' }, { id: 1, name: 'New' }] } }), { status: 200 });
+        throw new Error(`unexpected URL ${url}`);
+      });
+
+      const invalid = await app.inject({ method: 'POST', url: '/api/integrations/openproject/sources/src-scope/work-packages/SIE-27/update', payload: { status: 'missing' } });
+      expect(invalid.statusCode).toBe(400);
+      expect(invalid.body).toContain('Done, New');
+
+      const forbidden = await app.inject({ method: 'POST', url: '/api/integrations/openproject/sources/src-scope/work-packages/99/update', payload: { comment: 'nope' } });
+      expect(forbidden.statusCode).toBe(403);
+    });
   });
 
   describe('Database migration & TrackerItemRepo', () => {
@@ -830,6 +1068,9 @@ describe('OpenProject Integration', () => {
       expect(updated?.status_id).toBe(95);
       expect(updated?.last_comment_id).toBe(42);
       expect(updated?.writeback).toBe(JSON.stringify({ resolved: true }));
+
+      expect(repo.listForTask('task-2').map((row) => row.wp_id)).toEqual([100]);
+      expect(repo.listForTask('missing')).toEqual([]);
 
       // List
       repo.upsert({

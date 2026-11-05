@@ -1107,6 +1107,39 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       const calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
       expect(calls[0].body?.text).toContain('Đã tiếp tục task');
     });
+
+    it('triage callback validates ids, enforces the allowed sender, and preserves colons in sourceId', async () => {
+      const decideSpy = vi.spyOn(ctx.service, 'decideOpenProjectTicket').mockResolvedValue({ action: 'do', taskIds: ['p1/fix'] });
+      await bot.handleUpdate({
+        update_id: 36,
+        callback_query: {
+          id: 'cb-triage-valid', from: { id: CHAT_ID },
+          message: { message_id: 36, chat: { id: CHAT_ID } },
+          data: 'triage:do:customer:prod:42',
+        },
+      });
+      expect(decideSpy).toHaveBeenCalledWith('customer:prod', 42, 'do');
+
+      await bot.handleUpdate({
+        update_id: 37,
+        callback_query: {
+          id: 'cb-triage-invalid', from: { id: CHAT_ID },
+          message: { message_id: 37, chat: { id: CHAT_ID } },
+          data: 'triage:do:customer:prod:not-a-number',
+        },
+      });
+      expect(decideSpy).toHaveBeenCalledTimes(1);
+
+      await bot.handleUpdate({
+        update_id: 38,
+        callback_query: {
+          id: 'cb-triage-unauthorized', from: { id: 99999 },
+          message: { message_id: 38, chat: { id: CHAT_ID } },
+          data: 'triage:do:customer:prod:42',
+        },
+      });
+      expect(decideSpy).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('5. EventBus notifications and deduplication', () => {
@@ -1141,6 +1174,64 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(markup.inline_keyboard[0][0].callback_data).toBe('review:approve:p1/task-test');
       expect(markup.inline_keyboard[0][1].callback_data).toBe('review:reject_prompt:p1/task-test');
       expect(markup.inline_keyboard[1][0].callback_data).toBe('task:diff:p1/task-test');
+    });
+
+    it('broadcasts triage decisions with safe action buttons and hides buttons after auto-dispatch', async () => {
+      ctx.scheduler.getEventBus().emit('tracker.triage_ready', undefined, {
+        sourceId: 'customer:prod', wpId: 42, displayId: 'OP-42', taskId: 'p1/op-op-42-triage',
+        ticketUrl: 'https://op.test/work_packages/42',
+        analysis: { conclusion: 'lỗi', size: 'lớn', summary: 'Cần chia việc' }, autoDispatch: false,
+      });
+      await bot.flushQueue(CHAT_ID);
+      let call = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1)!;
+      const markup = call.body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data?: string }>> };
+      const callbacks = markup.inline_keyboard.flat().map((button) => button.callback_data).filter(Boolean);
+      expect(callbacks).toContain('triage:split:customer:prod:42');
+      expect(String(call.body?.text)).toContain('Mở ticket');
+      expect(String(call.body?.text)).toContain('Mở trên hub');
+
+      currentTime += 15_000;
+      ctx.scheduler.getEventBus().emit('tracker.triage_ready', undefined, {
+        sourceId: 'customer:prod', wpId: 44, displayId: 'OP-44',
+        analysis: { conclusion: 'việc thủ công', size: 'vừa', summary: 'Cần thao tác ngoài repo' }, autoDispatch: false,
+      });
+      await bot.flushQueue(CHAT_ID);
+      call = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1)!;
+      const manualCallbacks = ((call.body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data?: string }>> }).inline_keyboard).flat();
+      expect(manualCallbacks[0].text).toContain('Tôi tự làm');
+      expect(manualCallbacks.some((button) => button.text.includes('Làm + chia'))).toBe(false);
+
+      currentTime += 15_000;
+      ctx.scheduler.getEventBus().emit('tracker.triage_ready', undefined, {
+        sourceId: 'customer:prod', wpId: 43, displayId: 'OP-43',
+        analysis: { conclusion: 'lỗi', size: 'nhỏ', summary: 'Đã giao' }, autoDispatch: true,
+      });
+      await bot.flushQueue(CHAT_ID);
+      call = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1)!;
+      expect(String(call.body?.text)).toContain('Đã tự giao');
+      expect(call.body?.reply_markup).toBeUndefined();
+    });
+
+    it('sends a Telegram reply to the triage message as supplemental input', async () => {
+      const inputSpy = vi.spyOn(ctx.service, 'submitOpenProjectTriageInput').mockResolvedValue({ taskId: 'p1/op-op-55-triage-r1' });
+      ctx.scheduler.getEventBus().emit('tracker.triage_ready', undefined, {
+        sourceId: 'customer:prod', wpId: 55, displayId: 'OP-55', taskId: 'p1/op-op-55-triage',
+        analysis: { conclusion: 'thiếu thông tin', size: 'nhỏ', summary: 'Cần log' }, autoDispatch: false,
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      await bot.handleUpdate({
+        update_id: 39,
+        message: {
+          message_id: 39,
+          date: 1,
+          chat: { id: CHAT_ID, type: 'private' },
+          text: 'log từ server khách hàng',
+          reply_to_message: { message_id: 101, text: '🔎 [OP-55] Phân tích xong' },
+        },
+      });
+      expect(inputSpy).toHaveBeenCalledWith('customer:prod', 55, 'log từ server khách hàng');
+      expect(recordedCalls.some((call) => String(call.body?.text).includes('Đã tạo lượt triage bổ sung'))).toBe(true);
     });
 
     it('broadcasts task.failed and task.blocked with retry/log buttons', async () => {
@@ -1248,6 +1339,224 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
 
       calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
       expect(calls[0].body?.text).toContain('Ổ đĩa thấp');
+    });
+
+    it('handles disk notifications with notify.disk toggle, waiting tasks list, 60m reminder, and recovery message', async () => {
+      config.telegram.notify.fallback = false;
+      config.telegram.notify.disk = true;
+
+      ctx.projectRepo.insert({
+        id: 'p1',
+        name: 'Project 1',
+        path: tmpDir,
+        defaultBranch: 'main',
+        envTemplate: null,
+        maxParallel: 2,
+        merge: JSON.stringify({ enabled: false }),
+      });
+
+      ctx.taskRepo.insert({ id: 'p1/t-alpha', projectId: 'p1', slug: 't-alpha', title: 'Task Alpha', status: 'waiting_quota', waitReason: 'disk', level: 'easy' });
+      ctx.taskRepo.insert({ id: 'p1/t-beta', projectId: 'p1', slug: 't-beta', title: 'Task Beta', status: 'waiting_quota', waitReason: 'disk', level: 'easy' });
+
+      recordedCalls = [];
+      // 1. Sends when notify.fallback = false and notify.disk = true
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, {
+        label: 'Worktrees',
+        path: '/worktrees',
+        freeGB: 1.4,
+        minFreeGB: 1.5,
+        cacheDir: '/cache',
+        cacheBytes: 2 * 1024 ** 3,
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      let calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      const text = calls[0].body?.text;
+      expect(text).toContain('💾 Hết dung lượng: Worktrees (/worktrees) còn 1.4 GB, cần 1.5 GB.');
+      expect(text).toContain('2 task đang phải chờ: t-alpha, t-beta.');
+      expect(text).toContain('Gợi ý: dọn thùng rác hoặc cache node_modules (/cache, 2.0 GB).');
+
+      // 2. Throttled within 60 minutes
+      recordedCalls = [];
+      currentTime += 30 * 60_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Worktrees', path: '/worktrees', freeGB: 1.4, minFreeGB: 1.5 });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
+
+      // 3. Reminds after 60 minutes
+      currentTime += 31 * 60_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Worktrees', path: '/worktrees', freeGB: 1.4, minFreeGB: 1.5 });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+
+      // 4. Recovery message sent when prior blocking notification was sent
+      recordedCalls = [];
+      ctx.scheduler.getEventBus().emit('disk.ok', undefined, { freeGB: 10, minFreeGB: 1.5, resumedCount: 2 });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('✅ Đã đủ dung lượng, 2 task tiếp tục chạy');
+
+      // 4b. Recovery with resumedCount = 0 resets state without sending recovery message
+      recordedCalls = [];
+      currentTime += 65 * 60_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Hub Home', path: '/home/hub', source: 'hub_home', freeGB: 0.5, minFreeGB: 1, isBlocking: true });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(1);
+
+      recordedCalls = [];
+      ctx.scheduler.getEventBus().emit('disk.ok', undefined, { freeGB: 5, minFreeGB: 1, resumedCount: 0 });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
+
+      currentTime += 5 * 60_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Hub Home', path: '/home/hub', source: 'hub_home', freeGB: 0.4, minFreeGB: 1, isBlocking: true });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(1);
+
+      // 5. Does not send disk notifications when notify.disk = false
+      config.telegram.notify.disk = false;
+      recordedCalls = [];
+      currentTime += 65 * 60_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Worktrees', path: '/worktrees', freeGB: 1.4, minFreeGB: 1.5 });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
+
+      ctx.scheduler.getEventBus().emit('disk.ok', undefined, { freeGB: 10, minFreeGB: 1.5, resumedCount: 2 });
+      await bot.flushQueue(CHAT_ID);
+      expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
+    });
+
+    it('broadcasts recovery sequentially when multiple disks recover at different times', async () => {
+      config.telegram.notify.disk = true;
+      recordedCalls = [];
+
+      // 1. Two separate disk blocking alerts
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Drive A', path: '/drive-a', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-a'] });
+      await bot.flushQueue(CHAT_ID);
+      let calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Drive A');
+
+      recordedCalls = [];
+      currentTime += 15_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Drive B', path: '/drive-b', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-b'] });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Drive B');
+
+      // 2. Drive A recovers first (1 task resumed, 1 remaining)
+      recordedCalls = [];
+      currentTime += 15_000;
+      ctx.scheduler.getEventBus().emit('disk.ok', undefined, { path: '/drive-a', freeGB: 10, minFreeGB: 3, resumedCount: 1, remainingCount: 1, tasks: ['t-a'] });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('✅ Đã đủ dung lượng, 1 task tiếp tục chạy');
+
+      // 3. Drive B recovers afterwards (31m later, 1 task resumed, 0 remaining)
+      recordedCalls = [];
+      currentTime += 31 * 60_000;
+      ctx.scheduler.getEventBus().emit('disk.ok', undefined, { path: '/drive-b', freeGB: 10, minFreeGB: 3, resumedCount: 1, remainingCount: 0, tasks: ['t-b'] });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('✅ Đã đủ dung lượng, 1 task tiếp tục chạy');
+    });
+
+    it('broadcasts a new blocking incident after partial recovery without 60m throttle', async () => {
+      config.telegram.notify.disk = true;
+      recordedCalls = [];
+
+      // 1. Two separate disk blocking alerts
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Drive A', path: '/drive-a', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-a'] });
+      await bot.flushQueue(CHAT_ID);
+      let calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Drive A');
+
+      recordedCalls = [];
+      currentTime += 15_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Drive B', path: '/drive-b', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-b'] });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Drive B');
+
+      // 2. Drive A recovers first (1 task resumed, 1 remaining)
+      recordedCalls = [];
+      currentTime += 15_000;
+      ctx.scheduler.getEventBus().emit('disk.ok', undefined, { path: '/drive-a', freeGB: 10, minFreeGB: 3, resumedCount: 1, remainingCount: 1, tasks: ['t-a'] });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('✅ Đã đủ dung lượng, 1 task tiếp tục chạy');
+
+      // 3. 5 minutes later, Drive A becomes low again (< 60m since first alert)
+      recordedCalls = [];
+      currentTime += 5 * 60_000;
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Drive A', path: '/drive-a', freeGB: 0.4, minFreeGB: 3, isBlocking: true, tasks: ['t-a'] });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('Drive A');
+
+      // 4. Meanwhile Drive B emitting disk.low at 5m remains throttled
+      recordedCalls = [];
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, { label: 'Drive B', path: '/drive-b', freeGB: 0.5, minFreeGB: 3, isBlocking: true, tasks: ['t-b'] });
+      await bot.flushQueue(CHAT_ID);
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(0);
+    });
+
+    it('escapes HTML special characters in disk alert messages to prevent Telegram 400 errors', async () => {
+      config.telegram.notify.disk = true;
+
+      ctx.projectRepo.insert({
+        id: 'p-html',
+        name: 'Project HTML',
+        path: tmpDir,
+        defaultBranch: 'main',
+        envTemplate: null,
+        maxParallel: 2,
+        merge: JSON.stringify({ enabled: false }),
+      });
+
+      ctx.taskRepo.insert({
+        id: 'p-html/t-html',
+        projectId: 'p-html',
+        slug: '<t-html>&bad',
+        title: 'Task <HTML> & Special',
+        status: 'waiting_quota',
+        waitReason: 'disk',
+        level: 'easy',
+      });
+
+      recordedCalls = [];
+      ctx.scheduler.getEventBus().emit('disk.low', undefined, {
+        label: 'Worktrees <SSD> & Storage',
+        path: '/mnt/<data>&storage',
+        freeGB: 1.2,
+        minFreeGB: 2.0,
+        cacheDir: '/var/<cache>&npm',
+        cacheBytes: 3 * 1024 ** 3,
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      const calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      const text = calls[0].body?.text as string;
+      expect(text).toContain('Worktrees &lt;SSD&gt; &amp; Storage');
+      expect(text).toContain('(/mnt/&lt;data&gt;&amp;storage)');
+      expect(text).toContain('&lt;t-html&gt;&amp;bad');
+      expect(text).toContain('(/var/&lt;cache&gt;&amp;npm, 3.0 GB)');
+      expect(text).not.toContain('<SSD>');
+      expect(text).not.toContain('<data>');
+      expect(text).not.toContain('<t-html>');
+      expect(text).not.toContain('<cache>');
     });
 
     it('reproduces 2026-11-03 incident: claude/gpt exhausted on all 4 agy profiles, gemini and codex remain -> no notification', async () => {
@@ -3035,6 +3344,80 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     expect(summary.keyboard[1][0].text).toBe('✅ Chạy lệnh di chuy...');
     expect(summary.keyboard[1][1].text).toBe('❌ Chạy lệnh di chuy...');
     expect(summary.keyboard[1][1].callback_data).toBe('decision:reject:dec-2');
+  });
+
+  it('15. merge conflict and failure quiet notifications (h-merge-conflict-notify-quiet)', async () => {
+    ctx.projectRepo.insert({ id: 'p', name: 'Project P', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    const bot = createBot('suggest');
+
+    // 1. Conflict 1 to 3, hub auto-reassigned: no notifications
+    bot.handleEvent('merge.conflict', 'p/task-1', { conflictCount: 1, autoRetried: true, message: 'Xung đột merge ở: file1.ts' });
+    bot.handleEvent('merge.conflict', 'p/task-1', { conflictCount: 2, autoRetried: true, message: 'Xung đột merge ở: file1.ts' });
+    bot.handleEvent('merge.conflict', 'p/task-1', { conflictCount: 3, autoRetried: true, message: 'Xung đột merge ở: file1.ts' });
+    await bot.flushQueue(CHAT_ID);
+    let sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(0);
+
+    // 2. Conflict 4: sends exactly one notification
+    bot.handleEvent('merge.conflict', 'p/task-1', { conflictCount: 4, autoRetried: false, files: 'file1.ts, file2.ts' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].body?.text).toContain('⚠️ p/task-1 xung đột merge lần thứ 4, cần xem: file1.ts, file2.ts');
+
+    // Duplicate conflict 4 or 5 on same task: no duplicate notification ("Mỗi task chỉ gửi một lần")
+    bot.handleEvent('merge.conflict', 'p/task-1', { conflictCount: 5, autoRetried: false, files: 'file1.ts, file2.ts' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(1);
+
+    // Contradictory payload (conflictCount > 3 but autoRetried is true) must still notify
+    bot.handleEvent('merge.conflict', 'p/task-contradictory', { conflictCount: 4, autoRetried: true, files: 'c.ts' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(2);
+    expect(sendCalls[1].body?.text).toContain('⚠️ p/task-contradictory xung đột merge lần thứ 4, cần xem: c.ts');
+
+    // 3. Cannot auto-reassign (e.g. task cancelled or missing base branch): sends notification
+    bot.handleEvent('merge.conflict', 'p/task-cancelled', { conflictCount: 1, autoRetried: false, message: 'Xung đột merge ở: bad.ts' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(3);
+    expect(sendCalls[2].body?.text).toContain('⚠️ p/task-cancelled xung đột merge lần thứ 1, cần xem: bad.ts');
+
+    // 4. merge.failed when hub already created fix task: no notification
+    bot.handleEvent('merge.failed', 'p/task-postcheck', { autoFixCreated: true, message: 'Checks sau merge thất bại' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(3);
+
+    // 5. merge.failed due to environment error (no fix task created): sends notification
+    bot.handleEvent('merge.failed', 'p/task-env', { environment: true, message: 'Thiếu dependency' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(4);
+    expect(sendCalls[3].body?.text).toContain('Lỗi môi trường khi tự động gộp: p/task-env');
+
+    // 6. Automatically created draft task with -fix-merge: no notification
+    ctx.taskRepo.insert({
+      id: 'p/task-postcheck-fix-merge',
+      projectId: 'p',
+      slug: 'task-postcheck-fix-merge',
+      title: 'Fix merge',
+      status: 'draft',
+      sourceRef: JSON.stringify({ checkName: 'merge' }),
+    });
+    bot.handleEvent('batch.created', 'p/task-postcheck-fix-merge', { title: 'Fix merge' });
+    await bot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(4);
+
+    // 7. Restart persistence: a new TelegramBotService instance does not re-notify already alerted tasks
+    const restartedBot = createBot('suggest');
+    restartedBot.handleEvent('merge.conflict', 'p/task-1', { conflictCount: 6, autoRetried: false, files: 'file1.ts' });
+    await restartedBot.flushQueue(CHAT_ID);
+    sendCalls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sendCalls).toHaveLength(4);
   });
 });
 

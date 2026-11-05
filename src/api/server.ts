@@ -18,7 +18,7 @@ import { runMcpInstall } from '../tools/mcp-install.js';
 import { findClaudeBin } from '../chat/claude.js';
 import { brandingLogoPath, saveBrandingLogo } from '../branding.js';
 import { decodeCursor } from '../pagination.js';
-import { registerOpenProjectRoutes } from '../integrations/openproject/routes.js';
+import { registerOpenProjectRoutes, type OpenProjectSyncResult } from '../integrations/openproject/routes.js';
 import { parseDateNoon } from '../integrations/openproject/daily-report.js';
 import { SetupSecretRequestSchema } from '../setup-tools.js';
 
@@ -39,7 +39,7 @@ export async function createServer(
   options?: {
     webDir?: string;
     onShutdown?: (disable: boolean) => void;
-    openProjectSync?: (sourceId: string) => Promise<{ imported: number; comments: number }>;
+    openProjectSync?: (sourceId: string) => Promise<OpenProjectSyncResult>;
     openProjectDailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
   },
 ): Promise<FastifyInstance> {
@@ -185,6 +185,8 @@ export async function createServer(
   registerOpenProjectRoutes(fastify, config, {
     sync: options?.openProjectSync,
     dailyReport: options?.openProjectDailyReport || (service.dailyReportService ? (sourceId, date) => service.dailyReportService!.generateReport(sourceId, date ? parseDateNoon(date) : undefined, { overwrite: true }) : undefined),
+    decision: (sourceId, wpId, action, note) => service.decideOpenProjectTicket(sourceId, wpId, action, note),
+    triageInput: (sourceId, wpId, content) => service.submitOpenProjectTriageInput(sourceId, wpId, content),
   });
 
   fastify.post('/api/hub/shutdown', async (req) => {
@@ -391,9 +393,10 @@ export async function createServer(
     return service.getGiteaStatus(id);
   });
 
-  fastify.post('/api/projects/:id/gitea/sync', async (req: FastifyRequest) => {
+  fastify.post('/api/projects/:id/gitea/sync', async (req: FastifyRequest, reply: FastifyReply) => {
     const { id } = req.params as { id: string };
-    return service.triggerGiteaSync(id);
+    const result = await service.triggerGiteaSync(id);
+    return reply.status(result.status === 'started' ? 202 : 200).send(result);
   });
 
   fastify.put('/api/projects/:id/remote-deploy/env', async (req: FastifyRequest) => {
@@ -587,7 +590,9 @@ export async function createServer(
   });
 
   fastify.post('/api/tasks', async (req: FastifyRequest, reply: FastifyReply) => {
-    const task = service.createTask(req.body);
+    const task = (req.body && typeof req.body === 'object' && 'createTicket' in req.body)
+      ? await service.createTaskWithTicket(req.body)
+      : service.createTask(req.body);
     return reply.status(201).send(task);
   });
 
@@ -614,6 +619,11 @@ export async function createServer(
   fastify.post('/api/tasks/:id/cancel', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
     return service.cancelTask(id);
+  });
+
+  fastify.post('/api/tasks/:id/split', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.splitTask(id);
   });
 
   fastify.post('/api/tasks/:id/pause', async (req: FastifyRequest) => {

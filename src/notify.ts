@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import path from 'node:path';
 import { AgentHubConfig, updateConfigInMemory } from './config.js';
 import { EventBus } from './scheduler/index.js';
 import { QuotaMarkRepo, TaskRepo, ProfileRepo, CiRepo } from './db/index.js';
@@ -50,10 +51,14 @@ export class NotificationService {
   private lastSentSummary = new Map<string, number>();
   private lastSentDisk = new Map<'low' | 'ok', number>();
   private diskState: 'low' | 'ok' | undefined;
+  private diskBlockedNotified = false;
+  private lastSentDiskBlocked = 0;
+  private lastSentDiskBlockedByPath = new Map<string, number>();
   private readonly eventDeduper: NotificationDeduper;
   private boundHandler: ((type: string, taskId?: string, payload?: unknown) => void) | null = null;
   private quietHoursQueue: Array<{ type: string; taskId?: string; payload?: unknown; timestamp: number }> = [];
   private focusDigest = new Map<string, number>();
+  private mergeConflictNotified = new Set<string>();
   private get appName(): string { return this.config.branding?.name || 'AgentHub'; }
   private checkTimer?: NodeJS.Timeout;
 
@@ -177,11 +182,41 @@ export class NotificationService {
     if (level === 'off') return;
     if (level === 'important' && !new Set([
       'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
-      'disk.low', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed', 'task.waiting_quota',
+      'disk.low', 'disk.ok', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed', 'task.waiting_quota',
       'quota.cleared', 'remote_deploy.failed', 'remote_deploy.health_timeout',
+      'merge.conflict', 'merge.failed',
     ]).has(type)) return;
 
     const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+
+    if (type === 'merge.conflict') {
+      const conflictCount = typeof p.conflictCount === 'number' ? p.conflictCount : undefined;
+      const isRoutine = (conflictCount === undefined || conflictCount <= 3) && (
+        p.autoRetried === true || (
+          p.autoRetried === undefined &&
+          (() => {
+            if (!taskId || !this.taskRepo) return true;
+            const task = this.taskRepo.get(taskId);
+            return task && task.status !== 'cancelled';
+          })()
+        )
+      );
+      if (isRoutine) return;
+    }
+
+    if (type === 'merge.failed') {
+      if (p.autoFixCreated === true) return;
+      if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+        /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+      )) {
+        return;
+      }
+    }
+
+    if (taskId && /-fix-merge(?:-\d+)?$/.test(taskId)) {
+      const task = this.taskRepo?.get(taskId);
+      if (!task || task.status === 'draft') return;
+    }
     const notifyConfig = this.config.telegram?.notify;
     const notifyAllExhausted = notifyConfig?.quotaAllExhausted !== false;
     if (type === 'quota.cleared') {
@@ -244,6 +279,8 @@ export class NotificationService {
         type === 'system.error' ||
         type === 'ci.failed' ||
         type === 'ci.passed' ||
+        type === 'merge.conflict' ||
+        type === 'merge.failed' ||
         type.startsWith('remote_deploy.') ||
         type.startsWith('tracker.') ||
         type === 'quota.exhausted' ||
@@ -261,6 +298,10 @@ export class NotificationService {
     if (isQuietHours(this.config.notifications?.quietHours, new Date(now))) {
       const isIncident = isSystemIncident(type, payload, this.profileRepo, this.quotaMarkRepo, now);
       if (!isIncident) {
+        if (type === 'merge.conflict') {
+          if (!taskId || this.isMergeConflictNotified(taskId)) return;
+          this.markMergeConflictNotified(taskId);
+        }
         if (this.quietHoursQueue.length >= 200) {
           this.quietHoursQueue.shift();
         }
@@ -349,6 +390,20 @@ export class NotificationService {
         break;
       }
 
+      case 'tracker.triage_ready': {
+        const ref = typeof p.displayId === 'string' ? p.displayId : 'ticket';
+        const auto = p.autoDispatch === true ? ' (đã tự giao)' : '';
+        this.notify(`${this.appName}: OpenProject ticket ${ref} đã phân tích, chờ quyết định${auto}`, 'normal');
+        break;
+      }
+
+      case 'tracker.triage_invalid': {
+        const ref = typeof p.displayId === 'string' ? p.displayId : 'ticket';
+        const errors = Array.isArray(p.errors) ? `: ${p.errors.join('; ')}` : '';
+        this.notify(`${this.appName}: phân tích OpenProject ${ref} không hợp lệ${errors}`, 'normal');
+        break;
+      }
+
       case 'tracker.writeback_failed': {
         const error = typeof p.error === 'string' ? `: ${p.error}` : '';
         this.notify(`${this.appName}: ghi ngược OpenProject thất bại${error}`, 'critical');
@@ -425,11 +480,76 @@ export class NotificationService {
         break;
       }
 
+      case 'merge.conflict': {
+        if (!taskId) break;
+        if (this.isMergeConflictNotified(taskId)) break;
+        this.markMergeConflictNotified(taskId);
+
+        const count = typeof p.conflictCount === 'number' ? p.conflictCount : 1;
+        const filesText = this.extractConflictFiles(p);
+        this.notify(`⚠️ ${taskId} xung đột merge lần thứ ${count}, cần xem: ${filesText}`, 'critical');
+        break;
+      }
+
+      case 'merge.failed': {
+        if (p.autoFixCreated === true) break;
+        if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
+          /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+        )) {
+          break;
+        }
+        const message = typeof p.message === 'string' ? p.message : 'Lỗi khi merge tự động';
+        const taskLabel = taskId || 'Task';
+        const title = p.environment ? 'Lỗi môi trường khi tự động gộp' : 'Lỗi tự động gộp';
+        this.notify(`${this.appName}: ${title}: ${taskLabel} - ${message}`, 'critical');
+        break;
+      }
+
       case 'disk.low': {
-        if (!this.shouldSendDisk('low', now)) break;
         this.diskState = 'low';
         const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
         const minFreeGB = typeof p.minFreeGB === 'number' ? p.minFreeGB : 0;
+        const isHubHomeLow = p.source === 'hub_home'
+          || p.label === 'Ổ chứa dữ liệu hub (~/.agenthub)'
+          || p.label === 'Dữ liệu hub (~/.agenthub)';
+
+        let waitingTasks: Array<{ id: string; slug?: string; title?: string }> = [];
+        if (Array.isArray(p.tasks)) {
+          waitingTasks = p.tasks.map((item) => typeof item === 'string' ? { id: item, slug: item, title: item } : item as { id: string; slug?: string; title?: string });
+        } else if (this.taskRepo) {
+          waitingTasks = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'disk');
+        }
+
+        const isBlocking = isHubHomeLow || waitingTasks.length > 0 || p.isBlocking === true;
+
+        if (isBlocking) {
+          const diskKey = typeof p.path === 'string' && p.path ? path.resolve(p.path) : (typeof p.label === 'string' ? p.label : 'default');
+          const lastSent = this.lastSentDiskBlockedByPath.get(diskKey) ?? 0;
+          if (lastSent > 0 && now - lastSent < 60 * 60_000) break;
+          this.diskBlockedNotified = true;
+          this.lastSentDiskBlocked = now;
+          this.lastSentDiskBlockedByPath.set(diskKey, now);
+          this.lastSentDisk.set('low', now);
+
+          const label = typeof p.label === 'string' && p.label ? p.label : 'Ổ đĩa';
+          const pathStr = typeof p.path === 'string' && p.path ? ` (${p.path})` : '';
+          const taskNames = waitingTasks.map((t) => t.slug || t.title || t.id).filter(Boolean);
+          const taskListStr = taskNames.length > 0 ? ` ${taskNames.length} task đang phải chờ: ${taskNames.join(', ')}.` : '';
+
+          const cacheDir = typeof p.cacheDir === 'string' && p.cacheDir ? p.cacheDir : this.config.cacheDir;
+          const cacheBytes = typeof p.cacheBytes === 'number' ? p.cacheBytes : 0;
+          const cacheGB = cacheBytes > 0
+            ? `${(cacheBytes / (1024 ** 3)).toFixed(1)} GB`
+            : typeof p.cacheGB === 'number' ? `${p.cacheGB} GB` : '';
+          const cacheSuggestion = cacheDir
+            ? ` Gợi ý: dọn thùng rác hoặc cache node_modules (${cacheDir}${cacheGB ? `, ${cacheGB}` : ''}).`
+            : ' Gợi ý: dọn thùng rác hoặc cache node_modules.';
+
+          this.notify(`💾 Hết dung lượng: ${label}${pathStr} còn ${freeGB} GB, cần ${minFreeGB} GB.${taskListStr}${cacheSuggestion}`, 'critical');
+          break;
+        }
+
+        if (!this.shouldSendDisk('low', now)) break;
         const cacheDir = typeof p.cacheDir === 'string' ? ` Cache node_modules: ${p.cacheDir}.` : '';
         const largest = typeof p.largestCacheEntry === 'string'
           ? ` Bản lớn nhất: ${p.largestCacheEntry}${typeof p.largestCacheEntryBytes === 'number' ? ` (${(p.largestCacheEntryBytes / 1024 ** 3).toFixed(2)} GB)` : ''}.`
@@ -441,6 +561,52 @@ export class NotificationService {
       case 'disk.ok': {
         const freeGB = typeof p.freeGB === 'number' ? p.freeGB : 0;
         const minFreeGB = typeof p.minFreeGB === 'number' ? p.minFreeGB : 0;
+        const resumedCount = typeof p.resumedCount === 'number'
+          ? p.resumedCount
+          : Array.isArray(p.tasks)
+          ? p.tasks.length
+          : 0;
+
+        if (this.diskBlockedNotified) {
+          this.lastSentDisk.set('ok', now);
+          if (resumedCount > 0) {
+            this.notify(`✅ Đã đủ dung lượng, ${resumedCount} task tiếp tục chạy`, 'critical');
+          }
+          if (typeof p.remainingCount === 'number' && p.remainingCount > 0) {
+            if (typeof p.path === 'string' && p.path) {
+              const resolved = path.resolve(p.path);
+              this.lastSentDiskBlockedByPath.delete(resolved);
+              for (const key of Array.from(this.lastSentDiskBlockedByPath.keys())) {
+                if (key === resolved || key.startsWith(resolved + path.sep) || resolved.startsWith(key + path.sep)) {
+                  this.lastSentDiskBlockedByPath.delete(key);
+                }
+              }
+              for (const key of Array.from(this.lastSent.keys())) {
+                if (key.includes(p.path) || key.includes(resolved)) {
+                  this.lastSent.delete(key);
+                }
+              }
+            }
+            if (typeof p.label === 'string' && p.label) {
+              this.lastSentDiskBlockedByPath.delete(p.label);
+            }
+            if (this.lastSentDiskBlockedByPath.size === 0) {
+              this.diskBlockedNotified = false;
+              this.diskState = 'ok';
+            }
+          } else {
+            this.diskBlockedNotified = false;
+            this.lastSentDiskBlockedByPath.clear();
+            for (const key of Array.from(this.lastSent.keys())) {
+              if (key.includes('💾 Hết dung lượng')) {
+                this.lastSent.delete(key);
+              }
+            }
+            this.diskState = 'ok';
+          }
+          break;
+        }
+
         if (freeGB < minFreeGB + 1 || this.diskState !== 'low') break;
         if (!this.shouldSendDisk('ok', now)) break;
         this.diskState = 'ok';
@@ -609,6 +775,30 @@ export class NotificationService {
     return 'Task';
   }
 
+  private extractConflictFiles(p: Record<string, unknown>): string {
+    if (typeof p.files === 'string' && p.files.trim()) return p.files.trim();
+    if (Array.isArray(p.files) && p.files.length > 0) return p.files.join(', ');
+    if (typeof p.message === 'string') {
+      const match = p.message.match(/Xung đột merge ở:\s*(.+)/i);
+      if (match && match[1].trim()) return match[1].trim();
+      return p.message.trim();
+    }
+    return '(không rõ file)';
+  }
+
+  private isMergeConflictNotified(taskId: string): boolean {
+    if (this.mergeConflictNotified.has(taskId)) return true;
+    if (this.taskRepo?.isNotificationSent('desktop', 'merge.conflict', taskId)) {
+      this.mergeConflictNotified.add(taskId);
+      return true;
+    }
+    return false;
+  }
+
+  private markMergeConflictNotified(taskId: string): void {
+    this.mergeConflictNotified.add(taskId);
+    this.taskRepo?.markNotificationSent('desktop', 'merge.conflict', taskId);
+  }
   private notify(message: string, urgency: 'normal' | 'warning' | 'critical' = 'normal'): void {
     const level = this.config.notifications?.desktopLevel || 'all';
     if (level === 'off') return;

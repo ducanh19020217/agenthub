@@ -12,3 +12,4 @@ export * from './useFocusTrap';
 export * from './Toast';
 export * from './SelectOrCustomInput';
 export * from './SortableModelList';
+export * from './Field';

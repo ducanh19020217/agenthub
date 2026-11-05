@@ -38,7 +38,7 @@ import {
   ApplyPresetInput,
   ApplyPresetResult,
   EffectiveConfigResponse,
-  OpenProjectSource, OpenProjectSourceInput, GiteaStatus, RemoteDeployStatus,
+  OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto, OpenProjectTypeDto, OpenProjectSyncResult, GiteaStatus, RemoteDeployStatus,
 } from '../types/api';
 import { getActiveLocale, translateApiErrorMessage } from '../utils/apiError';
 
@@ -328,7 +328,9 @@ export const saveOpenProjectSource = (id: string, data: OpenProjectSourceInput) 
 export const deleteOpenProjectSource = (id: string) => apiFetch<{ ok: boolean }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}`, { method: 'DELETE' });
 export const saveOpenProjectKey = (id: string, key: string) => apiFetch<{ configured: boolean }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/key`, { method: 'PUT', body: JSON.stringify({ key }) });
 export const testOpenProjectConnection = (id: string) => apiFetch<{ ok: boolean; name?: string }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/test`, { method: 'POST' });
-export const syncOpenProject = (id: string) => apiFetch<{ imported: number; comments: number }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/sync`, { method: 'POST' });
+export const syncOpenProject = (id: string) => apiFetch<OpenProjectSyncResult>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/sync`, { method: 'POST' });
+export const getOpenProjectStatuses = (id: string) => apiFetch<OpenProjectStatusDto[]>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/statuses`);
+export const getOpenProjectTypes = (id: string) => apiFetch<OpenProjectTypeDto[]>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/types`);
 export const createOpenProjectDailyReport = (id: string) => apiFetch<{ ok: boolean; path: string; content: string }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/daily-report`, { method: 'POST' });
 export const saveGiteaToken = (projectId: string, token: string) => apiFetch<{ configured: boolean }>(`/api/projects/${encodeURIComponent(projectId)}/gitea/token`, { method: 'PUT', body: JSON.stringify({ token }) });
 export const getGiteaStatus = (projectId: string) => apiFetch<GiteaStatus>(`/api/projects/${encodeURIComponent(projectId)}/gitea/status`);
@@ -805,6 +807,19 @@ export async function reviewTask(
   });
 }
 
+export async function decideOpenProjectTicket(sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string): Promise<{ action: string; taskIds: string[] }> {
+  return apiFetch(`/api/tracker/${encodeURIComponent(sourceId)}/${wpId}/decision`, { method: 'POST', body: JSON.stringify({ action, note }) });
+}
+export async function submitOpenProjectTriageInput(sourceId: string, wpId: number, content: string): Promise<{ taskId: string }> {
+  return apiFetch(`/api/tracker/${encodeURIComponent(sourceId)}/${wpId}/input`, { method: 'POST', body: JSON.stringify({ content }) });
+}
+
+export async function splitTask(id: string): Promise<{ ok: boolean; taskId: string; task: Task }> {
+  return apiFetch<{ ok: boolean; taskId: string; task: Task }>(`/api/tasks/${encodeURIComponent(id)}/split`, {
+    method: 'POST',
+  });
+}
+
 export async function retryTask(id: string, data?: RetryTaskInput): Promise<Task> {
   return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/retry`, {
     method: 'POST',
@@ -951,6 +966,7 @@ export interface TelegramStatus {
     blocked: boolean;
     quotaAllExhausted: boolean;
     fallback: boolean;
+    disk: boolean;
   };
 }
 

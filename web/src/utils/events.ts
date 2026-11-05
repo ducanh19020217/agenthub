@@ -83,6 +83,7 @@ export const ALL_BACKEND_EVENT_TYPES: string[] = [
   'setup.install_done',
   'setup.install_progress',
   'setup.install_refresh_error',
+  'task.auto_closed',
   'task.blocked',
   'task.cancelled',
   'task.checking',

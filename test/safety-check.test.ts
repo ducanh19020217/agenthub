@@ -34,6 +34,11 @@ describe('safety-check hub home comparison', () => {
     expect(isIgnoredHubEntry('deploy-restart.json')).toBe(true);
     expect(isIgnoredHubEntry('deploy-push-state.json')).toBe(true);
 
+    // Daemon runtime directories
+    expect(isIgnoredHubEntry('reports')).toBe(true);
+    expect(isIgnoredHubEntry('tracker')).toBe(true);
+    expect(isIgnoredHubEntry('logs')).toBe(true);
+
     // Sensitive entries must NEVER be ignored
     expect(isIgnoredHubEntry('config.json')).toBe(false);
     expect(isIgnoredHubEntry('token')).toBe(false);
@@ -51,13 +56,24 @@ describe('safety-check hub home comparison', () => {
     expect(isIgnoredHubEntry('web-other')).toBe(false);
     expect(isIgnoredHubEntry('daemon.log')).toBe(false);
     expect(isIgnoredHubEntry('foo.tmp')).toBe(false);
+    expect(isIgnoredHubEntry('foo')).toBe(false);
   });
 
   it('filters out ignored entries and detects unexpected additions', () => {
     const before = ['web'];
-    const after = ['web', 'web-staging-test', 'deploy-restart.json', 'hub.db-wal', 'unrecognized-file.txt'];
-    // hub.db-wal is NOT ignored (sensitive), so it shows as unexpected
-    expect(findUnexpectedHubEntries(before, after)).toEqual(['hub.db-wal', 'unrecognized-file.txt']);
+    const after = [
+      'web',
+      'web-staging-test',
+      'deploy-restart.json',
+      'reports',
+      'tracker',
+      'logs',
+      'hub.db-wal',
+      'unrecognized-file.txt',
+      'foo',
+    ];
+    // hub.db-wal is NOT ignored (sensitive), so it shows as unexpected along with foo and unrecognized-file.txt
+    expect(findUnexpectedHubEntries(before, after)).toEqual(['hub.db-wal', 'unrecognized-file.txt', 'foo']);
   });
 
   it('reports violation when a new entry has an unexpected name', () => {
@@ -78,6 +94,9 @@ describe('safety-check hub home comparison', () => {
     fs.writeFileSync(path.join(tempDir, 'deploy-restart.json'), '{}');
     fs.mkdirSync(path.join(tempDir, 'web-staging-abc'));
     fs.mkdirSync(path.join(tempDir, 'web-previous-12345'));
+    fs.mkdirSync(path.join(tempDir, 'reports'));
+    fs.mkdirSync(path.join(tempDir, 'tracker'));
+    fs.mkdirSync(path.join(tempDir, 'logs'));
 
     expect(() => verifyHubHomeSafety(snap)).not.toThrow();
   });

@@ -132,4 +132,67 @@ describe('browser notification policy', () => {
       { brainMode: 'auto' },
     )).toBe(true);
   });
+
+  it('suppresses routine merge conflict and auto-fix browser notifications', () => {
+    // Routine conflicts 1 to 3 auto-reassigned: false
+    expect(shouldNotifyBrowserEvent(event('merge.conflict', { conflictCount: 1, autoRetried: true }))).toBe(false);
+    expect(shouldNotifyBrowserEvent(event('merge.conflict', { conflictCount: 2, autoRetried: true }))).toBe(false);
+    expect(shouldNotifyBrowserEvent(event('merge.conflict', { conflictCount: 3, autoRetried: true }))).toBe(false);
+
+    // Conflict 4: true
+    const ev4 = { ...event('merge.conflict', { conflictCount: 4, autoRetried: false, files: 'file1.ts, file2.ts' }), taskId: 'p/task-1' };
+    expect(shouldNotifyBrowserEvent(ev4)).toBe(true);
+    expect(browserNotificationBody(ev4)).toBe('⚠️ p/task-1 xung đột merge lần thứ 4, cần xem: file1.ts, file2.ts');
+
+    // Contradictory payload (conflictCount > 3 but autoRetried is true) must still notify:
+    const evContradictory = { ...event('merge.conflict', { conflictCount: 4, autoRetried: true, files: 'c.ts' }), taskId: 'p/task-contradictory' };
+    expect(shouldNotifyBrowserEvent(evContradictory)).toBe(true);
+    expect(browserNotificationBody(evContradictory)).toBe('⚠️ p/task-contradictory xung đột merge lần thứ 4, cần xem: c.ts');
+
+    // Cannot auto-reassign: true
+    const evCannot = { ...event('merge.conflict', { conflictCount: 1, autoRetried: false, message: 'bad.ts' }), taskId: 'p/task-cancel' };
+    expect(shouldNotifyBrowserEvent(evCannot)).toBe(true);
+    expect(browserNotificationBody(evCannot)).toBe('⚠️ p/task-cancel xung đột merge lần thứ 1, cần xem: bad.ts');
+
+    // merge.failed with autoFixCreated: false
+    expect(shouldNotifyBrowserEvent(event('merge.failed', { autoFixCreated: true }))).toBe(false);
+
+    // merge.failed without autoFixCreated: true
+    expect(shouldNotifyBrowserEvent(event('merge.failed', { autoFixCreated: false, environment: true }))).toBe(true);
+
+    // -fix-merge task: false
+    expect(shouldNotifyBrowserEvent({ ...event('task.queued'), taskId: 'p/task-fix-merge' })).toBe(false);
+  });
+
+  it('deduplicates merge conflict browser notifications permanently per task', () => {
+    const notifySpy = vi.fn();
+    Object.defineProperty(window, 'Notification', {
+      configurable: true,
+      value: class MockNotification {
+        static permission = 'granted';
+        constructor(title: string, options?: NotificationOptions) {
+          notifySpy(title, options);
+        }
+      },
+    });
+
+    const ev = { ...event('merge.conflict', { conflictCount: 4, autoRetried: false, files: 'a.ts' }), taskId: 'p/task-conflict-dedupe' };
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+
+    // First call: notifies
+    notifyBrowserEvent(ev, 'all');
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+
+    // Second call within 30 mins: deduplicated
+    now.mockReturnValue(1_100_000);
+    notifyBrowserEvent(ev, 'all');
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+
+    // Third call after 30 mins (e.g. 2 hours later): STILL deduplicated permanently per task
+    now.mockReturnValue(10_000_000);
+    notifyBrowserEvent(ev, 'all');
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+
+    now.mockRestore();
+  });
 });

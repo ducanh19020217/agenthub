@@ -3,6 +3,13 @@ import { resolveProjectFile } from './projects/paths.js';
 
 export type ReviewerVerdict = 'approved' | 'changes_requested';
 
+export type ReviewerActor = 'codex-reviewer' | 'claude-reviewer';
+
+/** Automated reviewers whose verdicts drive gates, round limits and auto-merge. */
+export function isAutoReviewer(by: string | undefined): by is ReviewerActor {
+  return by === 'codex-reviewer' || by === 'claude-reviewer';
+}
+
 export interface ReviewerResult {
   verdict: ReviewerVerdict;
   feedback: string;
@@ -25,8 +32,27 @@ export interface ReviewerHistoryItem {
 
 const REVIEWER_SCHEMA = `{"verdict":"approved|changes_requested","feedback":"specific markdown feedback"}`;
 
-export function buildReviewerPrompt(taskBody: string, worktreePath: string, checks: ReviewerCheckSummary[] = [], checklist: string[] = [], projectPath = worktreePath, previousReviews: ReviewerHistoryItem[] = []): string {
+export function buildReviewerPrompt(
+  taskBody: string,
+  worktreePath: string,
+  checks: ReviewerCheckSummary[] = [],
+  checklist: string[] = [],
+  projectPath = worktreePath,
+  previousReviews: ReviewerHistoryItem[] = [],
+  isPlanTask = false,
+): string {
   const checkSummary = JSON.stringify(checks, null, 2);
+  const planInstructions = isPlanTask
+    ? `\n\nHƯỚNG DẪN RIÊNG CHO TASK KẾ HOẠCH CHIA VIỆC (-plan):
+Đây là task lập kế hoạch chia việc từ ticket lớn, worker không sửa code mà viết mục ## Chia việc trong .agenthub/DONE.
+Reviewer hãy đánh giá cách chia việc trong ## Chia việc:
+1. Đủ phạm vi: đã bao quát hết yêu cầu trong ticket chưa?
+2. Giới hạn độ vụn: từ 2 đến tối đa 5 việc con. Không xé lẻ quá mức (không tách riêng viết test, sửa lint, cập nhật tài liệu, dịch chuỗi thành việc con riêng). Mỗi việc con phải là một phần trọn vẹn, kiểm thử được độc lập.
+3. Phụ thuộc: các việc con chạy song song không sửa chung file chính; nếu bắt buộc sửa chung file chính thì phải đặt phụ thuộc tuần tự.
+4. Level: đánh giá mức độ easy/hard có hợp lý không.
+5. Định dạng: tuân thủ đúng cấu trúc ### 1. <tiêu đề>, - project:, - level:, - phụ thuộc:, <mô tả>.
+Nếu kế hoạch chưa đạt bất kỳ tiêu chí nào ở trên, PHẢI chọn changes_requested và nêu rõ lý do cần điều chỉnh. Chỉ chọn approved khi cách chia việc đã hợp lý, khả thi và tuân thủ các quy tắc trên.\n`
+    : '';
   const reviewHistory = previousReviews.length === 0
     ? 'Chưa có lượt review trước.'
     : previousReviews.map((review, index) => [
@@ -67,7 +93,7 @@ ${reviewHistory}
 Nếu feedback chỉ nói về lỗi do môi trường chỉ đọc của reviewer, không yêu cầu worker sửa; báo rõ đây là lỗi môi trường để hệ thống chuyển cho người.
 
 Đề bài task:
-${taskBody}
+${taskBody}${planInstructions}
 
 CHECKLIST KHI DUYỆT (BẮT BUỘC ĐỐI CHIẾU):
 ${checklistText}

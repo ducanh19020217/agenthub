@@ -31,15 +31,26 @@ Mọi tính năng **tắt mặc định** và cấu hình theo nguồn hoặc th
   "pollIntervalSec": 120,
   "watchStatusIds": [1, 100],         // ticket giao cho "me" ở các trạng thái này → tạo task
   "reopenedStatusIds": [100],         // chuyển sang các trạng thái này = REOPENED
+  "createTypeId": null,                // loại mặc định khi hub tạo ticket
+  "createStatusId": null,              // trạng thái mặc định khi hub tạo ticket
   "resolvedStatusId": 95,             // null = không đổi trạng thái khi xong
   "reviewStatusId": 94,               // cần quyết định → trạng thái này (null = không đổi)
   "openStatusIds": [1, 100, 7, 94],   // dùng cho báo cáo ngày
   "minTicketNumber": 0,               // chỉ tự tạo task cho số ticket >= mức này
   "autoStart": true,                  // true: task queued; false: draft
+  "triage": "off",                   // off | approve | auto
+  "triageModelChain": ["gemini-3.8-flash-medium"],
+  "feedbackStatusId": null,            // trạng thái hỏi thêm tester
   "autoResolve": true,                // xong + đã push → comment + resolvedStatusId
   "language": "vi"                    // ngôn ngữ comment ghi ngược
 } ] } }
 ```
+
+Nguồn có thể cấu hình `split: { typeIds, keyword, workerMayRequest, maxParts,
+createChildTickets }`. Kế hoạch hợp lệ có 2–5 phần theo `src/protocol.md`; task
+`-plan` đi qua reviewer rồi mới tạo batch. Ticket con chỉ được tạo khi batch được
+giao (`dispatched`), với `parent` trỏ về ticket cha, nên huỷ batch nháp không tạo
+ticket rác.
 
 ## 3. OpenProject API v3 (đã kiểm chứng ở công cụ tham khảo)
 
@@ -57,9 +68,27 @@ Mọi tính năng **tắt mặc định** và cấu hình theo nguồn hoặc th
 
 ## 4. Luồng ticket → task → ghi ngược
 
+### 4.0 Tạo task kèm ticket
+
+API `POST /api/tasks` và MCP `hub_create_task` có thể nhận `createTicket: { sourceId? }`. Nếu không truyền `sourceId`, hub dùng nguồn OpenProject `primary` đã gắn với project của task. Tùy chọn này tắt mặc định.
+
+Hub tạo work package trước bằng tiêu đề task và mô tả Markdown (rút gọn khi quá dài), sau đó ghi ngay một hàng `tracker_items` đang tạo trước mọi lần đọc/ghi tiếp theo; intake bỏ qua hàng này nên không thể tạo task trùng trong lúc request đang hoàn tất. Hub tiếp tục tạo task với tiêu đề `[<displayId>] <tiêu đề>` và `externalRef = <displayId>`, cập nhật `task_ids`, rồi chép `ticket.md`/ảnh vào `tracker/<sourceId>/<wpId>/`. Các đầu vào project/slug/tracker được kiểm tra trước khi gọi OpenProject; nếu OpenProject từ chối tạo ticket thì task không được tạo.
+
+Nguồn có thêm `createTypeId` và `createStatusId` để chọn mặc định khi tạo ticket. Danh sách loại được lấy từ `GET /api/integrations/openproject/sources/:id/types`.
+
+Nếu OpenProject đã tạo work package nhưng một bước đọc ticket, chép context hoặc tạo task tiếp theo thất bại, AgentHub xóa dòng `createPending` để ticket không bị bỏ qua vĩnh viễn ở các vòng intake sau. Lỗi trả về vẫn nêu display ID của ticket đã tạo để người dùng có thể xử lý ticket mồ côi. Trong khoảng thời gian hoàn tất request, dòng `createPending` được ghi ngay sau POST tạo work package; intake bỏ qua dòng này để tránh tạo task trùng.
+
 ### 4.1 Intake
 
 Poller chạy theo `pollIntervalSec`. Khi lỗi thì backoff, tối đa 1800s.
+
+Nếu `triage` khác `off`, ticket NEW/REOPENED hoặc comment trả lời sau `ask` sẽ tạo task `op-<id>-triage` (hoặc `-r<n>`), task chỉ đọc và phải ghi `## Phân tích` theo `src/protocol.md`. Khi DONE hợp lệ, hub phát event `tracker.triage_ready`; người dùng chọn `do`, `split`, `ask`, `skip` hoặc `manual` qua API `POST /api/tracker/:sourceId/:wpId/decision` hoặc MCP `hub_ticket_decision`. `auto` tự chọn `do` khi kết luận là `lỗi` và độ lớn `nhỏ`/`vừa`, đồng thời thông báo đã tự giao.
+
+Phân tích triage được lưu trong writeback và hiển thị ở chi tiết task. `ask` ghi câu hỏi lên ticket, đổi sang `feedbackStatusId` (nếu có), rồi comment mới của tester tạo lượt `-triage-r<n>`; người dùng cũng có thể gửi log bổ sung qua API/MCP `hub_ticket_triage_input`, Web hoặc trả lời tin Telegram phân tích. File input chỉ nằm trong thư mục tracker cục bộ.
+
+Nguồn có thể gắn một project `primary` và nhiều `secondary`. Khi chọn `do`/`split`, hub tạo task cho từng repo với hậu tố project; nếu phần phân tích nêu thay đổi API thì task cung cấp (primary) chạy trước và task phụ thuộc nhận `dependsOn`. Chỉ khi mọi task sửa đã merge và push hub mới comment `Đã sửa`/resolve ticket. Kết luận `việc thủ công` dùng action nội bộ `manual`, không tạo task sửa và không triage lại khi có comment thường.
+
+Quyết định được ghi trong `tracker_items.writeback` và xử lý tuần tự để bấm lặp không tạo task trùng. `do` truyền toàn bộ phân tích vào task sửa, dùng `autoStart`; phần `Việc thủ công kèm theo` được đưa vào comment ghi ngược. Khi nguồn gắn nhiều project, mỗi project nhận một task; phần phụ thuộc API được nối bằng `dependsOn`.
 
 - **Lần đầu của một nguồn**: chỉ ghi mốc, không tạo task.
 - **Phân loại sự kiện**:

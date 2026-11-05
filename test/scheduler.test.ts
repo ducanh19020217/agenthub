@@ -1991,6 +1991,39 @@ describe('Checking after worker completion', () => {
     scheduler.stop();
   });
 
+  it('blocks triage with code changes and accepts a valid read-only analysis', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    const report = `Kết luận: lỗi\nĐộ lớn: vừa\nRepo: test-project\n\n### Tóm tắt yêu cầu\nBug\n\n### Bằng chứng\nĐã tái hiện\n\n### Nguyên nhân dự kiến\nCause\n\n### Hướng sửa đề xuất (và phương án nếu có nhiều)\nFix\n\n### Rủi ro / ảnh hưởng\nRisk\n\n### Câu hỏi cho tester (nếu thiếu thông tin)\nNone`;
+    taskRepo.insert({ id: 'test-project/op-1-triage', projectId: 'test-project', slug: 'op-1-triage', title: 'Triage', status: 'checking', worktreePath: projectPath, baseRef: 'main', branch: 'main', doneReport: report });
+    runRepo.insert({ id: 'triage-run-1', taskId: 'test-project/op-1-triage', engine: 'agy', model: 'gemini-3.8-flash-medium', profileName: 'p1' });
+    runRepo.finish('triage-run-1', 'done');
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>(), undefined, undefined, db);
+    await scheduler.runChecksForTask('test-project/op-1-triage', 'triage-run-1');
+    expect(taskRepo.get('test-project/op-1-triage')?.status).toBe('done');
+
+    taskRepo.insert({ id: 'test-project/op-2-triage', projectId: 'test-project', slug: 'op-2-triage', title: 'Triage', status: 'checking', worktreePath: projectPath, baseRef: 'main', branch: 'main', doneReport: report, diffStat: 'changed.ts | 1 +' });
+    runRepo.insert({ id: 'triage-run-2', taskId: 'test-project/op-2-triage', engine: 'agy', model: 'gemini-3.8-flash-medium', profileName: 'p1' });
+    runRepo.finish('triage-run-2', 'done');
+    await scheduler.runChecksForTask('test-project/op-2-triage', 'triage-run-2');
+    expect(taskRepo.get('test-project/op-2-triage')?.status).toBe('blocked');
+    expect(eventRepo.getRecent(20).some((event) => event.type === 'tracker.triage_invalid' && event.payload?.includes('code_changes'))).toBe(true);
+    scheduler.stop();
+  });
+
+  it('blocks a triage task whose DONE report is missing the analysis format', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    taskRepo.insert({ id: 'test-project/bad-triage', projectId: 'test-project', slug: 'bad-triage', title: 'Triage', status: 'checking', worktreePath: projectPath, baseRef: 'main', branch: 'main', doneReport: 'DONE nhưng không có phân tích' });
+    runRepo.insert({ id: 'bad-triage-run', taskId: 'test-project/bad-triage', engine: 'agy', model: 'gemini-3.8-flash-medium', profileName: 'p1' });
+    runRepo.finish('bad-triage-run', 'done');
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>(), undefined, undefined, db);
+    await scheduler.runChecksForTask('test-project/bad-triage', 'bad-triage-run');
+    expect(taskRepo.get('test-project/bad-triage')?.status).toBe('blocked');
+    expect(taskRepo.get('test-project/bad-triage')?.blockedReport).toContain('Kết luận thiếu hoặc không hợp lệ');
+    scheduler.stop();
+  });
+
   it('starts completion handling for every finished task before awaiting any completion', async () => {
     const scheduler = new Scheduler(
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,

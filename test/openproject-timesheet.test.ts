@@ -52,4 +52,23 @@ describe('OpenProject timesheet service', () => {
     const service = new OpenProjectTimesheetService({ config, projectRepo: empty, taskRepo: empty, runRepo: empty, eventRepo: empty, entryRepo: { listForDate: () => [] } as never, eventBus: { emit: () => true }, now: () => new Date('2026-11-08T17:30:00').getTime() });
     expect((await service.preview('op', '2026-11-08')).entries).toEqual([]); expect((await service.preview('op', '2026-11-04')).entries).toEqual([]);
   });
+
+  it('runs at or after the configured time, retries after failure, and does not run twice', async () => {
+    const config = loadConfig('/tmp/agenthub-timesheet-schedule');
+    config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo', pollIntervalSec: 1, timesheet: { enabled: true, activityId: 7, time: '17:30' } })];
+    let now = new Date('2026-11-05T17:29:00').getTime(); let calls = 0;
+    const service = new OpenProjectTimesheetService({ config, projectRepo: {} as never, taskRepo: {} as never, runRepo: {} as never, eventRepo: {} as never, entryRepo: {} as never, eventBus: { emit: () => true }, now: () => now });
+    (service as unknown as { run: () => Promise<void> }).run = async () => { calls += 1; if (calls === 1) throw new Error('temporary'); };
+    await service.checkScheduled(); expect(calls).toBe(0);
+    now = new Date('2026-11-05T17:30:00').getTime(); await service.checkScheduled(); expect(calls).toBe(1);
+    now += 1_000; await service.checkScheduled(); expect(calls).toBe(1);
+    now += 1_000; await service.checkScheduled(); expect(calls).toBe(2);
+    await service.checkScheduled(); expect(calls).toBe(2);
+  });
+
+  it('validates time and quarter-hour configuration without floating-point multipleOf errors', () => {
+    expect(() => OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo', timesheet: { time: '25:00' } })).toThrow();
+    expect(() => OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo', timesheet: { hours: 8.1 } })).toThrow();
+    expect(() => OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo', timesheet: { enabled: true } })).toThrow();
+  });
 });

@@ -510,6 +510,11 @@ export const TaskDetailPage: React.FC = () => {
           {task.reviewerEscalationReason ? ` (${task.reviewerEscalationReason})` : ''}.
         </div>
       ) : null}
+      {task.autoMergeSkippedReason ? (
+        <div data-testid="task-manual-approval" className="rounded-xl border border-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_12%,transparent)] px-4 py-3 text-sm text-[var(--t-text)]">
+          {t('extra.manualApproval')}: {task.autoMergeSkippedReason}
+        </div>
+      ) : null}
       {(task.status === 'review' || task.reviewMaxRounds) ? (
         <div data-testid="task-review-round" className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] px-4 py-3 text-sm text-[var(--t-text)]">
           {t('extra.reviewRound', { current: task.reviewRound ?? 1, max: task.reviewMaxRounds ?? 2 })}

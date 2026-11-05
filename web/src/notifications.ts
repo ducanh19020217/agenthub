@@ -3,7 +3,7 @@ import { getActiveLocale } from './utils/apiError';
 import { formatEventType } from './utils/events';
 
 const IMPORTANT = new Set([
-  'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
+  'brain.notify', 'task.review_ready', 'review.auto_merge_skipped', 'task.failed', 'task.blocked', 'review.escalated',
   'disk.low', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed', 'task.pause_reminder',
   'merge.conflict', 'merge.failed',
 ]);
@@ -180,6 +180,14 @@ export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 
   if (event.type === 'review.escalated') {
     const title = typeof payload.title === 'string' ? payload.title : (event.taskId || 'Task');
     return isEn ? `Approval required: ${title}` : `Cần người duyệt: ${title}`;
+  }
+  if (event.type === 'review.auto_merge_skipped') {
+    const title = typeof payload.title === 'string' ? payload.title : (event.taskId || 'Task');
+    const failed = Array.isArray(payload.checks) ? payload.checks.find((check) => check && typeof check === 'object' && 'outputTail' in check) as { name?: string } | undefined : undefined;
+    const reason = payload.reason === 'checks_failed'
+      ? (isEn ? `${failed?.name || 'test'} check failed (retried once)` : `check ${failed?.name || 'test'} đỏ (đã chạy lại 1 lần)`)
+      : String(payload.reason || 'unknown');
+    return isEn ? `✋ ${title} was approved but not auto-merged: ${reason}. Manual approval required.` : `✋ ${title} đã được duyệt nhưng chưa tự merge: ${reason}. Cần duyệt tay.`;
   }
   if (event.type === 'brain.notify') {
     const text = typeof payload.text === 'string' ? payload.text : '';

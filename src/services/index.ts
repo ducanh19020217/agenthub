@@ -3044,6 +3044,16 @@ export class AppService {
         : (isFallback ? fallbackReviewer : (reviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex'));
       const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
       const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
+      const skippedEvent = this.eventRepo?.getByTask(task.id).filter((event) => event.type === 'review.auto_merge_skipped').at(-1);
+      let autoMergeSkippedReason: string | null = null;
+      let autoMergeSkippedChecks: unknown[] | undefined;
+      if (skippedEvent?.payload) {
+        try {
+          const payload = JSON.parse(skippedEvent.payload) as { reason?: unknown; checks?: unknown };
+          autoMergeSkippedReason = typeof payload.reason === 'string' ? payload.reason : null;
+          autoMergeSkippedChecks = Array.isArray(payload.checks) ? payload.checks : undefined;
+        } catch { /* ignore malformed legacy event */ }
+      }
       return {
         ...apiTask(task, blockingDisk),
         externalUrl: this.openProjectTicketUrl(task),
@@ -3052,6 +3062,8 @@ export class AppService {
         reviewRound,
         reviewMaxRounds,
         reviewer,
+        autoMergeSkippedReason,
+        autoMergeSkippedChecks,
         checks: this.scheduler.getCheckResults(task.id),
         paused: Boolean(run?.paused),
         pauseReason: run?.pauseReason ?? null,
@@ -3213,6 +3225,8 @@ export class AppService {
     }
     const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
     const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
+    const skippedEvent = events.filter((event) => event.type === 'review.auto_merge_skipped').at(-1);
+    const skippedPayload = skippedEvent?.payload && typeof skippedEvent.payload === 'object' ? skippedEvent.payload as { reason?: unknown; checks?: unknown } : undefined;
     return {
       ...apiTask(task, blockingDisk),
       externalUrl: this.openProjectTicketUrl(task),
@@ -3242,6 +3256,8 @@ export class AppService {
       reviewStep: task.reviewStep ?? 0,
       reviewRound,
       reviewMaxRounds,
+      autoMergeSkippedReason: typeof skippedPayload?.reason === 'string' ? skippedPayload.reason : null,
+      autoMergeSkippedChecks: Array.isArray(skippedPayload?.checks) ? skippedPayload.checks : undefined,
       doneContent,
       blockedContent,
       modelWarnings,

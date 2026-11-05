@@ -1172,6 +1172,8 @@ export interface TaskRow {
   reviewerEscalated?: number;
   reviewerEscalatedAt?: string | null;
   reviewerEscalationReason?: string | null;
+  autoMergeSkippedReason?: string | null;
+  autoMergeSkippedChecks?: unknown[];
   reviewStep?: number;
   doneReport?: string | null;
   blockedReport?: string | null;

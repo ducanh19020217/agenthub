@@ -348,6 +348,17 @@ export class NotificationService {
         break;
       }
 
+      case 'review.auto_merge_skipped': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const checks = Array.isArray(p.checks) ? p.checks as Array<{ name?: string; outputTail?: string }> : [];
+        const failed = checks.find((check) => check.outputTail);
+        const firstError = failed?.outputTail;
+        const detail = firstError ? `\n${String(firstError).slice(0, 200)}` : '';
+        const reason = p.reason === 'checks_failed' ? `check \`${failed?.name || 'test'}\` đỏ (đã chạy lại 1 lần)` : String(p.reason || 'không rõ lý do');
+        this.notify(`✋ ${title} đã được duyệt nhưng chưa tự merge: ${reason}. Cần duyệt tay.${detail}`, 'critical');
+        break;
+      }
+
       case 'task.failed': {
         const title = this.resolveTaskTitle(taskId, p);
         this.notify(`${this.appName}: ${title} thất bại`, 'critical');

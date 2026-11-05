@@ -1315,7 +1315,7 @@ export const en: typeof vi = {
     resetIn: 'resets in {time}', fast: 'fast', locale: 'en', updatedAt: 'updated at', claudeQuotaAvailable: 'Quota available', claudeQuotaWarning: 'Quota running low', claudeQuotaRejected: 'Quota exhausted (temporarily locked)',
     themeAria: 'Theme mode', dark: 'Dark', light: 'Light', system: 'System', default: 'Default',
     sidebarAria: 'Sidebar navigation', pageTaskCreate: 'Create task', pageTaskDetail: 'Task details', pageSavings: 'Savings', pagePlans: 'Plan review', pageAgentHub: 'AgentHub', claudeQuota: 'Claude quota', unknown: 'unknown', claudeSessions: 'Claude sessions', tokensOverTime: 'Tokens over time', token: 'Token', task: 'Task', messages: 'messages', model: 'Model', lastActive: 'Last active', rescan: 'Rescan',
-    checking: 'Checking', stuck: 'stalled', waitingApprover: 'Waiting for reviewer', retryReviewer: 'Retry reviewer', quickChatError: 'Quick chat error', diskFree: 'Disk: {free} / {total} GB free',
+    checking: 'Checking', stuck: 'stalled', waitingApprover: 'Waiting for reviewer', manualApproval: 'Manual approval required', retryReviewer: 'Retry reviewer', quickChatError: 'Quick chat error', diskFree: 'Disk: {free} / {total} GB free',
     diskFreeWithMin: 'Disk: {free} / {total} GB free (min {min} GB)',
     waitingQueue: 'Waiting Queue', waitingCount: '{count} task(s) waiting', noWaitingTasks: 'No tasks waiting.',
     reviewRound: 'Review round {current}/{max}',
@@ -1494,6 +1494,7 @@ export const en: typeof vi = {
     },
     review: {
       completed: "Review completed",
+      auto_merge_skipped: "Approved but not auto-merged",
       escalated: "Review escalated",
       failed: "Review failed",
       fallback: "Reviewer fallback",

@@ -239,6 +239,8 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
 
     await ctx.service.autoMergeReviewedTask(task.id);
     expect(ctx.taskRepo.get(task.id)!.status).toBe('review');
+    await ctx.service.autoMergeReviewedTask(task.id);
+    expect(ctx.eventRepo.getByTask(task.id).filter((event) => event.type === 'review.auto_merge_skipped')).toHaveLength(1);
   });
 
   it('does not merge when task is escalated or review step is not complete', async () => {
@@ -280,6 +282,7 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
     ctx.taskRepo.update(task.id, { status: 'review', reviewStep: 1, reviewerEscalated: 1 });
     await ctx.service.autoMergeReviewedTask(task.id);
     expect(ctx.taskRepo.get(task.id)!.status).toBe('review');
+    expect(ctx.eventRepo.getByTask(task.id).filter((event) => event.type === 'review.auto_merge_skipped')).toHaveLength(1);
   });
 
   it('does not merge when the last reviewer is not an automated reviewer', async () => {

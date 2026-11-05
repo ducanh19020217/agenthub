@@ -67,6 +67,7 @@ export const ALL_BACKEND_EVENT_TYPES: string[] = [
   'reference.modified',
   'review.completed',
   'review.escalated',
+  'review.auto_merge_skipped',
   'review.failed',
   'review.fallback',
   'review.gate_completed',

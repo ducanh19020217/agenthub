@@ -310,7 +310,6 @@ function getAgentHubTempDirNames(): Set<string> {
 export function setup({ provide }: { provide: (key: string, value: string) => void }) {
   initialTempDirNames = getAgentHubTempDirNames();
   const realHome = os.userInfo().homedir;
-  const targetHomes = [realHome];
   testTempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-test-run-'));
   const safeHome = path.join(testTempRoot, 'home');
   fs.mkdirSync(safeHome, { recursive: true });
@@ -327,16 +326,12 @@ export function setup({ provide }: { provide: (key: string, value: string) => vo
     path.join(realHome, 'Library', 'LaunchAgents', 'dev.agenthub.plist'),
   ].map(getServiceSnapshot);
 
-  initialAgyHomes = targetHomes.map((home) => {
-    const dir = path.join(home, '.agy-homes');
-    return {
-      dir,
-      subdirs: getSubdirectories(dir),
-      profiles: getAgyProfiles(dir),
-    };
-  });
+  // Worker HOME/AGENTHUB_AGY_HOMES are redirected below to the private tree.
+  // Do not inspect live agy profiles: another daemon may legitimately update
+  // their runtime metadata while the test process is running.
+  initialAgyHomes = [];
 
-  initialHubHomes = targetHomes.map((home) => {
+  initialHubHomes = [realHome].map((home) => {
     const dir = path.join(home, '.agenthub');
     return getHubSnapshot(dir);
   });

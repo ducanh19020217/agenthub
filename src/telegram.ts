@@ -3981,6 +3981,20 @@ export class TelegramBotService {
         break;
       }
 
+      case 'review.auto_merge_skipped': {
+        if (!notify.reviewReady) return;
+        const task = taskId ? this.taskRepo?.get(taskId) : null;
+        const title = this.resolveTaskTitle(taskId, p, task);
+        const checks = Array.isArray(p.checks) ? p.checks as Array<{ name?: string; outputTail?: string }> : [];
+        const failed = checks.find((check) => check.outputTail);
+        const firstError = failed?.outputTail;
+        const detail = firstError ? `\n<code>${this.escapeHtml(String(firstError).slice(0, 200))}</code>` : '';
+        const reason = p.reason === 'checks_failed' ? `check <code>${this.escapeHtml(failed?.name || 'test')}</code> đỏ (đã chạy lại 1 lần)` : `lý do: ${this.escapeHtml(String(p.reason || 'không rõ'))}`;
+        const keyboard: InlineKeyboardButton[][] = [[{ text: '🌐 Xem dashboard', url: this.getDashboardUrl(taskId ? `#/tasks/${toRouteId(taskId)}` : '') }]];
+        this.broadcastMessage(`${prefix}✋ <b>${this.escapeHtml(title)}</b> đã được duyệt nhưng chưa tự merge: ${reason}. Cần duyệt tay.${detail}`, { inline_keyboard: keyboard });
+        break;
+      }
+
       case 'review.fallback': {
         if (!notify.fallback) return;
         if (!this.isAllQuotaExhausted(p, now)) return;

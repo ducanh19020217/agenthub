@@ -52,6 +52,7 @@ export const DEFAULT_BRAIN_DIGEST_CONFIG: BrainDigestConfig = {
 
 export const DEFAULT_BRAIN_WAKEUP_EVENTS: string[] = [
   'task.review_ready',
+  'review.auto_merge_skipped',
   'task.blocked',
   'task.failed',
   'review.escalated',

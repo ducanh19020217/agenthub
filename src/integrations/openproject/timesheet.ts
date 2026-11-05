@@ -14,7 +14,16 @@ export interface TimesheetPreview { sourceId: string; date: string; hours: numbe
 function dateBounds(date: string): { start: string; end: string } { return { start: `${date} 00:00:00`, end: `${date} 23:59:59.999` }; }
 function dayMs(date: string): { start: number; end: number } { const start = new Date(`${date}T00:00:00`).getTime(); return { start, end: start + 86400000 }; }
 function isoDuration(hours: number): string { const minutes = Math.round(hours * 60); return `PT${Math.floor(minutes / 60) ? `${Math.floor(minutes / 60)}H` : ''}${minutes % 60 ? `${minutes % 60}M` : ''}`; }
-function subjectFromCommits(commits: string[]): string { return (commits[0] || 'Cập nhật công việc').replace(/\s+/g, ' ').trim().slice(0, 255); }
+function subjectFromCommits(commits: string[], language = 'vi'): string {
+  const fallback = language === 'en' ? 'Work update' : 'Cập nhật công việc';
+  const subject = (commits[0] || fallback)
+    .replace(/^\s*(?:feat|fix|docs|refactor|test|chore|perf|style|build|ci)(?:\([^)]*\))?!?:\s*/i, '')
+    .replace(/`[^`]+`/g, '')
+    .replace(/\b[\w./-]+\.(?:ts|tsx|js|jsx|json|md|css|html)\b/gi, '')
+    .replace(/\b[A-Za-z_$][\w$]*\([^)]*\)/g, '')
+    .replace(/\s+/g, ' ').trim();
+  return (subject || fallback).slice(0, 255);
+}
 function taskLevel(task: TaskRow): number { return task.level === 'hard' ? 1.5 : 1; }
 
 export function allocateTimesheetHours(weights: Array<{ weight: number }>, total: number, min: number, step: number): number[] {
@@ -51,9 +60,9 @@ export class OpenProjectTimesheetService {
   start(): void { if (this.timer) return; this.checkScheduled().catch(() => undefined); this.timer = setInterval(() => this.checkScheduled().catch(() => undefined), this.timerMs); this.timer.unref?.(); }
   stop(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
   private source(id: string): OpenProjectSource { const source = this.options.config.integrations.openproject.sources.find((item) => item.id === id); if (!source) throw new Error('Nguồn OpenProject không tồn tại'); return source; }
-  async checkScheduled(): Promise<void> { const now = this.now(); const date = new Date(now); const key = formatYYYYMMDD(date); for (const source of this.options.config.integrations.openproject.sources) { const cfg = source.timesheet; if (!cfg?.enabled || (cfg.weekdaysOnly !== false && (date.getDay() === 0 || date.getDay() === 6)) || this.lastRun.get(source.id) === key) continue; if ((this.nextAttempt.get(source.id) || 0) > now) continue; const [h, m] = cfg.time.split(':').map(Number); const scheduled = new Date(date); scheduled.setHours(h, m, 0, 0); if (now < scheduled.getTime()) continue; try { await this.run(source.id, key); this.lastRun.set(source.id, key); this.failures.delete(source.id); this.nextAttempt.delete(source.id); } catch { const failure = (this.failures.get(source.id) || 0) + 1; this.failures.set(source.id, failure); const delay = Math.min(source.pollIntervalSec * 1000 * (2 ** failure), 30 * 60 * 1000); this.nextAttempt.set(source.id, now + delay); } } }
+  async checkScheduled(): Promise<void> { const now = this.now(); const date = new Date(now); const key = formatYYYYMMDD(date); for (const source of this.options.config.integrations.openproject.sources) { const cfg = source.timesheet; if (!cfg?.enabled || (cfg.weekdaysOnly !== false && (date.getDay() === 0 || date.getDay() === 6)) || this.lastRun.get(source.id) === key) continue; const hasPosted = typeof (this.options.eventRepo as Partial<EventRepo>).hasTimesheetPosted === 'function' && this.options.eventRepo.hasTimesheetPosted(source.id, key); if (hasPosted) { this.lastRun.set(source.id, key); continue; } if ((this.nextAttempt.get(source.id) || 0) > now) continue; const [h, m] = cfg.time.split(':').map(Number); const scheduled = new Date(date); scheduled.setHours(h, m, 0, 0); if (now < scheduled.getTime()) continue; try { await this.run(source.id, key); this.lastRun.set(source.id, key); this.failures.delete(source.id); this.nextAttempt.delete(source.id); } catch { const failure = (this.failures.get(source.id) || 0) + 1; this.failures.set(source.id, failure); const delay = Math.min(source.pollIntervalSec * 1000 * (2 ** failure), 30 * 60 * 1000); this.nextAttempt.set(source.id, now + delay); } } }
   async preview(sourceId: string, date = formatYYYYMMDD(new Date(this.now())), hoursOverride?: number): Promise<TimesheetPreview> {
-    const source = this.source(sourceId); const cfg = source.timesheet; if (!cfg || !cfg.enabled) return { sourceId, date, hours: hoursOverride ?? cfg?.hours ?? 8, entries: [], withoutTicket: [], missingFromDate: [], overMinimum: false };
+    const source = this.source(sourceId); const cfg = source.timesheet; if (!cfg) return { sourceId, date, hours: hoursOverride ?? 8, entries: [], withoutTicket: [], missingFromDate: [], overMinimum: false };
     const weekday = new Date(`${date}T12:00:00`).getDay(); if (cfg.weekdaysOnly !== false && (weekday === 0 || weekday === 6)) return { sourceId, date, hours: hoursOverride ?? cfg.hours, entries: [], withoutTicket: [], missingFromDate: [], overMinimum: false };
     const key = readOpenProjectKey(this.options.config.hubHome, sourceId); if (!key) throw new Error('Nguồn chưa có API key');
     const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
@@ -62,7 +71,7 @@ export class OpenProjectTimesheetService {
     for (const task of tasks) {
       const project = projects.find((p) => p.id === task.projectId); if (!project) continue;
       const commits = await this.commits(project.path, project.defaultBranch, task.branch || project.defaultBranch, date); if (!commits.length) continue;
-      let wp: OpenProjectWorkPackage | undefined; if (task.externalRef) wp = await client.findWorkPackage(task.externalRef); if (!wp) { withoutTicket.push({ taskId: task.id, subject: subjectFromCommits(commits) }); continue; }
+      let wp: OpenProjectWorkPackage | undefined; if (task.externalRef) wp = await client.findWorkPackage(task.externalRef); if (!wp) { withoutTicket.push({ taskId: task.id, subject: subjectFromCommits(commits, source.language) }); continue; }
       const runs = this.options.runRepo.getByTask(task.id);
       const runMinutes = runs.reduce((sum, run) => { const start = Math.max(day.start, new Date(run.startedAt).getTime()); const end = Math.min(day.end, new Date(run.endedAt || new Date(day.end).toISOString()).getTime()); return sum + Math.max(0, (end - start) / 60000); }, 0);
       const events = this.options.eventRepo.getByTask(task.id).filter((event) => { const ts = new Date(event.ts).getTime(); return ts >= day.start && ts < day.end; });
@@ -70,8 +79,8 @@ export class OpenProjectTimesheetService {
       const chat = (events.filter((event) => /review|comment|decision|blocked|question|changes_requested|ticket.*(created|comment)|comment.*(created|added)/i.test(event.type)).length + (payloadText.includes('## Cần quyết định') ? 1 : 0)) * 10;
       const waitStarts = events.filter((event) => /checking|review\.waiting|review\.gate_started|merge\.waiting|wait/i.test(event.type)).map((event) => new Date(event.ts).getTime());
       const wait = Math.min(runMinutes, waitStarts.reduce((sum, start, index) => { const end = waitStarts[index + 1] || day.end; return sum + Math.max(0, Math.min(day.end, end) - Math.max(day.start, start)) / 60000; }, 0));
-      const level = taskLevel(task); const current = tickets.get(wp.id) || { wpId: wp.id, displayId: wp.displayId || String(wp.id), subject: wp.subject || '', hours: 0, comment: subjectFromCommits(commits), run: 0, wait: 0, chat: 0, level, weight: 0 };
-      current.run += runMinutes; current.wait += wait; current.chat += chat; current.level = Math.max(current.level, level); current.weight += (runMinutes + 0.5 * wait + chat) * level; current.comment = subjectFromCommits([current.comment, ...commits]); tickets.set(wp.id, current);
+      const level = taskLevel(task); const current = tickets.get(wp.id) || { wpId: wp.id, displayId: wp.displayId || String(wp.id), subject: wp.subject || '', hours: 0, comment: subjectFromCommits(commits, source.language), run: 0, wait: 0, chat: 0, level: 0, weight: 0 };
+      current.run += runMinutes; current.wait += wait; current.chat += chat; current.weight += (runMinutes + 0.5 * wait + chat) * level; const base = current.run + 0.5 * current.wait + current.chat; current.level = base ? current.weight / base : level; current.comment = subjectFromCommits([current.comment, ...commits], source.language); tickets.set(wp.id, current);
     }
     const entries = [...tickets.values()]; const allocated = allocateTimesheetHours(entries, hoursOverride ?? cfg.hours, cfg.minEntryHours, cfg.roundTo); entries.forEach((entry, index) => { entry.hours = allocated[index]; });
     const currentWpIds = new Set(entries.map((entry) => entry.wpId)); const missingFromDate = this.options.entryRepo.listForDate(sourceId, date).map((row) => row.wp_id).filter((id) => !currentWpIds.has(id));

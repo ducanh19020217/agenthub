@@ -172,3 +172,9 @@
   - Đảm bảo tính nhất quán và tương thích ngược của hệ thống.
   - Thông tin hiển thị trên Web, Telegram và MCP phản ánh đúng bản chất lý do chờ của task.
 
+## DEC-014: Xấp xỉ thời gian chờ và tương tác cho timesheet
+
+- `run` được tính theo phần giao giữa thời gian chạy và ngày đang lập bảng.
+- `wait` dùng các event trạng thái chờ check/review/merge làm mốc bắt đầu, kéo dài tới mốc kế tiếp hoặc hết ngày, rồi giới hạn không vượt `run`. Đây là xấp xỉ vì schema event hiện chưa lưu khoảng chờ riêng.
+- `chat` tính các event review/comment/question/decision/blocked trong ngày; mỗi lượt quy đổi thành 10 phút. Nội dung `## Cần quyết định` trong payload được tính thêm khi event không có type tương ứng.
+- Khi nhiều task cùng ticket có level khác nhau, `weight` cộng theo từng task; trường `level` hiển thị là level hiệu dụng (trung bình có trọng số) để khớp với tổng weight.

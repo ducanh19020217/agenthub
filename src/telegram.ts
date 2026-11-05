@@ -4085,7 +4085,11 @@ export class TelegramBotService {
         break;
       }
       case 'tracker.timesheet.failed':
-        this.broadcastMessage(`${prefix}❌ <b>Ghi bảng giờ thất bại</b>: ${this.escapeHtml(String(p.error || ''))}`);
+        {
+          const posted = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; hours?: number }> : [];
+          const partial = posted.length ? `\nĐã ghi được: ${posted.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${row.hours || 0}h`).join(', ')}` : '';
+          this.broadcastMessage(`${prefix}❌ <b>Ghi bảng giờ thất bại</b>: ${this.escapeHtml(String(p.error || ''))}${partial}`);
+        }
         break;
       case 'tracker.triage_ready': {
         const sourceId = typeof p.sourceId === 'string' ? p.sourceId : '';

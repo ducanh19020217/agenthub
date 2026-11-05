@@ -2138,6 +2138,14 @@ export class EventRepo {
       .all(taskId) as EventRow[];
   }
 
+  hasTimesheetPosted(sourceId: string, date: string): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM events
+      WHERE type = 'tracker.timesheet.posted'
+        AND json_extract(payload, '$.sourceId') = ?
+        AND json_extract(payload, '$.date') = ?
+      LIMIT 1`).get(sourceId, date));
+  }
+
   page(options?: { taskId?: string; limit?: string | number; cursor?: string; offset?: string | number }): PageResult<EventRow> {
     const decoded = decodeCursor(options?.cursor);
     if (options?.cursor && !decoded) throw new Error('Invalid pagination cursor');

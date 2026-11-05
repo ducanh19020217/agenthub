@@ -418,7 +418,9 @@ export class NotificationService {
         break;
       }
       case 'tracker.timesheet.failed': {
-        this.notify(`${this.appName}: ghi bảng giờ thất bại${typeof p.error === 'string' ? `: ${p.error}` : ''}`, 'critical');
+        const posted = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; hours?: number }> : [];
+        const partial = posted.length ? `; đã ghi được: ${posted.map((row) => `[${row.displayId || '?'}] ${row.hours || 0}h`).join(', ')}` : '';
+        this.notify(`${this.appName}: ghi bảng giờ thất bại${typeof p.error === 'string' ? `: ${p.error}` : ''}${partial}`, 'critical');
         break;
       }
 

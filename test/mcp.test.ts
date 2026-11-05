@@ -45,6 +45,11 @@ describe('AgentHub MCP Server Tools', () => {
     const config = loadConfig(tmpDir);
     config.agyHomesDir = agyHomesDir;
     config.defaultLogDir = process.env.AGENTHUB_DEFAULT_LOG_DIR;
+    config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({
+      id: 'op', url: 'https://op.test', project: 'demo',
+      timesheet: { enabled: true, activityId: 7, minEntryHours: 0.5, roundTo: 0.25 },
+    })];
+    saveOpenProjectKey(tmpDir, 'op', 'test-key');
     ctx = createContext(config);
     // Stop scheduler to prevent it from interfering with static db test fixtures
     ctx.scheduler.stop();
@@ -121,6 +126,16 @@ describe('AgentHub MCP Server Tools', () => {
     expect(get).toBeDefined(); expect(add).toBeDefined();
     expect(get?.inputSchema.properties).toMatchObject({ sourceId: {}, date: {} });
     expect(add?.inputSchema.properties).toMatchObject({ description: {}, activeHours: { minimum: 0, maximum: 24 }, waitHours: { minimum: 0, maximum: 24 } });
+  });
+
+  it('gets the sole timesheet source by default and rejects an empty manual total', async () => {
+    const get = (await client.callTool({ name: 'hub_timesheet_get', arguments: {} })) as { content: Array<{ text: string }> };
+    expect(get.content[0].text).toContain('"sourceId":"op"');
+    const add = (await client.callTool({ name: 'hub_timesheet_add', arguments: {
+      ticket: 'OP-1', description: 'Không có giờ', activeHours: 0, waitHours: 0,
+    } })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(add.isError).toBe(true);
+    expect(add.content[0].text).toMatch(/lớn hơn 0|greater than 0/i);
   });
 
   it('hub_status returns overview with task counts, running tasks, and profile quota status', async () => {

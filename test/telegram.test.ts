@@ -27,6 +27,13 @@ describe('Telegram timesheet parser', () => {
   it('rejects missing descriptions and totals over 24 hours', () => {
     expect(() => parseTimesheetCommand('OP-1 1h')).toThrow();
     expect(() => parseTimesheetCommand('OP-1 20h cho 5h việc quá lâu')).toThrow(/24/);
+    expect(() => parseTimesheetCommand('OP-1 0h việc bằng không')).toThrow();
+  });
+
+  it('parses a standalone co-dinh flag and preserves ticket case', () => {
+    expect(parseTimesheetCommand('sie-42 2h co-dinh Cài đặt máy')).toEqual({
+      ticket: 'sie-42', activeHours: 2, waitHours: 0, pinned: true, description: 'Cài đặt máy',
+    });
   });
 });
 

@@ -204,7 +204,19 @@ export function registerOpenProjectRoutes(
     if (!key) throw new HttpError(400, 'bad_request', 'Nguồn chưa có API key');
     try {
       const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: options.fetch });
-      return (await client.searchWorkPackages(query)).map((wp) => workPackageSearchView(source.url, wp));
+      let statusId: string | undefined;
+      if (query.status?.trim()) {
+        const statuses = (await client.listStatuses())._embedded?.elements || [];
+        const found = /^\d+$/.test(query.status.trim())
+          ? statuses.find((item) => item.id === Number(query.status))
+          : statuses.find((item) => item.name.toLowerCase() === query.status!.trim().toLowerCase());
+        if (!found) {
+          const names = statuses.map((item) => item.name).join(', ');
+          throw new HttpError(400, 'bad_request', `Trạng thái "${query.status}" không hợp lệ. Tên hợp lệ: ${names || '(không có)'}`);
+        }
+        statusId = String(found.id);
+      }
+      return (await client.searchWorkPackages({ query: query.q, status: statusId, assignee: query.assignee })).map((wp) => workPackageSearchView(source.url, wp));
     } catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(502, 'openproject_error', 'Không thể kết nối OpenProject'); }
   });
 
@@ -218,9 +230,19 @@ export function registerOpenProjectRoutes(
       const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: options.fetch });
       const parent = body.parent === undefined ? undefined : await client.findWorkPackage(body.parent);
       if (body.parent !== undefined && !parent) throw new HttpError(403, 'forbidden', 'Work package cha không thuộc project của nguồn');
-      const status = body.status === undefined ? undefined : (await client.listStatuses())._embedded?.elements?.find((item) => String(item.id) === String(body.status) || item.name.toLowerCase() === String(body.status).toLowerCase());
-      if (body.status !== undefined && !status) throw new HttpError(400, 'bad_request', 'Trạng thái không hợp lệ');
-      const created = await client.createWorkPackage({ subject: body.subject, descriptionMarkdown: body.description, parentId: parent?.id, typeId: body.type, statusId: status?.id, assigneeMe: body.assigneeMe });
+      let statusId: number | undefined;
+      if (body.status !== undefined) {
+        const statuses = (await client.listStatuses())._embedded?.elements || [];
+        const status = typeof body.status === 'number' || /^\d+$/.test(String(body.status).trim())
+          ? statuses.find((item) => item.id === Number(body.status))
+          : statuses.find((item) => item.name.toLowerCase() === String(body.status).trim().toLowerCase());
+        if (!status) {
+          const names = statuses.map((item) => item.name).join(', ');
+          throw new HttpError(400, 'bad_request', `Trạng thái "${body.status}" không hợp lệ. Tên hợp lệ: ${names || '(không có)'}`);
+        }
+        statusId = status.id;
+      }
+      const created = await client.createWorkPackage({ subject: body.subject, descriptionMarkdown: body.description, parentId: parent?.id, typeId: body.type, statusId, assigneeMe: body.assigneeMe });
       if (body.taskId) options.linkTicket?.(id, created.id, created.displayId, body.taskId);
       return { ...created, ...(body.taskId ? { taskId: body.taskId } : {}) };
     } catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(502, 'openproject_error', 'Không thể tạo ticket OpenProject'); }

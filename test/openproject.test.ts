@@ -147,6 +147,18 @@ describe('OpenProject Integration', () => {
       expect(calls[0]).toContain('pageSize=100');
     });
 
+    it('searches all project tickets with optional filters', async () => {
+      let requested = '';
+      const fakeFetch = vi.fn().mockImplementation(async (url: string | URL) => {
+        requested = url.toString();
+        return new Response(JSON.stringify({ total: 1, _embedded: { elements: [{ id: 7, displayId: 'SIE-7', subject: 'Login bug', lockVersion: 1 }] } }), { status: 200 });
+      });
+      const result = await new OpenProjectClient({ baseUrl: 'https://op.example.com', project: 'sie', apiKey: 'key', fetch: fakeFetch as unknown as typeof fetch }).searchWorkPackages({ query: 'Login', status: '95', assignee: 'me' });
+      expect(result[0]?.displayId).toBe('SIE-7');
+      expect(decodeURIComponent(requested)).toContain('Login');
+      expect(decodeURIComponent(requested)).toContain('"assignee"');
+    });
+
     it('retries setStatus up to 3 times when receiving 409 conflict', async () => {
       let attempts = 0;
       let wpFetchCount = 0;

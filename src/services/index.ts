@@ -3334,6 +3334,11 @@ export class AppService {
     });
   }
 
+  linkOpenProjectTicket(sourceId: string, wpId: number, displayId: string, taskId: string): void {
+    if (!this.trackerRepo || !this.taskRepo.get(taskId)) throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    this.trackerRepo.upsert({ source_id: sourceId, wp_id: wpId, display_id: displayId, status_id: null, updated_at: new Date().toISOString(), last_comment_id: null, task_ids: JSON.stringify([taskId]), writeback: '{}' });
+  }
+
   createTask(raw: unknown): TaskRow {
     const parsed = CreateTaskSchema.parse(raw);
     if (parsed.createTicket) {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { commitConventionExample, renderCommitTemplate, renderTaskBranch, taskCommitRef } from '../src/commit-convention.js';
-import { buildCommitConventionPrompt } from '../src/scheduler/index.js';
+import { buildCommitConventionPrompt, buildTicketWorkflowPrompt } from '../src/scheduler/index.js';
 import { projectSettings } from '../src/projects/settings.js';
 
 describe('project commit conventions', () => {
@@ -48,5 +48,14 @@ describe('project commit conventions', () => {
     expect(prompt).toContain('[SIE-19] summary');
     expect(prompt).toContain('Thân commit phải có mô tả chi tiết');
     expect(prompt).not.toContain('REF-123');
+  });
+
+  it('prints shared ticket lifecycle rules only for linked tasks', () => {
+    expect(buildTicketWorkflowPrompt({ externalRef: null })).toBe('');
+    const prompt = buildTicketWorkflowPrompt({ externalRef: 'SIE-25', sourceId: 'sie', source: { inProgressStatusId: 94, resolvedStatusId: 95, autoResolve: true } });
+    expect(prompt).toContain('SIE-25');
+    expect(prompt).toContain('In progress (status 94)');
+    expect(prompt).toContain('Resolved (status 95)');
+    expect(prompt).toContain('## Đã làm');
   });
 });

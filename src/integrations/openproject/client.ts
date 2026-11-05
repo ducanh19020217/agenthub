@@ -172,6 +172,14 @@ export class OpenProjectClient {
     return this.listWorkPackagesWithFilters(filters, '[["updatedAt","desc"]]');
   }
 
+  async searchWorkPackages(input: { query?: string; status?: string; assignee?: string }): Promise<OpenProjectWorkPackage[]> {
+    const filters: Array<Record<string, { operator: string; values: string[] }>> = [];
+    if (input.query?.trim()) filters.push({ subject: { operator: '~', values: [input.query.trim()] } });
+    if (input.status?.trim()) filters.push({ status: { operator: '=', values: [input.status.trim()] } });
+    if (input.assignee?.trim()) filters.push({ assignee: { operator: '=', values: [input.assignee.trim()] } });
+    return this.listWorkPackagesWithFilters(JSON.stringify(filters), '[["updatedAt","desc"]]');
+  }
+
   async listUpdatedWorkPackages(start: string, end: string): Promise<OpenProjectWorkPackage[]> {
     const filters = JSON.stringify([
       { updatedAt: { operator: '<>d', values: [start, end] } },

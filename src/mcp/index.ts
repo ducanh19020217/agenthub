@@ -640,6 +640,35 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   );
 
   server.tool(
+    'hub_ticket_search',
+    'Tìm ticket OpenProject trong toàn bộ project, kể cả ticket đã đóng hoặc của người khác',
+    { sourceId: z.string().min(1), query: z.string().optional(), status: z.string().optional(), assignee: z.string().optional() },
+    async (args) => {
+      try {
+        const params = new URLSearchParams();
+        if (args.query) params.set('q', args.query);
+        if (args.status) params.set('status', args.status);
+        if (args.assignee) params.set('assignee', args.assignee);
+        const result = await callApi<unknown[]>('GET', `/api/integrations/openproject/sources/${encodeURIComponent(args.sourceId)}/tickets?${params}`);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: unknown) { return handleError(err); }
+    },
+  );
+
+  server.tool(
+    'hub_ticket_create',
+    'Tạo ticket OpenProject độc lập, không tạo task nháp trong AgentHub',
+    { sourceId: z.string().min(1), subject: z.string().min(1), description: z.string().optional(), parent: z.union([z.number().int().positive(), z.string().trim().min(1)]).optional(), status: z.union([z.number().int().positive(), z.string().trim().min(1)]).optional(), type: z.number().int().positive().optional(), assigneeMe: z.boolean().optional(), taskId: z.string().optional().describe('Task AgentHub có sẵn để liên kết') },
+    async (args) => {
+      try {
+        const { sourceId, ...body } = args;
+        const result = await callApi<unknown>('POST', `/api/integrations/openproject/sources/${encodeURIComponent(sourceId)}/tickets`, body);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: unknown) { return handleError(err); }
+    },
+  );
+
+  server.tool(
     'hub_ticket_update',
     'Cập nhật trạng thái, ticket cha hoặc comment của ticket OpenProject',
     {

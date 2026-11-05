@@ -185,6 +185,7 @@ export async function createServer(
     dailyReport: options?.openProjectDailyReport || (service.dailyReportService ? (sourceId, date) => service.dailyReportService!.generateReport(sourceId, date ? parseDateNoon(date) : undefined, { overwrite: true }) : undefined),
     decision: (sourceId, wpId, action, note) => service.decideOpenProjectTicket(sourceId, wpId, action, note),
     triageInput: (sourceId, wpId, content) => service.submitOpenProjectTriageInput(sourceId, wpId, content),
+    linkTicket: (sourceId, wpId, displayId, taskId) => service.linkOpenProjectTicket(sourceId, wpId, displayId, taskId),
   });
 
   fastify.post('/api/hub/shutdown', async (req) => {

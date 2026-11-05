@@ -147,6 +147,13 @@ export function buildCommitConventionPrompt(convention: ReturnType<typeof projec
   return `\n\n## Quy ước commit\n- Nhánh task: \`${branch}\`\n- Commit message mẫu: \`${message}\`\n- Merge message mẫu: \`${merge}\`\n- Thân commit phải có mô tả chi tiết về thay đổi và kết quả kiểm tra.${refInstruction}`;
 }
 
+export function buildTicketWorkflowPrompt(input: { externalRef?: string | null; sourceId?: string | null; source?: { autoResolve?: boolean; inProgressStatusId?: number | null; resolvedStatusId?: number | null } | null }): string {
+  if (!input.externalRef) return '';
+  const status = input.source?.inProgressStatusId == null ? 'In progress theo cấu hình nguồn' : `In progress (status ${input.source.inProgressStatusId})`;
+  const done = input.source?.autoResolve === false ? 'comment kết quả; không tự chuyển Done' : input.source?.resolvedStatusId == null ? 'comment kết quả; trạng thái kết thúc theo cấu hình nguồn' : `comment kết quả rồi chuyển Resolved (status ${input.source.resolvedStatusId})`;
+  return `\n\n## Quy trình ticket\n- Ticket hiện tại: \`${input.externalRef}\`${input.sourceId ? ` (nguồn ${input.sourceId})` : ''}. Không tạo ticket tổng hợp hoặc ticket trùng; việc cùng chủ đề là ticket con.\n- Khi bắt đầu làm: hub tự chuyển ticket sang ${status}. Khi xong: hub sẽ ${done}.\n- Nội dung báo cáo phải có '## Đã làm' và '## Còn lại' (checklist), không chứa secret. Task lỗi cần thêm 4 mục: Lỗi / Nguyên nhân (file:dòng) / Cách sửa (commit, image) / Kiểm tra.`;
+}
+
 export const PROTOCOL_PROMPT = buildProtocolPrompt({ worktree: { install: 'auto' } }, 'prepared');
 
 export class EventBus extends EventEmitter {
@@ -3668,6 +3675,8 @@ export class Scheduler {
     const ref = taskCommitRef(project, task);
     const branchExample = renderTaskBranch(project, task);
     prompt += buildCommitConventionPrompt(convention, branchExample, ref, task.baseRef || project.defaultBranch);
+    const ticketSource = task.externalRef ? this.config.integrations.openproject.sources.find((source) => source.id === projectSettings(project).openproject.sourceId) : undefined;
+    prompt += buildTicketWorkflowPrompt({ externalRef: task.externalRef, sourceId: ticketSource?.id, source: ticketSource });
     if (task.resume) {
       prompt += '\n\nTask đã làm dở – kiểm tra git log/status rồi làm tiếp, không làm lại.';
     }

@@ -411,8 +411,10 @@ export class NotificationService {
 
       case 'tracker.timesheet.posted': {
         const rows = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; subject?: string; hours?: number }> : [];
-        const missing = Array.isArray(p.withoutTicket) && p.withoutTicket.length ? `; chưa có ticket: ${p.withoutTicket.length}` : '';
-        this.notify(`${this.appName}: đã ghi bảng giờ ${p.sourceId || 'OpenProject'} (${p.hours || 0}h) ${rows.map((row) => `[${row.displayId || '?'}] ${row.subject || ''} — ${row.hours || 0}h`).join('; ')}${missing}`, 'normal');
+        const missing = Array.isArray(p.withoutTicket) && p.withoutTicket.length ? `; chưa có ticket: ${p.withoutTicket.map((item: { taskId?: string; subject?: string }) => `${item.taskId || '?'} ${item.subject || ''}`).join(', ')}` : '';
+        const stale = Array.isArray(p.missingFromDate) && p.missingFromDate.length ? `; ticket không còn trong ngày: ${p.missingFromDate.join(', ')}` : '';
+        const minimum = p.overMinimum ? '; tổng vượt giờ do mức tối thiểu' : '';
+        this.notify(`${this.appName}: đã ghi bảng giờ ${p.sourceId || 'OpenProject'} (${p.hours || 0}h) ${rows.map((row) => `[${row.displayId || '?'}] ${row.subject || ''} — ${row.hours || 0}h`).join('; ')}${missing}${stale}${minimum}`, 'normal');
         break;
       }
       case 'tracker.timesheet.failed': {

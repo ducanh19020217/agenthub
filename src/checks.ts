@@ -5,6 +5,7 @@ import type Database from 'better-sqlite3';
 import type { ProjectRow, TaskRow } from './db/index.js';
 import { runInProcessGroup } from './priority.js';
 import { workerEnvironment } from './worker-guard.js';
+import { taskCommitRef } from './commit-convention.js';
 
 const MAX_OUTPUT = 8192;
 const CONFLICT_MARKER_REGEX = /^(<{7}|={7}|>{7})( |$)/m;
@@ -155,14 +156,18 @@ async function runOne(check: CheckDefinition, repo: string, hubHome: string, pro
   if (check.name === 'commit-message' && project && task) {
     let output = '';
     const convention = projectSettings(project).commitConvention;
+    const ref = taskCommitRef(project, task);
     try {
       const range = `${(task.baseRef || project.defaultBranch || 'main')}..HEAD`;
       const log = execFileSync('git', ['log', '--no-merges', '--format=%H%x00%s', range], { cwd: repo, encoding: 'utf8' });
       const regex = convention.commitRegex ? new RegExp(convention.commitRegex) : null;
       const bad: string[] = [];
+      if (convention.commitTemplate.includes('{ref}') && !ref) {
+        bad.push('Commit template chứa {ref} nhưng task không có externalRef và project chưa đặt commitConvention.defaultRef; hãy đặt defaultRef hoặc gắn ticket cho task.');
+      }
       for (const line of log.split('\n').filter(Boolean)) {
         const [hash, message] = line.split('\0');
-        if ((regex && !regex.test(message)) || (convention.commitTemplate.includes('{ref}') && (!task.externalRef || !message.includes(task.externalRef)))) {
+        if ((regex && !regex.test(message)) || (ref && convention.commitTemplate.includes('{ref}') && !message.includes(ref))) {
           bad.push(`${hash.slice(0, 10)} ${message}`);
         }
       }

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { resolveConfigPaths } from '../src/config.js';
 
 export interface AgyHomesSnapshot { dir: string; subdirs: string[]; }
 export interface HubHomeSnapshot { dir: string; exists: boolean; entries: string[]; metadata: Map<string, string>; }
@@ -74,8 +75,13 @@ export interface IsolationPaths { home?: string; hubHome?: string; agyHomesDir?:
 export function assertTestIsolation(paths: IsolationPaths = {}): void {
   const realHome = os.userInfo().homedir;
   const home = paths.home ?? process.env.HOME ?? os.homedir();
-  const hubHome = paths.hubHome ?? process.env.AGENTHUB_HOME ?? path.join(home, '.agenthub');
-  const agyHomesDir = paths.agyHomesDir ?? process.env.AGENTHUB_AGY_HOMES ?? path.join(home, '.agy-homes');
+  const configPaths = resolveConfigPaths({
+    env: process.env,
+    home,
+    overrideHome: paths.hubHome,
+  });
+  const hubHome = configPaths.hubHome;
+  const agyHomesDir = paths.agyHomesDir ?? configPaths.agyHomesDir;
   const unsafe = [['os.homedir()', os.homedir()], ['HOME', home], ['AGENTHUB_HOME', hubHome], ['AGENTHUB_AGY_HOMES', agyHomesDir]].find(([, value]) => isInside(realHome, value));
   if (unsafe) throw new Error(`SAFETY NET VIOLATION: test isolation is broken: ${unsafe[0]} points into the real HOME`);
 }

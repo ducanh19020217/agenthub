@@ -26,16 +26,20 @@ describe('safety-check isolation and metadata warnings', () => {
   });
 
   it('passes for the test HOME and fails when any configured path is the real HOME', () => {
+    expect(() => assertTestIsolation()).not.toThrow();
     expect(() => assertTestIsolation({ home: tempDir, hubHome: path.join(tempDir, '.agenthub'), agyHomesDir: path.join(tempDir, '.agy-homes') })).not.toThrow();
     const realHome = os.userInfo().homedir;
     const saved = { HOME: process.env.HOME, AGENTHUB_HOME: process.env.AGENTHUB_HOME, AGENTHUB_AGY_HOMES: process.env.AGENTHUB_AGY_HOMES };
-    process.env.HOME = realHome;
-    process.env.AGENTHUB_HOME = path.join(realHome, '.agenthub');
-    process.env.AGENTHUB_AGY_HOMES = path.join(realHome, '.agy-homes');
-    expect(() => assertTestIsolation()).toThrow(/isolation is broken/);
-    process.env.HOME = saved.HOME;
-    process.env.AGENTHUB_HOME = saved.AGENTHUB_HOME;
-    process.env.AGENTHUB_AGY_HOMES = saved.AGENTHUB_AGY_HOMES;
+    try {
+      process.env.HOME = realHome;
+      process.env.AGENTHUB_HOME = path.join(realHome, '.agenthub');
+      process.env.AGENTHUB_AGY_HOMES = path.join(realHome, '.agy-homes');
+      expect(() => assertTestIsolation()).toThrow(/isolation is broken/);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
   });
 
   it('warns, without throwing, when a hub entry is added or removed', () => {

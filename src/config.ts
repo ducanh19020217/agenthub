@@ -954,8 +954,33 @@ export function updateConfigInMemory(
   }
 }
 
+export interface ConfigPaths {
+  hubHome: string;
+  agyHomesDir: string;
+}
+
+export function resolveConfigPaths(options: {
+  overrideHome?: string;
+  userConfig?: Record<string, unknown>;
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+} = {}): ConfigPaths {
+  const env = options.env || process.env;
+  const home = options.home || os.homedir();
+  const hubHome = options.overrideHome || env.AGENTHUB_HOME || path.join(home, '.agenthub');
+  const testAgyHomesDir = env.AGENTHUB_TEST_MODE === '1'
+    ? path.join(path.dirname(hubHome), 'agy-homes')
+    : undefined;
+  const agyHomesDir =
+    (options.userConfig?.agyHomesDir as string) ||
+    env.AGENTHUB_AGY_HOMES ||
+    testAgyHomesDir ||
+    path.join(home, '.agy-homes');
+  return { hubHome, agyHomesDir };
+}
+
 export function loadConfig(overrideHome?: string): AgentHubConfig {
-  const hubHome = overrideHome || process.env.AGENTHUB_HOME || path.join(os.homedir(), '.agenthub');
+  const hubHome = resolveConfigPaths({ overrideHome }).hubHome;
 
   // Ensure directory exists with proper permissions
   if (!fs.existsSync(hubHome)) {
@@ -983,14 +1008,7 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
   if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
   if (!fs.existsSync(worktreesDir)) fs.mkdirSync(worktreesDir, { recursive: true });
 
-  const testAgyHomesDir = process.env.AGENTHUB_TEST_MODE === '1'
-    ? path.join(path.dirname(hubHome), 'agy-homes')
-    : undefined;
-  const agyHomesDir =
-    (userConfig.agyHomesDir as string) ||
-    process.env.AGENTHUB_AGY_HOMES ||
-    testAgyHomesDir ||
-    path.join(os.homedir(), '.agy-homes');
+  const { agyHomesDir } = resolveConfigPaths({ overrideHome, userConfig });
 
   const defaultLogDir =
     (userConfig.defaultLogDir as string) ||

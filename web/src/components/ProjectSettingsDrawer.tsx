@@ -1358,7 +1358,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
               ) : draftMerge.worktrees[draftDefaultBranch] ? (
                 <p className="text-xs text-[var(--t-text-2)]">{t('projects.gitMergeConfigured', { branch: draftDefaultBranch, path: draftMerge.worktrees[draftDefaultBranch] })}</p>
               ) : (
-                <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_10%,transparent)] p-2.5 text-xs text-[var(--t-crit)]">
+                <div data-testid="merge-mapping-warning" className="flex items-center justify-between gap-3 rounded-lg border border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_10%,transparent)] p-2.5 text-xs text-[var(--t-crit)]">
                   <span>{t('projects.gitMergeMissing', { branch: draftDefaultBranch })}</span>
                   <Button type="button" size="sm" variant="secondary" onClick={() => setDraftMerge((prev) => ({ ...prev, enabled: true, worktrees: { ...prev.worktrees, [draftDefaultBranch]: project.path } }))}>
                     {t('projects.gitMergeUseRepo')}

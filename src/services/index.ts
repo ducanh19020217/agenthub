@@ -192,6 +192,34 @@ function hasConfiguredMerge(project: ProjectRow, baseRef: string): boolean {
   }
 }
 
+function mergeWarning(project: ProjectRow, baseRef: string): string | null {
+  const settings = projectSettings(project);
+  if (settings.integration.enabled || hasConfiguredMerge(project, baseRef)) return null;
+  return `Task sẽ không merge được vì project chưa có worktree tích hợp cho nhánh "${baseRef}". Mở Cài đặt dự án → Git để cấu hình.`;
+}
+
+function parseProjectMerge(value: string | null | undefined): ProjectMerge | null {
+  if (!value) return null;
+  try {
+    const parsed = ProjectMergeSchema.safeParse(JSON.parse(value));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultProjectMerge(projectPath: string, defaultBranch: string): ProjectMerge {
+  return { enabled: true, worktrees: { [defaultBranch]: projectPath }, checks: [], timeoutSec: 600 };
+}
+
+function isGitRepository(projectPath: string): boolean {
+  try {
+    return Boolean(execFileSync('git', ['-C', projectPath, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
+  } catch {
+    return false;
+  }
+}
+
 export function apiTaskNote(note: TaskNoteRow): TaskNoteRow {
   return {
     ...note,
@@ -988,7 +1016,23 @@ export class AppService {
     public directiveRepo?: BrainDirectiveRepo,
     public departmentRepo?: DepartmentRepo,
     public setupTools?: SetupTools,
-  ) {}
+  ) {
+    this.migrateProjectMergeMappings();
+  }
+
+  /** Backfill the legacy merge column for projects registered before automatic mapping existed. */
+  private migrateProjectMergeMappings(): void {
+    for (const project of this.projectRepo.getAll()) {
+      if (projectSettings(project).integration.enabled || project.merge || !isGitRepository(project.path)) continue;
+      const merge = defaultProjectMerge(project.path, project.defaultBranch);
+      this.projectRepo.update(project.id, { merge: JSON.stringify(merge) });
+      this.eventRepo.insert('project.merge_migrated', undefined, {
+        projectId: project.id,
+        defaultBranch: project.defaultBranch,
+        path: project.path,
+      });
+    }
+  }
 
   setSetupTools(tools: SetupTools): void { this.setupTools = tools; }
   setTrackerRepo(repo: TrackerItemRepo): void { this.trackerRepo = repo; }
@@ -1983,6 +2027,9 @@ export class AppService {
       throw new HttpError(400, 'bad_request', `Nhánh mặc định "${parsed.defaultBranch}" không tồn tại trong repository`);
     }
 
+    const merge = !effectiveSettings.integration.enabled && !parsed.merge
+      ? defaultProjectMerge(resolvedPath, parsed.defaultBranch)
+      : parsed.merge;
     const archived = this.projectRepo.getAllIncludingArchived().find(
       (project) => project.archivedAt && path.resolve(project.path) === resolvedPath,
     );
@@ -1997,6 +2044,7 @@ export class AppService {
         envTemplate: parsed.envTemplate || null,
         maxParallel: parsed.maxParallel,
         departmentId: parsed.departmentId,
+        merge: merge ? JSON.stringify(merge) : null,
       });
       this.invalidateOutOfScopeClaudeScanStates();
       return this.getProject(archived.id);
@@ -2011,7 +2059,7 @@ export class AppService {
       maxParallel: parsed.maxParallel,
       checks: parsed.checks ? JSON.stringify(parsed.checks) : null,
       hooks: parsed.hooks ? JSON.stringify(parsed.hooks) : null,
-      merge: parsed.merge ? JSON.stringify(parsed.merge) : null,
+      merge: merge ? JSON.stringify(merge) : null,
       reviewChain: parsed.reviewChain ? JSON.stringify(parsed.reviewChain) : null,
       review: parsed.review ? JSON.stringify(parsed.review) : null,
       settings: parsed.settings ? JSON.stringify(effectiveSettings) : null,
@@ -2064,13 +2112,27 @@ export class AppService {
       validateIntegrationBranch(mergedSettings.integration.branch || 'agenthub/integration', effectiveDefaultBranch);
     }
 
+    let mergeUpdate = parsed.merge === undefined ? undefined : parsed.merge ? JSON.stringify(parsed.merge) : null;
+    if (parsed.defaultBranch !== undefined && !mergedSettings.integration.enabled && parsed.merge === undefined) {
+      const currentMerge = parseProjectMerge(current.merge);
+      const oldBranch = current.defaultBranch;
+      const oldPath = currentMerge?.worktrees[oldBranch];
+      const newPath = currentMerge?.worktrees[effectiveDefaultBranch];
+      if (currentMerge && oldPath === current.path && (newPath === undefined || newPath === current.path)) {
+        const worktrees = { ...currentMerge.worktrees };
+        delete worktrees[oldBranch];
+        worktrees[effectiveDefaultBranch] = current.path;
+        mergeUpdate = JSON.stringify({ ...currentMerge, worktrees });
+      }
+    }
+
     this.projectRepo.update(id, {
       ...parsed,
       // Partial settings merge over what is stored, so callers can change one switch at a time.
       settings: parsed.settings === undefined ? undefined : JSON.stringify(mergedSettings),
       checks: parsed.checks === undefined ? undefined : parsed.checks ? JSON.stringify(parsed.checks) : null,
       hooks: parsed.hooks === undefined ? undefined : parsed.hooks ? JSON.stringify(parsed.hooks) : null,
-      merge: parsed.merge === undefined ? undefined : parsed.merge ? JSON.stringify(parsed.merge) : null,
+      merge: mergeUpdate,
       reviewChain: parsed.reviewChain === undefined ? undefined : parsed.reviewChain ? JSON.stringify(parsed.reviewChain) : null,
       review: parsed.review === undefined ? undefined : parsed.review ? JSON.stringify(parsed.review) : null,
     });
@@ -3493,7 +3555,9 @@ export class AppService {
       this.scheduler.triggerTick();
     }
 
-    return this.taskRepo.get(taskId)!;
+    const task = this.taskRepo.get(taskId)!;
+    const warning = mergeWarning(project, parsed.baseRef || project.defaultBranch);
+    return warning ? { ...task, mergeWarning: warning } as TaskRow : task;
   }
 
   async createTaskWithTicket(raw: unknown): Promise<TaskRow> {

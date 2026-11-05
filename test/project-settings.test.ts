@@ -157,6 +157,44 @@ describe('project settings through the service', () => {
   it('exposes defaults for a project created without settings', () => {
     const created = ctx.service.createProject({ name: 'plain', path: path.join(tmpDir, 'repo') }) as unknown as { settings: unknown };
     expect(created.settings).toEqual(DEFAULT_PROJECT_SETTINGS);
+    expect((created as unknown as { merge: unknown }).merge).toEqual({
+      enabled: true,
+      worktrees: { main: path.join(tmpDir, 'repo') },
+      checks: [],
+      timeoutSec: 600,
+    });
+  });
+
+  it('moves the automatic merge mapping when the default branch changes', () => {
+    ctx.service.createProject({ name: 'branch-map', path: path.join(tmpDir, 'repo') });
+    const updated = ctx.service.updateProject('branch-map', { defaultBranch: 'develop' }) as unknown as { merge: { worktrees: Record<string, string> } };
+    expect(updated.merge.worktrees).toEqual({ develop: path.join(tmpDir, 'repo') });
+  });
+
+  it('does not move a merge mapping that points to a user-selected folder', () => {
+    ctx.service.createProject({ name: 'custom-map', path: path.join(tmpDir, 'repo'), merge: { enabled: true, worktrees: { main: path.join(tmpDir, 'custom-integration') }, checks: [], timeoutSec: 600 } });
+    const updated = ctx.service.updateProject('custom-map', { defaultBranch: 'develop' }) as unknown as { merge: { worktrees: Record<string, string> } };
+    expect(updated.merge.worktrees).toEqual({ main: path.join(tmpDir, 'custom-integration') });
+  });
+
+  it('migrates a legacy git project with an empty merge configuration', () => {
+    const legacyPath = path.join(tmpDir, 'repo');
+    ctx.projectRepo.insert({ id: 'legacy-map', name: 'Legacy map', path: legacyPath, defaultBranch: 'main', envTemplate: null, maxParallel: 1, merge: null });
+    (ctx.service as unknown as { migrateProjectMergeMappings: () => void }).migrateProjectMergeMappings();
+    expect(JSON.parse(ctx.projectRepo.get('legacy-map')?.merge || '{}')).toEqual({
+      enabled: true,
+      worktrees: { main: legacyPath },
+      checks: [],
+      timeoutSec: 600,
+    });
+    expect(ctx.eventRepo.getByTask('legacy-map')).toHaveLength(0);
+    expect(ctx.eventRepo.getRecent(20).some((event) => event.type === 'project.merge_migrated' && event.payload?.includes('legacy-map'))).toBe(true);
+  });
+
+  it('returns an early merge warning when a task targets an unmapped base branch', () => {
+    ctx.service.createProject({ name: 'warning-map', path: path.join(tmpDir, 'repo'), merge: { enabled: true, worktrees: {}, checks: [], timeoutSec: 600 } });
+    const task = ctx.service.createTask({ project: 'warning-map', slug: 'needs-merge', title: 'Needs merge', body: 'body' }) as unknown as { mergeWarning?: string };
+    expect(task.mergeWarning).toContain('chưa có worktree tích hợp');
   });
 
   it('stores settings on create and merges partial updates', () => {

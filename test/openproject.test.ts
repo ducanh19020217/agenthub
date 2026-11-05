@@ -825,9 +825,10 @@ describe('OpenProject Integration', () => {
       });
 
       // Linking another task preserves state and merges task_ids
-      service.linkOpenProjectTicket('soar', 10, 'SIE-10', 'p1/task-2');
+      service.linkOpenProjectTicket('soar', 10, 'SIE-99', 'p1/task-2');
       const row2 = trackerRepo.get('soar', 10);
       expect(row2).toBeDefined();
+      expect(row2!.display_id).toBe('SIE-10');
       expect(row2!.status_id).toBe(95);
       expect(row2!.last_comment_id).toBe(1234);
       expect(JSON.parse(row2!.writeback)).toEqual({ commented: true, resolved: true });

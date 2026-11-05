@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { LocaleProvider } from '../context/LocaleContext';
 import { ThemeProvider } from '../context/ThemeContext';
 
-const { preview, run } = vi.hoisted(() => ({ preview: vi.fn(), run: vi.fn() }));
+const { preview, run, getTimesheet, searchTickets, addManual, updateManual, deleteManual, writeDay } = vi.hoisted(() => ({ preview: vi.fn(), run: vi.fn(), getTimesheet: vi.fn(), searchTickets: vi.fn(), addManual: vi.fn(), updateManual: vi.fn(), deleteManual: vi.fn(), writeDay: vi.fn() }));
 
 vi.mock('../api/client', () => ({
   getOpenProjectSources: vi.fn(async () => [{ id: 'op', url: 'https://op.test', project: 'demo', keyConfigured: true, pollIntervalSec: 120, watchStatusIds: [], reopenedStatusIds: [], openStatusIds: [], minTicketNumber: 0, autoStart: true, autoResolve: true, triage: 'off', triageModelChain: [], feedbackStatusId: null, language: 'vi', split: { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true }, dailyReport: { enabled: false, time: '18:00', weekdaysOnly: true, maxItems: 10, telegram: false }, timesheet: { enabled: true, time: '17:30', weekdaysOnly: true, hours: 8, activityId: null, minEntryHours: 0.5, roundTo: 0.25 } }]),
@@ -19,9 +19,16 @@ vi.mock('../api/client', () => ({
   syncOpenProject: vi.fn(),
   testOpenProjectConnection: vi.fn(),
   createOpenProjectDailyReport: vi.fn(),
+  getTimesheet,
+  searchOpenProjectWorkPackages: searchTickets,
+  addTimesheetManual: addManual,
+  updateTimesheetManual: updateManual,
+  deleteTimesheetManual: deleteManual,
+  writeTimesheetDay: writeDay,
 }));
 
 import { OpenProjectSettings } from '../components/OpenProjectSettings';
+import { TimesheetPage } from '../pages/TimesheetPage';
 
 function renderSettings() {
   return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><LocaleProvider initialLocale="vi"><ThemeProvider><OpenProjectSettings /></ThemeProvider></LocaleProvider></QueryClientProvider>);
@@ -56,5 +63,20 @@ describe('OpenProject timesheet controls', () => {
     const button = await screen.findByRole('button', { name: 'Ghi lên OpenProject' });
     fireEvent.click(button);
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('write failed'));
+  });
+});
+
+describe('manual timesheet page', () => {
+  it('shows search results, manual form and recalculates after changing the daily total', async () => {
+    getTimesheet.mockResolvedValue({ sourceId: 'op', date: '2026-11-05', hours: 8, entries: [{ wpId: 42, displayId: 'OP-42', subject: 'Deploy', comment: 'Deploy', kind: 'manual', rawHours: 2, hours: 2, pinned: false, manualIds: ['m1'], writtenAt: '2026-11-05 18:00:00' }], overMinimum: false });
+    searchTickets.mockResolvedValue([{ id: 42, displayId: 'OP-42', subject: 'Deploy' }]);
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><LocaleProvider initialLocale="vi"><ThemeProvider><TimesheetPage /></ThemeProvider></LocaleProvider></QueryClientProvider>);
+    expect(await screen.findByText('OP-42')).toBeInTheDocument();
+    expect(screen.getByText(/Đã ghi lúc/)).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText('Tìm mã hoặc tên ticket'), { target: { value: 'Deploy' } });
+    await waitFor(() => expect(searchTickets).toHaveBeenCalled());
+    expect(screen.getByText('Thêm việc thủ công')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Tổng giờ ngày'), { target: { value: '9' } });
+    expect(screen.getByLabelText('Tổng giờ ngày')).toHaveValue(9);
   });
 });

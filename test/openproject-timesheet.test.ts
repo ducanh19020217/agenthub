@@ -147,7 +147,8 @@ describe('OpenProject timesheet notifications', () => {
   const payload = {
     sourceId: 'op', hours: 8.25, overMinimum: true, missingFromDate: [41],
     withoutTicket: [{ taskId: 'p/no-ticket', subject: 'Unlinked work' }],
-    entries: [{ displayId: 'OP-42', subject: 'Export report', hours: 8.25 }],
+    entries: [{ displayId: 'OP-42', subject: 'Export report', hours: 8.25, rawHours: 6.25, estimateHours: 6.25 }],
+    estimateSkipped: [{ wpId: 42, displayId: 'OP-42', reason: 'estimate đã do người khác đặt' }],
   };
 
   it('includes posted details and partial failures in desktop notifications', () => {
@@ -155,13 +156,14 @@ describe('OpenProject timesheet notifications', () => {
     const calls: string[] = [];
     const service = new NotificationService({ config, eventBus: {} as never, exec: (_file, args) => { calls.push(args.join(' ')); } });
     service.handleEvent('tracker.timesheet.posted', undefined, payload);
-    service.handleEvent('tracker.timesheet.failed', undefined, { error: 'temporary failure', entries: payload.entries });
-    expect(calls.join('\n')).toContain('[OP-42] Export report — thực tế 8.25h');
+    service.handleEvent('tracker.timesheet.failed', undefined, { error: 'temporary failure', entries: payload.entries, estimateSkipped: payload.estimateSkipped });
+    expect(calls.join('\n')).toContain('[OP-42] Export report — thực tế 8,25h · estimate 6,25h');
+    expect(calls.join('\n')).toContain('bỏ qua estimate: [OP-42] estimate đã do người khác đặt');
     expect(calls.join('\n')).toContain('chưa có ticket');
     expect(calls.join('\n')).toContain('ticket không còn trong ngày');
     expect(calls.join('\n')).toContain('tổng vượt giờ do mức tối thiểu');
     expect(calls.join('\n')).toContain('ghi bảng giờ thất bại');
-    expect(calls.join('\n')).toContain('đã ghi được');
+    expect(calls.join('\n')).toContain('đã ghi được: [OP-42] 8,25h');
   });
 
   it('includes posted details and partial failures in Telegram notifications', () => {
@@ -170,12 +172,13 @@ describe('OpenProject timesheet notifications', () => {
     const service = new TelegramBotService({ config, service: {} as never, eventBus: {} as never, taskRepo: {} as never, projectRepo: {} as never, tokenOverride: 'test-token' });
     (service as unknown as { broadcastMessage: (text: string) => void }).broadcastMessage = (text) => { messages.push(text); };
     service.handleEvent('tracker.timesheet.posted', undefined, payload);
-    service.handleEvent('tracker.timesheet.failed', undefined, { error: 'temporary failure', entries: payload.entries });
-    expect(messages.join('\n')).toContain('[OP-42] Export report — thực tế 8.25h');
+    service.handleEvent('tracker.timesheet.failed', undefined, { error: 'temporary failure', entries: payload.entries, estimateSkipped: payload.estimateSkipped });
+    expect(messages.join('\n')).toContain('[OP-42] Export report — thực tế 8,25h · estimate 6,25h');
+    expect(messages.join('\n')).toContain('Bỏ qua estimate: [OP-42] estimate đã do người khác đặt');
     expect(messages.join('\n')).toContain('Chưa có ticket');
     expect(messages.join('\n')).toContain('Ticket không còn trong ngày');
     expect(messages.join('\n')).toContain('Tổng vượt giờ do mức tối thiểu');
-    expect(messages.join('\n')).toContain('Đã ghi được');
+    expect(messages.join('\n')).toContain('Đã ghi được: [OP-42] 8,25h');
   });
 });
 
@@ -340,6 +343,58 @@ describe('OpenProject timesheet estimate writeback', () => {
     const service = new OpenProjectTimesheetService({ config, projectRepo, taskRepo, runRepo, eventRepo, entryRepo, fetchFn, eventBus: { emit: () => true } });
     await service.run('op', '2026-11-04');
     expect(estimateCalls).toBe(2); // 1 fail + 1 retry
+    db.close(); fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('preview includes cumulative estimate across days', async () => {
+    const { root, db, config, projectRepo, taskRepo, runRepo, eventRepo, entryRepo } = setup();
+    const repoPath = path.join(root, 'repo');
+    const git = (args: string[], env?: NodeJS.ProcessEnv) => execFileSync('git', ['-C', repoPath, ...args], { env: { ...process.env, ...env }, stdio: 'pipe' });
+    git(['checkout', 'task']); fs.writeFileSync(path.join(repoPath, 'README'), 'work2'); git(['add', 'README']);
+    git(['commit', '-qm', 'more work', '--date', '2026-11-05T10:00:00Z'], { GIT_AUTHOR_DATE: '2026-11-05T10:00:00Z', GIT_COMMITTER_DATE: '2026-11-05T10:00:00Z' });
+    runRepo.insert({ id: 'r2', taskId: 't', engine: 'test', model: 'test', profileName: 'test', startedAt: '2026-11-05T08:00:00Z', kind: 'worker' }); runRepo.finish('r2', 'done');
+    db.prepare('UPDATE runs SET endedAt = ? WHERE id = ?').run('2026-11-05T10:00:00Z', 'r2');
+    const fetchFn = (async (url: string | URL, init?: RequestInit) => {
+      const value = url.toString();
+      if (init?.method === 'PATCH') return new Response(JSON.stringify({ id: 42, lockVersion: 2 }));
+      if (value.endsWith('/work_packages/42')) return new Response(JSON.stringify({ id: 42, displayId: 'OP-42', subject: 'Export', lockVersion: 1, estimatedTime: null }));
+      if (value.includes('/time_entries')) return new Response(JSON.stringify({ id: 99 }));
+      throw new Error(`unexpected ${value}`);
+    }) as typeof fetch;
+    const service = new OpenProjectTimesheetService({ config, projectRepo, taskRepo, runRepo, eventRepo, entryRepo, fetchFn, eventBus: { emit: () => true } });
+    await service.run('op', '2026-11-04');
+    const previewDay2 = await service.preview('op', '2026-11-05');
+    expect(previewDay2.entries).toHaveLength(1);
+    expect(previewDay2.entries[0].rawHours).toBe(2);
+    expect(previewDay2.entries[0].estimateHours).toBe(4); // 2h from day 1 + 2h from day 2
+    db.close(); fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('does not overwrite if estimate was changed by someone else during 409 retry', async () => {
+    const { root, db, config, projectRepo, taskRepo, runRepo, eventRepo, entryRepo } = setup();
+    let estimateCalls = 0;
+    const fetchFn = (async (url: string | URL, init?: RequestInit) => {
+      const value = url.toString();
+      if (value.includes('/time_entries')) return new Response(JSON.stringify({ id: 99 }));
+      if (init?.method === 'PATCH' && String(init.body).includes('estimatedTime')) {
+        estimateCalls++;
+        return new Response(JSON.stringify({ message: 'Conflict' }), { status: 409 });
+      }
+      if (init?.method === 'PATCH') return new Response(JSON.stringify({ id: 42, lockVersion: 2 }));
+      if (value.endsWith('/work_packages/42')) {
+        // First GET before attempt 0: estimate is null
+        // Second GET on 409 retry: another user has set estimatedTime to PT5H
+        const estimatedTime = estimateCalls === 0 ? null : 'PT5H';
+        return new Response(JSON.stringify({ id: 42, displayId: 'OP-42', subject: 'Export', lockVersion: estimateCalls + 1, estimatedTime }));
+      }
+      throw new Error(`unexpected ${value}`);
+    }) as typeof fetch;
+    const service = new OpenProjectTimesheetService({ config, projectRepo, taskRepo, runRepo, eventRepo, entryRepo, fetchFn, eventBus: { emit: () => true } });
+    const result = await service.run('op', '2026-11-04');
+    // Only 1 attempt sent PATCH; retry aborted without sending another PATCH
+    expect(estimateCalls).toBe(1);
+    expect(result.estimateSkipped).toBeDefined();
+    expect(result.estimateSkipped![0].reason).toContain('người khác');
     db.close(); fs.rmSync(root, { recursive: true, force: true });
   });
 

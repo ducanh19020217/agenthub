@@ -410,17 +410,19 @@ export class NotificationService {
       }
 
       case 'tracker.timesheet.posted': {
-        const rows = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; subject?: string; hours?: number; rawHours?: number }> : [];
+        const rows = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; subject?: string; hours?: number; rawHours?: number; estimateHours?: number }> : [];
+        const skipped = Array.isArray(p.estimateSkipped) && p.estimateSkipped.length ? `; bỏ qua estimate: ${p.estimateSkipped.map((item: { displayId?: string; reason?: string }) => `[${item.displayId || '?'}] ${item.reason || ''}`).join(', ')}` : '';
         const missing = Array.isArray(p.withoutTicket) && p.withoutTicket.length ? `; chưa có ticket: ${p.withoutTicket.map((item: { taskId?: string; subject?: string }) => `${item.taskId || '?'} ${item.subject || ''}`).join(', ')}` : '';
         const stale = Array.isArray(p.missingFromDate) && p.missingFromDate.length ? `; ticket không còn trong ngày: ${p.missingFromDate.join(', ')}` : '';
         const minimum = p.overMinimum ? '; tổng vượt giờ do mức tối thiểu' : '';
-        this.notify(`${this.appName}: đã ghi bảng giờ ${p.sourceId || 'OpenProject'} (${p.hours || 0}h) ${rows.map((row) => `[${row.displayId || '?'}] ${row.subject || ''} — thực tế ${row.hours || 0}h · estimate ${row.rawHours ?? row.hours ?? 0}h`).join('; ')}${missing}${stale}${minimum}`, 'normal');
+        this.notify(`${this.appName}: đã ghi bảng giờ ${p.sourceId || 'OpenProject'} (${formatHours(p.hours)}h) ${rows.map((row) => `[${row.displayId || '?'}] ${row.subject || ''} — thực tế ${formatHours(row.hours)}h · estimate ${formatHours(row.estimateHours ?? row.rawHours ?? row.hours)}h`).join('; ')}${skipped}${missing}${stale}${minimum}`, 'normal');
         break;
       }
       case 'tracker.timesheet.failed': {
         const posted = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; hours?: number }> : [];
-        const partial = posted.length ? `; đã ghi được: ${posted.map((row) => `[${row.displayId || '?'}] ${row.hours || 0}h`).join(', ')}` : '';
-        this.notify(`${this.appName}: ghi bảng giờ thất bại${typeof p.error === 'string' ? `: ${p.error}` : ''}${partial}`, 'critical');
+        const partial = posted.length ? `; đã ghi được: ${posted.map((row) => `[${row.displayId || '?'}] ${formatHours(row.hours)}h`).join(', ')}` : '';
+        const skipped = Array.isArray(p.estimateSkipped) && p.estimateSkipped.length ? `; bỏ qua estimate: ${p.estimateSkipped.map((item: { displayId?: string; reason?: string }) => `[${item.displayId || '?'}] ${item.reason || ''}`).join(', ')}` : '';
+        this.notify(`${this.appName}: ghi bảng giờ thất bại${typeof p.error === 'string' ? `: ${p.error}` : ''}${partial}${skipped}`, 'critical');
         break;
       }
 
@@ -855,4 +857,11 @@ export class NotificationService {
     this.lastSentDisk.set(state, now);
     return true;
   }
+}
+
+function formatHours(h: unknown): string {
+  const num = typeof h === 'number' ? h : Number(h || 0);
+  if (Number.isNaN(num)) return '0';
+  const rounded = Math.round(num * 100) / 100;
+  return String(rounded).replace('.', ',');
 }

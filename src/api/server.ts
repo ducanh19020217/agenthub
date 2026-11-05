@@ -739,6 +739,7 @@ export async function createServer(
 
   // --- Config API ---
   fastify.get('/api/presets', async () => service.getPresets());
+  fastify.get('/api/presets/current', async () => service.getCurrentGlobalPreset());
   fastify.post('/api/presets/apply', async (req: FastifyRequest) => service.applyPreset(req.body));
 
   fastify.get('/api/config', async () => {

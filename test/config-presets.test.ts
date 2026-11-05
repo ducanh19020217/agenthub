@@ -491,6 +491,20 @@ describe('Config Presets, Priority, and Effective Config', () => {
     });
   });
 
+  describe('5b. Preset toàn cục đang dùng', () => {
+    it('GET /api/presets/current nhận ra preset vừa áp dụng, chỉnh tay thì thành custom', async () => {
+      const current = async () => JSON.parse((await server.inject({ method: 'GET', url: '/api/presets/current', headers: authHeaders() })).body).preset;
+      for (const preset of ['safe', 'balanced', 'auto'] as const) {
+        const res = await server.inject({ method: 'POST', url: '/api/presets/apply', headers: authHeaders(), payload: { scope: 'global', preset, dryRun: false } });
+        expect(res.statusCode).toBe(200);
+        expect(await current()).toBe(preset);
+      }
+      const patch = await server.inject({ method: 'PUT', url: '/api/config', headers: authHeaders(), payload: { autoFixOnFail: false } });
+      expect(patch.statusCode).toBe(200);
+      expect(await current()).toBe('custom');
+    });
+  });
+
   describe('6. Tương thích ngược integration.autoMerge', () => {
     it('đọc JSON cũ có integration.autoMerge=true thì review.autoMerge nhận true', () => {
       const parsed = parseProjectSettings(JSON.stringify({

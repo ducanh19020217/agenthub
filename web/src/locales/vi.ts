@@ -1184,6 +1184,8 @@ export const vi = {
     presetAutoDesc: 'Tự động hoá tối đa: Codex review và tự merge khi check pass, tự sửa lỗi, không cần duyệt kế hoạch. Yêu cầu ít nhất một check.',
     presetsTitle: 'Preset cấu hình',
     presetsSubtitle: 'Chọn một trong 3 preset chuẩn để áp dụng nhanh cấu hình phù hợp.',
+    presetActive: 'Đang dùng',
+    presetCustom: 'Cấu hình hiện tại đã được chỉnh tay, không khớp preset nào.',
     presetApplyBtn: 'Áp dụng',
     presetApplying: 'Đang áp dụng...',
     presetPreviewDiff: 'Xem thay đổi (Diff)',

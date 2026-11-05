@@ -80,7 +80,7 @@ import { createNewGitProject, inspectProject, readClaudeSessionExcerpt } from '.
 import type { DeployService } from '../deploy.js';
 import type { RemoteDeployService, RemoteDeployStatus } from '../remote-deploy.js';
 import type { PerfCollector } from '../perf.js';
-import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../presets.js';
+import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset, detectGlobalPreset } from '../presets.js';
 import type { SetupTools } from '../setup-tools.js';
 import { computeEffectiveConfig } from '../effective-config.js';
 import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
@@ -5421,6 +5421,10 @@ export class AppService {
 
   getPresets() {
     return Object.values(PRESET_DEFINITIONS);
+  }
+
+  getCurrentGlobalPreset() {
+    return { preset: detectGlobalPreset(this.config) };
   }
 
   applyPreset(raw: unknown) {

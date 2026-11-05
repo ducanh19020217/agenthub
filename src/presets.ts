@@ -176,6 +176,32 @@ export function detectPresetMatch(
   return true;
 }
 
+/**
+ * Which preset the global config currently matches, or 'custom'. Mirrors what
+ * applyPreset(scope=global) writes; reviewer models are not compared so a
+ * different Codex/Claude model still counts as the same preset.
+ */
+export function detectGlobalPreset(config: AgentHubConfig): PresetLevel | 'custom' {
+  const engines = (config.reviewer?.order || []).map((item) => item.engine);
+  const expectedEngines: Record<PresetLevel, string[]> = {
+    safe: [],
+    balanced: ['codex', 'claude'],
+    auto: ['codex'],
+  };
+  for (const level of ['safe', 'balanced', 'auto'] as const) {
+    const def = PRESET_DEFINITIONS[level].config;
+    if (config.brain.mode !== def.brain.mode) continue;
+    if (config.brain.permissions !== def.brain.permissions) continue;
+    if (Boolean(config.autoFixOnFail) !== def.autoFixOnFail) continue;
+    if (Boolean(config.planning?.requireApproval) !== def.planning.requireApproval) continue;
+    if ((config.planning?.approvalMinTasks ?? 0) !== def.planning.approvalMinTasks) continue;
+    if ((config.reviewer?.maxChangesRequested ?? 2) !== def.review.maxRounds) continue;
+    if (engines.join(',') !== expectedEngines[level].join(',')) continue;
+    return level;
+  }
+  return 'custom';
+}
+
 export function detectProjectPreset(
   project: ProjectRow,
   globalConfig: AgentHubConfig,

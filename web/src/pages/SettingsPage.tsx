@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getProfiles, getModelOptions, getPresets, applyPreset } from '../api/client';
+import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getProfiles, getModelOptions, getPresets, applyPreset, getCurrentPreset } from '../api/client';
 import type { ReviewerFallback, ReviewerOrderItem, PresetLevel, ApplyPresetResult } from '../types/api';
 import { Save, CheckCircle2, AlertCircle, Info, MessageSquare, Bell, ArrowUp, ArrowDown, Plus, Trash2 } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
@@ -98,6 +98,8 @@ export const SettingsPage: React.FC = () => {
   const shutdownMutation = useMutation({ mutationFn: () => shutdownHub(shutdownDisable), onSuccess: () => { setShutdownOpen(false); setShutdownDone(true); } });
 
   const { data: presets = [] } = useQuery({ queryKey: ['presets'], queryFn: getPresets });
+  // Under ['config'] so every config save/apply that invalidates the config also refreshes it.
+  const { data: currentPreset } = useQuery({ queryKey: ['config', 'currentPreset'], queryFn: getCurrentPreset });
   const [selectedPreset, setSelectedPreset] = useState<PresetLevel | null>(null);
   const [diffResult, setDiffResult] = useState<ApplyPresetResult | null>(null);
   const [presetApplySuccess, setPresetApplySuccess] = useState<string | null>(null);
@@ -520,6 +522,9 @@ export const SettingsPage: React.FC = () => {
         <div>
           <h2 className="text-base font-semibold text-[var(--t-text)]">{t('settings.presetsTitle')}</h2>
           <p className="text-sm text-[var(--t-text-3)]">{t('settings.presetsSubtitle')}</p>
+          {currentPreset?.preset === 'custom' && (
+            <p data-testid="preset-active-custom" className="text-xs text-[var(--t-text-3)]">{t('settings.presetCustom')}</p>
+          )}
         </div>
 
         {presetApplySuccess && (
@@ -542,6 +547,7 @@ export const SettingsPage: React.FC = () => {
             const title = pDef?.name?.[locale as 'vi' | 'en'] || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}`);
             const desc = pDef?.description?.[locale as 'vi' | 'en'] || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}Desc`);
             const isSelected = selectedPreset === level;
+            const isActive = currentPreset?.preset === level;
             return (
               <div
                 key={level}
@@ -550,11 +556,20 @@ export const SettingsPage: React.FC = () => {
                 className={`cursor-pointer rounded-xl border p-4 space-y-2 transition-all hover:border-[var(--t-accent)] ${
                   isSelected
                     ? 'border-[var(--t-accent)] bg-[color-mix(in_srgb,var(--t-accent)_8%,transparent)] ring-2 ring-[var(--t-accent)]'
-                    : 'border-[var(--t-border)] bg-[var(--t-surface-2)]'
+                    : isActive
+                      ? 'border-[var(--t-accent)] bg-[color-mix(in_srgb,var(--t-accent)_8%,transparent)]'
+                      : 'border-[var(--t-border)] bg-[var(--t-surface-2)]'
                 }`}
               >
                 <div className="flex items-center justify-between">
-                  <span className="font-semibold text-sm text-[var(--t-text)]">{title}</span>
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-semibold text-sm text-[var(--t-text)]">{title}</span>
+                    {isActive && (
+                      <span data-testid={`preset-active-${level}`} className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-[var(--t-accent)] text-[var(--t-on-accent)]">
+                        {t('settings.presetActive')}
+                      </span>
+                    )}
+                  </span>
                   <button
                     type="button"
                     className="text-xs px-2.5 py-1 rounded bg-[var(--t-surface)] border border-[var(--t-border)] text-[var(--t-accent)] font-medium hover:bg-[var(--t-hover)]"

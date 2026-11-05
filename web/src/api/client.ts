@@ -35,6 +35,7 @@ import {
   Department,
   EventItem,
   PresetDetails,
+  PresetLevel,
   ApplyPresetInput,
   ApplyPresetResult,
   EffectiveConfigResponse,
@@ -350,6 +351,7 @@ export const updateDepartmentProfiles = (id: string, profiles: Array<Pick<Depart
 export const updateDepartmentProjects = (id: string, data: { projectIds?: string[]; projectId?: string }) => apiFetch<Department>(`/api/departments/${encodeURIComponent(id)}/projects`, { method: 'PUT', body: JSON.stringify(data) });
 
 export const getPresets = () => apiFetch<PresetDetails[]>('/api/presets');
+export const getCurrentPreset = () => apiFetch<{ preset: PresetLevel | 'custom' }>('/api/presets/current');
 export const applyPreset = (input: ApplyPresetInput) => apiFetch<ApplyPresetResult>('/api/presets/apply', { method: 'POST', body: JSON.stringify(input) });
 export const getEffectiveConfig = (projectId: string) => apiFetch<EffectiveConfigResponse>(`/api/projects/${encodeURIComponent(projectId)}/effective-config`);
 

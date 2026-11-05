@@ -165,6 +165,7 @@ describe('Simple Settings UI (f-simple-settings-ui)', () => {
     localStorage.clear();
 
     vi.spyOn(client, 'getPresets').mockResolvedValue(mockPresets);
+    vi.spyOn(client, 'getCurrentPreset').mockResolvedValue({ preset: 'balanced' });
     vi.spyOn(client, 'getDepartments').mockResolvedValue(mockDepartments);
     vi.spyOn(client, 'getProjects').mockResolvedValue([mockProject]);
     vi.spyOn(client, 'getProfiles').mockResolvedValue(mockProfiles);
@@ -195,6 +196,21 @@ describe('Simple Settings UI (f-simple-settings-ui)', () => {
         expect(advanced).toBeInTheDocument();
         expect(advanced.open).toBe(false);
       });
+    });
+
+    it('marks the preset currently in use', async () => {
+      renderWithProviders(<SettingsPage />);
+      await waitFor(() => expect(screen.getByTestId('preset-active-balanced')).toBeInTheDocument());
+      expect(screen.queryByTestId('preset-active-safe')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('preset-active-auto')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('preset-active-custom')).not.toBeInTheDocument();
+    });
+
+    it('says when the config matches no preset', async () => {
+      vi.spyOn(client, 'getCurrentPreset').mockResolvedValue({ preset: 'custom' });
+      renderWithProviders(<SettingsPage />);
+      await waitFor(() => expect(screen.getByTestId('preset-active-custom')).toBeInTheDocument());
+      expect(screen.queryByTestId('preset-active-balanced')).not.toBeInTheDocument();
     });
 
     it('triggers dry-run on preset card click and displays diff table preview', async () => {

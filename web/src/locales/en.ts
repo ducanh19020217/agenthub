@@ -1185,6 +1185,8 @@ export const en: typeof vi = {
     presetAutoDesc: 'Maximum automation: Codex review and auto-merge on pass, auto-fix, no plan approval. Requires at least one check.',
     presetsTitle: 'Configuration Presets',
     presetsSubtitle: 'Select one of 3 standard presets to quickly apply suitable configuration.',
+    presetActive: 'In use',
+    presetCustom: 'The current configuration has been customised and does not match any preset.',
     presetApplyBtn: 'Apply',
     presetApplying: 'Applying...',
     presetPreviewDiff: 'Preview Diff',

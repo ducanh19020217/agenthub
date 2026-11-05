@@ -86,9 +86,25 @@ describe('manual timesheet page', () => {
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><LocaleProvider initialLocale="vi"><ThemeProvider><TimesheetPage /></ThemeProvider></LocaleProvider></QueryClientProvider>);
     expect(await screen.findByText('OP-42')).toBeInTheDocument();
     const row = screen.getByText('OP-42').closest('tr')!; fireEvent.click(within(row).getByLabelText('Cố định')); await waitFor(() => expect(updateManual).toHaveBeenCalledWith('m1', expect.objectContaining({ pinned: true })));
+    await waitFor(() => expect(getTimesheet.mock.calls.length).toBeGreaterThan(1));
     fireEvent.click(screen.getByRole('button', { name: 'Sửa' }));
     fireEvent.click(screen.getByRole('button', { name: 'Xóa OP-42' })); await waitFor(() => expect(deleteManual).toHaveBeenCalledWith('m1'));
     fireEvent.click(screen.getByRole('button', { name: 'Ghi lên OpenProject' })); expect(await screen.findByTestId('timesheet-toast')).toHaveTextContent('write failed');
+  });
+
+  it('submits a manual entry and keeps the save button busy until the request completes', async () => {
+    getTimesheet.mockResolvedValue({ sourceId: 'op', date: '2026-11-05', hours: 8, entries: [], overMinimum: false });
+    let resolveAdd!: (value: unknown) => void;
+    addManual.mockReturnValueOnce(new Promise((resolve) => { resolveAdd = resolve; }));
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><LocaleProvider initialLocale="vi"><ThemeProvider><TimesheetPage /></ThemeProvider></LocaleProvider></QueryClientProvider>);
+    await screen.findByText('Thêm việc thủ công');
+    fireEvent.change(screen.getByPlaceholderText('Tìm mã hoặc tên ticket'), { target: { value: 'OP-42' } });
+    fireEvent.change(screen.getByLabelText('Mô tả'), { target: { value: 'Kiểm tra thủ công' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Thêm' }));
+    await waitFor(() => expect(addManual).toHaveBeenCalledWith(expect.objectContaining({ ticket: 'OP-42', description: 'Kiểm tra thủ công' })));
+    expect(screen.getByRole('button', { name: 'Thêm' })).toBeDisabled();
+    resolveAdd({});
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Thêm' })).not.toBeDisabled());
   });
 
   it('shows the parent selector when creating a new ticket', async () => {

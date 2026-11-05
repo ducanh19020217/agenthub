@@ -108,6 +108,44 @@ describe('manual timesheet allocation and persistence', () => {
     f.db.close(); fs.rmSync(f.root, { recursive: true, force: true });
   });
 
+  it('updates an existing OpenProject entry after manual work is removed and reports stale tickets', async () => {
+    const f = fixture();
+    f.manualRepo.insert({ id: 'm-delete', source_id: 'op', spent_on: '2026-11-04', wp_id: 42, display_id: 'OP-42', description: 'Việc thủ công', active_hours: 1, wait_hours: 0, level: 'easy', pinned: 0 });
+    f.entryRepo.upsert({ source_id: 'op', spent_on: '2026-11-04', wp_id: 42, entry_id: 99, hours: 1, raw_hours: 1, written_estimate: null });
+    f.manualRepo.delete('m-delete');
+    const calls: Array<{ url: string; method?: string; body?: string }> = [];
+    const baseFetch = f.fetchFn;
+    (f.service as unknown as { fetchFn: typeof fetch }).fetchFn = (async (url: string | URL, init?: RequestInit) => {
+      calls.push({ url: url.toString(), method: init?.method, body: typeof init?.body === 'string' ? init.body : undefined });
+      return baseFetch(url, init);
+    }) as typeof fetch;
+    const result = await f.service.run('op', '2026-11-04');
+    expect(result.missingFromDate).toEqual([]);
+    expect(calls.some((call) => call.method === 'PATCH' && call.url.endsWith('/time_entries/99'))).toBe(true);
+    expect(JSON.parse(calls.find((call) => call.method === 'PATCH' && call.url.endsWith('/time_entries/99'))!.body!).comment).toBeTruthy();
+
+    f.entryRepo.upsert({ source_id: 'op', spent_on: '2026-11-04', wp_id: 404, entry_id: 100, hours: 1, raw_hours: 1, written_estimate: null });
+    expect((await f.service.preview('op', '2026-11-04')).missingFromDate).toContain(404);
+    f.db.close(); fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it('writes the combined manual description and raw estimate to OpenProject', async () => {
+    const f = fixture();
+    f.manualRepo.insert({ id: 'm-comment', source_id: 'op', spent_on: '2026-11-04', wp_id: 42, display_id: 'OP-42', description: 'Trao đổi với khách', active_hours: 2, wait_hours: 1, level: 'hard', pinned: 0 });
+    const calls: Array<{ url: string; method?: string; body?: string }> = [];
+    const baseFetch = f.fetchFn;
+    (f.service as unknown as { fetchFn: typeof fetch }).fetchFn = (async (url: string | URL, init?: RequestInit) => {
+      calls.push({ url: url.toString(), method: init?.method, body: typeof init?.body === 'string' ? init.body : undefined });
+      return baseFetch(url, init);
+    }) as typeof fetch;
+    const result = await f.service.run('op', '2026-11-04');
+    const timeEntry = calls.find((call) => call.url.endsWith('/time_entries') && call.method === 'POST');
+    expect(timeEntry).toBeDefined();
+    expect(JSON.parse(timeEntry!.body!).comment.raw).toContain('Trao đổi với khách');
+    expect(result.entries[0].estimateHours).toBeGreaterThan(result.entries[0].hours);
+    f.db.close(); fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
   it('validates manual API payloads and day totals', async () => {
     const app = Fastify({ logger: false }); app.setErrorHandler((error, _request, reply) => reply.status(error.statusCode && error.statusCode >= 400 ? error.statusCode : 400).send({ message: error.message })); const config = loadConfig(fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-routes-'))); config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo' })];
     registerOpenProjectRoutes(app, config, { timesheetManualAdd: async (input) => input, timesheetManualUpdate: async (_id, input) => input, timesheetDaySet: async (sourceId, date, hours) => ({ sourceId, date, hours }) }); await app.ready();

@@ -138,6 +138,20 @@ describe('AgentHub MCP Server Tools', () => {
     expect(add.content[0].text).toMatch(/lớn hơn 0|greater than 0/i);
   });
 
+  it('passes a valid manual entry through the MCP add tool', async () => {
+    (ctx.timesheetService as unknown as { fetchFn: typeof fetch }).fetchFn = (async (url: string | URL, _init?: RequestInit) => {
+      const value = url.toString();
+      if (value.includes('/work_packages?')) return new Response(JSON.stringify({ _embedded: { elements: [{ id: 1, displayId: 'OP-1', subject: 'Ticket 1', lockVersion: 1 }] }, total: 1 }));
+      if (value.endsWith('/time_entries')) return new Response(JSON.stringify({ id: 10 }));
+      return new Response(JSON.stringify({ _embedded: { elements: [] }, total: 0 }));
+    }) as typeof fetch;
+    const add = (await client.callTool({ name: 'hub_timesheet_add', arguments: {
+      ticket: 'OP-1', description: 'Trao đổi khách', activeHours: 1, waitHours: 0.5, pinned: true,
+    } })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(add.isError).not.toBe(true);
+    expect(add.content[0].text).toContain('source_id');
+  });
+
   it('hub_status returns overview with task counts, running tasks, and profile quota status', async () => {
     ctx.profileRepo.upsert({
       name: 'chinh',

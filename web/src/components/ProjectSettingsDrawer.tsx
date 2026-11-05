@@ -1145,13 +1145,13 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
 
     const payload: UpdateProjectInput = {};
     if (draftDefaultBranch.trim() !== (project.defaultBranch || 'main')) {
-      const activeTasks = projectTasks.filter((task: any) => ['queued', 'running', 'checking', 'review'].includes(task.status));
-      if (activeTasks.length > 0 && !window.confirm(t('projects.defaultBranchChangeConfirm', { count: activeTasks.length }))) return;
       const branchError = validateBranchSyntax(draftDefaultBranch, t);
       if (branchError) {
         setSectionErrors((prev) => ({ ...prev, git: branchError }));
         return;
       }
+      const activeTasks = projectTasks.filter((task: any) => ['queued', 'running', 'checking', 'review'].includes(task.status));
+      if (activeTasks.length > 0 && !window.confirm(t('projects.defaultBranchChangeConfirm', { count: activeTasks.length }))) return;
       payload.defaultBranch = draftDefaultBranch.trim();
     }
 
@@ -1307,7 +1307,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
             </div>
           )}
 
-          {/* Section 1: Preset & Phòng ban */}
+          {/* Section 0: Git */}
           <Card className="p-5 space-y-4" data-testid="project-git-section">
             <div>
               <h3 className="text-sm font-bold text-[var(--t-text)] flex items-center gap-2"><GitBranch className="w-4 h-4 text-[var(--t-accent)]" />{t('projects.gitTitle')}</h3>

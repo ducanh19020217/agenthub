@@ -332,6 +332,7 @@ export async function createServer(
   });
 
   fastify.post('/api/projects/inspect', async (req: FastifyRequest) => service.inspectProject(req.body));
+  fastify.post('/api/projects/inspect-git', async (req: FastifyRequest) => service.inspectProjectGit(req.body));
 
   fastify.post('/api/projects/:id/guidance', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };

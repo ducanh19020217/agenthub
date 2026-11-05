@@ -27,6 +27,8 @@ function sanitizeRemote(value: string): string {
     url.password = '';
     return url.toString().replace(/^ssh:\/\//, '').replace(/\/$/, '');
   } catch {
+    const scpCredentials = value.match(/^[^/@\s:]+:[^/@\s]+@(.+)$/);
+    if (scpCredentials) return scpCredentials[1].trim();
     return value.replace(/(ssh:\/\/|https?:\/\/)([^/@]+):([^/@]+)@/i, '$1').trim();
   }
 }
@@ -36,14 +38,13 @@ export async function inspectGitProject(repoPath: string, defaultBranch: string)
     const [current, locals, remotes, dirtyOutput, remoteOutput] = await Promise.all([
       git(repoPath, ['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => null),
       git(repoPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']),
-      git(repoPath, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes/origin']),
+      git(repoPath, ['for-each-ref', '--format=%(refname:lstrip=3)', 'refs/remotes/origin']),
       git(repoPath, ['status', '--porcelain']),
       git(repoPath, ['remote', 'get-url', 'origin']).catch(() => ''),
     ]);
     const localBranches = locals.split('\n').map((item) => item.trim()).filter(Boolean);
     const remoteBranches = remotes.split('\n').map((item) => item.trim()).filter(Boolean)
-      .filter((item) => item !== 'origin/HEAD')
-      .map((item) => item.replace(/^origin\//, ''));
+      .filter((item) => item !== 'HEAD');
     let aheadBehind: { ahead: number; behind: number } | null = null;
     if (remoteBranches.includes(defaultBranch)) {
       try {

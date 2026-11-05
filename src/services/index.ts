@@ -1631,6 +1631,16 @@ export class AppService {
     return inspectProject(input.path);
   }
 
+  async inspectProjectGit(raw: unknown) {
+    const input = z.object({ path: z.string().min(1) }).parse(raw);
+    if (!path.isAbsolute(input.path)) throw new HttpError(400, 'bad_request', 'Đường dẫn phải là đường dẫn tuyệt đối');
+    try {
+      return await inspectGitProject(input.path, 'main');
+    } catch (error) {
+      throw new HttpError(400, 'bad_request', error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async getProjectGitStatus(id: string) {
     const project = this.projectRepo.get(id);
     if (!project) throw new HttpError(404, 'not_found', `Project "${id}" không tồn tại`);

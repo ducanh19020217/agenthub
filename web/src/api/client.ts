@@ -368,6 +368,7 @@ export async function getArchivedProjects(): Promise<Project[]> {
 }
 
 export const inspectProject = (path: string) => apiFetch<ProjectInspection>('/api/projects/inspect', { method: 'POST', body: JSON.stringify({ path }) });
+export const inspectProjectGit = (path: string) => apiFetch<ProjectGitStatus>('/api/projects/inspect-git', { method: 'POST', body: JSON.stringify({ path }) });
 export const createNewProject = (data: CreateNewProjectInput) => apiFetch<Project>('/api/projects/new', { method: 'POST', body: JSON.stringify(data) });
 export const writeProjectGuidance = (projectId: string, content: string) =>
   apiFetch<{ ok: boolean }>(`/api/projects/${encodeURIComponent(projectId)}/guidance`, {

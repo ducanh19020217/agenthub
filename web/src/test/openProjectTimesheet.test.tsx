@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { LocaleProvider } from '../context/LocaleContext';
 import { ThemeProvider } from '../context/ThemeContext';
@@ -78,5 +78,23 @@ describe('manual timesheet page', () => {
     expect(screen.getByText('Thêm việc thủ công')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Tổng giờ ngày'), { target: { value: '9' } });
     expect(screen.getByLabelText('Tổng giờ ngày')).toHaveValue(9);
+  });
+
+  it('edits, toggles, deletes manual work and shows create-ticket parent plus toast errors', async () => {
+    getTimesheet.mockResolvedValue({ sourceId: 'op', date: '2026-11-05', hours: 8, entries: [{ wpId: 42, displayId: 'OP-42', subject: 'Deploy', comment: 'Deploy', kind: 'manual', rawHours: 2, hours: 2, pinned: false, manualIds: ['m1'] }], overMinimum: false });
+    updateManual.mockResolvedValue({}); deleteManual.mockResolvedValue({}); writeDay.mockRejectedValueOnce(new Error('write failed'));
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><LocaleProvider initialLocale="vi"><ThemeProvider><TimesheetPage /></ThemeProvider></LocaleProvider></QueryClientProvider>);
+    expect(await screen.findByText('OP-42')).toBeInTheDocument();
+    const row = screen.getByText('OP-42').closest('tr')!; fireEvent.click(within(row).getByLabelText('Cố định')); await waitFor(() => expect(updateManual).toHaveBeenCalledWith('m1', expect.objectContaining({ pinned: true })));
+    fireEvent.click(screen.getByRole('button', { name: 'Sửa' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Xóa OP-42' })); await waitFor(() => expect(deleteManual).toHaveBeenCalledWith('m1'));
+    fireEvent.click(screen.getByRole('button', { name: 'Ghi lên OpenProject' })); expect(await screen.findByTestId('timesheet-toast')).toHaveTextContent('write failed');
+  });
+
+  it('shows the parent selector when creating a new ticket', async () => {
+    getTimesheet.mockResolvedValue({ sourceId: 'op', date: '2026-11-05', hours: 8, entries: [], overMinimum: false });
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><LocaleProvider initialLocale="vi"><ThemeProvider><TimesheetPage /></ThemeProvider></LocaleProvider></QueryClientProvider>);
+    await screen.findByText('Thêm việc thủ công'); fireEvent.click(screen.getByLabelText('Tạo ticket mới'));
+    expect(screen.getByLabelText('Ticket cha (tùy chọn)')).toBeInTheDocument();
   });
 });

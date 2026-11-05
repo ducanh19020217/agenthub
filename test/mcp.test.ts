@@ -114,6 +114,15 @@ describe('AgentHub MCP Server Tools', () => {
     expect(discover?.inputSchema.properties).not.toHaveProperty('key');
   });
 
+  it('exposes manual timesheet tools with optional source/date and validated hours', async () => {
+    const tools = await client.listTools();
+    const get = tools.tools.find((tool) => tool.name === 'hub_timesheet_get');
+    const add = tools.tools.find((tool) => tool.name === 'hub_timesheet_add');
+    expect(get).toBeDefined(); expect(add).toBeDefined();
+    expect(get?.inputSchema.properties).toMatchObject({ sourceId: {}, date: {} });
+    expect(add?.inputSchema.properties).toMatchObject({ description: {}, activeHours: { minimum: 0, maximum: 24 }, waitHours: { minimum: 0, maximum: 24 } });
+  });
+
   it('hub_status returns overview with task counts, running tasks, and profile quota status', async () => {
     ctx.profileRepo.upsert({
       name: 'chinh',

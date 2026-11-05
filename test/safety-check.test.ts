@@ -1,275 +1,99 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import Database from 'better-sqlite3';
 import {
-  isIgnoredHubEntry,
-  findUnexpectedHubEntries,
-  getHubSnapshot,
-  verifyHubHomeSafety,
+  assertTestIsolation,
   findHubEntryChanges,
   getAgyHomesSnapshot,
+  getHubSnapshot,
   verifyAgyHomesSafety,
+  verifyHubHomeSafety,
 } from './safety-check';
 
-describe('safety-check hub home comparison', () => {
+describe('safety-check isolation and metadata warnings', () => {
   let tempDir: string;
+  let warn: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-safety-test-'));
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   });
 
   afterEach(() => {
-    if (tempDir && fs.existsSync(tempDir)) {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
+    warn.mockRestore();
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('uses a temporary home and hub home during tests', () => {
-    expect(os.homedir()).toBe(process.env.HOME);
-    expect(process.env.AGENTHUB_HOME).toContain(process.env.AGENTHUB_TEST_TMP_ROOT);
-    expect(process.env.AGENTHUB_AGY_HOMES).toContain(process.env.AGENTHUB_TEST_TMP_ROOT);
+  it('passes for the test HOME and fails when any configured path is the real HOME', () => {
+    expect(() => assertTestIsolation({ home: tempDir, hubHome: path.join(tempDir, '.agenthub'), agyHomesDir: path.join(tempDir, '.agy-homes') })).not.toThrow();
+    const realHome = os.userInfo().homedir;
+    const saved = { HOME: process.env.HOME, AGENTHUB_HOME: process.env.AGENTHUB_HOME, AGENTHUB_AGY_HOMES: process.env.AGENTHUB_AGY_HOMES };
+    process.env.HOME = realHome;
+    process.env.AGENTHUB_HOME = path.join(realHome, '.agenthub');
+    process.env.AGENTHUB_AGY_HOMES = path.join(realHome, '.agy-homes');
+    expect(() => assertTestIsolation()).toThrow(/isolation is broken/);
+    process.env.HOME = saved.HOME;
+    process.env.AGENTHUB_HOME = saved.AGENTHUB_HOME;
+    process.env.AGENTHUB_AGY_HOMES = saved.AGENTHUB_AGY_HOMES;
   });
 
-  it('correctly classifies ignored hub entries', () => {
-    // web-staging-* / web-previous-*
-    expect(isIgnoredHubEntry('web-staging-abc')).toBe(true);
-    expect(isIgnoredHubEntry('web-staging-df7pHi')).toBe(true);
-    expect(isIgnoredHubEntry('web-previous-1234-5678')).toBe(true);
+  it('warns, without throwing, when a hub entry is added or removed', () => {
+    const hub = path.join(tempDir, '.agenthub');
+    fs.mkdirSync(hub);
+    const snap = getHubSnapshot(hub);
+    fs.mkdirSync(path.join(hub, 'runtime'));
+    verifyHubHomeSafety(snap);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('runtime'));
 
-    // Deploy runtime files and web directory
-    expect(isIgnoredHubEntry('web')).toBe(true);
-    expect(isIgnoredHubEntry('deploy-restart.json')).toBe(true);
-    expect(isIgnoredHubEntry('deploy-push-state.json')).toBe(true);
-
-    // Daemon runtime directories
-    expect(isIgnoredHubEntry('reports')).toBe(true);
-    expect(isIgnoredHubEntry('tracker')).toBe(true);
-    expect(isIgnoredHubEntry('logs')).toBe(true);
-
-    // Sensitive entries must NEVER be ignored
-    expect(isIgnoredHubEntry('config.json')).toBe(false);
-    expect(isIgnoredHubEntry('token')).toBe(false);
-    expect(isIgnoredHubEntry('hub.db')).toBe(false);
-    expect(isIgnoredHubEntry('hub.db-wal')).toBe(false);
-    expect(isIgnoredHubEntry('hub.db-shm')).toBe(false);
-    expect(isIgnoredHubEntry('secrets')).toBe(false);
-    expect(isIgnoredHubEntry('profiles')).toBe(false);
-
-    // Entries outside minimal allowlist must NOT be ignored
-    expect(isIgnoredHubEntry('unknown.txt')).toBe(false);
-    expect(isIgnoredHubEntry('deploy-pending-state.json')).toBe(false);
-    expect(isIgnoredHubEntry('chat-mcp.json')).toBe(false);
-    expect(isIgnoredHubEntry('unexpected-dir')).toBe(false);
-    expect(isIgnoredHubEntry('web-other')).toBe(false);
-    expect(isIgnoredHubEntry('daemon.log')).toBe(false);
-    expect(isIgnoredHubEntry('foo.tmp')).toBe(false);
-    expect(isIgnoredHubEntry('foo')).toBe(false);
+    warn.mockClear();
+    fs.rmSync(path.join(hub, 'runtime'), { recursive: true });
+    fs.writeFileSync(path.join(hub, 'removed'), 'x');
+    const withFile = getHubSnapshot(hub);
+    fs.rmSync(path.join(hub, 'removed'));
+    verifyHubHomeSafety(withFile);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('removed'));
   });
 
-  it('filters out ignored entries and detects unexpected additions', () => {
-    const before = ['web'];
-    const after = [
-      'web',
-      'web-staging-test',
-      'deploy-restart.json',
-      'reports',
-      'tracker',
-      'logs',
-      'hub.db-wal',
-      'unrecognized-file.txt',
-      'foo',
-    ];
-    // hub.db-wal is NOT ignored (sensitive), so it shows as unexpected along with foo and unrecognized-file.txt
-    expect(findUnexpectedHubEntries(before, after)).toEqual(['hub.db-wal', 'unrecognized-file.txt', 'foo']);
+  it('warns when config metadata changes, without reading its content', () => {
+    const hub = path.join(tempDir, '.agenthub');
+    fs.mkdirSync(hub);
+    fs.writeFileSync(path.join(hub, 'config.json'), '{}');
+    const snap = getHubSnapshot(hub);
+    const later = new Date(Date.now() + 2000);
+    fs.utimesSync(path.join(hub, 'config.json'), later, later);
+    verifyHubHomeSafety(snap);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('config.json'));
   });
 
-  it('only warns when a high-level entry has an unexpected name', () => {
-    fs.mkdirSync(path.join(tempDir, 'web'));
-    const snap = getHubSnapshot(tempDir);
-
-    fs.writeFileSync(path.join(tempDir, 'suspicious-file.txt'), 'content');
-
-    expect(() => verifyHubHomeSafety(snap)).not.toThrow();
+  it('warns when an agy profile is removed without inspecting profiles', () => {
+    const agyHomes = path.join(tempDir, '.agy-homes');
+    fs.mkdirSync(path.join(agyHomes, 'g1'), { recursive: true });
+    fs.writeFileSync(path.join(agyHomes, 'g1', 'token'), 'secret');
+    const snap = getAgyHomesSnapshot(agyHomes);
+    fs.rmSync(path.join(agyHomes, 'g1'), { recursive: true });
+    verifyAgyHomesSafety(snap);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('g1'));
   });
 
-  it('does not report violation when allowlisted runtime entries are added', () => {
-    const snap = getHubSnapshot(tempDir);
-
-    fs.writeFileSync(path.join(tempDir, 'deploy-push-state.json'), '{}');
-    fs.writeFileSync(path.join(tempDir, 'deploy-restart.json'), '{}');
-    fs.mkdirSync(path.join(tempDir, 'web-staging-abc'));
-    fs.mkdirSync(path.join(tempDir, 'web-previous-12345'));
-    fs.mkdirSync(path.join(tempDir, 'reports'));
-    fs.mkdirSync(path.join(tempDir, 'tracker'));
-    fs.mkdirSync(path.join(tempDir, 'logs'));
-
-    expect(() => verifyHubHomeSafety(snap)).not.toThrow();
+  it('does not read sensitive files while taking or comparing snapshots', () => {
+    const hub = path.join(tempDir, '.agenthub');
+    const agyHomes = path.join(tempDir, '.agy-homes');
+    fs.mkdirSync(path.join(hub, 'secrets'), { recursive: true });
+    fs.mkdirSync(path.join(hub, 'profiles'), { recursive: true });
+    fs.mkdirSync(path.join(agyHomes, 'g1'), { recursive: true });
+    fs.writeFileSync(path.join(hub, 'secrets', 'key'), 'secret');
+    fs.writeFileSync(path.join(hub, 'profiles', 'p'), 'profile');
+    fs.writeFileSync(path.join(agyHomes, 'g1', 'token'), 'secret');
+    const readFile = vi.spyOn(fs, 'readFileSync');
+    const open = vi.spyOn(fs, 'openSync');
+    verifyHubHomeSafety(getHubSnapshot(hub));
+    verifyAgyHomesSafety(getAgyHomesSnapshot(agyHomes));
+    expect(readFile).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
   });
 
-  it('allows web-staging-abc additions and warns for unexpected directories', () => {
-    const snap = getHubSnapshot(tempDir);
-
-    fs.mkdirSync(path.join(tempDir, 'web-staging-abc'));
-    fs.mkdirSync(path.join(tempDir, 'web-previous-9999'));
-    expect(() => verifyHubHomeSafety(snap)).not.toThrow();
-
-    fs.mkdirSync(path.join(tempDir, 'unexpected-dir'));
-    expect(() => verifyHubHomeSafety(snap)).not.toThrow();
-  });
-
-  it('reports added and removed high-level entries without inspecting their contents', () => {
+  it('reports added and removed top-level names', () => {
     expect(findHubEntryChanges(['a', 'b'], ['b', 'c'])).toEqual({ added: ['c'], removed: ['a'] });
-  });
-
-  it('warns when a whole existing profile is removed but fails when its file changes', () => {
-    const agyHomes = path.join(tempDir, 'agy-homes');
-    fs.mkdirSync(path.join(agyHomes, 'old'), { recursive: true });
-    fs.writeFileSync(path.join(agyHomes, 'old', 'metadata.json'), '{}');
-    const profile = getAgyHomesSnapshot(agyHomes);
-    fs.rmSync(path.join(agyHomes, 'old'), { recursive: true });
-    expect(() => verifyAgyHomesSafety(profile)).not.toThrow();
-    fs.mkdirSync(path.join(agyHomes, 'old'), { recursive: true });
-    fs.writeFileSync(path.join(agyHomes, 'old', 'metadata.json'), '{}');
-    fs.writeFileSync(path.join(agyHomes, 'old', 'changed.txt'), 'changed');
-    expect(() => verifyAgyHomesSafety(profile)).toThrow(/profile .* changed inside/);
-  });
-
-  it('reports violation when sensitive files are created during test', () => {
-    for (const name of ['config.json', 'token', 'hub.db', 'hub.db-wal', 'hub.db-shm', 'secrets', 'profiles']) {
-      const snap = getHubSnapshot(tempDir);
-      if (name === 'secrets' || name === 'profiles') {
-        fs.mkdirSync(path.join(tempDir, name));
-      } else {
-        fs.writeFileSync(path.join(tempDir, name), '{}');
-      }
-      expect(() => verifyHubHomeSafety(snap)).toThrow(/SAFETY NET VIOLATION/);
-      fs.rmSync(path.join(tempDir, name), { recursive: true, force: true });
-    }
-  });
-
-  it('reports violation when existing sensitive files are modified during test', () => {
-    // Set up all sensitive files and dirs with original content
-    const originals: [string, string][] = [
-      ['config.json', '{"original":true}'], ['token', 'original-token'],
-    ];
-    for (const [name, content] of originals) fs.writeFileSync(path.join(tempDir, name), content);
-    fs.mkdirSync(path.join(tempDir, 'secrets'));
-    fs.writeFileSync(path.join(tempDir, 'secrets', 'key.pem'), 'original');
-    fs.mkdirSync(path.join(tempDir, 'profiles'));
-    fs.writeFileSync(path.join(tempDir, 'profiles', 'default.json'), '{}');
-    const snap = getHubSnapshot(tempDir);
-
-    // Modify each sensitive file and verify detection, then restore
-    for (const [name, content] of originals) {
-      fs.writeFileSync(path.join(tempDir, name), 'MODIFIED');
-      expect(() => verifyHubHomeSafety(snap)).toThrow(new RegExp(`Sensitive entry changed: ${name.replace(/\./g, '\\.')}`));
-      fs.writeFileSync(path.join(tempDir, name), content);
-    }
-    // Modify sensitive directories
-    fs.writeFileSync(path.join(tempDir, 'secrets', 'key.pem'), 'modified');
-    expect(() => verifyHubHomeSafety(snap)).toThrow(/Sensitive entry changed: secrets/);
-    fs.writeFileSync(path.join(tempDir, 'secrets', 'key.pem'), 'original');
-    fs.writeFileSync(path.join(tempDir, 'profiles', 'default.json'), '{"changed":true}');
-    expect(() => verifyHubHomeSafety(snap)).toThrow(/Sensitive entry changed: profiles/);
-  });
-
-  it('does not report violation when non-sensitive table in hub.db is modified', () => {
-    const dbPath = path.join(tempDir, 'hub.db');
-    const db = new Database(dbPath);
-    db.exec('CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT)');
-    db.exec('CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT)');
-    db.prepare('INSERT INTO projects (id, name) VALUES (?, ?)').run('proj1', 'Project 1');
-    db.prepare('INSERT INTO events (type) VALUES (?)').run('heartbeat');
-    db.close();
-
-    const snap = getHubSnapshot(tempDir);
-
-    const db2 = new Database(dbPath);
-    db2.prepare('INSERT INTO events (type) VALUES (?)').run('heartbeat2');
-    db2.close();
-
-    expect(() => verifyHubHomeSafety(snap)).not.toThrow();
-  });
-
-  it('reports violation when sensitive table in hub.db is modified', () => {
-    const dbPath = path.join(tempDir, 'hub.db');
-    const db = new Database(dbPath);
-    db.exec('CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT)');
-    db.exec('CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT)');
-    db.prepare('INSERT INTO projects (id, name) VALUES (?, ?)').run('proj1', 'Project 1');
-    db.close();
-
-    const snap = getHubSnapshot(tempDir);
-
-    const db2 = new Database(dbPath);
-    db2.prepare('INSERT INTO projects (id, name) VALUES (?, ?)').run('proj2', 'Project 2');
-    db2.close();
-
-    expect(() => verifyHubHomeSafety(snap)).toThrow(
-      /SAFETY NET VIOLATION:.*Sensitive entry changed: hub\.db/,
-    );
-  });
-
-  it('reports violation when existing hub.db is deleted during test', () => {
-    const dbPath = path.join(tempDir, 'hub.db');
-    const db = new Database(dbPath);
-    db.exec('CREATE TABLE projects (id TEXT PRIMARY KEY)');
-    db.close();
-
-    const snap = getHubSnapshot(tempDir);
-    fs.rmSync(dbPath);
-
-    expect(() => verifyHubHomeSafety(snap)).toThrow(
-      /SAFETY NET VIOLATION:.*Sensitive entry changed: hub\.db/,
-    );
-  });
-
-  it('reports violation when existing hub.db-wal is deleted during test', () => {
-    const walPath = path.join(tempDir, 'hub.db-wal');
-    fs.writeFileSync(walPath, 'wal-content');
-
-    const snap = getHubSnapshot(tempDir);
-    fs.rmSync(walPath);
-
-    expect(() => verifyHubHomeSafety(snap)).toThrow(
-      /SAFETY NET VIOLATION:.*Sensitive entry changed: hub\.db-wal/,
-    );
-  });
-
-  it('reports violation when existing hub.db-shm is deleted during test', () => {
-    const shmPath = path.join(tempDir, 'hub.db-shm');
-    fs.writeFileSync(shmPath, 'shm-content');
-
-    const snap = getHubSnapshot(tempDir);
-    fs.rmSync(shmPath);
-
-    expect(() => verifyHubHomeSafety(snap)).toThrow(
-      /SAFETY NET VIOLATION:.*Sensitive entry changed: hub\.db-shm/,
-    );
-  });
-
-  it('does not report violation when only directory mtime changes', () => {
-    fs.writeFileSync(path.join(tempDir, 'deploy-restart.json'), 'initial');
-    const snap = getHubSnapshot(tempDir);
-
-    // Explicitly modify the directory mtime
-    const past = new Date(Date.now() - 100000);
-    fs.utimesSync(tempDir, past, past);
-
-    expect(() => verifyHubHomeSafety(snap)).not.toThrow();
-  });
-
-  it('reports violation when hub directory was created during test execution', () => {
-    const nonExistent = path.join(tempDir, 'new-hub-dir');
-    const snap = getHubSnapshot(nonExistent);
-    expect(snap.exists).toBe(false);
-
-    fs.mkdirSync(nonExistent);
-
-    expect(() => verifyHubHomeSafety(snap)).toThrow(
-      /SAFETY NET VIOLATION:.*was created during test execution/,
-    );
   });
 });

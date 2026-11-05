@@ -76,6 +76,7 @@ export const ProjectSettingsSchema = z.object({
   commitConvention: z.object({
     branchTemplate: z.string().min(1).max(200).default('agenthub/{slug}'),
     commitTemplate: z.string().min(1).max(200).default('{type}: {summary}'),
+    defaultRef: z.string().max(200).default(''),
     commitRegex: z.string().min(1).max(1000).optional(),
     mergeMessageTemplate: z.string().min(1).max(200).default("Merge branch '{branch}' into {target}"),
   }).default({}),

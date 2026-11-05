@@ -23,7 +23,7 @@ import {
 } from '../db/index.js';
 import { projectSettings } from '../projects/settings.js';
 import { isTriageTaskSlug, parseTriageAnalysis } from '../integrations/openproject/triage.js';
-import { renderCommitTemplate, renderTaskBranch } from '../commit-convention.js';
+import { renderCommitTemplate, renderTaskBranch, taskCommitRef } from '../commit-convention.js';
 import { isProjectWorktreeRootAccessible, projectWorktreeRoot, projectWorktreeRoots } from '../projects/paths.js';
 import { Engine, AgyEngine, CodexEngine } from '../engines/index.js';
 import { getModelFamily, getModelEngine, isKnownModel, QuotaService } from '../quota/index.js';
@@ -137,6 +137,15 @@ export function buildProtocolPrompt(
 
 export const renderProtocolPrompt = buildProtocolPrompt;
 export const renderNodeModulesInstruction = getNodeModulesPromptInstruction;
+
+export function buildCommitConventionPrompt(convention: ReturnType<typeof projectSettings>['commitConvention'], branch: string, ref: string, target: string): string {
+  const message = renderCommitTemplate(convention.commitTemplate, { type: 'feat', scope: 'scope', ref, summary: 'summary' });
+  const merge = renderCommitTemplate(convention.mergeMessageTemplate, { branch, target });
+  const refInstruction = convention.commitTemplate.includes('{ref}')
+    ? ref ? `\n- Mã ref bắt buộc: \`${ref}\`` : '\n- CẢNH BÁO: chưa có mã ref; hãy gắn ticket cho task hoặc đặt commitConvention.defaultRef trước khi commit.'
+    : '';
+  return `\n\n## Quy ước commit\n- Nhánh task: \`${branch}\`\n- Commit message mẫu: \`${message}\`\n- Merge message mẫu: \`${merge}\`\n- Thân commit phải có mô tả chi tiết về thay đổi và kết quả kiểm tra.${refInstruction}`;
+}
 
 export const PROTOCOL_PROMPT = buildProtocolPrompt({ worktree: { install: 'auto' } }, 'prepared');
 
@@ -3656,9 +3665,9 @@ export class Scheduler {
     // Write task.md
     let prompt = buildProtocolPrompt(settings, installResult);
     const convention = projectSettings(project).commitConvention;
+    const ref = taskCommitRef(project, task);
     const branchExample = renderTaskBranch(project, task);
-    prompt += `\n\n## Quy ước commit\n- Nhánh task: \`${branchExample}\`\n- Commit message mẫu: \`${renderCommitTemplate(convention.commitTemplate, { type: 'feat', scope: 'scope', ref: task.externalRef || 'REF-123', summary: 'summary' })}\`\n- Merge message mẫu: \`${renderCommitTemplate(convention.mergeMessageTemplate, { branch: branchExample, target: task.baseRef || project.defaultBranch })}\``;
-    if (convention.commitTemplate.includes('{ref}') && task.externalRef) prompt += `\n- External ref bắt buộc: \`${task.externalRef}\``;
+    prompt += buildCommitConventionPrompt(convention, branchExample, ref, task.baseRef || project.defaultBranch);
     if (task.resume) {
       prompt += '\n\nTask đã làm dở – kiểm tra git log/status rồi làm tiếp, không làm lại.';
     }

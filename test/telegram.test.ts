@@ -3826,6 +3826,18 @@ describe('Telegram theo dự án (b3-telegram-per-project)', () => {
     await bot.flushQueue(CHAT_ID);
     lastMsg = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1);
     expect(lastMsg?.body?.text).toContain('[A&lt;B &amp; C&gt;]');
+
+    currentTime += 15_000;
+    bot.handleEvent('review.auto_merge_skipped', 'p-prefix/task-1', {
+      reason: 'checks_failed', retried: true,
+      checks: [{ name: 'test', ok: false, outputTail: 'npm test\nError: token=telegram-secret' }],
+    });
+    await bot.flushQueue(CHAT_ID);
+    lastMsg = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1);
+    expect(lastMsg?.body?.text).toContain('đã được duyệt nhưng chưa tự merge');
+    expect(lastMsg?.body?.text).toContain('check <code>test</code> đỏ (đã chạy lại 1 lần)');
+    expect(lastMsg?.body?.text).toContain('Error: token=[redacted]');
+    expect(lastMsg?.body?.text).not.toContain('telegram-secret');
   });
 
   it('4. telegramContent = minimal khong lo tieu de trong moi duong gui', async () => {

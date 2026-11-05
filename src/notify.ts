@@ -10,6 +10,7 @@ import { formatReset } from './time-format.js';
 import { quotaLowText } from './quota/alerts.js';
 import { NotificationDeduper } from './notification-dedupe.js';
 import { QuotaService, QuotaCapacitySnapshot } from './quota/index.js';
+import { autoMergeReasonLabel, firstCheckError } from './auto-merge-notify.js';
 
 const WAITING_QUOTA_BATCH_DELAY_MS = 100;
 
@@ -182,6 +183,7 @@ export class NotificationService {
     if (level === 'off') return;
     if (level === 'important' && !new Set([
       'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
+      'review.auto_merge_skipped',
       'disk.low', 'disk.ok', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed', 'task.waiting_quota',
       'quota.cleared', 'remote_deploy.failed', 'remote_deploy.health_timeout',
       'merge.conflict', 'merge.failed',
@@ -349,6 +351,19 @@ export class NotificationService {
         break;
       }
 
+      case 'review.auto_merge_skipped': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const checks = Array.isArray(p.checks) ? p.checks as Array<{ name?: string; ok?: boolean; outputTail?: string }> : [];
+        const failed = checks.find((check) => !check.ok || check.outputTail);
+        const detail = firstCheckError(failed?.outputTail) ? `\n${firstCheckError(failed?.outputTail)}` : '';
+        const retryText = p.retried === true ? ' (đã chạy lại 1 lần)' : '';
+        const reason = p.reason === 'checks_failed'
+          ? `check \`${failed?.name || 'test'}\` đỏ${retryText}`
+          : autoMergeReasonLabel(p.reason);
+        this.notify(`✋ ${title} đã được duyệt nhưng chưa tự merge: ${reason}. Cần duyệt tay.${detail}`, 'critical');
+        break;
+      }
+
       case 'task.failed': {
         const title = this.resolveTaskTitle(taskId, p);
         this.notify(`${this.appName}: ${title} thất bại`, 'critical');
@@ -407,6 +422,21 @@ export class NotificationService {
       case 'tracker.writeback_failed': {
         const error = typeof p.error === 'string' ? `: ${p.error}` : '';
         this.notify(`${this.appName}: ghi ngược OpenProject thất bại${error}`, 'critical');
+        break;
+      }
+
+      case 'tracker.timesheet.posted': {
+        const rows = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; subject?: string; hours?: number }> : [];
+        const missing = Array.isArray(p.withoutTicket) && p.withoutTicket.length ? `; chưa có ticket: ${p.withoutTicket.map((item: { taskId?: string; subject?: string }) => `${item.taskId || '?'} ${item.subject || ''}`).join(', ')}` : '';
+        const stale = Array.isArray(p.missingFromDate) && p.missingFromDate.length ? `; ticket không còn trong ngày: ${p.missingFromDate.join(', ')}` : '';
+        const minimum = p.overMinimum ? '; tổng vượt giờ do mức tối thiểu' : '';
+        this.notify(`${this.appName}: đã ghi bảng giờ ${p.sourceId || 'OpenProject'} (${p.hours || 0}h) ${rows.map((row) => `[${row.displayId || '?'}] ${row.subject || ''} — ${row.hours || 0}h`).join('; ')}${missing}${stale}${minimum}`, 'normal');
+        break;
+      }
+      case 'tracker.timesheet.failed': {
+        const posted = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; hours?: number }> : [];
+        const partial = posted.length ? `; đã ghi được: ${posted.map((row) => `[${row.displayId || '?'}] ${row.hours || 0}h`).join(', ')}` : '';
+        this.notify(`${this.appName}: ghi bảng giờ thất bại${typeof p.error === 'string' ? `: ${p.error}` : ''}${partial}`, 'critical');
         break;
       }
 

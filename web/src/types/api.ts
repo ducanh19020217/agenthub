@@ -222,7 +222,7 @@ export interface ProjectSettings {
   preset?: 'safe' | 'balanced' | 'auto' | 'custom' | string;
   autoFixOnFail?: boolean;
   planning?: { requireApproval?: boolean; approvalMinTasks?: number };
-  commitConvention?: { branchTemplate: string; commitTemplate: string; commitRegex?: string; mergeMessageTemplate: string };
+  commitConvention?: { branchTemplate: string; commitTemplate: string; defaultRef?: string; commitRegex?: string; mergeMessageTemplate: string };
   brain: {
     engine?: 'inherit' | 'claude' | 'codex';
     codexProfile?: string;
@@ -251,10 +251,11 @@ export interface OpenProjectSource {
   minTicketNumber: number; autoStart: boolean; autoResolve: boolean; language: string;
   triage?: 'off' | 'approve' | 'auto'; triageModelChain?: string[]; feedbackStatusId?: number | null;
   split?: OpenProjectSplitConfig;
-  dailyReport?: { time: string; weekdaysOnly: boolean; dir?: string; maxItems: number; telegram: boolean };
+  dailyReport?: { enabled?: boolean; time: string; weekdaysOnly: boolean; dir?: string; maxItems: number; telegram: boolean };
+  timesheet?: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number };
 }
 export interface OpenProjectSplitConfig { typeIds: number[]; keyword: string | null; workerMayRequest: boolean; maxParts: number; createChildTickets: boolean; }
-export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured' | 'split'> { split: OpenProjectSplitConfig; key?: string; }
+export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured' | 'split' | 'timesheet'> { split: OpenProjectSplitConfig; timesheet: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number }; key?: string; }
 export interface OpenProjectStatusDto {
   id: number;
   name: string;
@@ -369,6 +370,9 @@ export interface Task {
   reviewerEscalated?: number;
   reviewerEscalatedAt?: string | null;
   reviewerEscalationReason?: string | null;
+  autoMergeSkippedReason?: string | null;
+  autoMergeSkippedChecks?: Array<{ name?: string; outputTail?: string }>;
+  autoMergeSkippedRetried?: boolean;
   reviewStep?: number;
   reviewRound?: number;
   reviewMaxRounds?: number;

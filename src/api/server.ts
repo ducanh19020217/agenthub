@@ -41,6 +41,8 @@ export async function createServer(
     onShutdown?: (disable: boolean) => void;
     openProjectSync?: (sourceId: string) => Promise<OpenProjectSyncResult>;
     openProjectDailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
+    openProjectTimesheetPreview?: (sourceId: string, date?: string) => Promise<unknown>;
+    openProjectTimesheetRun?: (sourceId: string, date?: string, hours?: number) => Promise<unknown>;
   },
 ): Promise<FastifyInstance> {
   const fastify = Fastify({ logger: false, forceCloseConnections: true });
@@ -185,8 +187,11 @@ export async function createServer(
   registerOpenProjectRoutes(fastify, config, {
     sync: options?.openProjectSync,
     dailyReport: options?.openProjectDailyReport || (service.dailyReportService ? (sourceId, date) => service.dailyReportService!.generateReport(sourceId, date ? parseDateNoon(date) : undefined, { overwrite: true }) : undefined),
+    timesheetPreview: options?.openProjectTimesheetPreview || (service.timesheetService ? (sourceId, date) => service.timesheetService!.preview(sourceId, date) : undefined),
+    timesheetRun: options?.openProjectTimesheetRun || (service.timesheetService ? (sourceId, date, hours) => service.timesheetService!.run(sourceId, date, hours) : undefined),
     decision: (sourceId, wpId, action, note) => service.decideOpenProjectTicket(sourceId, wpId, action, note),
     triageInput: (sourceId, wpId, content) => service.submitOpenProjectTriageInput(sourceId, wpId, content),
+    linkTicket: (sourceId, wpId, displayId, taskId) => service.linkOpenProjectTicket(sourceId, wpId, displayId, taskId),
   });
 
   fastify.post('/api/hub/shutdown', async (req) => {

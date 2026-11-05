@@ -25,10 +25,12 @@ import {
   BrainDirectiveRepo,
   CiRepo,
   TrackerItemRepo,
+  TimesheetEntryRepo,
 } from './db/index.js';
 import { CiWatchService } from './ci.js';
 import { OpenProjectIntakeService } from './integrations/openproject/intake.js';
 import { DailyReportService, parseDateNoon } from './integrations/openproject/daily-report.js';
+import { OpenProjectTimesheetService } from './integrations/openproject/timesheet.js';
 import { SetupTools } from './setup-tools.js';
 import { OpenProjectWritebackService } from './integrations/openproject/writeback.js';
 import { GiteaSyncService } from './integrations/gitea/service.js';
@@ -107,9 +109,11 @@ export interface DaemonContext {
   ciRepo: CiRepo;
   ciService: CiWatchService;
   trackerRepo: TrackerItemRepo;
+  timesheetEntryRepo: TimesheetEntryRepo;
   intakeService: OpenProjectIntakeService;
   writebackService: OpenProjectWritebackService;
   dailyReportService: DailyReportService;
+  timesheetService: OpenProjectTimesheetService;
   giteaSyncService: GiteaSyncService;
   perfCollector: PerfCollector;
 }
@@ -145,6 +149,7 @@ export function createContext(
   const quotaMarkRepo = new QuotaMarkRepo(db);
   const taskRepo = new TaskRepo(db);
   const trackerRepo = new TrackerItemRepo(db);
+  const timesheetEntryRepo = new TimesheetEntryRepo(db);
   const runRepo = new RunRepo(db);
   const runMetricsRepo = new RunMetricsRepo(db);
   const reviewRepo = new ReviewRepo(db);
@@ -411,6 +416,8 @@ export function createContext(
     eventBus: scheduler.getEventBus(),
   });
   service.dailyReportService = dailyReportService;
+  const timesheetService = new OpenProjectTimesheetService({ config, projectRepo, taskRepo, runRepo, eventRepo, entryRepo: timesheetEntryRepo, eventBus: scheduler.getEventBus() });
+  service.timesheetService = timesheetService;
 
   const giteaSyncService = new GiteaSyncService({
     config,
@@ -491,6 +498,8 @@ export function createContext(
     intakeService,
     writebackService,
     dailyReportService,
+    timesheetService,
+    timesheetEntryRepo,
     giteaSyncService,
     perfCollector,
   };
@@ -621,6 +630,7 @@ export async function startDaemon(
   ctx.intakeService.start();
   ctx.writebackService.start();
   ctx.dailyReportService.start();
+  ctx.timesheetService.start();
   ctx.giteaSyncService.start();
   ctx.perfCollector.start();
 
@@ -638,6 +648,8 @@ export async function startDaemon(
         date ? parseDateNoon(date) : undefined,
         { overwrite: true },
       ),
+    openProjectTimesheetPreview: (sourceId, date) => ctx.timesheetService.preview(sourceId, date),
+    openProjectTimesheetRun: (sourceId, date, hours) => ctx.timesheetService.run(sourceId, date, hours),
     onShutdown: (disable) => {
       if (disable) {
         try {

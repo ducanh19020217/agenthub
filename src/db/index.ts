@@ -938,6 +938,14 @@ export const MIGRATIONS: string[] = [
   DROP TABLE chat_sessions_setup_new;
   PRAGMA foreign_keys = ON;
   `,
+  // Migration 64: idempotent OpenProject timesheet writeback.
+  `
+  CREATE TABLE IF NOT EXISTS timesheet_entries (
+    source_id TEXT NOT NULL, spent_on TEXT NOT NULL, wp_id INTEGER NOT NULL,
+    entry_id INTEGER NOT NULL, hours REAL NOT NULL, updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source_id, spent_on, wp_id)
+  );
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -1175,6 +1183,8 @@ export interface TaskRow {
   reviewerEscalated?: number;
   reviewerEscalatedAt?: string | null;
   reviewerEscalationReason?: string | null;
+  autoMergeSkippedReason?: string | null;
+  autoMergeSkippedChecks?: unknown[];
   reviewStep?: number;
   doneReport?: string | null;
   blockedReport?: string | null;
@@ -2135,6 +2145,14 @@ export class EventRepo {
     return this.db
       .prepare('SELECT * FROM events WHERE taskId = ? ORDER BY id')
       .all(taskId) as EventRow[];
+  }
+
+  hasTimesheetPosted(sourceId: string, date: string): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM events
+      WHERE type = 'tracker.timesheet.posted'
+        AND json_extract(payload, '$.sourceId') = ?
+        AND json_extract(payload, '$.date') = ?
+      LIMIT 1`).get(sourceId, date));
   }
 
   page(options?: { taskId?: string; limit?: string | number; cursor?: string; offset?: string | number }): PageResult<EventRow> {
@@ -3214,6 +3232,31 @@ export interface TrackerItemRow {
 export class TrackerItemRepo {
   constructor(private db: Database.Database) {}
   get(sourceId: string, wpId: number): TrackerItemRow | undefined { return this.db.prepare('SELECT * FROM tracker_items WHERE source_id = ? AND wp_id = ?').get(sourceId, wpId) as TrackerItemRow | undefined; }
+  linkTask(sourceId: string, wpId: number, displayId: string, taskId: string): TrackerItemRow {
+    const existing = this.get(sourceId, wpId);
+    if (existing) {
+      let taskIds: string[];
+      try {
+        const parsed = JSON.parse(existing.task_ids || '[]');
+        taskIds = Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+      } catch {
+        taskIds = [];
+      }
+      if (!taskIds.includes(taskId)) taskIds.push(taskId);
+      this.db.prepare('UPDATE tracker_items SET task_ids = ? WHERE source_id = ? AND wp_id = ?').run(JSON.stringify(taskIds), sourceId, wpId);
+      return this.get(sourceId, wpId)!;
+    }
+    return this.upsert({
+      source_id: sourceId,
+      wp_id: wpId,
+      display_id: displayId,
+      status_id: null,
+      updated_at: new Date().toISOString(),
+      last_comment_id: null,
+      task_ids: JSON.stringify([taskId]),
+      writeback: '{}',
+    });
+  }
   delete(sourceId: string, wpId: number): void { this.db.prepare('DELETE FROM tracker_items WHERE source_id = ? AND wp_id = ?').run(sourceId, wpId); }
   upsert(row: Omit<TrackerItemRow, 'created_at'>): TrackerItemRow {
     this.db.prepare(`INSERT INTO tracker_items (source_id,wp_id,display_id,status_id,updated_at,last_comment_id,task_ids,writeback) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(source_id,wp_id) DO UPDATE SET display_id=excluded.display_id,status_id=excluded.status_id,updated_at=excluded.updated_at,last_comment_id=excluded.last_comment_id,task_ids=excluded.task_ids,writeback=excluded.writeback`).run(row.source_id,row.wp_id,row.display_id,row.status_id,row.updated_at,row.last_comment_id,row.task_ids,row.writeback);
@@ -3223,6 +3266,22 @@ export class TrackerItemRepo {
   listAll(): TrackerItemRow[] { return this.db.prepare('SELECT * FROM tracker_items ORDER BY source_id, wp_id').all() as TrackerItemRow[]; }
   listForTask(taskId: string): TrackerItemRow[] {
     return this.db.prepare(`SELECT t.* FROM tracker_items t WHERE EXISTS (SELECT 1 FROM json_each(t.task_ids) WHERE json_each.value = ?) ORDER BY t.source_id, t.wp_id`).all(taskId) as TrackerItemRow[];
+  }
+}
+
+export interface TimesheetEntryRow { source_id: string; spent_on: string; wp_id: number; entry_id: number; hours: number; updated_at: string; }
+export class TimesheetEntryRepo {
+  constructor(private db: Database.Database) {}
+  get(sourceId: string, date: string, wpId: number): TimesheetEntryRow | undefined {
+    return this.db.prepare('SELECT * FROM timesheet_entries WHERE source_id = ? AND spent_on = ? AND wp_id = ?').get(sourceId, date, wpId) as TimesheetEntryRow | undefined;
+  }
+  listForDate(sourceId: string, date: string): TimesheetEntryRow[] {
+    return this.db.prepare('SELECT * FROM timesheet_entries WHERE source_id = ? AND spent_on = ? ORDER BY wp_id').all(sourceId, date) as TimesheetEntryRow[];
+  }
+  upsert(row: Omit<TimesheetEntryRow, 'updated_at'>): void {
+    this.db.prepare(`INSERT INTO timesheet_entries (source_id, spent_on, wp_id, entry_id, hours) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(source_id, spent_on, wp_id) DO UPDATE SET entry_id=excluded.entry_id, hours=excluded.hours, updated_at=datetime('now')`)
+      .run(row.source_id, row.spent_on, row.wp_id, row.entry_id, row.hours);
   }
 }
 

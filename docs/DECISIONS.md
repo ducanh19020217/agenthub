@@ -187,3 +187,10 @@
 - **Bối cảnh**: Mục 2.1 của PLAN chỉ chặn keyring trên Linux, bằng cách đặt `DBUS_SESSION_BUS_ADDRESS` tới một địa chỉ không tồn tại. macOS không dùng DBus. Khi `HOME` của hồ sơ không có `Library/Keychains`, mỗi lần agy lưu phiên thì macOS bật hộp thoại "A keychain cannot be found to store "antigravity"". Nếu người dùng bấm "Reset To Defaults", login keychain thật bị thay bằng một keychain trống.
 - **Quyết định**: Gom môi trường của hồ sơ isolated vào `applyIsolatedAgyEnv()` (`src/agy.ts`). Hàm này dùng cho worker, đăng nhập (CLI và PTY), đọc quota và wakeup. Trên `darwin`, hàm đặt thêm `SSH_CONNECTION=127.0.0.1 0 127.0.0.1 0` nếu biến này chưa có. agy 1.4.11 phát hiện phiên SSH và ghi log `Using file-based token storage because SSH session detected` (đã kiểm chứng với HOME tạm, không có token).
 - **Hệ quả**: Không còn hộp thoại Keychain cho các hồ sơ isolated. Phiên vẫn được lưu ở `<HOME>/.gemini/antigravity-cli/antigravity-oauth-token`, đúng với cách hub nhận biết trạng thái đăng nhập. Hồ sơ `keyring` (tài khoản mặc định) giữ nguyên env. Nếu agy đổi cách phát hiện SSH, hộp thoại có thể xuất hiện lại và cần kiểm chứng lại.
+
+## DEC-016: Xấp xỉ thời gian chờ và tương tác cho timesheet
+
+- `run` được tính theo phần giao giữa thời gian chạy và ngày đang lập bảng.
+- `wait` dùng các event trạng thái chờ check/review/merge làm mốc bắt đầu, kéo dài tới mốc kế tiếp hoặc hết ngày, rồi giới hạn không vượt `run`. Đây là xấp xỉ vì schema event hiện chưa lưu khoảng chờ riêng.
+- `chat` tính các event review/comment/question/decision/blocked trong ngày; mỗi lượt quy đổi thành 10 phút. Nội dung `## Cần quyết định` trong payload được tính thêm khi event không có type tương ứng.
+- Khi nhiều task cùng ticket có level khác nhau, `weight` cộng theo từng task; trường `level` hiển thị là level hiệu dụng (trung bình có trọng số) để khớp với tổng weight.

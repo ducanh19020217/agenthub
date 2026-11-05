@@ -175,6 +175,7 @@ export const defaultProjectSettings = (): NonNullable<Project['settings']> => ({
   commitConvention: {
     branchTemplate: 'agenthub/{slug}',
     commitTemplate: '{type}: {summary}',
+    defaultRef: '',
     mergeMessageTemplate: "Merge branch '{branch}' into {target}",
   },
   brain: { mode: 'inherit' },
@@ -197,6 +198,7 @@ function normalizeProjectSettings(settings?: Partial<NonNullable<Project['settin
     commitConvention: {
       branchTemplate: settings?.commitConvention?.branchTemplate || defaults.commitConvention!.branchTemplate,
       commitTemplate: settings?.commitConvention?.commitTemplate || defaults.commitConvention!.commitTemplate,
+      defaultRef: settings?.commitConvention?.defaultRef || defaults.commitConvention!.defaultRef,
       commitRegex: settings?.commitConvention?.commitRegex,
       mergeMessageTemplate: settings?.commitConvention?.mergeMessageTemplate || defaults.commitConvention!.mergeMessageTemplate,
     },
@@ -2147,6 +2149,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
               {([
                 ['branchTemplate', 'projects.branchTemplate'],
                 ['commitTemplate', 'projects.commitTemplate'],
+                ['defaultRef', 'projects.defaultRef'],
                 ['commitRegex', 'projects.commitRegex'],
                 ['mergeMessageTemplate', 'projects.mergeMessageTemplate'],
               ] as const).map(([key, label]) => (

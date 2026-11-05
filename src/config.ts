@@ -57,6 +57,7 @@ export const DEFAULT_BRAIN_DIGEST_CONFIG: BrainDigestConfig = {
 
 export const DEFAULT_BRAIN_WAKEUP_EVENTS: string[] = [
   'task.review_ready',
+  'review.auto_merge_skipped',
   'task.blocked',
   'task.failed',
   'review.escalated',
@@ -334,6 +335,19 @@ export const DailyReportConfigSchema = z.object({
   telegram: z.boolean().default(false),
 });
 
+export const TimesheetConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default('17:30'),
+  weekdaysOnly: z.boolean().default(true),
+  hours: z.number().min(8).default(8),
+  activityId: z.number().int().positive().nullable().default(null),
+  minEntryHours: z.number().positive().refine((value) => Math.abs(value * 4 - Math.round(value * 4)) < 1e-8, 'minEntryHours must be a multiple of 0.25').default(0.5),
+  roundTo: z.number().positive().refine((value) => Math.abs(value * 4 - Math.round(value * 4)) < 1e-8, 'roundTo must be a multiple of 0.25').default(0.25),
+}).superRefine((value, ctx) => {
+  if (value.enabled && value.activityId == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['activityId'], message: 'activityId is required when timesheet is enabled' });
+  if (Math.abs(value.hours * 4 - Math.round(value.hours * 4)) > 1e-8) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['hours'], message: 'hours must be a multiple of 0.25' });
+});
+
 export const OpenProjectSplitConfigSchema = z.object({
   typeIds: z.array(z.number().int()).default([]),
   keyword: z.string().nullable().default('[chia]'),
@@ -353,6 +367,7 @@ export const OpenProjectSourceSchema = z.object({
   reopenedStatusIds: z.array(z.number().int()).default([]),
   createTypeId: z.number().int().nullable().default(null),
   createStatusId: z.number().int().nullable().default(null),
+  inProgressStatusId: z.number().int().nullable().default(null),
   resolvedStatusId: z.number().int().nullable().default(null),
   reviewStatusId: z.number().int().nullable().default(null),
   openStatusIds: z.array(z.number().int()).default([]),
@@ -365,6 +380,7 @@ export const OpenProjectSourceSchema = z.object({
   language: z.string().default('vi'),
   split: OpenProjectSplitConfigSchema.default({}),
   dailyReport: DailyReportConfigSchema.optional(),
+  timesheet: TimesheetConfigSchema.default({}),
 });
 
 export type OpenProjectSource = z.infer<typeof OpenProjectSourceSchema>;

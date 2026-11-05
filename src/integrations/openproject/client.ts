@@ -63,6 +63,14 @@ export interface OpenProjectActivity {
   };
 }
 
+export interface OpenProjectTimeEntry {
+  id: number;
+  hours: string;
+  spentOn: string;
+  comment?: { raw?: string };
+  _links?: { workPackage?: OpenProjectHalLink; activity?: OpenProjectHalLink; [key: string]: OpenProjectHalLink | undefined };
+}
+
 export interface OpenProjectCollection<T> {
   _type?: string;
   total?: number;
@@ -172,6 +180,65 @@ export class OpenProjectClient {
     return this.listWorkPackagesWithFilters(filters, '[["updatedAt","desc"]]');
   }
 
+  async searchWorkPackages(input: { query?: string; status?: string; assignee?: string }): Promise<OpenProjectWorkPackage[]> {
+    const buildFilters = (queryFilter?: Record<string, { operator: string; values: string[] }>) => {
+      const filters: Array<Record<string, { operator: string; values: string[] }>> = [];
+      if (input.status?.trim()) {
+        filters.push({ status: { operator: '=', values: [input.status.trim()] } });
+      } else {
+        filters.push({ status: { operator: '*', values: [] } });
+      }
+      if (input.assignee?.trim()) {
+        filters.push({ assignee: { operator: '=', values: [input.assignee.trim()] } });
+      }
+      if (queryFilter) {
+        filters.push(queryFilter);
+      }
+      return JSON.stringify(filters);
+    };
+
+    const trimmedQuery = input.query?.trim();
+    if (!trimmedQuery) {
+      return this.listWorkPackagesWithFilters(buildFilters(), '[["updatedAt","desc"]]');
+    }
+
+    const idMatch = trimmedQuery.match(/^(?:[A-Za-z0-9_-]+-)?(\d+)$/);
+    if (!idMatch) {
+      return this.listWorkPackagesWithFilters(
+        buildFilters({ subject: { operator: '~', values: [trimmedQuery] } }),
+        '[["updatedAt","desc"]]',
+      );
+    }
+
+    const idNum = idMatch[1];
+    const isPureNum = /^\d+$/.test(trimmedQuery);
+
+    const byIdRows = await this.listWorkPackagesWithFilters(
+      buildFilters({ id: { operator: '=', values: [idNum] } }),
+      '[["updatedAt","desc"]]',
+    );
+
+    if (isPureNum) {
+      return byIdRows;
+    }
+
+    const bySubjectRows = await this.listWorkPackagesWithFilters(
+      buildFilters({ subject: { operator: '~', values: [trimmedQuery] } }),
+      '[["updatedAt","desc"]]',
+    );
+
+    const map = new Map<number, OpenProjectWorkPackage>();
+    for (const row of byIdRows) {
+      if (!row.displayId || row.displayId.toLowerCase() === trimmedQuery.toLowerCase()) {
+        map.set(row.id, row);
+      }
+    }
+    for (const row of bySubjectRows) {
+      map.set(row.id, row);
+    }
+    return [...map.values()];
+  }
+
   async listUpdatedWorkPackages(start: string, end: string): Promise<OpenProjectWorkPackage[]> {
     const filters = JSON.stringify([
       { updatedAt: { operator: '<>d', values: [start, end] } },
@@ -208,6 +275,25 @@ export class OpenProjectClient {
       `/api/v3/work_packages/${encodeURIComponent(String(id))}/activities`,
     );
     return res._embedded?.elements || [];
+  }
+
+  async listTimeEntryActivities(): Promise<Array<{ id: number; name: string }>> {
+    const result = await this.request<OpenProjectCollection<{ id: number; name: string }>>('/api/v3/time_entries/activities?pageSize=100');
+    return (result._embedded?.elements || []).map((item) => ({ id: item.id, name: item.name }));
+  }
+
+  async createTimeEntry(input: { hours: string; spentOn: string; comment: string; workPackageId: number; activityId: number }): Promise<OpenProjectTimeEntry> {
+    return this.request<OpenProjectTimeEntry>('/api/v3/time_entries', { method: 'POST', body: JSON.stringify({
+      hours: input.hours, spentOn: input.spentOn, comment: { raw: input.comment },
+      _links: { workPackage: { href: `/api/v3/work_packages/${input.workPackageId}` }, activity: { href: `/api/v3/time_entries/activities/${input.activityId}` } },
+    }) });
+  }
+
+  async updateTimeEntry(id: number, input: { hours: string; spentOn: string; comment: string; workPackageId: number; activityId: number }): Promise<OpenProjectTimeEntry> {
+    return this.request<OpenProjectTimeEntry>(`/api/v3/time_entries/${id}`, { method: 'PATCH', body: JSON.stringify({
+      hours: input.hours, spentOn: input.spentOn, comment: { raw: input.comment },
+      _links: { workPackage: { href: `/api/v3/work_packages/${input.workPackageId}` }, activity: { href: `/api/v3/time_entries/activities/${input.activityId}` } },
+    }) });
   }
 
   async getUserName(href: string): Promise<string> {

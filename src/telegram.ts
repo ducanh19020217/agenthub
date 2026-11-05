@@ -25,6 +25,7 @@ import { formatReset } from './time-format.js';
 import { NotificationDeduper } from './notification-dedupe.js';
 import { reviewerSettingsFromLegacy } from './reviewer-config.js';
 import { QuotaService, QuotaCapacitySnapshot } from './quota/index.js';
+import { autoMergeReasonLabel, firstCheckError } from './auto-merge-notify.js';
 
 const WAITING_QUOTA_BATCH_DELAY_MS = 100;
 
@@ -3984,6 +3985,21 @@ export class TelegramBotService {
         break;
       }
 
+      case 'review.auto_merge_skipped': {
+        if (!notify.reviewReady) return;
+        const task = taskId ? this.taskRepo?.get(taskId) : null;
+        const title = this.resolveTaskTitle(taskId, p, task);
+        const checks = Array.isArray(p.checks) ? p.checks as Array<{ name?: string; ok?: boolean; outputTail?: string }> : [];
+        const failed = checks.find((check) => !check.ok || check.outputTail);
+        const firstError = firstCheckError(failed?.outputTail);
+        const detail = firstError ? `\n<code>${this.escapeHtml(firstError)}</code>` : '';
+        const retryText = p.retried === true ? ' (đã chạy lại 1 lần)' : '';
+        const reason = p.reason === 'checks_failed' ? `check <code>${this.escapeHtml(failed?.name || 'test')}</code> đỏ${retryText}` : `lý do: ${this.escapeHtml(autoMergeReasonLabel(p.reason))}`;
+        const keyboard: InlineKeyboardButton[][] = [[{ text: '🌐 Xem dashboard', url: this.getDashboardUrl(taskId ? `#/tasks/${toRouteId(taskId)}` : '') }]];
+        this.broadcastMessage(`${prefix}✋ <b>${this.escapeHtml(title)}</b> đã được duyệt nhưng chưa tự merge: ${reason}. Cần duyệt tay.${detail}`, { inline_keyboard: keyboard });
+        break;
+      }
+
       case 'review.fallback': {
         if (!notify.fallback) return;
         if (!this.isAllQuotaExhausted(p, now)) return;
@@ -4079,6 +4095,21 @@ export class TelegramBotService {
         this.broadcastMessage(`${prefix}🔗 <b>${this.escapeHtml(ref)}</b> ${label}.`);
         break;
       }
+      case 'tracker.timesheet.posted': {
+        const rows = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; subject?: string; hours?: number }> : [];
+        const missing = Array.isArray(p.withoutTicket) && p.withoutTicket.length ? `\nChưa có ticket: ${p.withoutTicket.map((item: { taskId?: string; subject?: string }) => `${this.escapeHtml(String(item.taskId || '?'))} ${this.escapeHtml(String(item.subject || ''))}`).join(', ')}` : '';
+        const stale = Array.isArray(p.missingFromDate) && p.missingFromDate.length ? `\nTicket không còn trong ngày: ${p.missingFromDate.join(', ')}` : '';
+        const minimum = p.overMinimum ? '\nTổng vượt giờ do mức tối thiểu.' : '';
+        this.broadcastMessage(`${prefix}🕒 <b>Đã ghi bảng giờ</b> (${this.escapeHtml(String(p.hours || 0))}h)\n${rows.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${this.escapeHtml(String(row.subject || ''))} — ${row.hours || 0}h`).join('\n')}${missing}${stale}${minimum}`);
+        break;
+      }
+      case 'tracker.timesheet.failed':
+        {
+          const posted = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; hours?: number }> : [];
+          const partial = posted.length ? `\nĐã ghi được: ${posted.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${row.hours || 0}h`).join(', ')}` : '';
+          this.broadcastMessage(`${prefix}❌ <b>Ghi bảng giờ thất bại</b>: ${this.escapeHtml(String(p.error || ''))}${partial}`);
+        }
+        break;
       case 'tracker.triage_ready': {
         const sourceId = typeof p.sourceId === 'string' ? p.sourceId : '';
         const wpId = typeof p.wpId === 'number' ? p.wpId : 0;

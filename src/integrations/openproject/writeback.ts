@@ -72,6 +72,60 @@ function section(content: string | null | undefined, heading: string): string | 
   return lines.slice(start + 1, end < 0 ? lines.length : end).join('\n').trim() || null;
 }
 
+export function extractBugSection(content: string | null | undefined, heading: string): string | null {
+  if (!content) return null;
+  const lines = content.split(/\r?\n/);
+  const cleanHeading = heading.trim().toLowerCase();
+  const start = lines.findIndex((line) => {
+    const trimmed = line.trim().toLowerCase();
+    return (
+      trimmed === cleanHeading ||
+      trimmed === `### ${cleanHeading}` ||
+      trimmed === `## ${cleanHeading}` ||
+      trimmed.startsWith(`### ${cleanHeading}`) ||
+      trimmed.startsWith(`## ${cleanHeading}`) ||
+      trimmed.startsWith(`${cleanHeading}:`) ||
+      trimmed.startsWith(`- **${cleanHeading}**:`) ||
+      trimmed.startsWith(`**${cleanHeading}**:`)
+    );
+  });
+  if (start < 0) return null;
+  const startLine = lines[start].trim();
+  const isInline = startLine.includes(':') && !startLine.startsWith('#');
+  if (isInline) {
+    const inlineContent = startLine.substring(startLine.indexOf(':') + 1).trim();
+    const extraLines: string[] = [];
+    for (let i = start + 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (/^(#{1,6}\s|[-*]\s|\*\*)/.test(line.trim())) break;
+      extraLines.push(line);
+    }
+    return [inlineContent, ...extraLines].join('\n').trim() || null;
+  }
+  const levelMatch = startLine.match(/^(#+)/);
+  const level = levelMatch ? levelMatch[1].length : 3;
+  const stopRegex = new RegExp(`^#{1,${level}}\\s`);
+  const end = lines.findIndex((line, index) => index > start && stopRegex.test(line.trim()));
+  return lines.slice(start + 1, end < 0 ? lines.length : end).join('\n').trim() || null;
+}
+
+export function extractBugReport(content: string | null | undefined): string | null {
+  if (!content) return null;
+  const loi = extractBugSection(content, 'lỗi');
+  const nguyenNhan = extractBugSection(content, 'nguyên nhân');
+  const cachSua = extractBugSection(content, 'cách sửa');
+  const kiemTra = extractBugSection(content, 'kiểm tra');
+
+  if (!loi && !nguyenNhan && !cachSua && !kiemTra) return null;
+
+  const parts: string[] = [];
+  if (loi) parts.push(`#### Lỗi\n${loi}`);
+  if (nguyenNhan) parts.push(`#### Nguyên nhân\n${nguyenNhan}`);
+  if (cachSua) parts.push(`#### Cách sửa\n${cachSua}`);
+  if (kiemTra) parts.push(`#### Kiểm tra\n${kiemTra}`);
+  return parts.join('\n\n');
+}
+
 function sourceFor(config: AgentHubConfig, sourceId: string): OpenProjectSource | undefined {
   return config.integrations.openproject.sources.find((source) => source.id === sourceId);
 }
@@ -104,7 +158,7 @@ export class OpenProjectWritebackService {
   private readonly retryAttempts = new Map<string, number>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly bound = (type: string, taskId?: string, payload?: unknown) => {
-    if (type === 'task.done' || type === 'task.merged' || type === 'task.blocked') void this.handleTaskEvent(type, taskId, payload);
+    if (type === 'task.running' || type === 'task.done' || type === 'task.merged' || type === 'task.blocked') void this.handleTaskEvent(type, taskId, payload);
     if (type === 'batch.dispatched') void this.handleBatchDispatched(payload);
     if (type === 'batch.discarded') void this.handleBatchDiscarded(payload);
     if (type === 'deploy.succeeded' || type === 'gitea.sync.succeeded') void this.handlePushEvent(type, payload);
@@ -151,6 +205,16 @@ export class OpenProjectWritebackService {
     const matches = this.trackerRepo.listAll().filter((row) => parseIds(row).includes(taskId) || row.display_id === task.externalRef);
     for (const row of matches) await this.enqueue(row, async () => {
       const source = sourceFor(this.config, row.source_id);
+      if (type === 'task.running') {
+        if (source?.inProgressStatusId !== null && source?.inProgressStatusId !== undefined) {
+          const key = readOpenProjectKey(this.config.hubHome, row.source_id);
+          if (!key) return;
+          try {
+            await new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn }).setStatus(row.wp_id, source.inProgressStatusId);
+          } catch (error) { await this.handleError(row, error, 'start writeback'); }
+        }
+        return;
+      }
       const isPlanTask = task.slug.endsWith('-plan');
       const report = type === 'task.done' ? task.doneReport : task.blockedReport;
       const hasSplit = Boolean(splitSection(report));
@@ -606,10 +670,14 @@ export class OpenProjectWritebackService {
     if (tasks.length === 0 || !tasks.every((task) => currentState.merged?.[task.id])) return;
     const comments = tasks.map((task) => {
       const comment = section(task.doneReport, '## Comment cho tester');
+      const bugReport = extractBugReport(task.doneReport);
+      const text = bugReport
+        ? (comment ? `${bugReport}\n\n${comment}` : bugReport)
+        : comment;
       const analysis = parseState(row).triage?.analysis;
       return {
         task,
-        text: comment ? `${comment}${analysis?.manualAlongside ? `\n\nCần thao tác thủ công kèm theo: ${analysis.manualAlongside}` : ''}` : null,
+        text: text ? `${text}${analysis?.manualAlongside ? `\n\nCần thao tác thủ công kèm theo: ${analysis.manualAlongside}` : ''}` : null,
       };
     }).filter((item): item is { task: TaskRow; text: string } => Boolean(item.text));
     const push = tasks.map((task) => this.hasPush(task.projectId));

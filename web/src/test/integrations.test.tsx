@@ -194,6 +194,18 @@ describe('Integrations UI Suite', () => {
       })));
     });
 
+    it('keeps newline while typing post-merge checks one command at a time', async () => {
+      renderWithProviders(<ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />);
+
+      const gitSection = await screen.findByTestId('project-git-section');
+      const checks = within(gitSection).getByLabelText('Lệnh check sau merge');
+      fireEvent.change(checks, { target: { value: 'npm test' } });
+      fireEvent.change(checks, { target: { value: 'npm test\n' } });
+      fireEvent.change(checks, { target: { value: 'npm test\nnpm run lint' } });
+
+      expect(checks).toHaveValue('npm test\nnpm run lint');
+    });
+
     it('confirms a default branch change when tasks are active', async () => {
       vi.mocked(client.getTasks).mockResolvedValue([{ id: 'task-1', status: 'running' } as Task]);
       const updateSpy = vi.spyOn(client, 'updateProject').mockResolvedValue(mockProject);

@@ -378,6 +378,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const [draftDepartmentId, setDraftDepartmentId] = useState('chung');
   const [draftDefaultBranch, setDraftDefaultBranch] = useState('main');
   const [draftMerge, setDraftMerge] = useState<ProjectMerge>({ enabled: false, worktrees: {}, checks: [], timeoutSec: 600 });
+  const [draftMergeChecksText, setDraftMergeChecksText] = useState('');
   const [checklistDraft, setChecklistDraft] = useState('');
   const [showCommitExample, setShowCommitExample] = useState(false);
   const [giteaToken, setGiteaToken] = useState('');
@@ -522,7 +523,9 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     setStructuredChecks(parseChecksToStructured(targetProject.checks));
     setDraftDepartmentId(targetProject.departmentId || 'chung');
     setDraftDefaultBranch(targetProject.defaultBranch || 'main');
-    setDraftMerge(normalizeProjectMerge(targetProject));
+    const merge = normalizeProjectMerge(targetProject);
+    setDraftMerge(merge);
+    setDraftMergeChecksText(merge.checks.join('\n'));
     setDraftChecks(
       typeof targetProject.checks === 'string'
         ? targetProject.checks
@@ -863,7 +866,11 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   }, [project]);
   const origEnv = useMemo(() => project?.envTemplate ?? '', [project]);
   const origMerge = useMemo(() => normalizeProjectMerge(project), [project]);
-  const mergeChanged = useMemo(() => JSON.stringify(draftMerge) !== JSON.stringify(origMerge), [draftMerge, origMerge]);
+  const normalizedDraftMerge = useMemo(() => ({
+    ...draftMerge,
+    checks: draftMergeChecksText.split('\n').map((line) => line.trim()).filter(Boolean),
+  }), [draftMerge, draftMergeChecksText]);
+  const mergeChanged = useMemo(() => JSON.stringify(normalizedDraftMerge) !== JSON.stringify(origMerge), [normalizedDraftMerge, origMerge]);
 
   const brainChanged = useMemo(
     () =>
@@ -1216,7 +1223,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
         : null;
     }
 
-    if (mergeChanged) payload.merge = draftMerge;
+    if (mergeChanged) payload.merge = normalizedDraftMerge;
 
     if (draftDepartmentId !== (project.departmentId ?? 'chung')) {
       payload.departmentId = draftDepartmentId;
@@ -1371,8 +1378,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 <textarea
                   aria-label={t('projects.gitMergeChecksLabel')}
                   rows={3}
-                  value={draftMerge.checks.join('\n')}
-                  onChange={(event) => setDraftMerge((prev) => ({ ...prev, checks: event.target.value.split('\n').map((line) => line.trim()).filter(Boolean) }))}
+                  value={draftMergeChecksText}
+                  onChange={(event) => setDraftMergeChecksText(event.target.value)}
                   className="mt-2 w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-2.5 text-xs font-mono focus:outline-hidden focus:ring-2 focus:ring-[var(--t-accent)]"
                 />
               </label>

@@ -102,6 +102,8 @@ describe('Integrations UI Suite', () => {
     vi.spyOn(client, 'getGiteaStatus').mockResolvedValue({ projectId: 'proj-1', status: 'ok', finishedAt: '2026-11-03T10:00:00Z' });
     vi.spyOn(client, 'getRemoteDeployStatus').mockResolvedValue({ projectId: 'proj-1', status: 'succeeded', finishedAt: '2026-11-03T11:00:00Z' });
     vi.spyOn(client, 'getEffectiveConfig').mockResolvedValue({} as any);
+    vi.spyOn(client, 'getProjectGitStatus').mockResolvedValue({ path: mockProject.path, currentBranch: 'main', defaultBranch: 'main', dirty: { changed: true, files: 2 }, remote: 'https://example.com/team/repo.git', localBranches: ['main'], remoteBranches: ['main', 'dev-ss'], aheadBehind: { ahead: 1, behind: 2 } });
+    vi.spyOn(client, 'getTasks').mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -165,6 +167,19 @@ describe('Integrations UI Suite', () => {
   });
 
   describe('2. ProjectSettingsDrawer Integrations Sections', () => {
+    it('renders Git status, warns for remote-only branch and saves the default branch', async () => {
+      const updateSpy = vi.spyOn(client, 'updateProject').mockResolvedValue({ ...mockProject, defaultBranch: 'dev-ss' });
+      renderWithProviders(<ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />);
+
+      const gitSection = await screen.findByTestId('project-git-section');
+      await waitFor(() => expect(within(gitSection).getByText(/2 file chưa commit/i)).toBeInTheDocument());
+      fireEvent.change(within(gitSection).getByTestId('project-git-default-branch'), { target: { value: 'dev-ss' } });
+      expect(within(gitSection).getByText(/chưa có ở máy/i)).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('save-changes-button'));
+
+      await waitFor(() => expect(updateSpy).toHaveBeenCalledWith('proj-1', expect.objectContaining({ defaultBranch: 'dev-ss' })));
+    });
+
     it('renders OpenProject section and saves changes via updateProject', async () => {
       const updateSpy = vi.spyOn(client, 'updateProject').mockResolvedValue(mockProject);
 

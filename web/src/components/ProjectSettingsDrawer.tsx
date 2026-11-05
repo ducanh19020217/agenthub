@@ -15,6 +15,7 @@ import {
   Sparkles,
   Terminal,
   Loader2,
+  Copy,
 } from 'lucide-react';
 import {
   Card,
@@ -59,7 +60,7 @@ import {
   applyPreset,
   getEffectiveConfig,
   getDepartments,
-  getOpenProjectSources, getGiteaStatus, syncGitea, saveGiteaToken, getRemoteDeployStatus, triggerRemoteDeploy, saveRemoteDeployEnv,
+  getOpenProjectSources, getGiteaStatus, syncGitea, saveGiteaToken, getRemoteDeployStatus, triggerRemoteDeploy, saveRemoteDeployEnv, getProjectGitStatus, getTasks,
 } from '../api/client';
 
 export interface StructuredCheckItem {
@@ -337,6 +338,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     staleTime: 30_000,
   });
   const { data: openProjectSources = [] } = useQuery({ queryKey: ['openproject-sources'], queryFn: getOpenProjectSources, enabled: Boolean(isOpen) });
+  const { data: gitStatus, isLoading: gitStatusLoading, error: gitStatusError } = useQuery({ queryKey: ['project-git', project?.id], queryFn: () => getProjectGitStatus(project!.id), enabled: Boolean(isOpen && project?.id), refetchInterval: 15_000 });
+  const { data: projectTasks = [] } = useQuery({ queryKey: ['tasks', project?.id], queryFn: () => getTasks({ project: project!.id }), enabled: Boolean(isOpen && project?.id) });
 
   const { data: allProfiles = [] } = useQuery({
     queryKey: ['profiles'],
@@ -362,6 +365,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const [draftReviewerFallback, setDraftReviewerFallback] = useState<string>('');
   const [draftEnvTemplate, setDraftEnvTemplate] = useState<string>('');
   const [draftDepartmentId, setDraftDepartmentId] = useState('chung');
+  const [draftDefaultBranch, setDraftDefaultBranch] = useState('main');
   const [checklistDraft, setChecklistDraft] = useState('');
   const [showCommitExample, setShowCommitExample] = useState(false);
   const [giteaToken, setGiteaToken] = useState('');
@@ -505,6 +509,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     setChecklistDraft((targetProject.settings?.reviewChecklist || []).join('\n'));
     setStructuredChecks(parseChecksToStructured(targetProject.checks));
     setDraftDepartmentId(targetProject.departmentId || 'chung');
+    setDraftDefaultBranch(targetProject.defaultBranch || 'main');
     setDraftChecks(
       typeof targetProject.checks === 'string'
         ? targetProject.checks
@@ -961,6 +966,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     if (reviewChanged) count++;
     if (envChanged) count++;
     if (draftDepartmentId !== (project?.departmentId ?? 'chung')) count++;
+    if (draftDefaultBranch !== (project?.defaultBranch || 'main')) count++;
     if (reviewerOverrideChanged) count++;
     return count;
   }, [
@@ -979,6 +985,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     hooksChanged,
     reviewChanged,
     envChanged,
+    draftDefaultBranch,
     reviewerOverrideChanged,
   ]);
 
@@ -1137,6 +1144,16 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     }
 
     const payload: UpdateProjectInput = {};
+    if (draftDefaultBranch.trim() !== (project.defaultBranch || 'main')) {
+      const activeTasks = projectTasks.filter((task: any) => ['queued', 'running', 'checking', 'review'].includes(task.status));
+      if (activeTasks.length > 0 && !window.confirm(t('projects.defaultBranchChangeConfirm', { count: activeTasks.length }))) return;
+      const branchError = validateBranchSyntax(draftDefaultBranch, t);
+      if (branchError) {
+        setSectionErrors((prev) => ({ ...prev, git: branchError }));
+        return;
+      }
+      payload.defaultBranch = draftDefaultBranch.trim();
+    }
 
     const partialSettings = changedSettings(draftSettings, origSettings);
     if (Object.keys(partialSettings).length > 0) {
@@ -1289,6 +1306,33 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
               <span>{apiError}</span>
             </div>
           )}
+
+          {/* Section 1: Preset & Phòng ban */}
+          <Card className="p-5 space-y-4" data-testid="project-git-section">
+            <div>
+              <h3 className="text-sm font-bold text-[var(--t-text)] flex items-center gap-2"><GitBranch className="w-4 h-4 text-[var(--t-accent)]" />{t('projects.gitTitle')}</h3>
+              <p className="text-xs text-[var(--t-text-3)]">{t('projects.gitDescription')}</p>
+            </div>
+            {gitStatusLoading && <p className="text-xs text-[var(--t-text-3)]">{t('projects.gitLoading')}</p>}
+            {gitStatusError && <p role="alert" className="text-xs text-[var(--t-crit)]">{t('projects.gitError')}</p>}
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold">{t('projects.gitPath')}</label>
+              <div className="flex gap-2"><Input value={gitStatus?.path || project.path} readOnly className="font-mono" /><Button type="button" size="sm" variant="secondary" aria-label={t('projects.gitCopyPath')} onClick={() => void navigator.clipboard?.writeText(gitStatus?.path || project.path)}><Copy className="w-3.5 h-3.5" /></Button></div>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold">{t('projects.gitDefaultBranch')}</label>
+              <p className="text-xs text-[var(--t-text-3)]">{t('projects.gitDefaultBranchHint')}</p>
+              <SelectOrCustomInput value={draftDefaultBranch} onChange={setDraftDefaultBranch} options={[...(gitStatus?.localBranches || []), ...(gitStatus?.remoteBranches || []).filter((branch) => !(gitStatus?.localBranches || []).includes(branch))]} validate={(value) => validateBranchSyntax(value, t)} ariaLabel={t('projects.gitDefaultBranch')} testId="project-git-default-branch" />
+              {gitStatus?.remoteBranches.includes(draftDefaultBranch) && !gitStatus.localBranches.includes(draftDefaultBranch) && <p role="alert" className="text-xs text-[var(--t-warn)]">{t('projects.gitRemoteOnlyWarning', { branch: draftDefaultBranch })}</p>}
+              {sectionErrors.git && <p role="alert" className="text-xs text-[var(--t-crit)]">{sectionErrors.git}</p>}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-[var(--t-text-2)]">
+              <div>{t('projects.gitCurrentBranch')}: <span className="font-mono">{gitStatus?.currentBranch || '—'}</span></div>
+              <div>{t('projects.gitRemote')}: <span className="font-mono break-all">{gitStatus?.remote || '—'}</span></div>
+              <div>{t('projects.gitAheadBehind')}: {gitStatus?.aheadBehind ? `${gitStatus.aheadBehind.ahead} ↑ / ${gitStatus.aheadBehind.behind} ↓` : '—'}</div>
+            </div>
+            {gitStatus?.dirty.changed && <p role="alert" className="text-xs text-[var(--t-warn)]">{t('projects.gitDirtyWarning', { count: gitStatus.dirty.files })}</p>}
+          </Card>
 
           {/* Section 1: Preset & Phòng ban */}
           <Card className="p-5 space-y-4" data-testid="project-preset-department">

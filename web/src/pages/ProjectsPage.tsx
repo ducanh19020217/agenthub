@@ -17,6 +17,7 @@ import {
   getTasks,
   updateProjectKnowledge,
   getProfiles,
+  inspectProject,
 } from '../api/client';
 import {
   FolderGit2,
@@ -440,6 +441,16 @@ export const ProjectsPage: React.FC = () => {
     queryKey: ['departments'],
     queryFn: getDepartments,
   });
+  const pathInspection = useQuery({
+    queryKey: ['project-register-inspection', path],
+    queryFn: () => inspectProject(path.trim()),
+    enabled: Boolean(path.trim() && /^\//.test(path.trim())),
+    retry: false,
+  });
+  useEffect(() => {
+    const branch = pathInspection.data?.currentBranch || pathInspection.data?.branches?.find((item) => !item.startsWith('origin/'));
+    if (branch && (defaultBranch === 'main' || !defaultBranch.trim())) setDefaultBranch(branch);
+  }, [pathInspection.data]);
   const { data: focus } = useQuery({ queryKey: ['focus'], queryFn: getFocus });
   const focusMutation = useMutation({
     mutationFn: (projectId: string | null) => setFocus(projectId),
@@ -761,7 +772,7 @@ export const ProjectsPage: React.FC = () => {
                     placeholder="main"
                     value={defaultBranch}
                     onChange={setDefaultBranch}
-                    options={DEFAULT_COMMON_BRANCHES}
+                    options={Array.from(new Set([...(pathInspection.data?.branches || []).map((item) => item.replace(/^origin\//, '')), ...DEFAULT_COMMON_BRANCHES]))}
                     validate={(val) => validateBranchSyntax(val, t)}
                     ariaLabel={t('projects.branchLabel')}
                   />

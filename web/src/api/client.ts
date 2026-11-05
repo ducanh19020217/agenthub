@@ -38,7 +38,7 @@ import {
   ApplyPresetInput,
   ApplyPresetResult,
   EffectiveConfigResponse,
-  OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto, OpenProjectTypeDto, OpenProjectSyncResult, GiteaStatus, RemoteDeployStatus,
+  OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto, OpenProjectTypeDto, OpenProjectSyncResult, GiteaStatus, RemoteDeployStatus, ProjectGitStatus,
 } from '../types/api';
 import { getActiveLocale, translateApiErrorMessage } from '../utils/apiError';
 
@@ -321,6 +321,9 @@ export async function cleanResetClaudeSessions(): Promise<{ ok: boolean; cleared
 export async function getProjects(): Promise<Project[]> {
   return apiFetch<Project[]>('/api/projects');
 }
+
+export const getProjectGitStatus = (projectId: string) =>
+  apiFetch<ProjectGitStatus>(`/api/projects/${encodeURIComponent(projectId)}/git`);
 
 export const getOpenProjectSources = () => apiFetch<OpenProjectSource[]>('/api/integrations/openproject/sources');
 export const saveOpenProjectSource = (id: string, data: OpenProjectSourceInput) => apiFetch<OpenProjectSource>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) });

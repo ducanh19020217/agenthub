@@ -622,6 +622,47 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   );
 
   server.tool(
+    'hub_ticket_get',
+    'Đọc thông tin một ticket OpenProject trước khi cập nhật',
+    {
+      sourceId: z.string().min(1),
+      wp: z.union([z.number().int().positive(), z.string().trim().min(1)]).describe('Mã hiển thị, ví dụ SIE-27, hoặc id số'),
+    },
+    async (args) => {
+      try {
+        const result = await callApi<{ subject: string; status: string; parent: string | null; assignee: string | null; url: string }>(
+          'GET',
+          `/api/integrations/openproject/sources/${encodeURIComponent(args.sourceId)}/work-packages/${encodeURIComponent(String(args.wp))}`,
+        );
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: unknown) { return handleError(err); }
+    },
+  );
+
+  server.tool(
+    'hub_ticket_update',
+    'Cập nhật trạng thái, ticket cha hoặc comment của ticket OpenProject',
+    {
+      sourceId: z.string().min(1),
+      wp: z.union([z.number().int().positive(), z.string().trim().min(1)]).describe('Mã hiển thị, ví dụ SIE-27, hoặc id số'),
+      status: z.union([z.number().int().positive(), z.string().trim().min(1)]).optional(),
+      parent: z.union([z.number().int().positive(), z.string().trim().min(1)]).nullable().optional(),
+      comment: z.string().min(1).optional(),
+    },
+    async (args) => {
+      try {
+        const { sourceId, wp, ...body } = args;
+        const result = await callApi<{ id: number; displayId: string; status: string; parent: string | null; url: string }>(
+          'POST',
+          `/api/integrations/openproject/sources/${encodeURIComponent(sourceId)}/work-packages/${encodeURIComponent(String(wp))}/update`,
+          body,
+        );
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: unknown) { return handleError(err); }
+    },
+  );
+
+  server.tool(
     'hub_daily_report',
     'Tạo ngay báo cáo ngày OpenProject cho một nguồn',
     {

@@ -35,6 +35,8 @@ export interface OpenProjectWorkPackage {
   updatedAt?: string;
   createdAt?: string;
   _links?: {
+    project?: OpenProjectHalLink;
+    parent?: OpenProjectHalLink;
     status?: OpenProjectHalLink;
     priority?: OpenProjectHalLink;
     author?: OpenProjectHalLink;
@@ -181,6 +183,26 @@ export class OpenProjectClient {
     return this.request<OpenProjectWorkPackage>(`/api/v3/work_packages/${encodeURIComponent(String(id))}`);
   }
 
+  async findWorkPackage(ref: number | string): Promise<OpenProjectWorkPackage | undefined> {
+    if (!this.options.project) throw new Error('OpenProject project is required');
+    const value = String(ref).trim();
+    if (/^\d+$/.test(value)) {
+      let wp: OpenProjectWorkPackage;
+      try {
+        wp = await this.getWorkPackage(value);
+      } catch (error) {
+        if (error instanceof OpenProjectError && error.status === 404) return undefined;
+        throw error;
+      }
+      const project = wp._links?.project;
+      if (!project) return wp;
+      const projectRef = decodeURIComponent(project.href.split('/').pop() || '');
+      return projectRef === this.options.project || project.title === this.options.project ? wp : undefined;
+    }
+    const rows = await this.listWorkPackagesWithFilters('[]');
+    return rows.find((item) => item.displayId?.toLowerCase() === value.toLowerCase());
+  }
+
   async listActivities(id: number | string): Promise<OpenProjectActivity[]> {
     const res = await this.request<OpenProjectCollection<OpenProjectActivity>>(
       `/api/v3/work_packages/${encodeURIComponent(String(id))}/activities`,
@@ -218,6 +240,27 @@ export class OpenProjectClient {
         body: JSON.stringify({ comment: { raw: markdown } }),
       },
     );
+  }
+
+  async setParent(id: number | string, parentId: number | string | null): Promise<OpenProjectWorkPackage> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const wp = await this.getWorkPackage(id);
+      try {
+        return await this.request<OpenProjectWorkPackage>(
+          `/api/v3/work_packages/${encodeURIComponent(String(id))}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({
+              lockVersion: wp.lockVersion,
+              _links: { parent: parentId === null ? null : { href: `/api/v3/work_packages/${parentId}` } },
+            }),
+          },
+        );
+      } catch (error) {
+        if (!(error instanceof OpenProjectError) || error.status !== 409 || attempt === 2) throw error;
+      }
+    }
+    throw new Error('Failed to set parent after retries');
   }
 
   async createWorkPackage(input: {

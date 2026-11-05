@@ -210,6 +210,27 @@ describe('OpenProject Integration', () => {
       await expect(client.setStatus(123, 95)).rejects.toThrow(OpenProjectError);
     });
 
+    it('sets parent and retries with a fresh lock version after 409', async () => {
+      let patchAttempts = 0;
+      let getAttempts = 0;
+      const fakeFetch = vi.fn().mockImplementation(async (_url: string | URL, init?: RequestInit) => {
+        if (init?.method === 'PATCH') {
+          patchAttempts++;
+          if (patchAttempts === 1) return new Response('{}', { status: 409 });
+          return new Response(JSON.stringify({ id: 123, lockVersion: 8, _links: { parent: { href: '/api/v3/work_packages/25' } } }), { status: 200 });
+        }
+        getAttempts++;
+        return new Response(JSON.stringify({ id: 123, lockVersion: getAttempts, _links: {} }), { status: 200 });
+      });
+      const client = new OpenProjectClient({ baseUrl: 'https://op.example.com', apiKey: 'key', fetch: fakeFetch as unknown as typeof globalThis.fetch });
+
+      await client.setParent(123, 25);
+      const patches = fakeFetch.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH');
+      expect(patches).toHaveLength(2);
+      expect(JSON.parse(String(patches[0][1]?.body))).toEqual({ lockVersion: 1, _links: { parent: { href: '/api/v3/work_packages/25' } } });
+      expect(JSON.parse(String(patches[1][1]?.body))).toEqual({ lockVersion: 2, _links: { parent: { href: '/api/v3/work_packages/25' } } });
+    });
+
     it('caches getUserName responses by href', async () => {
       let fetchCount = 0;
       const fakeFetch = vi.fn().mockImplementation(async () => {
@@ -930,6 +951,62 @@ describe('OpenProject Integration', () => {
       expect(JSON.parse(response.body)).toEqual([
         { id: 3, name: 'Task', position: 1 }, { id: 9, name: 'Bug', position: 2 },
       ]);
+    });
+
+    it('updates a ticket by display id in comment, parent, status order and maps status names', async () => {
+      config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'src-update', url: 'https://op.example.com', project: '123' })];
+      saveOpenProjectKey(tmpDir, 'src-update', 'update-key');
+      const calls: Array<{ url: string; method: string; body?: string }> = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: string | URL, init?: RequestInit) => {
+        const url = input.toString();
+        calls.push({ url, method: init?.method || 'GET', body: init?.body ? String(init.body) : undefined });
+        if (url.includes('/projects/123/work_packages?')) {
+          return new Response(JSON.stringify({ total: 2, _embedded: { elements: [
+            { id: 27, displayId: 'SIE-27', subject: 'Child', lockVersion: 1 },
+            { id: 25, displayId: 'SIE-25', subject: 'Parent', lockVersion: 1 },
+          ] } }), { status: 200 });
+        }
+        if (url.endsWith('/statuses?pageSize=100')) {
+          return new Response(JSON.stringify({ _embedded: { elements: [{ id: 5, name: 'Done' }, { id: 1, name: 'New' }] } }), { status: 200 });
+        }
+        if (url.endsWith('/activities') && init?.method === 'POST') return new Response(JSON.stringify({ id: 1 }), { status: 201 });
+        if (url.endsWith('/work_packages/27') && init?.method === 'PATCH') {
+          const body = JSON.parse(String(init.body));
+          return new Response(JSON.stringify({ id: 27, displayId: 'SIE-27', lockVersion: 2, status: body._links.status ? { title: 'Done' } : undefined, _links: { parent: { title: 'SIE-25' }, status: { title: 'Done' } } }), { status: 200 });
+        }
+        if (url.endsWith('/work_packages/27')) return new Response(JSON.stringify({ id: 27, displayId: 'SIE-27', lockVersion: 1 }), { status: 200 });
+        throw new Error(`unexpected URL ${url}`);
+      });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/integrations/openproject/sources/src-update/work-packages/SIE-27/update',
+        payload: { comment: 'Đã xử lý', parent: 'SIE-25', status: 'done' },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(JSON.parse(response.body)).toEqual({ id: 27, displayId: 'SIE-27', status: 'Done', parent: 'SIE-25', url: 'https://op.example.com/work_packages/27' });
+      expect(calls.filter((call) => call.method === 'POST' || call.method === 'PATCH').map((call) => call.method + ':' + call.url.split('/').pop())).toEqual([
+        'POST:activities', 'PATCH:27', 'PATCH:27',
+      ]);
+    });
+
+    it('rejects an unknown status with the valid names and blocks a work package from another project', async () => {
+      config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'src-scope', url: 'https://op.example.com', project: '123' })];
+      saveOpenProjectKey(tmpDir, 'src-scope', 'scope-key');
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: string | URL) => {
+        const url = input.toString();
+        if (url.endsWith('/work_packages/99')) return new Response(JSON.stringify({ id: 99, lockVersion: 1, _links: { project: { href: '/api/v3/projects/other', title: 'other' } } }), { status: 200 });
+        if (url.includes('/projects/123/work_packages?')) return new Response(JSON.stringify({ total: 1, _embedded: { elements: [{ id: 27, displayId: 'SIE-27', lockVersion: 1 }] } }), { status: 200 });
+        if (url.endsWith('/statuses?pageSize=100')) return new Response(JSON.stringify({ _embedded: { elements: [{ id: 5, name: 'Done' }, { id: 1, name: 'New' }] } }), { status: 200 });
+        throw new Error(`unexpected URL ${url}`);
+      });
+
+      const invalid = await app.inject({ method: 'POST', url: '/api/integrations/openproject/sources/src-scope/work-packages/SIE-27/update', payload: { status: 'missing' } });
+      expect(invalid.statusCode).toBe(400);
+      expect(invalid.body).toContain('Done, New');
+
+      const forbidden = await app.inject({ method: 'POST', url: '/api/integrations/openproject/sources/src-scope/work-packages/99/update', payload: { comment: 'nope' } });
+      expect(forbidden.statusCode).toBe(403);
     });
   });
 

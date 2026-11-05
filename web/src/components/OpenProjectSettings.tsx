@@ -22,8 +22,9 @@ type TimesheetPreview = {
   date?: string;
   hours?: number;
   overMinimum?: boolean;
-  entries?: Array<{ displayId?: string; subject?: string; run?: number; wait?: number; chat?: number; level?: number; weight?: number; hours?: number; rawHours?: number }>;
+  entries?: Array<{ displayId?: string; subject?: string; run?: number; wait?: number; chat?: number; level?: number; weight?: number; hours?: number; rawHours?: number; estimateHours?: number }>;
   withoutTicket?: Array<{ taskId?: string; subject?: string }>;
+  estimateSkipped?: Array<{ wpId?: number; displayId?: string; reason?: string }>;
 };
 
 const blank = (id: string): OpenProjectSourceInput => ({
@@ -810,9 +811,10 @@ export const OpenProjectSettings: React.FC = () => {
             <div className="sm:col-span-2 overflow-x-auto rounded-lg border border-[var(--t-border)] p-3 text-xs" data-testid="timesheet-preview">
               <p className="mb-2">{timesheetPreview.date || ''} · {timesheetPreview.hours ?? 0}h</p>
               <table className="w-full text-left"><thead><tr><th>Ticket</th><th>Subject</th><th>run</th><th>wait</th><th>chat</th><th>level</th><th>weight</th><th>{t('integrations.timesheetEstimateCol')}</th><th>{t('integrations.timesheetActualCol')}</th></tr></thead>
-                <tbody>{(timesheetPreview.entries || []).map((entry) => <tr key={entry.displayId}><td>[{entry.displayId || '?'}]</td><td>{entry.subject || ''}</td><td>{entry.run ?? 0}</td><td>{entry.wait ?? 0}</td><td>{entry.chat ?? 0}</td><td>{entry.level ?? 0}</td><td>{entry.weight ?? 0}</td><td>{entry.rawHours ?? 0}h</td><td>{entry.hours ?? 0}h</td></tr>)}</tbody>
+                <tbody>{(timesheetPreview.entries || []).map((entry) => <tr key={entry.displayId}><td>[{entry.displayId || '?'}]</td><td>{entry.subject || ''}</td><td>{entry.run ?? 0}</td><td>{entry.wait ?? 0}</td><td>{entry.chat ?? 0}</td><td>{entry.level ?? 0}</td><td>{entry.weight ?? 0}</td><td>{entry.estimateHours ?? entry.rawHours ?? 0}h</td><td>{entry.hours ?? 0}h</td></tr>)}</tbody>
               </table>
               {timesheetPreview.withoutTicket && timesheetPreview.withoutTicket.length > 0 && <p className="mt-2">{timesheetPreview.withoutTicket.map((item) => `${item.taskId || '?'} ${item.subject || ''}`).join(', ')}</p>}
+              {timesheetPreview.estimateSkipped && timesheetPreview.estimateSkipped.length > 0 && <p className="mt-2 text-[var(--t-warn)]">{timesheetPreview.estimateSkipped.map((item) => `[${item.displayId || '?'}] ${item.reason || ''}`).join(', ')}</p>}
               {timesheetPreview.overMinimum && <p className="mt-2 text-[var(--t-crit)]">{t('integrations.timesheetOverMinimum')}</p>}
             </div>
           )}

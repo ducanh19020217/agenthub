@@ -37,8 +37,17 @@ describe('OpenProject timesheet controls', () => {
     fireEvent.click(previewButton);
     await waitFor(() => expect(preview).toHaveBeenCalled());
     expect(await screen.findByRole('button', { name: 'Đang xử lý…' })).toBeDisabled();
-    resolvePreview({ date: '2026-11-05', hours: 8, entries: [{ displayId: 'OP-1', subject: 'Export', run: 10, wait: 5, chat: 10, level: 1, weight: 22.5, hours: 8 }] });
-    expect(await screen.findByTestId('timesheet-preview')).toHaveTextContent('OP-1');
+    resolvePreview({
+      date: '2026-11-05',
+      hours: 8,
+      entries: [{ displayId: 'OP-1', subject: 'Export', run: 10, wait: 5, chat: 10, level: 1, weight: 22.5, hours: 8, rawHours: 6, estimateHours: 10 }],
+      estimateSkipped: [{ displayId: 'OP-2', reason: 'estimate đã do người khác đặt' }],
+    });
+    const previewEl = await screen.findByTestId('timesheet-preview');
+    expect(previewEl).toHaveTextContent('OP-1');
+    expect(previewEl).toHaveTextContent('10h');
+    expect(previewEl).toHaveTextContent('8h');
+    expect(previewEl).toHaveTextContent('estimate đã do người khác đặt');
   });
 
   it('shows an error when writing fails', async () => {

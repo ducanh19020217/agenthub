@@ -75,6 +75,7 @@ import { isKnownModel } from '../quota/index.js';
 import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, ReviewerOrderSchema, reviewerSettingsFromLegacy } from '../reviewer-config.js';
 import { SetupManager } from '../tools/setup.js';
 import { createNewGitProject, inspectProject, readClaudeSessionExcerpt } from '../projects/inspect.js';
+import { inspectGitProject } from '../projects/git.js';
 import type { DeployService } from '../deploy.js';
 import type { RemoteDeployService, RemoteDeployStatus } from '../remote-deploy.js';
 import type { PerfCollector } from '../perf.js';
@@ -1628,6 +1629,16 @@ export class AppService {
     const input = z.object({ path: z.string().min(1) }).parse(raw);
     if (!path.isAbsolute(input.path)) throw new HttpError(400, 'bad_request', 'Đường dẫn phải là đường dẫn tuyệt đối');
     return inspectProject(input.path);
+  }
+
+  async getProjectGitStatus(id: string) {
+    const project = this.projectRepo.get(id);
+    if (!project) throw new HttpError(404, 'not_found', `Project "${id}" không tồn tại`);
+    try {
+      return await inspectGitProject(project.path, project.defaultBranch);
+    } catch (error) {
+      throw new HttpError(400, 'bad_request', error instanceof Error ? error.message : String(error));
+    }
   }
 
   writeProjectGuidance(id: string, raw: unknown) {

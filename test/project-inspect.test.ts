@@ -4,6 +4,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createNewGitProject, inspectProject } from '../src/projects/inspect.js';
+import { inspectGitProject } from '../src/projects/git.js';
 import { loadConfig } from '../src/config.js';
 import { createContext } from '../src/daemon.js';
 import { FakeEngine, type Engine } from '../src/engines/index.js';
@@ -14,6 +15,29 @@ afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: 
 function tempDir() { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-inspect-')); dirs.push(dir); return dir; }
 
 describe('project wizard inspection', () => {
+  it('reports git branches, sanitized origin, dirty files and ahead/behind asynchronously', async () => {
+    const dir = tempDir();
+    execFileSync('git', ['init', '-q', dir]);
+    execFileSync('git', ['-C', dir, 'config', 'user.email', 'test@example.com']);
+    execFileSync('git', ['-C', dir, 'config', 'user.name', 'Test']);
+    execFileSync('git', ['-C', dir, 'checkout', '-qb', 'main']);
+    fs.writeFileSync(path.join(dir, 'tracked.txt'), 'one');
+    execFileSync('git', ['-C', dir, 'add', '.']);
+    execFileSync('git', ['-C', dir, 'commit', '-qm', 'initial']);
+    execFileSync('git', ['-C', dir, 'branch', 'dev']);
+    execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', 'https://user:password@example.com/team/repo.git']);
+    execFileSync('git', ['-C', dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD']);
+    execFileSync('git', ['-C', dir, 'update-ref', 'refs/remotes/origin/dev', 'HEAD']);
+    fs.writeFileSync(path.join(dir, 'dirty.txt'), 'uncommitted');
+
+    const result = await inspectGitProject(dir, 'main');
+    expect(result.localBranches).toEqual(expect.arrayContaining([result.currentBranch as string, 'dev']));
+    expect(result.remoteBranches).toEqual(expect.arrayContaining(['main', 'dev']));
+    expect(result.remote).toBe('https://example.com/team/repo.git');
+    expect(result.dirty).toEqual({ changed: true, files: 1 });
+    expect(result.aheadBehind).toEqual({ ahead: 0, behind: 0 });
+  });
+
   it('reports git, monorepo, hooks, lockfile and guidance metadata without reading secrets', () => {
     const dir = tempDir();
     execFileSync('git', ['init', '-q', dir]);

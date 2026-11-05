@@ -359,6 +359,11 @@ export async function createServer(
     return service.getProject(id);
   });
 
+  fastify.get('/api/projects/:id/git', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getProjectGitStatus(id);
+  });
+
   fastify.get('/api/projects/:id/effective-config', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
     return service.getEffectiveConfig(id);

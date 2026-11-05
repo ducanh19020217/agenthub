@@ -1309,7 +1309,7 @@ export const vi = {
     themeAria: 'Chế độ giao diện', dark: 'Tối', light: 'Sáng', system: 'Hệ thống', default: 'Mặc định',
     sidebarAria: 'Sidebar điều hướng', pageTaskCreate: 'Tạo task mới', pageTaskDetail: 'Chi tiết task',
     pageSavings: 'Hiệu quả', pagePlans: 'Duyệt kế hoạch', pageAgentHub: 'AgentHub', claudeQuota: 'Quota Claude', unknown: 'chưa rõ', claudeSessions: 'Phiên Claude', tokensOverTime: 'Token theo thời gian', token: 'Token', task: 'Task', messages: 'tin nhắn', model: 'Model', lastActive: 'Hoạt động cuối', rescan: 'Quét lại',
-    checking: 'Đang kiểm tra', stuck: 'kẹt (stalled)', waitingApprover: 'Chờ người duyệt', manualApproval: 'Cần duyệt tay', retryReviewer: 'Chạy lại reviewer',
+    checking: 'Đang kiểm tra', stuck: 'kẹt (stalled)', waitingApprover: 'Chờ người duyệt', manualApproval: 'Cần duyệt tay', manualApprovalReasonChecksFailed: 'check thất bại', manualApprovalReasonChecksMissing: 'thiếu check', manualApprovalReasonEscalated: 'review đã escalated', manualApprovalReasonChainIncomplete: 'chưa đủ chuỗi review', manualApprovalReasonMergeFailed: 'merge thất bại', manualApprovalReasonDisabled: 'đã tắt auto-merge', manualApprovalReasonUnknown: 'không rõ lý do', retryReviewer: 'Chạy lại reviewer',
     quickChatError: 'Lỗi gửi tin nhắn nhanh', diskFree: 'Ổ đĩa: {free} / {total} GB trống',
     diskFreeWithMin: 'Ổ đĩa: {free} / {total} GB trống (ngưỡng {min} GB)',
     waitingQueue: 'Hàng đợi chờ', waitingCount: '{count} task đang chờ', noWaitingTasks: 'Không có task nào đang chờ.',

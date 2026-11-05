@@ -12,6 +12,7 @@ import { TaskDag } from '../components/dag';
 import { filterTasksForDag } from '../components/dag/dagUtils';
 import { DataTable } from '../components/ui';
 import { useShowMore } from '../components/CollapsibleList';
+import { autoMergeReasonKey } from '../utils/autoMerge';
 
 export interface KanbanColumnProps {
   statusKey: (typeof KANBAN_STATUSES)[number];
@@ -142,7 +143,7 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
               ) : null}
               {task.autoMergeSkippedReason ? (
                 <span data-testid={`task-manual-approval-${task.id}`} className="inline-flex mb-2 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)]">
-                  {t('extra.manualApproval')}: {task.autoMergeSkippedReason}
+                  {t('extra.manualApproval')}: {t(autoMergeReasonKey(task.autoMergeSkippedReason))}
                 </span>
               ) : null}
               {task.status === 'review' ? (

@@ -25,6 +25,7 @@ import { formatReset } from './time-format.js';
 import { NotificationDeduper } from './notification-dedupe.js';
 import { reviewerSettingsFromLegacy } from './reviewer-config.js';
 import { QuotaService, QuotaCapacitySnapshot } from './quota/index.js';
+import { autoMergeReasonLabel, firstCheckError } from './auto-merge-notify.js';
 
 const WAITING_QUOTA_BATCH_DELAY_MS = 100;
 
@@ -3985,11 +3986,12 @@ export class TelegramBotService {
         if (!notify.reviewReady) return;
         const task = taskId ? this.taskRepo?.get(taskId) : null;
         const title = this.resolveTaskTitle(taskId, p, task);
-        const checks = Array.isArray(p.checks) ? p.checks as Array<{ name?: string; outputTail?: string }> : [];
-        const failed = checks.find((check) => check.outputTail);
-        const firstError = failed?.outputTail;
-        const detail = firstError ? `\n<code>${this.escapeHtml(String(firstError).slice(0, 200))}</code>` : '';
-        const reason = p.reason === 'checks_failed' ? `check <code>${this.escapeHtml(failed?.name || 'test')}</code> đỏ (đã chạy lại 1 lần)` : `lý do: ${this.escapeHtml(String(p.reason || 'không rõ'))}`;
+        const checks = Array.isArray(p.checks) ? p.checks as Array<{ name?: string; ok?: boolean; outputTail?: string }> : [];
+        const failed = checks.find((check) => !check.ok || check.outputTail);
+        const firstError = firstCheckError(failed?.outputTail);
+        const detail = firstError ? `\n<code>${this.escapeHtml(firstError)}</code>` : '';
+        const retryText = p.retried === true ? ' (đã chạy lại 1 lần)' : '';
+        const reason = p.reason === 'checks_failed' ? `check <code>${this.escapeHtml(failed?.name || 'test')}</code> đỏ${retryText}` : `lý do: ${this.escapeHtml(autoMergeReasonLabel(p.reason))}`;
         const keyboard: InlineKeyboardButton[][] = [[{ text: '🌐 Xem dashboard', url: this.getDashboardUrl(taskId ? `#/tasks/${toRouteId(taskId)}` : '') }]];
         this.broadcastMessage(`${prefix}✋ <b>${this.escapeHtml(title)}</b> đã được duyệt nhưng chưa tự merge: ${reason}. Cần duyệt tay.${detail}`, { inline_keyboard: keyboard });
         break;

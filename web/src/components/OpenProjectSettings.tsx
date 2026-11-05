@@ -12,6 +12,9 @@ import {
   syncOpenProject,
   testOpenProjectConnection,
   createOpenProjectDailyReport,
+  getOpenProjectTimeEntryActivities,
+  previewOpenProjectTimesheet,
+  runOpenProjectTimesheet,
 } from '../api/client';
 import type { OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto } from '../types/api';
 
@@ -35,7 +38,8 @@ const blank = (id: string): OpenProjectSourceInput => ({
   feedbackStatusId: null,
   language: 'vi',
   split: { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true },
-  dailyReport: { time: '18:00', weekdaysOnly: true, maxItems: 10, telegram: false },
+  dailyReport: { enabled: false, time: '18:00', weekdaysOnly: true, maxItems: 10, telegram: false },
+  timesheet: { enabled: false, time: '17:30', weekdaysOnly: true, hours: 8, activityId: null, minEntryHours: 0.5, roundTo: 0.25 },
 });
 
 export const parseIdList = (value: string): number[] =>
@@ -63,6 +67,7 @@ export const matchStatusIds = (statuses: OpenProjectStatusDto[], targetNames: st
 const normalizeSplit = (source: OpenProjectSource | OpenProjectSourceInput): OpenProjectSourceInput => ({
   ...source,
   split: source.split || { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true },
+  timesheet: source.timesheet || { enabled: false, time: '17:30', weekdaysOnly: true, hours: 8, activityId: null, minEntryHours: 0.5, roundTo: 0.25 },
 });
 
 export const OpenProjectSettings: React.FC = () => {
@@ -109,6 +114,7 @@ export const OpenProjectSettings: React.FC = () => {
     enabled: canFetchStatuses,
     retry: false,
   });
+  const { data: activities = [] } = useQuery({ queryKey: ['openproject-time-entry-activities', draft?.id], queryFn: () => getOpenProjectTimeEntryActivities(draft!.id), enabled: canFetchStatuses, retry: false });
 
   const saveMutation = useMutation({
     mutationFn: async (sourceDraft: OpenProjectSourceInput) => {
@@ -247,6 +253,8 @@ export const OpenProjectSettings: React.FC = () => {
       });
     },
   });
+  const timesheetPreviewMutation = useMutation({ mutationFn: (id: string) => previewOpenProjectTimesheet(id), onSuccess: () => setMessage({ type: 'ok', text: t('integrations.timesheetPreviewSuccess') }) });
+  const timesheetRunMutation = useMutation({ mutationFn: (id: string) => runOpenProjectTimesheet(id), onSuccess: () => setMessage({ type: 'ok', text: t('integrations.timesheetRunSuccess') }) });
 
   const set = (patch: Partial<OpenProjectSourceInput>) =>
     setDraft((d) => (d ? { ...d, ...patch } : d));
@@ -691,6 +699,17 @@ export const OpenProjectSettings: React.FC = () => {
             </label>
           </div>
 
+          <div className="sm:col-span-2 grid gap-3 rounded-lg border border-[var(--t-border)] p-3 sm:grid-cols-2">
+            <strong className="sm:col-span-2 text-xs">{t('integrations.timesheetConfig')}</strong>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.timesheet?.enabled ?? false} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), enabled: e.target.checked } })} />{t('integrations.timesheetEnabled')}</label>
+            <label className="space-y-1 text-xs"><span>{t('integrations.timesheetTime')}</span><input type="time" value={draft.timesheet?.time || '17:30'} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), time: e.target.value } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label>
+            <label className="space-y-1 text-xs"><span>{t('integrations.timesheetActivity')}</span><select value={draft.timesheet?.activityId ?? ''} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), activityId: e.target.value ? Number(e.target.value) : null } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2"><option value="">{t('integrations.timesheetActivityManual')}</option>{activities.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}</select></label>
+            <label className="space-y-1 text-xs"><span>{t('integrations.timesheetHours')}</span><input type="number" min={8} step={0.25} value={draft.timesheet?.hours ?? 8} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), hours: Number(e.target.value) } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label>
+            <label className="space-y-1 text-xs"><span>{t('integrations.timesheetMin')}</span><input type="number" min={0.25} step={0.25} value={draft.timesheet?.minEntryHours ?? 0.5} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), minEntryHours: Number(e.target.value) } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label>
+            <label className="space-y-1 text-xs"><span>{t('integrations.timesheetRound')}</span><input type="number" min={0.25} step={0.25} value={draft.timesheet?.roundTo ?? 0.25} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), roundTo: Number(e.target.value) } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.timesheet?.weekdaysOnly ?? true} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), weekdaysOnly: e.target.checked } })} />{t('integrations.weekdaysOnly')}</label>
+          </div>
+
           <label className="sm:col-span-2 space-y-1">
             <span>{t('integrations.apiKey')}</span>
             <input
@@ -752,6 +771,8 @@ export const OpenProjectSettings: React.FC = () => {
               {dailyReportMutation.isPending && <Loader2 className="inline h-3 w-3 animate-spin" />}
               {dailyReportMutation.isPending ? t('integrations.creatingDailyReport') : t('integrations.dailyReport')}
             </button>
+            <button type="button" onClick={() => timesheetPreviewMutation.mutate(draft.id)} disabled={isUnsaved || timesheetPreviewMutation.isPending} className="rounded-lg border px-3 py-2 text-xs disabled:opacity-50">{t('integrations.timesheetPreview')}</button>
+            <button type="button" onClick={() => timesheetRunMutation.mutate(draft.id)} disabled={isUnsaved || timesheetRunMutation.isPending} className="rounded-lg border px-3 py-2 text-xs disabled:opacity-50">{t('integrations.timesheetRun')}</button>
             <button
               type="button"
               onClick={() => {

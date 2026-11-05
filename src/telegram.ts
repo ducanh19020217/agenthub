@@ -4076,6 +4076,15 @@ export class TelegramBotService {
         this.broadcastMessage(`${prefix}🔗 <b>${this.escapeHtml(ref)}</b> ${label}.`);
         break;
       }
+      case 'tracker.timesheet.posted': {
+        const rows = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; subject?: string; hours?: number }> : [];
+        const missing = Array.isArray(p.withoutTicket) && p.withoutTicket.length ? `\nChưa có ticket: ${p.withoutTicket.length}` : '';
+        this.broadcastMessage(`${prefix}🕒 <b>Đã ghi bảng giờ</b> (${this.escapeHtml(String(p.hours || 0))}h)\n${rows.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${this.escapeHtml(String(row.subject || ''))} — ${row.hours || 0}h`).join('\n')}${missing}`);
+        break;
+      }
+      case 'tracker.timesheet.failed':
+        this.broadcastMessage(`${prefix}❌ <b>Ghi bảng giờ thất bại</b>: ${this.escapeHtml(String(p.error || ''))}`);
+        break;
       case 'tracker.triage_ready': {
         const sourceId = typeof p.sourceId === 'string' ? p.sourceId : '';
         const wpId = typeof p.wpId === 'number' ? p.wpId : 0;

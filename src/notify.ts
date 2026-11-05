@@ -409,6 +409,17 @@ export class NotificationService {
         break;
       }
 
+      case 'tracker.timesheet.posted': {
+        const rows = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; subject?: string; hours?: number }> : [];
+        const missing = Array.isArray(p.withoutTicket) && p.withoutTicket.length ? `; chưa có ticket: ${p.withoutTicket.length}` : '';
+        this.notify(`${this.appName}: đã ghi bảng giờ ${p.sourceId || 'OpenProject'} (${p.hours || 0}h) ${rows.map((row) => `[${row.displayId || '?'}] ${row.subject || ''} — ${row.hours || 0}h`).join('; ')}${missing}`, 'normal');
+        break;
+      }
+      case 'tracker.timesheet.failed': {
+        this.notify(`${this.appName}: ghi bảng giờ thất bại${typeof p.error === 'string' ? `: ${p.error}` : ''}`, 'critical');
+        break;
+      }
+
       case 'daily_report.created': {
         const source = typeof p.sourceId === 'string' ? p.sourceId : 'OpenProject';
         this.notify(`${this.appName}: đã tạo báo cáo ngày (${source})`, 'normal');

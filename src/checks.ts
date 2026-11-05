@@ -5,12 +5,13 @@ import type Database from 'better-sqlite3';
 import type { ProjectRow, TaskRow } from './db/index.js';
 import { runInProcessGroup } from './priority.js';
 import { workerEnvironment } from './worker-guard.js';
+import { taskCommitRef } from './commit-convention.js';
 
 const MAX_OUTPUT = 8192;
 const CONFLICT_MARKER_REGEX = /^(<{7}|={7}|>{7})( |$)/m;
 export interface CheckDefinition { name: string; cmd: string[]; timeoutSec?: number }
 export interface CheckResult { name: string; ok: boolean; exitCode: number | null; durationMs: number; outputTail: string; runId?: string; runStartedAt?: string }
-export interface CheckRunOptions { reuseSavedResults?: boolean }
+export interface CheckRunOptions { reuseSavedResults?: boolean; onlyNames?: string[] }
 
 /** Release packaging is deliberately opt-in: it may run npm ci and rebuild the hub. */
 export function isHeavyReleaseCheck(check: CheckDefinition): boolean {
@@ -155,14 +156,18 @@ async function runOne(check: CheckDefinition, repo: string, hubHome: string, pro
   if (check.name === 'commit-message' && project && task) {
     let output = '';
     const convention = projectSettings(project).commitConvention;
+    const ref = taskCommitRef(project, task);
     try {
       const range = `${(task.baseRef || project.defaultBranch || 'main')}..HEAD`;
       const log = execFileSync('git', ['log', '--no-merges', '--format=%H%x00%s', range], { cwd: repo, encoding: 'utf8' });
       const regex = convention.commitRegex ? new RegExp(convention.commitRegex) : null;
       const bad: string[] = [];
+      if (convention.commitTemplate.includes('{ref}') && !ref) {
+        bad.push('Commit template chứa {ref} nhưng task không có externalRef và project chưa đặt commitConvention.defaultRef; hãy đặt defaultRef hoặc gắn ticket cho task.');
+      }
       for (const line of log.split('\n').filter(Boolean)) {
         const [hash, message] = line.split('\0');
-        if ((regex && !regex.test(message)) || (convention.commitTemplate.includes('{ref}') && (!task.externalRef || !message.includes(task.externalRef)))) {
+        if ((regex && !regex.test(message)) || (ref && convention.commitTemplate.includes('{ref}') && !message.includes(ref))) {
           bad.push(`${hash.slice(0, 10)} ${message}`);
         }
       }
@@ -187,9 +192,14 @@ export class CheckRunner {
     const configured = project.checks ? JSON.parse(project.checks) as CheckDefinition[] : detectChecks(repo);
     // Explicit project checks are authoritative. Only auto-detected release
     // checks are excluded because they may run npm ci/package.
-    const checks = [...(project.checks ? configured : configured.filter((check) => !isHeavyReleaseCheck(check))), ...mandatoryChecks(repo, task, project)];
+    const allChecks = [...(project.checks ? configured : configured.filter((check) => !isHeavyReleaseCheck(check))), ...mandatoryChecks(repo, task, project)];
+    const checks = options.onlyNames ? allChecks.filter((check) => options.onlyNames!.includes(check.name)) : allChecks;
     if (!options.reuseSavedResults) {
-      this.db.prepare('DELETE FROM check_results WHERE taskId = ? AND runId = ?').run(task.id, runId);
+      if (options.onlyNames?.length) {
+        this.db.prepare(`DELETE FROM check_results WHERE taskId = ? AND runId = ? AND name IN (${options.onlyNames.map(() => '?').join(',')})`).run(task.id, runId, ...options.onlyNames);
+      } else {
+        this.db.prepare('DELETE FROM check_results WHERE taskId = ? AND runId = ?').run(task.id, runId);
+      }
     }
     const head = worktreeHead(repo);
     const existingRows = options.reuseSavedResults

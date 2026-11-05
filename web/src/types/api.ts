@@ -218,7 +218,7 @@ export interface ProjectSettings {
   preset?: 'safe' | 'balanced' | 'auto' | 'custom' | string;
   autoFixOnFail?: boolean;
   planning?: { requireApproval?: boolean; approvalMinTasks?: number };
-  commitConvention?: { branchTemplate: string; commitTemplate: string; commitRegex?: string; mergeMessageTemplate: string };
+  commitConvention?: { branchTemplate: string; commitTemplate: string; defaultRef?: string; commitRegex?: string; mergeMessageTemplate: string };
   brain: {
     engine?: 'inherit' | 'claude' | 'codex';
     codexProfile?: string;
@@ -366,6 +366,9 @@ export interface Task {
   reviewerEscalated?: number;
   reviewerEscalatedAt?: string | null;
   reviewerEscalationReason?: string | null;
+  autoMergeSkippedReason?: string | null;
+  autoMergeSkippedChecks?: Array<{ name?: string; outputTail?: string }>;
+  autoMergeSkippedRetried?: boolean;
   reviewStep?: number;
   reviewRound?: number;
   reviewMaxRounds?: number;

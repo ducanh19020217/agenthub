@@ -1230,6 +1230,8 @@ export interface TaskRow {
   reviewerEscalated?: number;
   reviewerEscalatedAt?: string | null;
   reviewerEscalationReason?: string | null;
+  autoMergeSkippedReason?: string | null;
+  autoMergeSkippedChecks?: unknown[];
   reviewStep?: number;
   doneReport?: string | null;
   blockedReport?: string | null;
@@ -3273,6 +3275,31 @@ export interface TrackerItemRow {
 export class TrackerItemRepo {
   constructor(private db: Database.Database) {}
   get(sourceId: string, wpId: number): TrackerItemRow | undefined { return this.db.prepare('SELECT * FROM tracker_items WHERE source_id = ? AND wp_id = ?').get(sourceId, wpId) as TrackerItemRow | undefined; }
+  linkTask(sourceId: string, wpId: number, displayId: string, taskId: string): TrackerItemRow {
+    const existing = this.get(sourceId, wpId);
+    if (existing) {
+      let taskIds: string[];
+      try {
+        const parsed = JSON.parse(existing.task_ids || '[]');
+        taskIds = Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+      } catch {
+        taskIds = [];
+      }
+      if (!taskIds.includes(taskId)) taskIds.push(taskId);
+      this.db.prepare('UPDATE tracker_items SET task_ids = ? WHERE source_id = ? AND wp_id = ?').run(JSON.stringify(taskIds), sourceId, wpId);
+      return this.get(sourceId, wpId)!;
+    }
+    return this.upsert({
+      source_id: sourceId,
+      wp_id: wpId,
+      display_id: displayId,
+      status_id: null,
+      updated_at: new Date().toISOString(),
+      last_comment_id: null,
+      task_ids: JSON.stringify([taskId]),
+      writeback: '{}',
+    });
+  }
   delete(sourceId: string, wpId: number): void { this.db.prepare('DELETE FROM tracker_items WHERE source_id = ? AND wp_id = ?').run(sourceId, wpId); }
   upsert(row: Omit<TrackerItemRow, 'created_at'>): TrackerItemRow {
     this.db.prepare(`INSERT INTO tracker_items (source_id,wp_id,display_id,status_id,updated_at,last_comment_id,task_ids,writeback) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(source_id,wp_id) DO UPDATE SET display_id=excluded.display_id,status_id=excluded.status_id,updated_at=excluded.updated_at,last_comment_id=excluded.last_comment_id,task_ids=excluded.task_ids,writeback=excluded.writeback`).run(row.source_id,row.wp_id,row.display_id,row.status_id,row.updated_at,row.last_comment_id,row.task_ids,row.writeback);

@@ -26,6 +26,7 @@ describe('project settings parsing', () => {
       commitConvention: {
         branchTemplate: 'agenthub/{slug}',
         commitTemplate: '{type}: {summary}',
+        defaultRef: '',
         mergeMessageTemplate: "Merge branch '{branch}' into {target}",
       },
       brain: { engine: 'inherit', mode: 'inherit', permissions: 'inherit' },

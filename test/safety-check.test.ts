@@ -8,6 +8,9 @@ import {
   findUnexpectedHubEntries,
   getHubSnapshot,
   verifyHubHomeSafety,
+  findHubEntryChanges,
+  getAgyHomesSnapshot,
+  verifyAgyHomesSafety,
 } from './safety-check';
 
 describe('safety-check hub home comparison', () => {
@@ -21,6 +24,12 @@ describe('safety-check hub home comparison', () => {
     if (tempDir && fs.existsSync(tempDir)) {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it('uses a temporary home and hub home during tests', () => {
+    expect(os.homedir()).toBe(process.env.HOME);
+    expect(process.env.AGENTHUB_HOME).toContain(process.env.AGENTHUB_TEST_TMP_ROOT);
+    expect(process.env.AGENTHUB_AGY_HOMES).toContain(process.env.AGENTHUB_TEST_TMP_ROOT);
   });
 
   it('correctly classifies ignored hub entries', () => {
@@ -76,15 +85,13 @@ describe('safety-check hub home comparison', () => {
     expect(findUnexpectedHubEntries(before, after)).toEqual(['hub.db-wal', 'unrecognized-file.txt', 'foo']);
   });
 
-  it('reports violation when a new entry has an unexpected name', () => {
+  it('only warns when a high-level entry has an unexpected name', () => {
     fs.mkdirSync(path.join(tempDir, 'web'));
     const snap = getHubSnapshot(tempDir);
 
     fs.writeFileSync(path.join(tempDir, 'suspicious-file.txt'), 'content');
 
-    expect(() => verifyHubHomeSafety(snap)).toThrow(
-      /SAFETY NET VIOLATION:.*suspicious-file\.txt/,
-    );
+    expect(() => verifyHubHomeSafety(snap)).not.toThrow();
   });
 
   it('does not report violation when allowlisted runtime entries are added', () => {
@@ -101,7 +108,7 @@ describe('safety-check hub home comparison', () => {
     expect(() => verifyHubHomeSafety(snap)).not.toThrow();
   });
 
-  it('allows web-staging-abc additions but reports unexpected directories', () => {
+  it('allows web-staging-abc additions and warns for unexpected directories', () => {
     const snap = getHubSnapshot(tempDir);
 
     fs.mkdirSync(path.join(tempDir, 'web-staging-abc'));
@@ -109,9 +116,24 @@ describe('safety-check hub home comparison', () => {
     expect(() => verifyHubHomeSafety(snap)).not.toThrow();
 
     fs.mkdirSync(path.join(tempDir, 'unexpected-dir'));
-    expect(() => verifyHubHomeSafety(snap)).toThrow(
-      /SAFETY NET VIOLATION:.*unexpected-dir/,
-    );
+    expect(() => verifyHubHomeSafety(snap)).not.toThrow();
+  });
+
+  it('reports added and removed high-level entries without inspecting their contents', () => {
+    expect(findHubEntryChanges(['a', 'b'], ['b', 'c'])).toEqual({ added: ['c'], removed: ['a'] });
+  });
+
+  it('warns when a whole existing profile is removed but fails when its file changes', () => {
+    const agyHomes = path.join(tempDir, 'agy-homes');
+    fs.mkdirSync(path.join(agyHomes, 'old'), { recursive: true });
+    fs.writeFileSync(path.join(agyHomes, 'old', 'metadata.json'), '{}');
+    const profile = getAgyHomesSnapshot(agyHomes);
+    fs.rmSync(path.join(agyHomes, 'old'), { recursive: true });
+    expect(() => verifyAgyHomesSafety(profile)).not.toThrow();
+    fs.mkdirSync(path.join(agyHomes, 'old'), { recursive: true });
+    fs.writeFileSync(path.join(agyHomes, 'old', 'metadata.json'), '{}');
+    fs.writeFileSync(path.join(agyHomes, 'old', 'changed.txt'), 'changed');
+    expect(() => verifyAgyHomesSafety(profile)).toThrow(/profile .* changed inside/);
   });
 
   it('reports violation when sensitive files are created during test', () => {

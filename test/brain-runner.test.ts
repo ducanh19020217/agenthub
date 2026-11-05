@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { BrainRunner } from '../src/brain/runner.js';
+import { BrainRunner, buildBrainTicketWorkflowInstruction } from '../src/brain/runner.js';
 import { BrainTurnRepo, ChatSessionRepo, DepartmentRepo, KnowledgeRepo, ProfileRepo, ProjectRepo, openDatabase } from '../src/db/index.js';
 import { EventBus } from '../src/scheduler/index.js';
 
@@ -403,5 +403,23 @@ describe('BrainRunner', () => {
     ctx.events.emit('brain.profile_transfer', undefined, { profileName: 'g1', fromDepartmentId: 'eng', toDepartmentId: 'sales' });
     expect(ctx.departments.profiles('eng')).toHaveLength(0);
     expect(ctx.departments.profiles('sales')).toMatchObject([{ profileName: 'g1', share: 40 }]);
+  });
+
+  it('includes shared ticket workflow rules in brain turn when OpenProject is enabled', () => {
+    const settings = {
+      openproject: { enabled: true, sourceId: 'sie', role: 'primary' },
+      commitConvention: { defaultRef: 'SIE-19', commitTemplate: '[{ref}] {summary}', branchTemplate: 'agenthub/{slug}' },
+    };
+    const ctx = setup('suggest', { projectSettings: { p1: JSON.stringify(settings) } });
+    ctx.runner.start();
+    ctx.events.emit('task.failed', 'p1/task-1');
+    ctx.runner.flush();
+    const sent = ctx.sent.find((s) => s.includes('p1'));
+    expect(sent).toBeDefined();
+    expect(sent).toContain('QUY ĐỊNH TICKET OPENPROJECT (BẮT BUỘC)');
+    expect(sent).toContain('Mã ref mặc định: `SIE-19`');
+    expect(sent).toContain('Nội dung ticket: ## Đã làm + ## Còn lại');
+
+    expect(buildBrainTicketWorkflowInstruction({ openproject: { enabled: false } } as never)).toBe('');
   });
 });

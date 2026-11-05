@@ -147,6 +147,49 @@ describe('OpenProject Integration', () => {
       expect(calls[0]).toContain('pageSize=100');
     });
 
+    it('searches all project tickets with optional filters, default wildcard status, and pagination', async () => {
+      const calls: string[] = [];
+      const fakeFetch = vi.fn().mockImplementation(async (url: string | URL) => {
+        const u = url.toString();
+        calls.push(u);
+        if (u.includes('offset=1')) {
+          const elements = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, displayId: `SIE-${i + 1}`, lockVersion: 1 }));
+          return new Response(JSON.stringify({ total: 101, _embedded: { elements } }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ total: 101, _embedded: { elements: [{ id: 101, displayId: 'SIE-101', lockVersion: 1 }] } }), { status: 200 });
+      });
+
+      // Search without status defaults to status = '*' (including closed tickets)
+      const client = new OpenProjectClient({ baseUrl: 'https://op.example.com', project: 'sie', apiKey: 'key', fetch: fakeFetch as unknown as typeof fetch });
+      const result = await client.searchWorkPackages({ assignee: 'me' });
+      expect(result).toHaveLength(101);
+      expect(result[0]?.displayId).toBe('SIE-1');
+      expect(result[100]?.displayId).toBe('SIE-101');
+      expect(decodeURIComponent(calls[0])).toContain('"status":{"operator":"*","values":[]}');
+      expect(decodeURIComponent(calls[0])).toContain('"assignee":{"operator":"=","values":["me"]}');
+      expect(calls[0]).toContain('offset=1');
+      expect(calls[1]).toContain('offset=2');
+    });
+
+    it('searches by display id SIE-25 by querying numeric id and subject', async () => {
+      const urls: string[] = [];
+      const fakeFetch = vi.fn().mockImplementation(async (url: string | URL) => {
+        const u = decodeURIComponent(url.toString());
+        urls.push(u);
+        if (u.includes('"id":{"operator":"=","values":["25"]}')) {
+          return new Response(JSON.stringify({ total: 1, _embedded: { elements: [{ id: 25, displayId: 'SIE-25', subject: 'Refactor UI', lockVersion: 1 }] } }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ total: 0, _embedded: { elements: [] } }), { status: 200 });
+      });
+
+      const client = new OpenProjectClient({ baseUrl: 'https://op.example.com', project: 'sie', apiKey: 'key', fetch: fakeFetch as unknown as typeof fetch });
+      const result = await client.searchWorkPackages({ query: 'SIE-25', status: '95' });
+      expect(result).toHaveLength(1);
+      expect(result[0]?.displayId).toBe('SIE-25');
+      expect(urls.some((u) => u.includes('"id":{"operator":"=","values":["25"]}'))).toBe(true);
+      expect(urls.some((u) => u.includes('"status":{"operator":"=","values":["95"]}'))).toBe(true);
+    });
+
     it('retries setStatus up to 3 times when receiving 409 conflict', async () => {
       let attempts = 0;
       let wpFetchCount = 0;
@@ -730,6 +773,67 @@ describe('OpenProject Integration', () => {
         }),
       ).not.toThrow();
     });
+
+    it('links ticket to task, preserves tracker row state on update, and validates source and task existence', () => {
+      const trackerRepo = new TrackerItemRepo(db);
+      const taskRepo = new TaskRepo(db);
+      service.taskRepo = taskRepo;
+      service.setTrackerRepo(trackerRepo);
+
+      projectRepo.insert({
+        id: 'p1',
+        name: 'Project 1',
+        path: tmpDir,
+        defaultBranch: 'main',
+        envTemplate: null,
+        maxParallel: 1,
+      });
+      taskRepo.insert({
+        id: 'p1/task-1',
+        projectId: 'p1',
+        slug: 'task-1',
+        title: 'Task 1',
+        level: 'easy',
+      });
+      taskRepo.insert({
+        id: 'p1/task-2',
+        projectId: 'p1',
+        slug: 'task-2',
+        title: 'Task 2',
+        level: 'easy',
+      });
+
+      // 404 on missing source
+      expect(() => service.linkOpenProjectTicket('unknown-source', 10, 'SIE-10', 'p1/task-1')).toThrowError(/Nguồn OpenProject "unknown-source" không tồn tại/);
+
+      // 404 on missing task
+      expect(() => service.linkOpenProjectTicket('soar', 10, 'SIE-10', 'p1/missing-task')).toThrowError(/Task "p1\/missing-task" không tồn tại/);
+
+      // New link creates row
+      service.linkOpenProjectTicket('soar', 10, 'SIE-10', 'p1/task-1');
+      const row1 = trackerRepo.get('soar', 10);
+      expect(row1).toBeDefined();
+      expect(JSON.parse(row1!.task_ids)).toEqual(['p1/task-1']);
+      expect(row1!.writeback).toBe('{}');
+
+      // Update existing tracker row with status and writeback to simulate prior work
+      trackerRepo.upsert({
+        ...row1!,
+        status_id: 95,
+        last_comment_id: 1234,
+        writeback: JSON.stringify({ commented: true, resolved: true }),
+      });
+
+      // Linking another task preserves state and merges task_ids
+      service.linkOpenProjectTicket('soar', 10, 'SIE-99', 'p1/task-2');
+      const row2 = trackerRepo.get('soar', 10);
+      expect(row2).toBeDefined();
+      expect(row2!.display_id).toBe('SIE-10');
+      expect(row2!.status_id).toBe(95);
+      expect(row2!.last_comment_id).toBe(1234);
+      expect(JSON.parse(row2!.writeback)).toEqual({ commented: true, resolved: true });
+      expect(JSON.parse(row2!.task_ids)).toEqual(['p1/task-1', 'p1/task-2']);
+    });
   });
 
   describe('OpenProject HTTP Routes', () => {
@@ -1007,6 +1111,155 @@ describe('OpenProject Integration', () => {
 
       const forbidden = await app.inject({ method: 'POST', url: '/api/integrations/openproject/sources/src-scope/work-packages/99/update', payload: { comment: 'nope' } });
       expect(forbidden.statusCode).toBe(403);
+    });
+
+    it('GET /api/integrations/openproject/sources/:id/tickets searches tickets, maps status names, and hides API key', async () => {
+      config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'src-tickets-get', url: 'https://op.example.com', project: '123' })];
+      saveOpenProjectKey(tmpDir, 'src-tickets-get', 'secret-search-key');
+
+      let requestedUrl = '';
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: string | URL) => {
+        const url = input.toString();
+        requestedUrl = url;
+        if (url.endsWith('/statuses?pageSize=100')) {
+          return new Response(JSON.stringify({ _embedded: { elements: [{ id: 95, name: 'Resolved' }, { id: 1, name: 'New' }] } }), { status: 200 });
+        }
+        if (url.includes('/projects/123/work_packages?')) {
+          return new Response(JSON.stringify({
+            total: 1,
+            _embedded: {
+              elements: [{
+                id: 25,
+                displayId: 'SIE-25',
+                subject: 'Auth fix',
+                status: { title: 'Resolved' },
+                _links: { parent: { title: 'SIE-1' }, assignee: { title: 'Alice' } },
+              }],
+            },
+          }), { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      // Valid search with status name mapping
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/openproject/sources/src-tickets-get/tickets?q=Auth&status=Resolved&assignee=me',
+      });
+      expect(res.statusCode).toBe(200);
+      const results = JSON.parse(res.body);
+      expect(results).toEqual([{
+        displayId: 'SIE-25',
+        subject: 'Auth fix',
+        status: 'Resolved',
+        parent: 'SIE-1',
+        assignee: 'Alice',
+        url: 'https://op.example.com/work_packages/25',
+      }]);
+      expect(decodeURIComponent(requestedUrl)).toContain('"status":{"operator":"=","values":["95"]}');
+      expect(res.body).not.toContain('secret-search-key');
+
+      // Invalid status returns 400
+      const invalidStatusRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/openproject/sources/src-tickets-get/tickets?status=nonexistent',
+      });
+      expect(invalidStatusRes.statusCode).toBe(400);
+      expect(JSON.parse(invalidStatusRes.body).message).toContain('Trạng thái "nonexistent" không hợp lệ');
+
+      // 502 on failure does not leak secret key
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network error with key secret-search-key'));
+      const failRes = await app.inject({
+        method: 'GET',
+        url: '/api/integrations/openproject/sources/src-tickets-get/tickets',
+      });
+      expect(failRes.statusCode).toBe(502);
+      expect(failRes.body).not.toContain('secret-search-key');
+    });
+
+    it('POST /api/integrations/openproject/sources/:id/tickets creates ticket, links taskId, and validates parent/status without leaking key', async () => {
+      config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'src-tickets-post', url: 'https://op.example.com', project: '123' })];
+      saveOpenProjectKey(tmpDir, 'src-tickets-post', 'secret-create-key');
+
+      let linkedArgs: unknown[] = [];
+      const testApp = Fastify();
+      testApp.setErrorHandler((error, _req, reply) => {
+        if (error instanceof HttpError) return reply.status(error.statusCode).send({ error: error.error, message: error.message });
+        return reply.status(500).send({ error: 'internal_error', message: error.message });
+      });
+      registerOpenProjectRoutes(testApp, config, {
+        linkTicket: (sourceId, wpId, displayId, taskId) => {
+          linkedArgs = [sourceId, wpId, displayId, taskId];
+        },
+      });
+      await testApp.ready();
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: string | URL, init?: RequestInit) => {
+        const url = input.toString();
+        if (url.endsWith('/statuses?pageSize=100')) {
+          return new Response(JSON.stringify({ _embedded: { elements: [{ id: 94, name: 'In progress' }, { id: 95, name: 'Resolved' }] } }), { status: 200 });
+        }
+        if (url.endsWith('/users/me')) {
+          return new Response(JSON.stringify({ id: 5, name: 'Me' }), { status: 200 });
+        }
+        if (url.includes('/projects/123/work_packages?')) {
+          return new Response(JSON.stringify({ total: 1, _embedded: { elements: [{ id: 10, displayId: 'SIE-10', lockVersion: 1 }] } }), { status: 200 });
+        }
+        if (url.endsWith('/work_packages/99')) {
+          return new Response(JSON.stringify({ id: 99, lockVersion: 1, _links: { project: { href: '/api/v3/projects/other', title: 'other' } } }), { status: 200 });
+        }
+        if (url.includes('/projects/123/work_packages') && init?.method === 'POST') {
+          return new Response(JSON.stringify({ id: 35, displayId: 'SIE-35' }), { status: 201 });
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      // Successful creation with taskId and mapped status name
+      const createRes = await testApp.inject({
+        method: 'POST',
+        url: '/api/integrations/openproject/sources/src-tickets-post/tickets',
+        payload: {
+          subject: 'New feature',
+          description: 'Description markdown',
+          parent: 'SIE-10',
+          status: 'In progress',
+          taskId: 'p1/task-35',
+        },
+      });
+      expect(createRes.statusCode).toBe(200);
+      const created = JSON.parse(createRes.body);
+      expect(created).toEqual({
+        id: 35,
+        displayId: 'SIE-35',
+        url: 'https://op.example.com/work_packages/35',
+        taskId: 'p1/task-35',
+      });
+      expect(linkedArgs).toEqual(['src-tickets-post', 35, 'SIE-35', 'p1/task-35']);
+      expect(createRes.body).not.toContain('secret-create-key');
+
+      // Parent outside project returns 403
+      const forbiddenRes = await testApp.inject({
+        method: 'POST',
+        url: '/api/integrations/openproject/sources/src-tickets-post/tickets',
+        payload: {
+          subject: 'Another',
+          parent: 99,
+        },
+      });
+      expect(forbiddenRes.statusCode).toBe(403);
+
+      // Invalid status returns 400
+      const invalidStatusRes = await testApp.inject({
+        method: 'POST',
+        url: '/api/integrations/openproject/sources/src-tickets-post/tickets',
+        payload: {
+          subject: 'Another',
+          status: 'BadStatus',
+        },
+      });
+      expect(invalidStatusRes.statusCode).toBe(400);
+
+      await testApp.close();
     });
   });
 

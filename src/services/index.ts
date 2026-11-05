@@ -82,6 +82,7 @@ import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../pres
 import type { SetupTools } from '../setup-tools.js';
 import { computeEffectiveConfig } from '../effective-config.js';
 import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
+import { type AutoMergeSkipReason } from '../auto-merge-notify.js';
 import { OpenProjectClient, type OpenProjectWorkPackage } from '../integrations/openproject/client.js';
 import { readOpenProjectKey } from '../integrations/openproject/secrets.js';
 import { writeTicketDirectory } from '../integrations/openproject/ticket.js';
@@ -955,6 +956,9 @@ export class AppService {
   private gitVersionCheck?: Promise<string | null>;
   private static readonly SETUP_VERSION_CACHE_MS = 10 * 60 * 1000;
   private failedAutoMerges = new Set<string>();
+  private autoMergeCheckRetries = new Set<string>();
+  private autoMergeCheckRetryPromises = new Map<string, Promise<boolean>>();
+  private autoMergeSkipped = new Set<string>();
   constructor(
     public config: AgentHubConfig,
     public projectRepo: ProjectRepo,
@@ -3044,6 +3048,18 @@ export class AppService {
         : (isFallback ? fallbackReviewer : (reviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex'));
       const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
       const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
+      const skippedEvent = this.eventRepo?.getByTask(task.id).filter((event) => event.type === 'review.auto_merge_skipped').at(-1);
+      let autoMergeSkippedReason: string | null = null;
+      let autoMergeSkippedChecks: unknown[] | undefined;
+      let autoMergeSkippedRetried = false;
+      if (skippedEvent?.payload) {
+        try {
+          const payload = JSON.parse(skippedEvent.payload) as { reason?: unknown; checks?: unknown; retried?: unknown };
+          autoMergeSkippedReason = typeof payload.reason === 'string' ? payload.reason : null;
+          autoMergeSkippedChecks = Array.isArray(payload.checks) ? payload.checks : undefined;
+          autoMergeSkippedRetried = payload.retried === true;
+        } catch { /* ignore malformed legacy event */ }
+      }
       return {
         ...apiTask(task, blockingDisk),
         externalUrl: this.openProjectTicketUrl(task),
@@ -3052,6 +3068,9 @@ export class AppService {
         reviewRound,
         reviewMaxRounds,
         reviewer,
+        autoMergeSkippedReason,
+        autoMergeSkippedChecks,
+        autoMergeSkippedRetried,
         checks: this.scheduler.getCheckResults(task.id),
         paused: Boolean(run?.paused),
         pauseReason: run?.pauseReason ?? null,
@@ -3213,6 +3232,8 @@ export class AppService {
     }
     const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
     const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
+    const skippedEvent = events.filter((event) => event.type === 'review.auto_merge_skipped').at(-1);
+    const skippedPayload = skippedEvent?.payload && typeof skippedEvent.payload === 'object' ? skippedEvent.payload as { reason?: unknown; checks?: unknown; retried?: unknown } : undefined;
     return {
       ...apiTask(task, blockingDisk),
       externalUrl: this.openProjectTicketUrl(task),
@@ -3242,6 +3263,9 @@ export class AppService {
       reviewStep: task.reviewStep ?? 0,
       reviewRound,
       reviewMaxRounds,
+      autoMergeSkippedReason: typeof skippedPayload?.reason === 'string' ? skippedPayload.reason : null,
+      autoMergeSkippedChecks: Array.isArray(skippedPayload?.checks) ? skippedPayload.checks : undefined,
+      autoMergeSkippedRetried: skippedPayload?.retried === true,
       doneContent,
       blockedContent,
       modelWarnings,
@@ -3334,6 +3358,14 @@ export class AppService {
       task_ids: JSON.stringify([taskId]),
       writeback: '{}',
     });
+  }
+
+  linkOpenProjectTicket(sourceId: string, wpId: number, displayId: string, taskId: string): void {
+    if (!this.config.integrations.openproject.sources.some((s) => s.id === sourceId)) {
+      throw new HttpError(404, 'not_found', `Nguồn OpenProject "${sourceId}" không tồn tại`);
+    }
+    if (!this.trackerRepo || !this.taskRepo.get(taskId)) throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    this.trackerRepo.linkTask(sourceId, wpId, displayId, taskId);
   }
 
   createTask(raw: unknown): TaskRow {
@@ -4178,8 +4210,28 @@ export class AppService {
     if (!task || task.status !== 'review') return;
     const project = this.projectRepo.get(task.projectId);
     if (!project) return;
+    const last = this.reviewRepo.getByTask(taskId).at(-1);
+    if (!last || !isAutoReviewer(last.actor) || last.verdict !== 'approved') return;
+    const skip = (reason: AutoMergeSkipReason, checks?: unknown[], retried = false) => {
+      const key = `${taskId}:${last.id}`;
+      if (this.autoMergeSkipped.has(key)) return;
+      if (this.eventRepo.getByTask(taskId).some((event) => {
+        if (event.type !== 'review.auto_merge_skipped') return false;
+        try { return (event.payload ? JSON.parse(event.payload) : {}).reviewId === last.id; } catch { return false; }
+      })) {
+        this.autoMergeSkipped.add(key);
+        return;
+      }
+      this.autoMergeSkipped.add(key);
+      this.scheduler.getEventBus().emit('review.auto_merge_skipped', taskId, {
+        reason,
+        reviewId: last.id,
+        retried,
+        ...(checks ? { checks } : {}),
+      });
+    };
     const settings = projectSettings(project);
-    if (!(settings.review.autoMerge || settings.integration.autoMerge)) return;
+    if (!(settings.review.autoMerge || settings.integration.autoMerge)) { skip('auto_merge_disabled'); return; }
     const rawChain = project.review
       ? (() => {
           try {
@@ -4198,21 +4250,42 @@ export class AppService {
       : typeof rawChain === 'string'
         ? parseReviewChain(rawChain)
         : [];
-    if (!chain.length) return;
+    if (!chain.length) { skip('chain_incomplete'); return; }
     const lastStep = chain.at(-1);
-    if (!lastStep || lastStep.mode !== 'gate') return;
-    if ((task.reviewStep ?? 0) < chain.length) return;
-    if (task.reviewerEscalated) return;
-    const last = this.reviewRepo.getByTask(taskId).at(-1);
-    if (!last || !isAutoReviewer(last.actor) || last.verdict !== 'approved') return;
-    const checks = this.scheduler.getCheckResults(taskId);
-    if (checks.length === 0 || checks.some((c) => !c.ok)) return;
-    if (this.failedAutoMerges.has(taskId)) return;
+    if (!lastStep || lastStep.mode !== 'gate' || (task.reviewStep ?? 0) < chain.length) { skip('chain_incomplete'); return; }
+    if (task.reviewerEscalated) { skip('escalated'); return; }
+    let checks = this.scheduler.getCheckResults(taskId);
+    if (checks.length === 0) { skip('checks_missing'); return; }
+    if (checks.some((c) => !c.ok)) {
+      const retryKey = `${taskId}:${last.id}`;
+      let retried = false;
+      if (!this.autoMergeCheckRetries.has(retryKey)) {
+        const failed = checks.filter((check) => !check.ok).map((check) => check.name);
+        const runId = checks.find((check) => check.runId)?.runId;
+        if (runId) {
+          this.autoMergeCheckRetries.add(retryKey);
+          const retry = this.scheduler.rerunFailedChecksForTask(taskId, runId, failed)
+            .then(() => true)
+            .catch(() => false);
+          this.autoMergeCheckRetryPromises.set(retryKey, retry);
+          retried = await retry;
+          this.autoMergeCheckRetryPromises.delete(retryKey);
+          checks = this.scheduler.getCheckResults(taskId);
+        }
+      } else {
+        const retry = this.autoMergeCheckRetryPromises.get(retryKey);
+        if (retry) retried = await retry;
+        checks = this.scheduler.getCheckResults(taskId);
+      }
+      if (this.taskRepo.get(taskId)?.status !== 'review') return;
+      if (checks.length === 0 || checks.some((c) => !c.ok)) { skip('checks_failed', checks, retried); return; }
+    }
+    if (this.failedAutoMerges.has(taskId)) { skip('merge_failed', checks); return; }
     // The ready event can arrive twice for one approval; the first call is already merging.
     if (this.reviewingTasks.has(taskId)) {
       // A reviewer approval emits task.review_ready before the outer review API call
-      // releases its guard. Retry once on the next event-loop turn after that call ends.
-      setImmediate(() => void this.autoMergeReviewedTask(taskId));
+      // releases its guard. The outer call will perform the merge; do not enqueue a
+      // late duplicate that can race with teardown or a subsequent review.
       return;
     }
     try {
@@ -4225,6 +4298,7 @@ export class AppService {
       this.failedAutoMerges.delete(taskId);
     } catch (error) {
       this.failedAutoMerges.add(taskId);
+      skip('merge_failed', this.scheduler.getCheckResults(taskId));
       const isConflict = (error instanceof HttpError && (error.error === 'conflict' || error.statusCode === 409)) ||
         (error instanceof MergeError && error.error === 'conflict') ||
         (error instanceof Error && /conflict/i.test(error.message));

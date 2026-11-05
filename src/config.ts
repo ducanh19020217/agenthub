@@ -52,6 +52,7 @@ export const DEFAULT_BRAIN_DIGEST_CONFIG: BrainDigestConfig = {
 
 export const DEFAULT_BRAIN_WAKEUP_EVENTS: string[] = [
   'task.review_ready',
+  'review.auto_merge_skipped',
   'task.blocked',
   'task.failed',
   'review.escalated',
@@ -349,6 +350,7 @@ export const OpenProjectSourceSchema = z.object({
   reopenedStatusIds: z.array(z.number().int()).default([]),
   createTypeId: z.number().int().nullable().default(null),
   createStatusId: z.number().int().nullable().default(null),
+  inProgressStatusId: z.number().int().nullable().default(null),
   resolvedStatusId: z.number().int().nullable().default(null),
   reviewStatusId: z.number().int().nullable().default(null),
   openStatusIds: z.array(z.number().int()).default([]),

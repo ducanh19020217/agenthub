@@ -34,6 +34,31 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
     ctx.db.prepare("INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'test', 0, 1, 1, 'failed')").run(taskId, runId);
   }
 
+  function prepareRetryTask(slug: string) {
+    const projectId = `retry-${slug}`;
+    const repo = path.join(tmpDir, `${slug}-repo`);
+    initGitRepo(repo, 'main');
+    ctx.service.createProject({
+      id: projectId,
+      name: 'Retry checks',
+      path: repo,
+      defaultBranch: 'main',
+      settings: { integration: { enabled: true, branch: `agenthub/${projectId}`, autoMerge: true }, review: { autoMerge: true } },
+      reviewChain: [{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }],
+      merge: { enabled: true, worktrees: {}, checks: ['node -e "process.exit(0)"'], timeoutSec: 30 },
+    });
+    ctx.service.createTask({ project: projectId, slug, title: 'Retry checks', body: 'Do it', level: 'easy', start: true });
+    ctx.scheduler.tick();
+    const task = ctx.taskRepo.get(`${projectId}/${slug}`)!;
+    fs.writeFileSync(path.join(task.worktreePath!, 'retry.txt'), 'retry\n');
+    execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
+    execFileSync('git', ['-C', task.worktreePath!, 'commit', '-m', 'feat: retry']);
+    ctx.taskRepo.update(task.id, { status: 'review', reviewStep: 1 });
+    persistFailedCheck(task.id, slug);
+    ctx.reviewRepo.insert({ id: `review-${slug}`, taskId: task.id, verdict: 'approved', feedback: 'approved', actor: 'claude-reviewer' });
+    return ctx.taskRepo.get(task.id)!;
+  }
+
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-automerge-substitute-'));
     process.env.AGENTHUB_HOME = tmpDir;
@@ -239,6 +264,44 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
 
     await ctx.service.autoMergeReviewedTask(task.id);
     expect(ctx.taskRepo.get(task.id)!.status).toBe('review');
+    await ctx.service.autoMergeReviewedTask(task.id);
+    expect(ctx.eventRepo.getByTask(task.id).filter((event) => event.type === 'review.auto_merge_skipped')).toHaveLength(1);
+    const skipped = ctx.eventRepo.getByTask(task.id).find((event) => event.type === 'review.auto_merge_skipped');
+    expect(JSON.parse(skipped!.payload!)).toMatchObject({ reason: 'checks_failed', retried: true });
+  });
+
+  it('reruns only failed checks once and merges when the rerun passes', async () => {
+    const task = prepareRetryTask('green');
+    let calls = 0;
+    ctx.scheduler.rerunFailedChecksForTask = async (taskId, runId) => {
+      calls += 1;
+      ctx.db.prepare("UPDATE check_results SET ok = 1, exitCode = 0, outputTail = 'ok' WHERE taskId = ? AND runId = ? AND name = 'test'").run(taskId, runId);
+      return { passed: true, failed: [], results: [] };
+    };
+    await ctx.service.autoMergeReviewedTask(task.id);
+    expect(calls).toBe(1);
+    expect(ctx.taskRepo.get(task.id)!.status).toBe('done');
+  });
+
+  it('shares an in-flight retry between repeated review_ready calls', async () => {
+    const task = prepareRetryTask('concurrent');
+    let calls = 0;
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    ctx.scheduler.rerunFailedChecksForTask = async (taskId, runId) => {
+      calls += 1;
+      await waiting;
+      ctx.db.prepare("UPDATE check_results SET ok = 1, exitCode = 0, outputTail = 'ok' WHERE taskId = ? AND runId = ? AND name = 'test'").run(taskId, runId);
+      return { passed: true, failed: [], results: [] };
+    };
+    const first = ctx.service.autoMergeReviewedTask(task.id);
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = ctx.service.autoMergeReviewedTask(task.id);
+    release();
+    await Promise.all([first, second]);
+    expect(calls).toBe(1);
+    expect(ctx.eventRepo.getByTask(task.id).filter((event) => event.type === 'review.auto_merge_skipped')).toHaveLength(0);
+    expect(ctx.taskRepo.get(task.id)!.status).toBe('done');
   });
 
   it('does not merge when task is escalated or review step is not complete', async () => {
@@ -280,6 +343,7 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
     ctx.taskRepo.update(task.id, { status: 'review', reviewStep: 1, reviewerEscalated: 1 });
     await ctx.service.autoMergeReviewedTask(task.id);
     expect(ctx.taskRepo.get(task.id)!.status).toBe('review');
+    expect(ctx.eventRepo.getByTask(task.id).filter((event) => event.type === 'review.auto_merge_skipped')).toHaveLength(1);
   });
 
   it('does not merge when the last reviewer is not an automated reviewer', async () => {

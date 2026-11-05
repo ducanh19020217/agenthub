@@ -22,8 +22,9 @@ type TimesheetPreview = {
   date?: string;
   hours?: number;
   overMinimum?: boolean;
-  entries?: Array<{ displayId?: string; subject?: string; run?: number; wait?: number; chat?: number; level?: number; weight?: number; hours?: number }>;
+  entries?: Array<{ displayId?: string; subject?: string; run?: number; wait?: number; chat?: number; level?: number; weight?: number; hours?: number; rawHours?: number; estimateHours?: number }>;
   withoutTicket?: Array<{ taskId?: string; subject?: string }>;
+  estimateSkipped?: Array<{ wpId?: number; displayId?: string; reason?: string }>;
 };
 
 const blank = (id: string): OpenProjectSourceInput => ({
@@ -47,7 +48,7 @@ const blank = (id: string): OpenProjectSourceInput => ({
   language: 'vi',
   split: { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true },
   dailyReport: { enabled: false, time: '18:00', weekdaysOnly: true, maxItems: 10, telegram: false },
-  timesheet: { enabled: false, time: '17:30', weekdaysOnly: true, hours: 8, activityId: null, minEntryHours: 0.5, roundTo: 0.25 },
+  timesheet: { enabled: false, time: '17:30', weekdaysOnly: true, hours: 8, activityId: null, minEntryHours: 0.5, roundTo: 0.25, writeEstimate: true },
 });
 
 export const parseIdList = (value: string): number[] =>
@@ -75,7 +76,7 @@ export const matchStatusIds = (statuses: OpenProjectStatusDto[], targetNames: st
 const normalizeSplit = (source: OpenProjectSource | OpenProjectSourceInput): OpenProjectSourceInput => ({
   ...source,
   split: source.split || { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true },
-  timesheet: source.timesheet || { enabled: false, time: '17:30', weekdaysOnly: true, hours: 8, activityId: null, minEntryHours: 0.5, roundTo: 0.25 },
+  timesheet: source.timesheet || { enabled: false, time: '17:30', weekdaysOnly: true, hours: 8, activityId: null, minEntryHours: 0.5, roundTo: 0.25, writeEstimate: true },
 });
 
 export const OpenProjectSettings: React.FC = () => {
@@ -717,6 +718,7 @@ export const OpenProjectSettings: React.FC = () => {
             <label className="space-y-1 text-xs"><span>{t('integrations.timesheetMin')}</span><input type="number" min={0.25} step={0.25} value={draft.timesheet?.minEntryHours ?? 0.5} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), minEntryHours: Number(e.target.value) } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label>
             <label className="space-y-1 text-xs"><span>{t('integrations.timesheetRound')}</span><input type="number" min={0.25} step={0.25} value={draft.timesheet?.roundTo ?? 0.25} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), roundTo: Number(e.target.value) } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label>
             <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.timesheet?.weekdaysOnly ?? true} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), weekdaysOnly: e.target.checked } })} />{t('integrations.weekdaysOnly')}</label>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.timesheet?.writeEstimate ?? true} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), writeEstimate: e.target.checked } })} />{t('integrations.timesheetWriteEstimate')}</label>
           </div>
 
           <label className="sm:col-span-2 space-y-1">
@@ -808,10 +810,11 @@ export const OpenProjectSettings: React.FC = () => {
           {timesheetPreview && (
             <div className="sm:col-span-2 overflow-x-auto rounded-lg border border-[var(--t-border)] p-3 text-xs" data-testid="timesheet-preview">
               <p className="mb-2">{timesheetPreview.date || ''} · {timesheetPreview.hours ?? 0}h</p>
-              <table className="w-full text-left"><thead><tr><th>Ticket</th><th>Subject</th><th>run</th><th>wait</th><th>chat</th><th>level</th><th>weight</th><th>hours</th></tr></thead>
-                <tbody>{(timesheetPreview.entries || []).map((entry) => <tr key={entry.displayId}><td>[{entry.displayId || '?'}]</td><td>{entry.subject || ''}</td><td>{entry.run ?? 0}</td><td>{entry.wait ?? 0}</td><td>{entry.chat ?? 0}</td><td>{entry.level ?? 0}</td><td>{entry.weight ?? 0}</td><td>{entry.hours ?? 0}h</td></tr>)}</tbody>
+              <table className="w-full text-left"><thead><tr><th>Ticket</th><th>Subject</th><th>run</th><th>wait</th><th>chat</th><th>level</th><th>weight</th><th>{t('integrations.timesheetEstimateCol')}</th><th>{t('integrations.timesheetActualCol')}</th></tr></thead>
+                <tbody>{(timesheetPreview.entries || []).map((entry) => <tr key={entry.displayId}><td>[{entry.displayId || '?'}]</td><td>{entry.subject || ''}</td><td>{entry.run ?? 0}</td><td>{entry.wait ?? 0}</td><td>{entry.chat ?? 0}</td><td>{entry.level ?? 0}</td><td>{entry.weight ?? 0}</td><td>{entry.estimateHours ?? entry.rawHours ?? 0}h</td><td>{entry.hours ?? 0}h</td></tr>)}</tbody>
               </table>
               {timesheetPreview.withoutTicket && timesheetPreview.withoutTicket.length > 0 && <p className="mt-2">{timesheetPreview.withoutTicket.map((item) => `${item.taskId || '?'} ${item.subject || ''}`).join(', ')}</p>}
+              {timesheetPreview.estimateSkipped && timesheetPreview.estimateSkipped.length > 0 && <p className="mt-2 text-[var(--t-warn)]">{timesheetPreview.estimateSkipped.map((item) => `[${item.displayId || '?'}] ${item.reason || ''}`).join(', ')}</p>}
               {timesheetPreview.overMinimum && <p className="mt-2 text-[var(--t-crit)]">{t('integrations.timesheetOverMinimum')}</p>}
             </div>
           )}

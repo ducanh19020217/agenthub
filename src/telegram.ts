@@ -4093,18 +4093,20 @@ export class TelegramBotService {
         break;
       }
       case 'tracker.timesheet.posted': {
-        const rows = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; subject?: string; hours?: number }> : [];
+        const rows = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; subject?: string; hours?: number; rawHours?: number; estimateHours?: number }> : [];
+        const skipped = Array.isArray(p.estimateSkipped) && p.estimateSkipped.length ? `\nBỏ qua estimate: ${p.estimateSkipped.map((item: { displayId?: string; reason?: string }) => `[${this.escapeHtml(String(item.displayId || '?'))}] ${this.escapeHtml(String(item.reason || ''))}`).join(', ')}` : '';
         const missing = Array.isArray(p.withoutTicket) && p.withoutTicket.length ? `\nChưa có ticket: ${p.withoutTicket.map((item: { taskId?: string; subject?: string }) => `${this.escapeHtml(String(item.taskId || '?'))} ${this.escapeHtml(String(item.subject || ''))}`).join(', ')}` : '';
         const stale = Array.isArray(p.missingFromDate) && p.missingFromDate.length ? `\nTicket không còn trong ngày: ${p.missingFromDate.join(', ')}` : '';
         const minimum = p.overMinimum ? '\nTổng vượt giờ do mức tối thiểu.' : '';
-        this.broadcastMessage(`${prefix}🕒 <b>Đã ghi bảng giờ</b> (${this.escapeHtml(String(p.hours || 0))}h)\n${rows.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${this.escapeHtml(String(row.subject || ''))} — ${row.hours || 0}h`).join('\n')}${missing}${stale}${minimum}`);
+        this.broadcastMessage(`${prefix}🕒 <b>Đã ghi bảng giờ</b> (${this.escapeHtml(formatHours(p.hours))}h)\n${rows.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${this.escapeHtml(String(row.subject || ''))} — thực tế ${formatHours(row.hours)}h · estimate ${formatHours(row.estimateHours ?? row.rawHours ?? row.hours)}h`).join('\n')}${skipped}${missing}${stale}${minimum}`);
         break;
       }
       case 'tracker.timesheet.failed':
         {
           const posted = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; hours?: number }> : [];
-          const partial = posted.length ? `\nĐã ghi được: ${posted.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${row.hours || 0}h`).join(', ')}` : '';
-          this.broadcastMessage(`${prefix}❌ <b>Ghi bảng giờ thất bại</b>: ${this.escapeHtml(String(p.error || ''))}${partial}`);
+          const partial = posted.length ? `\nĐã ghi được: ${posted.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${formatHours(row.hours)}h`).join(', ')}` : '';
+          const skipped = Array.isArray(p.estimateSkipped) && p.estimateSkipped.length ? `\nBỏ qua estimate: ${p.estimateSkipped.map((item: { displayId?: string; reason?: string }) => `[${this.escapeHtml(String(item.displayId || '?'))}] ${this.escapeHtml(String(item.reason || ''))}`).join(', ')}` : '';
+          this.broadcastMessage(`${prefix}❌ <b>Ghi bảng giờ thất bại</b>: ${this.escapeHtml(String(p.error || ''))}${partial}${skipped}`);
         }
         break;
       case 'tracker.triage_ready': {
@@ -4914,4 +4916,11 @@ export class TelegramBotService {
 
 <i>Lưu ý: Task ID có thể dùng dạng đầy đủ 'project/slug' hoặc chỉ 'slug' nếu không trùng.</i>`;
   }
+}
+
+function formatHours(h: unknown): string {
+  const num = typeof h === 'number' ? h : Number(h || 0);
+  if (Number.isNaN(num)) return '0';
+  const rounded = Math.round(num * 100) / 100;
+  return String(rounded).replace('.', ',');
 }

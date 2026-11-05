@@ -32,6 +32,7 @@ export interface OpenProjectWorkPackage {
     html?: string;
   };
   lockVersion: number;
+  estimatedTime?: string | null;
   updatedAt?: string;
   createdAt?: string;
   _links?: {
@@ -403,4 +404,51 @@ export class OpenProjectClient {
     }
     throw new Error('Failed to set status after retries');
   }
+
+  /**
+   * Ghi estimatedTime lên work package. Retry tối đa 3 lần khi gặp 409.
+   * Kiểm tra điều kiện không ghi đè ở mỗi lần thử (kể cả retry sau 409).
+   * Trả về work package mới nhất (có estimatedTime thực tế từ server).
+   * Ném lỗi nếu 422 hoặc lỗi khác.
+   */
+  async setEstimate(
+    id: number | string,
+    isoDuration: string,
+    options?: { prevWrittenHours?: number | null; canWrite?: (wp: OpenProjectWorkPackage) => boolean },
+  ): Promise<OpenProjectWorkPackage> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const wp = await this.getWorkPackage(id);
+      if (options?.canWrite) {
+        if (!options.canWrite(wp)) {
+          throw new OpenProjectError(409, 'estimate đã do người khác đặt');
+        }
+      } else if (options && 'prevWrittenHours' in options) {
+        const opEstimateHours = wp.estimatedTime ? parsePTHours(wp.estimatedTime) : null;
+        const prev = options.prevWrittenHours ?? null;
+        const canWrite = opEstimateHours === null || (prev !== null && Math.abs(opEstimateHours - prev) < 1e-6);
+        if (!canWrite) {
+          throw new OpenProjectError(409, 'estimate đã do người khác đặt');
+        }
+      }
+      try {
+        return await this.request<OpenProjectWorkPackage>(
+          `/api/v3/work_packages/${encodeURIComponent(String(id))}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({ lockVersion: wp.lockVersion, estimatedTime: isoDuration }),
+          },
+        );
+      } catch (error) {
+        if (!(error instanceof OpenProjectError) || error.status !== 409 || attempt === 2) throw error;
+      }
+    }
+    throw new Error('Failed to set estimate after retries');
+  }
+}
+
+/** Parse ISO 8601 duration string (PT#H#M#S) to hours. Returns null if unparseable. */
+export function parsePTHours(duration: string): number | null {
+  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(duration);
+  if (!m) return null;
+  return (parseInt(m[1] || '0', 10)) + (parseInt(m[2] || '0', 10)) / 60 + (parseInt(m[3] || '0', 10)) / 3600;
 }

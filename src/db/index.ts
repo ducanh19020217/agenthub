@@ -946,6 +946,26 @@ export const MIGRATIONS: string[] = [
     PRIMARY KEY (source_id, spent_on, wp_id)
   );
   `,
+  // Migration 65: rawHours per day and written_estimate tracking for Estimated Time writeback.
+  `
+  PRAGMA foreign_keys = OFF;
+  CREATE TABLE IF NOT EXISTS timesheet_entries_new (
+    source_id TEXT NOT NULL,
+    spent_on TEXT NOT NULL,
+    wp_id INTEGER NOT NULL,
+    entry_id INTEGER NOT NULL,
+    hours REAL NOT NULL,
+    raw_hours REAL,
+    written_estimate REAL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source_id, spent_on, wp_id)
+  );
+  INSERT OR REPLACE INTO timesheet_entries_new (source_id, spent_on, wp_id, entry_id, hours, updated_at)
+    SELECT source_id, spent_on, wp_id, entry_id, hours, updated_at FROM timesheet_entries;
+  DROP TABLE timesheet_entries;
+  ALTER TABLE timesheet_entries_new RENAME TO timesheet_entries;
+  PRAGMA foreign_keys = ON;
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -3262,7 +3282,7 @@ export class TrackerItemRepo {
   }
 }
 
-export interface TimesheetEntryRow { source_id: string; spent_on: string; wp_id: number; entry_id: number; hours: number; updated_at: string; }
+export interface TimesheetEntryRow { source_id: string; spent_on: string; wp_id: number; entry_id: number; hours: number; raw_hours: number | null; written_estimate: number | null; updated_at: string; }
 export class TimesheetEntryRepo {
   constructor(private db: Database.Database) {}
   get(sourceId: string, date: string, wpId: number): TimesheetEntryRow | undefined {
@@ -3271,10 +3291,20 @@ export class TimesheetEntryRepo {
   listForDate(sourceId: string, date: string): TimesheetEntryRow[] {
     return this.db.prepare('SELECT * FROM timesheet_entries WHERE source_id = ? AND spent_on = ? ORDER BY wp_id').all(sourceId, date) as TimesheetEntryRow[];
   }
+  /** Tổng raw_hours qua mọi ngày đã ghi cho (source_id, wp_id). Không tính ngày excludeDate. */
+  sumRawHours(sourceId: string, wpId: number, excludeDate: string): number {
+    const row = this.db.prepare('SELECT COALESCE(SUM(raw_hours),0) AS total FROM timesheet_entries WHERE source_id = ? AND wp_id = ? AND spent_on != ?').get(sourceId, wpId, excludeDate) as { total: number };
+    return row.total;
+  }
+  /** Giá trị written_estimate gần nhất hub đã ghi lên OP cho (source_id, wp_id), hoặc null nếu chưa ghi. */
+  lastWrittenEstimate(sourceId: string, wpId: number): number | null {
+    const row = this.db.prepare('SELECT written_estimate FROM timesheet_entries WHERE source_id = ? AND wp_id = ? AND written_estimate IS NOT NULL ORDER BY spent_on DESC LIMIT 1').get(sourceId, wpId) as { written_estimate: number } | undefined;
+    return row?.written_estimate ?? null;
+  }
   upsert(row: Omit<TimesheetEntryRow, 'updated_at'>): void {
-    this.db.prepare(`INSERT INTO timesheet_entries (source_id, spent_on, wp_id, entry_id, hours) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(source_id, spent_on, wp_id) DO UPDATE SET entry_id=excluded.entry_id, hours=excluded.hours, updated_at=datetime('now')`)
-      .run(row.source_id, row.spent_on, row.wp_id, row.entry_id, row.hours);
+    this.db.prepare(`INSERT INTO timesheet_entries (source_id, spent_on, wp_id, entry_id, hours, raw_hours, written_estimate) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(source_id, spent_on, wp_id) DO UPDATE SET entry_id=excluded.entry_id, hours=excluded.hours, raw_hours=excluded.raw_hours, written_estimate=excluded.written_estimate, updated_at=datetime('now')`)
+      .run(row.source_id, row.spent_on, row.wp_id, row.entry_id, row.hours, row.raw_hours ?? null, row.written_estimate ?? null);
   }
 }
 

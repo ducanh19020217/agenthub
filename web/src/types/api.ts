@@ -248,10 +248,10 @@ export interface OpenProjectSource {
   triage?: 'off' | 'approve' | 'auto'; triageModelChain?: string[]; feedbackStatusId?: number | null;
   split?: OpenProjectSplitConfig;
   dailyReport?: { enabled?: boolean; time: string; weekdaysOnly: boolean; dir?: string; maxItems: number; telegram: boolean };
-  timesheet?: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number };
+  timesheet?: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number; writeEstimate: boolean };
 }
 export interface OpenProjectSplitConfig { typeIds: number[]; keyword: string | null; workerMayRequest: boolean; maxParts: number; createChildTickets: boolean; }
-export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured' | 'split' | 'timesheet'> { split: OpenProjectSplitConfig; timesheet: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number }; key?: string; }
+export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured' | 'split' | 'timesheet'> { split: OpenProjectSplitConfig; timesheet: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number; writeEstimate: boolean }; key?: string; }
 export interface OpenProjectStatusDto {
   id: number;
   name: string;

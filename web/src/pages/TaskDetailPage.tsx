@@ -743,7 +743,7 @@ export const TaskDetailPage: React.FC = () => {
               ) : null}
               <button
                 type="button"
-                onClick={() => reviewMutation.mutate({ verdict: 'approved' })}
+                onClick={() => reviewMutation.mutate({ verdict: 'approved', merge: false })}
                 disabled={reviewMutation.isPending}
                 className="px-3.5 py-1.5 rounded-lg bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)] hover:bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
               >

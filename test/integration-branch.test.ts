@@ -499,6 +499,33 @@ describe('Integration branch and cross-project dependencies', () => {
     expect(fs.existsSync(path.join(repo, 'feature.txt'))).toBe(false);
   });
 
+  it('merges a brain approval that omits merge when the project auto-merges; merge:false still skips it', async () => {
+    for (const [slug, merge, expected] of [['brain-default', undefined, true], ['brain-nomerge', false, false]] as const) {
+      const repo = path.join(tmpDir, `${slug}-repo`);
+      initGitRepo(repo, 'main');
+      ctx.service.createProject({
+        id: slug,
+        name: slug,
+        path: repo,
+        defaultBranch: 'main',
+        settings: { review: { autoMerge: true } },
+        merge: { enabled: true, worktrees: { main: repo }, checks: [], timeoutSec: 30 },
+      });
+      ctx.service.createTask({ project: slug, slug: 'feat', title: 'Feature', body: 'Do it', level: 'easy', start: true });
+      ctx.scheduler.tick();
+      const task = ctx.taskRepo.get(`${slug}/feat`)!;
+      fs.writeFileSync(path.join(task.worktreePath!, 'feature.txt'), 'feature\n');
+      execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
+      execFileSync('git', ['-C', task.worktreePath!, 'commit', '-m', 'feat: brain']);
+      ctx.taskRepo.update(task.id, { status: 'review' });
+      persistPassedCheck(task.id, slug);
+
+      await ctx.service.reviewTask(task.id, { verdict: 'approved', by: 'claude-review', feedback: 'ok', ...(merge === undefined ? {} : { merge }) });
+      expect(ctx.taskRepo.get(task.id)!.status).toBe('done');
+      expect(fs.existsSync(path.join(repo, 'feature.txt'))).toBe(expected);
+    }
+  });
+
   it('retries an escalated review even when the brain runs in auto mode', async () => {
     ctx.config.brain.mode = 'auto';
     const repo = path.join(tmpDir, 'esc-auto-repo');

@@ -1120,7 +1120,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
       id: z.string().describe('ID của task'),
       verdict: z.enum(['approved', 'changes_requested']).describe('Kết quả review'),
       feedback: z.string().optional().describe('Góp ý hoặc yêu cầu sửa (bắt buộc khi verdict là changes_requested)'),
-      merge: z.boolean().optional().describe('Khi approved, merge vào worktree tích hợp đã cấu hình'),
+      merge: z.boolean().optional().describe('Khi approved, merge vào worktree tích hợp đã cấu hình. Bỏ trống = theo cài đặt tự merge của project'),
       source: z
         .enum(['content', 'operational'])
         .optional()
@@ -1251,7 +1251,9 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           const chain = Array.isArray(task.reviewChain) ? task.reviewChain as Array<{ mode?: string }> : [];
           if (chain.length === 0) return true;
           const step = Number(task.reviewStep ?? 0);
-          return step >= chain.length || chain[step]?.mode === 'final';
+          const current = chain[step] as { mode?: string; reviewer?: string } | undefined;
+          // A Codex step (gate or final) is run by the scheduler, so it is not waitable yet.
+          return step >= chain.length || (current?.mode === 'final' && !String(current.reviewer || '').startsWith('codex:'));
         };
         if (targetIds && targetIds.length > 0) {
           for (const id of targetIds) {

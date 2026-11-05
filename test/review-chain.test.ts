@@ -23,3 +23,14 @@ describe('project review chain', () => {
     expect(ReviewChainSchema.safeParse([{ reviewer: 'codex:gpt-4o', mode: 'gate' }]).success).toBe(true);
   });
 });
+
+describe('isAutomatedStep', () => {
+  it('runs gates and any Codex step automatically, leaves a Claude final step to the brain', async () => {
+    const { isAutomatedStep } = await import('../src/review-chain.js');
+    expect(isAutomatedStep({ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' })).toBe(true);
+    expect(isAutomatedStep({ reviewer: 'codex:gpt-5.6-luna', mode: 'final' })).toBe(true);
+    expect(isAutomatedStep({ reviewer: 'claude', mode: 'gate' })).toBe(true);
+    expect(isAutomatedStep({ reviewer: 'claude', mode: 'final' })).toBe(false);
+    expect(isAutomatedStep(undefined)).toBe(false);
+  });
+});

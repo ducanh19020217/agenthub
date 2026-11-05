@@ -439,6 +439,8 @@ export interface AgentHubConfig {
   };
   defaultLogDir: string;
   autoFixOnFail: boolean;
+  /** Preset applied to newly registered projects; set when a preset is applied globally. */
+  defaultProjectPreset?: 'safe' | 'balanced' | 'auto';
   chat: ChatConfig;
   brain: BrainConfig;
   assistant: AssistantConfig;
@@ -510,6 +512,7 @@ export function saveConfig(
     watchdog: { stallMinutes?: number; waitingMinutes?: number };
     port: number;
     autoFixOnFail?: boolean;
+    defaultProjectPreset?: 'safe' | 'balanced' | 'auto';
     chat: Partial<ChatConfig>;
     brain?: Partial<Omit<BrainConfig, 'digest' | 'director'>> & {
       digest?: Partial<BrainDigestConfig>;
@@ -712,6 +715,7 @@ export function updateConfigInMemory(
     slotsPerCodexProfile: number;
     watchdog: { stallMinutes?: number; waitingMinutes?: number };
     autoFixOnFail: boolean;
+    defaultProjectPreset: 'safe' | 'balanced' | 'auto';
     chat: Partial<ChatConfig>;
     brain?: Partial<Omit<BrainConfig, 'digest' | 'director'>> & {
       digest?: Partial<BrainDigestConfig>;
@@ -780,6 +784,7 @@ export function updateConfigInMemory(
     config.watchdog = { ...config.watchdog, ...patch.watchdog };
   }
   if (patch.autoFixOnFail !== undefined) config.autoFixOnFail = patch.autoFixOnFail;
+  if (patch.defaultProjectPreset !== undefined) config.defaultProjectPreset = patch.defaultProjectPreset;
   if (patch.chat) {
     if (patch.chat.claudeBin !== undefined) {
       config.chat.claudeBin = patch.chat.claudeBin;
@@ -1286,6 +1291,9 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
     },
     defaultLogDir,
     autoFixOnFail: userConfig.autoFixOnFail === true,
+    ...(['safe', 'balanced', 'auto'].includes(userConfig.defaultProjectPreset as string)
+      ? { defaultProjectPreset: userConfig.defaultProjectPreset as 'safe' | 'balanced' | 'auto' }
+      : {}),
     chat,
     brain: {
       engine: brainRaw.engine === 'codex' ? 'codex' : 'claude',

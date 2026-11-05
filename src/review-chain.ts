@@ -36,6 +36,16 @@ export function parseReviewChain(value: string | null | undefined): ReviewChainS
   }
 }
 
+/**
+ * Steps the scheduler runs on its own and advances past on approval: every gate, and any Codex
+ * step even when it is `final` (nothing else ever runs a Codex reviewer, so a Codex final step
+ * would otherwise park the task forever). A Claude `final` step stays with the brain or a person.
+ */
+export function isAutomatedStep(step: ReviewChainStep | undefined): boolean {
+  if (!step) return false;
+  return step.mode === 'gate' || step.reviewer.startsWith('codex:');
+}
+
 export function reviewerModel(step: ReviewChainStep): string | null {
   return step.reviewer.startsWith('codex:') ? step.reviewer : null;
 }

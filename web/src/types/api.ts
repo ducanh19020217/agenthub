@@ -762,6 +762,8 @@ export interface DailyUsageReport {
 }
 
 export interface SystemConfig {
+  /** Preset given to newly registered projects (the one last applied globally). */
+  defaultProjectPreset?: 'safe' | 'balanced' | 'auto' | null;
   branding?: { name: string; shortName: string; logo?: string; logoVersion?: number; accentColor?: string; tagline?: string };
   modelChainHard: string[];
   modelChainEasy: string[];

@@ -227,9 +227,11 @@ describe('TaskDetailPage', () => {
       await Promise.resolve();
     });
 
+    // Plain "Duyệt" says so explicitly; an omitted merge now follows the project's auto-merge.
     expect(reviewSpy).toHaveBeenCalledWith('proj-1~t1', {
       verdict: 'approved',
       feedback: undefined,
+      merge: false,
     });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['task', 'proj-1~t1'] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['tasks'] });

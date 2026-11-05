@@ -50,7 +50,8 @@ export function emptyDraft(): WizardDraft {
     name: '',
     path: '',
     branch: 'main',
-    preset: 'balanced',
+    // Left empty so the wizard can start from the hub's default preset (see ProjectWizard).
+    preset: undefined,
     departmentId: 'chung',
     settings: {
       brain: { mode: 'inherit', permissions: 'standard' },

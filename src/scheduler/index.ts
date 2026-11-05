@@ -43,7 +43,7 @@ import { ClaudeFailoverState } from '../chat/failover.js';
 import { ensureIntegrationNodeModules, ensureIntegrationWorktree } from '../projects/integration.js';
 import { buildReviewerPrompt, parseReviewerOutput, ReviewerVerdict, isAutoReviewer, type ReviewerActor } from '../reviewer.js';
 import { CLAUDE_REVIEW_ENGINE_KEY } from '../engines/claude-review.js';
-import { parseReviewChain, reviewerModel, type ReviewChainStep } from '../review-chain.js';
+import { isAutomatedStep, parseReviewChain, reviewerModel, type ReviewChainStep } from '../review-chain.js';
 import { isOrphanProcess, listAllWorktreeProcesses, reap, reapSyncForWorktree } from '../reaper.js';
 import { LoadGuard, LoadSnapshot } from '../load.js';
 import { measureProcessTree } from '../process-tree.js';
@@ -2554,7 +2554,7 @@ export class Scheduler {
         this.taskRepo.update(task.id, { reviewStep: 0 });
         continue;
       }
-      if (chain.length > 0 && (!step || step.mode !== 'gate')) {
+      if (chain.length > 0 && !isAutomatedStep(step)) {
         if ((task.reviewStep ?? 0) >= chain.length && this.markReviewNotified(task, 'complete')) {
           this.emitReviewReadyIfReview(task.id, { reviewChainComplete: true });
         }
@@ -2785,7 +2785,7 @@ export class Scheduler {
     // reviewers cannot reset the content-review limit.
     this.taskRepo.update(task.id, { reviewStep: nextStep });
     task.reviewStep = nextStep;
-    if (nextStep >= chain.length || chain[nextStep]?.mode === 'final') {
+    if (nextStep >= chain.length || !isAutomatedStep(chain[nextStep])) {
       this.markReviewNotified(task, 'complete');
       this.emitReviewReadyIfReview(task.id, { reviewChainComplete: true, reviewStep: nextStep, reason });
     } else {
@@ -2954,7 +2954,7 @@ export class Scheduler {
   }
 
   private skippedCodexGate(task: TaskRow, chain: ReviewChainStep[]): boolean {
-    if (!chain.some((step) => step.mode === 'gate' && step.reviewer.startsWith('codex:'))) return false;
+    if (!chain.some((step) => isAutomatedStep(step) && step.reviewer.startsWith('codex:'))) return false;
     const last = this.reviewRepo?.getByTask(task.id).at(-1);
     return !last || !isAutoReviewer(last.actor) || last.verdict !== 'approved';
   }
@@ -3952,7 +3952,7 @@ export class Scheduler {
       if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
         this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback: feedback || null, actor: by || 'reviewer' });
       }
-      if ((isAutoReviewer(by) || by === 'claude-review') && step?.mode === 'gate') {
+      if ((isAutoReviewer(by) || by === 'claude-review') && isAutomatedStep(step)) {
         this.advanceReviewStep(task, chain, 'approved');
         return;
       }

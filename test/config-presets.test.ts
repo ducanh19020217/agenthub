@@ -505,6 +505,37 @@ describe('Config Presets, Priority, and Effective Config', () => {
     });
   });
 
+  describe('5c. Project mới nhận preset', () => {
+    async function createProject(id: string, extra: Record<string, unknown> = {}) {
+      const repoDir = path.join(tmpDir, `repo-${id}`);
+      initGitRepo(repoDir);
+      const res = await server.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(), payload: { id, name: id, path: repoDir, defaultBranch: 'main', ...extra } });
+      expect(res.statusCode).toBe(201);
+      return JSON.parse((await server.inject({ method: 'GET', url: `/api/projects/${id}/effective-config`, headers: authHeaders() })).body);
+    }
+
+    it('áp preset toàn cục "auto" thì project đăng ký sau đó cũng tự merge, có nhánh integration', async () => {
+      const apply = await server.inject({ method: 'POST', url: '/api/presets/apply', headers: authHeaders(), payload: { scope: 'global', preset: 'auto', dryRun: false } });
+      expect(apply.statusCode).toBe(200);
+      expect(ctx.service.config.defaultProjectPreset).toBe('auto');
+
+      const eff = await createProject('later-proj');
+      expect(eff.review.autoMerge.value).toBe(true);
+      expect(eff.review.chain.value).toEqual([{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }]);
+      const project = ctx.projectRepo.get('later-proj')!;
+      expect(JSON.parse(project.settings!).integration).toMatchObject({ enabled: true, branch: 'agenthub/integration', autoMerge: true });
+    });
+
+    it('preset chọn trong wizard được áp thật, và chuỗi review truyền tay thì giữ nguyên', async () => {
+      const eff = await createProject('wizard-safe', { settings: { preset: 'safe' } });
+      expect(eff.review.autoMerge.value).toBe(false);
+      expect(eff.review.chain.value).toEqual([]);
+
+      const manual = await createProject('manual-chain', { settings: { preset: 'auto' }, reviewChain: [{ reviewer: 'claude', mode: 'final' }] });
+      expect(manual.review.chain.value).toEqual([{ reviewer: 'claude', mode: 'final' }]);
+    });
+  });
+
   describe('6. Tương thích ngược integration.autoMerge', () => {
     it('đọc JSON cũ có integration.autoMerge=true thì review.autoMerge nhận true', () => {
       const parsed = parseProjectSettings(JSON.stringify({

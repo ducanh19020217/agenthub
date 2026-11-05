@@ -71,7 +71,7 @@ import { mergeTaskIntoBase, MergeError } from '../merge.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
-import { ReviewChainSchema, parseReviewChain, type ReviewChainStep } from '../review-chain.js';
+import { ReviewChainSchema, isAutomatedStep, parseReviewChain, type ReviewChainStep } from '../review-chain.js';
 import { isAutoReviewer } from '../reviewer.js';
 import { isKnownModel } from '../quota/index.js';
 import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, ReviewerOrderSchema, reviewerSettingsFromLegacy } from '../reviewer-config.js';
@@ -80,7 +80,7 @@ import { createNewGitProject, inspectProject, readClaudeSessionExcerpt } from '.
 import type { DeployService } from '../deploy.js';
 import type { RemoteDeployService, RemoteDeployStatus } from '../remote-deploy.js';
 import type { PerfCollector } from '../perf.js';
-import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset, detectGlobalPreset } from '../presets.js';
+import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset, detectGlobalPreset, presetProjectPatch, type PresetLevel } from '../presets.js';
 import type { SetupTools } from '../setup-tools.js';
 import { computeEffectiveConfig } from '../effective-config.js';
 import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
@@ -421,7 +421,8 @@ export const ReviewTaskSchema = z.object({
   feedback: z.string().optional(),
   by: z.string().optional(),
   source: z.enum(['content', 'operational']).optional().default('content'),
-  merge: z.boolean().optional().default(false),
+  /** Omitted: merge when the project has auto-merge on, so an approval from the brain/MCP never strands code. */
+  merge: z.boolean().optional(),
 }).refine(
   (d) => d.verdict !== 'changes_requested' || (typeof d.feedback === 'string' && d.feedback.trim().length > 0),
   { message: 'Feedback là bắt buộc khi changes_requested' },
@@ -505,6 +506,7 @@ export const UpdateConfigSchema = z.object({
     waitingMinutes: z.number().positive().optional(),
   }).optional(),
   autoFixOnFail: z.boolean().optional(),
+  defaultProjectPreset: z.enum(['safe', 'balanced', 'auto']).optional(),
   tools: z.object({ installers: z.record(z.object({
     package: z.string().regex(/^(@[a-z0-9-~][a-z0-9._~]*\/[a-z0-9-~][a-z0-9._~]*|[a-z0-9-~][a-z0-9._~]*)(@[\w.^~<>=*-]+)?$/).refine((value) => !value.startsWith('-'), 'Tên package npm không hợp lệ').optional(),
     versionArgs: z.array(z.string()).optional(),
@@ -2145,10 +2147,18 @@ export class AppService {
       departmentId: parsed.departmentId,
     });
 
-    if (effectiveSettings.integration.enabled) {
-      const projLike = { id, path: resolvedPath, defaultBranch: parsed.defaultBranch, settings: JSON.stringify(effectiveSettings) };
+    // Put the new project on its chosen preset, or on the one last applied globally, unless the
+    // caller set the review chain itself. Only the wizard's label was stored before, not the preset.
+    const presetToApply = parsed.settings?.preset ?? this.config.defaultProjectPreset;
+    if (presetToApply && presetToApply in PRESET_DEFINITIONS && !parsed.review && !parsed.reviewChain) {
+      this.updateProject(id, presetProjectPatch(this.projectRepo.get(id)!, presetToApply as PresetLevel, this.config.brain.codexModel || 'gpt-5.6-luna'));
+    }
+    const createdSettings = projectSettings(this.projectRepo.get(id)!);
+
+    if (createdSettings.integration.enabled) {
+      const projLike = { id, path: resolvedPath, defaultBranch: parsed.defaultBranch, settings: JSON.stringify(createdSettings) };
       ensureIntegrationWorktree(projLike, this.config.hubHome);
-      if (effectiveSettings.worktree.install === 'auto') {
+      if (createdSettings.worktree.install === 'auto') {
         void ensureIntegrationNodeModules(projLike, this.config.hubHome, {
           cacheDir: this.config.cacheDir,
           cacheMaxEntries: this.config.cacheMaxEntries,
@@ -4468,7 +4478,12 @@ export class AppService {
 
     let mergeResult: { mergeCommit: string; checks: string[] } | undefined;
     const isPlan = task.slug.endsWith('-plan');
-    let shouldMerge = parsed.verdict === 'approved' && Boolean(parsed.merge) && !isPlan;
+    const reviewedProject = this.projectRepo.get(task.projectId);
+    const projectAutoMerge = reviewedProject
+      ? (() => { const settings = projectSettings(reviewedProject); return settings.review.autoMerge || settings.integration.autoMerge; })()
+      : false;
+    // Automated reviewers never merge here: their approvals go through autoMergeReviewedTask and its guards.
+    let shouldMerge = parsed.verdict === 'approved' && (parsed.merge ?? (projectAutoMerge && !isAutoReviewer(parsed.by))) && !isPlan;
     if (shouldMerge && task.worktreePath) {
       const project = this.projectRepo.get(task.projectId);
       if (project) {
@@ -4614,7 +4629,7 @@ export class AppService {
         : [];
     if (!chain.length) { skip('chain_incomplete'); return; }
     const lastStep = chain.at(-1);
-    if (!lastStep || lastStep.mode !== 'gate' || (task.reviewStep ?? 0) < chain.length) { skip('chain_incomplete'); return; }
+    if (!lastStep || !isAutomatedStep(lastStep) || (task.reviewStep ?? 0) < chain.length) { skip('chain_incomplete'); return; }
     if (task.reviewerEscalated) { skip('escalated'); return; }
     let checks = this.scheduler.getCheckResults(taskId);
     if (checks.length === 0) { skip('checks_missing'); return; }
@@ -5281,6 +5296,7 @@ export class AppService {
       slotsPerCodexProfile: this.config.slotsPerCodexProfile,
       watchdog: this.config.watchdog,
       autoFixOnFail: this.config.autoFixOnFail,
+      defaultProjectPreset: this.config.defaultProjectPreset ?? null,
       chat: {
         claudeBin: this.config.chat.claudeBin,
         resolvedClaudeBin: findClaudeBin(this.config.chat.claudeBin),

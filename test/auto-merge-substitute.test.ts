@@ -180,6 +180,39 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
     expect(autoMergeReview?.feedback).toBe('Tự merge sau khi reviewer tự động (codex-reviewer) chấp thuận.');
   });
 
+  it('auto-merges a [Codex final] chain (the Automated preset) once Codex approves', async () => {
+    const repo = path.join(tmpDir, 'codex-final-repo');
+    initGitRepo(repo, 'main');
+    ctx.service.createProject({
+      id: 'codex-final',
+      name: 'Codex final auto merge',
+      path: repo,
+      defaultBranch: 'main',
+      settings: {
+        integration: { enabled: true, branch: 'agenthub/integration', autoMerge: true },
+        review: { autoMerge: true },
+      },
+      reviewChain: [{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }],
+      merge: { enabled: true, worktrees: {}, checks: ['node -e "process.exit(0)"'], timeoutSec: 30 },
+    });
+    const intPath = path.join(tmpDir, 'integration', 'codex-final');
+    ctx.service.createTask({ project: 'codex-final', slug: 'feat-final', title: 'Feature final', body: 'Do it', level: 'easy', start: true });
+    ctx.scheduler.tick();
+    const task = ctx.taskRepo.get('codex-final/feat-final')!;
+    fs.writeFileSync(path.join(task.worktreePath!, 'final.txt'), 'codex final approved\n');
+    execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
+    execFileSync('git', ['-C', task.worktreePath!, 'commit', '-m', 'feat: codex final approved']);
+    ctx.taskRepo.update(task.id, { status: 'review', reviewStep: 0 });
+    persistPassedCheck(task.id, 'codex-final-1');
+
+    ctx.scheduler.reviewTask(task.id, 'approved', 'looks great', 'codex-reviewer');
+    expect(ctx.taskRepo.get(task.id)!.reviewStep).toBe(1);
+
+    await ctx.service.autoMergeReviewedTask(task.id);
+    expect(ctx.taskRepo.get(task.id)!.status).toBe('done');
+    expect(fs.existsSync(path.join(intPath, 'final.txt'))).toBe(true);
+  });
+
   it('does not merge when autoMerge is disabled, and emits review_ready exactly once without spam', async () => {
     const repo = path.join(tmpDir, 'no-automerge-repo');
     initGitRepo(repo, 'main');

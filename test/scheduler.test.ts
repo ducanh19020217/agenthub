@@ -798,6 +798,29 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
+  it('runs a Codex final step itself and completes the chain when it approves', async () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }]) });
+    scheduler.tick();
+    expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(1);
+    await vi.waitFor(() => {
+      expect(taskRepo.get('test-project/review')?.reviewStep).toBe(1);
+    });
+    const ready = eventRepo.getRecent(50).filter((event) => event.type === 'task.review_ready' && event.taskId === 'test-project/review');
+    expect(ready).toHaveLength(1);
+    expect(ready[0].payload).toContain('"reviewChainComplete":true');
+    expect(taskRepo.get('test-project/review')?.status).toBe('review');
+    scheduler.stop();
+  });
+
+  it('leaves a Claude final step to the brain or a person', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'claude', mode: 'final' }]) });
+    scheduler.tick();
+    expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(0);
+    scheduler.stop();
+  });
+
   it('reviews a Codex-built task from another Codex account instead of skipping the gate', () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });

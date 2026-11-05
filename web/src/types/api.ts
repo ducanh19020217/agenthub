@@ -367,6 +367,7 @@ export interface Task {
   waitReason?: WaitReason;
   blockingDisk?: BlockingDiskInfo | null;
   modelWarnings?: string[];
+  mergeWarning?: string | null;
   dependsOn: string | string[];
   attempt: number;
   resume: number;

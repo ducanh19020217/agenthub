@@ -332,6 +332,13 @@ export const getOpenProjectStatuses = (id: string) => apiFetch<OpenProjectStatus
 export const getOpenProjectTypes = (id: string) => apiFetch<OpenProjectTypeDto[]>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/types`);
 export const createOpenProjectDailyReport = (id: string) => apiFetch<{ ok: boolean; path: string; content: string }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/daily-report`, { method: 'POST' });
 export const getOpenProjectTimeEntryActivities = (id: string) => apiFetch<Array<{ id: number; name: string }>>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/time-entry-activities`);
+export interface TimesheetEntryDto { wpId: number; displayId: string; subject: string; hours: number; rawHours: number; estimateHours: number; comment: string; kind: 'commit' | 'manual'; pinned: boolean; manualIds?: string[]; }
+export interface TimesheetPreviewDto { sourceId: string; date: string; hours: number; entries: TimesheetEntryDto[]; overMinimum: boolean; fixedHours?: number; fixedOverHours?: boolean; }
+export const getTimesheet = (sourceId: string, date: string) => apiFetch<TimesheetPreviewDto>(`/api/timesheet?sourceId=${encodeURIComponent(sourceId)}&date=${encodeURIComponent(date)}`);
+export const addTimesheetManual = (input: Record<string, unknown>) => apiFetch('/api/timesheet/manual', { method: 'POST', body: JSON.stringify(input) });
+export const updateTimesheetManual = (id: string, input: Record<string, unknown>) => apiFetch(`/api/timesheet/manual/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(input) });
+export const deleteTimesheetManual = (id: string) => apiFetch(`/api/timesheet/manual/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export const writeTimesheetDay = (input: { sourceId: string; date: string; hours: number }) => apiFetch('/api/timesheet/day', { method: 'PATCH', body: JSON.stringify(input) });
 export const previewOpenProjectTimesheet = (id: string) => apiFetch<unknown>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/timesheet`);
 export const runOpenProjectTimesheet = (id: string) => apiFetch<unknown>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/timesheet/run`, { method: 'POST', body: JSON.stringify({}) });
 export const saveGiteaToken = (projectId: string, token: string) => apiFetch<{ configured: boolean }>(`/api/projects/${encodeURIComponent(projectId)}/gitea/token`, { method: 'PUT', body: JSON.stringify({ token }) });

@@ -50,7 +50,7 @@ describe('OpenProjectIntakeService', () => {
     workPackage = {
       id: 42, displayId: 'OP-123', subject: 'Broken export', updatedAt: '2026-11-03T10:00:00Z',
       lockVersion: 1, description: { raw: 'Description' },
-      _links: { status: { href: '/api/v3/statuses/1' } },
+      _links: { status: { href: '/api/v3/statuses/1' }, type: { title: 'Bug' } },
       status: { title: 'New' }, priority: { title: 'Normal' }, author: { title: 'Reporter' },
     };
     activities = [];
@@ -111,7 +111,7 @@ describe('OpenProjectIntakeService', () => {
     workPackages.set(101, {
       id: 101, displayId: 'OP-101', subject: 'Bug 1', updatedAt: '2026-11-03T10:00:00Z',
       lockVersion: 1, description: { raw: 'Desc 1' },
-      _links: { status: { href: '/api/v3/statuses/1' } },
+      _links: { status: { href: '/api/v3/statuses/1' }, type: { title: 'Bug' } },
       status: { title: 'New' }, priority: { title: 'Normal' }, author: { title: 'Reporter' },
     });
     workPackages.set(102, {
@@ -138,6 +138,7 @@ describe('OpenProjectIntakeService', () => {
       expect(JSON.parse(item.writeback)).toMatchObject({ baseline: true });
       expect(item.task_ids).toBe('[]');
     }
+    expect(JSON.parse(items[0]!.writeback)).toMatchObject({ typeName: 'Bug' });
 
     const res2 = await intake.sync('demo');
     expect(res2).toEqual({ imported: 0, comments: 0, baseline: 0, watched: 3 });
@@ -153,7 +154,7 @@ describe('OpenProjectIntakeService', () => {
     const result = await service().sync('demo');
     expect(result.imported).toBe(0);
     expect(created).toHaveLength(0);
-    expect(JSON.parse(trackerRepo.get('demo', 42)!.writeback)).toEqual({ createPending: true });
+    expect(JSON.parse(trackerRepo.get('demo', 42)!.writeback)).toMatchObject({ createPending: true, typeName: 'Bug' });
   });
 
   it('baseline ticket transitioning to Reopened creates 1 task, while comments without open task are ignored', async () => {

@@ -147,6 +147,49 @@ export function buildCommitConventionPrompt(convention: ReturnType<typeof projec
   return `\n\n## Quy ước commit\n- Nhánh task: \`${branch}\`\n- Commit message mẫu: \`${message}\`\n- Merge message mẫu: \`${merge}\`\n- Thân commit phải có mô tả chi tiết về thay đổi và kết quả kiểm tra.${refInstruction}`;
 }
 
+export function isBugTask(
+  task: { title?: string; slug?: string; body?: string | null; externalRef?: string | null },
+  trackerItem?: { writeback?: string } | null,
+): boolean {
+  if (trackerItem?.writeback) {
+    try {
+      const parsed = JSON.parse(trackerItem.writeback);
+      if (typeof parsed.isBug === 'boolean') return parsed.isBug;
+      if (typeof parsed.typeName === 'string' && /bug|lỗi|defect/i.test(parsed.typeName)) return true;
+    } catch {
+      // ignore
+    }
+  }
+  if (task.title && /\b(bug|lỗi|defect)\b/i.test(task.title)) return true;
+  if (task.slug && (task.slug.startsWith('bug-') || task.slug.includes('-bug-') || task.slug.endsWith('-bug') || task.slug.startsWith('fix-') || task.slug.includes('-fix-') || task.slug.endsWith('-fix'))) return true;
+  if (task.body && /Ticket:.*\[.*\]/i.test(task.body) && /loại:\s*(bug|lỗi|defect)/i.test(task.body)) return true;
+  return false;
+}
+
+export function buildTicketWorkflowPrompt(input: {
+  externalRef?: string | null;
+  sourceId?: string | null;
+  source?: { autoResolve?: boolean; inProgressStatusId?: number | null; resolvedStatusId?: number | null } | null;
+  defaultRef?: string | null;
+  isBug?: boolean;
+}): string {
+  if (!input.externalRef && !input.defaultRef && !input.sourceId && !input.source) return '';
+  const refText = input.externalRef
+    ? `Ticket hiện tại: \`${input.externalRef}\`${input.sourceId ? ` (nguồn ${input.sourceId})` : ''}`
+    : `Project đang bật OpenProject nhưng task này chưa gắn ticket. Mã commit mặc định: \`${input.defaultRef || 'chưa đặt defaultRef'}\``;
+  const status = input.source?.inProgressStatusId == null ? 'In progress theo cấu hình nguồn' : `In progress (status ${input.source.inProgressStatusId})`;
+  const done = input.source?.autoResolve === false ? 'comment kết quả; không tự chuyển Done' : input.source?.resolvedStatusId == null ? 'comment kết quả; trạng thái kết thúc theo cấu hình nguồn' : `comment kết quả rồi chuyển Resolved (status ${input.source.resolvedStatusId})`;
+  const lifecycle = input.externalRef
+    ? `\n- Khi bắt đầu làm: hub tự chuyển ticket sang ${status}. Khi xong: hub sẽ ${done}.`
+    : '';
+
+  const bugTemplate = input.isBug
+    ? `\n\n### Mẫu báo cáo DONE cho task sửa bug (bắt buộc đủ 4 mục để hub tự động ghi vào ticket):\n\`\`\`markdown\n### Lỗi\n<mô tả hiện tượng lỗi quan sát được>\n\n### Nguyên nhân\n<nguyên nhân gốc rễ, kèm vị trí file:dòng cụ thể>\n\n### Cách sửa\n<mô tả cách khắc phục, commit hash, hình ảnh nếu có>\n\n### Kiểm tra\n<các bước và kết quả kiểm tra>\n\`\`\``
+    : `\n- Task lỗi cần thêm 4 mục: Lỗi / Nguyên nhân (file:dòng) / Cách sửa (commit, image) / Kiểm tra.`;
+
+  return `\n\n## Quy trình ticket\n- ${refText}. Không tạo ticket tổng hợp hoặc ticket trùng; việc cùng chủ đề là ticket con.${lifecycle}\n- Nội dung báo cáo phải có '## Đã làm' và '## Còn lại' (checklist), không chứa secret.${bugTemplate}`;
+}
+
 export const PROTOCOL_PROMPT = buildProtocolPrompt({ worktree: { install: 'auto' } }, 'prepared');
 
 export class EventBus extends EventEmitter {
@@ -3668,6 +3711,22 @@ export class Scheduler {
     const ref = taskCommitRef(project, task);
     const branchExample = renderTaskBranch(project, task);
     prompt += buildCommitConventionPrompt(convention, branchExample, ref, task.baseRef || project.defaultBranch);
+    const openproject = projectSettings(project).openproject;
+    const hasOpenProject = Boolean(openproject.enabled || task.externalRef);
+    if (hasOpenProject) {
+      const ticketSource = this.config.integrations.openproject.sources.find((source) => source.id === openproject.sourceId);
+      const trackerItem = this.trackerRepo
+        ? (task.externalRef ? this.trackerRepo.listAll().find((row) => row.display_id === task.externalRef) : this.trackerRepo.listForTask(task.id)[0])
+        : undefined;
+      const isBug = isBugTask(task, trackerItem);
+      prompt += buildTicketWorkflowPrompt({
+        externalRef: task.externalRef,
+        sourceId: ticketSource?.id || openproject.sourceId,
+        source: ticketSource,
+        defaultRef: convention.defaultRef,
+        isBug,
+      });
+    }
     if (task.resume) {
       prompt += '\n\nTask đã làm dở – kiểm tra git log/status rồi làm tiếp, không làm lại.';
     }

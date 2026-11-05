@@ -3336,6 +3336,14 @@ export class AppService {
     });
   }
 
+  linkOpenProjectTicket(sourceId: string, wpId: number, displayId: string, taskId: string): void {
+    if (!this.config.integrations.openproject.sources.some((s) => s.id === sourceId)) {
+      throw new HttpError(404, 'not_found', `Nguồn OpenProject "${sourceId}" không tồn tại`);
+    }
+    if (!this.trackerRepo || !this.taskRepo.get(taskId)) throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    this.trackerRepo.linkTask(sourceId, wpId, displayId, taskId);
+  }
+
   createTask(raw: unknown): TaskRow {
     const parsed = CreateTaskSchema.parse(raw);
     if (parsed.createTicket) {

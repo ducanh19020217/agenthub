@@ -120,6 +120,20 @@ function triageState(row: TrackerItemRow): { decision?: { action?: string }; tri
   try { return JSON.parse(row.writeback) as { decision?: { action?: string }; triage?: unknown }; } catch { return {}; }
 }
 
+function withTypeMetadata(row: TrackerItemRow, workPackage: OpenProjectWorkPackage): TrackerItemRow {
+  const typeName = workPackage._links?.type?.title?.trim();
+  if (!typeName) return row;
+  let state: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(row.writeback);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) state = parsed as Record<string, unknown>;
+  } catch {
+    // Replace malformed metadata with the type information we can trust.
+  }
+  if (state.typeName === typeName) return row;
+  return { ...row, writeback: JSON.stringify({ ...state, typeName }) };
+}
+
 export class OpenProjectIntakeService {
   private readonly config: AgentHubConfig;
   private readonly projectRepo: ProjectRepo;
@@ -225,7 +239,7 @@ export class OpenProjectIntakeService {
       const currentStatus = statusId(wp);
       const lastComment = activities.reduce((max, item) => Math.max(max, item.id || 0), 0) || null;
       if (!previous && firstPoll) {
-        this.trackerRepo.upsert({
+        this.trackerRepo.upsert(withTypeMetadata({
           source_id: source.id,
           wp_id: wp.id,
           display_id: displayId(wp),
@@ -234,7 +248,8 @@ export class OpenProjectIntakeService {
           last_comment_id: lastComment,
           task_ids: '[]',
           writeback: JSON.stringify({ baseline: true }),
-        });
+          created_at: new Date(this.now()).toISOString(),
+        }, wp));
         baseline += 1;
         continue;
       }
@@ -243,7 +258,7 @@ export class OpenProjectIntakeService {
       // details and ticket directory are fetched. Never import that claim as
       // a second task while the original request is still completing.
       if (previous && isCreatePendingRow(previous)) {
-        this.trackerRepo.upsert({ ...previous, display_id: displayId(wp), status_id: currentStatus, updated_at: wp.updatedAt || previous.updated_at, last_comment_id: lastComment });
+        this.trackerRepo.upsert(withTypeMetadata({ ...previous, display_id: displayId(wp), status_id: currentStatus, updated_at: wp.updatedAt || previous.updated_at, last_comment_id: lastComment }, wp));
         continue;
       }
 
@@ -262,7 +277,7 @@ export class OpenProjectIntakeService {
         const importedResult = await this.handleTicket(source, attached.primary, client, wp, activities, seed, 'new');
         imported += importedResult.imported;
         comments += importedResult.comments;
-        this.trackerRepo.upsert({ ...importedResult.row, status_id: currentStatus, updated_at: wp.updatedAt || new Date(this.now()).toISOString(), last_comment_id: lastComment });
+        this.trackerRepo.upsert(withTypeMetadata({ ...importedResult.row, status_id: currentStatus, updated_at: wp.updatedAt || new Date(this.now()).toISOString(), last_comment_id: lastComment }, wp));
         continue;
       }
 
@@ -289,7 +304,7 @@ export class OpenProjectIntakeService {
         comments += importedResult.comments;
         row = importedResult.row;
       }
-      this.trackerRepo.upsert({ ...row, display_id: displayId(wp), status_id: currentStatus, updated_at: wp.updatedAt || row.updated_at, last_comment_id: lastComment, task_ids: row.task_ids, writeback: row.writeback });
+      this.trackerRepo.upsert(withTypeMetadata({ ...row, display_id: displayId(wp), status_id: currentStatus, updated_at: wp.updatedAt || row.updated_at, last_comment_id: lastComment, task_ids: row.task_ids, writeback: row.writeback }, wp));
     }
     this.initializedSources.add(source.id);
     return { imported, comments, baseline, watched: watched.length };

@@ -189,6 +189,7 @@ export async function createServer(
     timesheetRun: options?.openProjectTimesheetRun || (service.timesheetService ? (sourceId, date, hours) => service.timesheetService!.run(sourceId, date, hours) : undefined),
     decision: (sourceId, wpId, action, note) => service.decideOpenProjectTicket(sourceId, wpId, action, note),
     triageInput: (sourceId, wpId, content) => service.submitOpenProjectTriageInput(sourceId, wpId, content),
+    linkTicket: (sourceId, wpId, displayId, taskId) => service.linkOpenProjectTicket(sourceId, wpId, displayId, taskId),
   });
 
   fastify.post('/api/hub/shutdown', async (req) => {

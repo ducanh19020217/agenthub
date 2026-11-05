@@ -16,6 +16,11 @@ const ticketUpdateBody = z.object({
   parent: z.union([z.number().int().positive(), z.string().trim().min(1)]).nullable().optional(),
   comment: z.string().min(1).optional(),
 });
+const ticketSearchQuery = z.object({ q: z.string().trim().optional(), status: z.string().trim().optional(), assignee: z.string().trim().optional() });
+const ticketCreateBody = z.object({
+  subject: z.string().trim().min(1), description: z.string().default(''), parent: z.union([z.number().int().positive(), z.string().trim().min(1)]).optional(),
+  status: z.union([z.number().int().positive(), z.string().trim().min(1)]).optional(), type: z.number().int().positive().optional(), assigneeMe: z.boolean().default(true), taskId: z.string().trim().min(1).optional(),
+});
 
 function sourceOrThrow(config: AgentHubConfig, id: string): OpenProjectSource {
   const source = config.integrations.openproject.sources.find((item) => item.id === id);
@@ -51,6 +56,11 @@ function workPackageUpdateView(baseUrl: string, wp: import('./client.js').OpenPr
   };
 }
 
+function workPackageSearchView(baseUrl: string, wp: import('./client.js').OpenProjectWorkPackage) {
+  const parent = wp._links?.parent;
+  return { displayId: wp.displayId || String(wp.id), subject: wp.subject || '', status: wp.status?.title || wp._links?.status?.title || '', parent: parent?.title || (parent?.href ? parent.href.split('/').pop() : null) || null, assignee: wp._links?.assignee?.title || null, url: `${baseUrl.replace(/\/+$/, '')}/work_packages/${wp.id}` };
+}
+
 export interface RegisterOpenProjectRoutesOptions {
   fetch?: typeof globalThis.fetch;
   sync?: (sourceId: string) => Promise<OpenProjectSyncResult>;
@@ -59,6 +69,7 @@ export interface RegisterOpenProjectRoutesOptions {
   timesheetRun?: (sourceId: string, date?: string, hours?: number) => Promise<unknown>;
   decision?: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>;
   triageInput?: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>;
+  linkTicket?: (sourceId: string, wpId: number, displayId: string, taskId: string) => void;
 }
 
 export function registerOpenProjectRoutes(
@@ -200,6 +211,58 @@ export function registerOpenProjectRoutes(
       if (error instanceof HttpError) throw error;
       throw new HttpError(502, 'openproject_error', 'Không thể kết nối OpenProject');
     }
+  });
+
+  fastify.get('/api/integrations/openproject/sources/:id/tickets', async (req: FastifyRequest) => {
+    const { id } = idParams.parse(req.params);
+    const query = ticketSearchQuery.parse(req.query || {});
+    const source = sourceOrThrow(config, id);
+    const key = readOpenProjectKey(config.hubHome, id);
+    if (!key) throw new HttpError(400, 'bad_request', 'Nguồn chưa có API key');
+    try {
+      const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: options.fetch });
+      let statusId: string | undefined;
+      if (query.status?.trim()) {
+        const statuses = (await client.listStatuses())._embedded?.elements || [];
+        const found = /^\d+$/.test(query.status.trim())
+          ? statuses.find((item) => item.id === Number(query.status))
+          : statuses.find((item) => item.name.toLowerCase() === query.status!.trim().toLowerCase());
+        if (!found) {
+          const names = statuses.map((item) => item.name).join(', ');
+          throw new HttpError(400, 'bad_request', `Trạng thái "${query.status}" không hợp lệ. Tên hợp lệ: ${names || '(không có)'}`);
+        }
+        statusId = String(found.id);
+      }
+      return (await client.searchWorkPackages({ query: query.q, status: statusId, assignee: query.assignee })).map((wp) => workPackageSearchView(source.url, wp));
+    } catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(502, 'openproject_error', 'Không thể kết nối OpenProject'); }
+  });
+
+  fastify.post('/api/integrations/openproject/sources/:id/tickets', async (req: FastifyRequest) => {
+    const { id } = idParams.parse(req.params);
+    const body = ticketCreateBody.parse(req.body || {});
+    const source = sourceOrThrow(config, id);
+    const key = readOpenProjectKey(config.hubHome, id);
+    if (!key) throw new HttpError(400, 'bad_request', 'Nguồn chưa có API key');
+    try {
+      const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: options.fetch });
+      const parent = body.parent === undefined ? undefined : await client.findWorkPackage(body.parent);
+      if (body.parent !== undefined && !parent) throw new HttpError(403, 'forbidden', 'Work package cha không thuộc project của nguồn');
+      let statusId: number | undefined;
+      if (body.status !== undefined) {
+        const statuses = (await client.listStatuses())._embedded?.elements || [];
+        const status = typeof body.status === 'number' || /^\d+$/.test(String(body.status).trim())
+          ? statuses.find((item) => item.id === Number(body.status))
+          : statuses.find((item) => item.name.toLowerCase() === String(body.status).trim().toLowerCase());
+        if (!status) {
+          const names = statuses.map((item) => item.name).join(', ');
+          throw new HttpError(400, 'bad_request', `Trạng thái "${body.status}" không hợp lệ. Tên hợp lệ: ${names || '(không có)'}`);
+        }
+        statusId = status.id;
+      }
+      const created = await client.createWorkPackage({ subject: body.subject, descriptionMarkdown: body.description, parentId: parent?.id, typeId: body.type, statusId, assigneeMe: body.assigneeMe });
+      if (body.taskId) options.linkTicket?.(id, created.id, created.displayId, body.taskId);
+      return { ...created, ...(body.taskId ? { taskId: body.taskId } : {}) };
+    } catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(502, 'openproject_error', 'Không thể tạo ticket OpenProject'); }
   });
 
   fastify.post('/api/integrations/openproject/sources/:id/work-packages/:wp/update', async (req: FastifyRequest) => {

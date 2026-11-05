@@ -180,6 +180,65 @@ export class OpenProjectClient {
     return this.listWorkPackagesWithFilters(filters, '[["updatedAt","desc"]]');
   }
 
+  async searchWorkPackages(input: { query?: string; status?: string; assignee?: string }): Promise<OpenProjectWorkPackage[]> {
+    const buildFilters = (queryFilter?: Record<string, { operator: string; values: string[] }>) => {
+      const filters: Array<Record<string, { operator: string; values: string[] }>> = [];
+      if (input.status?.trim()) {
+        filters.push({ status: { operator: '=', values: [input.status.trim()] } });
+      } else {
+        filters.push({ status: { operator: '*', values: [] } });
+      }
+      if (input.assignee?.trim()) {
+        filters.push({ assignee: { operator: '=', values: [input.assignee.trim()] } });
+      }
+      if (queryFilter) {
+        filters.push(queryFilter);
+      }
+      return JSON.stringify(filters);
+    };
+
+    const trimmedQuery = input.query?.trim();
+    if (!trimmedQuery) {
+      return this.listWorkPackagesWithFilters(buildFilters(), '[["updatedAt","desc"]]');
+    }
+
+    const idMatch = trimmedQuery.match(/^(?:[A-Za-z0-9_-]+-)?(\d+)$/);
+    if (!idMatch) {
+      return this.listWorkPackagesWithFilters(
+        buildFilters({ subject: { operator: '~', values: [trimmedQuery] } }),
+        '[["updatedAt","desc"]]',
+      );
+    }
+
+    const idNum = idMatch[1];
+    const isPureNum = /^\d+$/.test(trimmedQuery);
+
+    const byIdRows = await this.listWorkPackagesWithFilters(
+      buildFilters({ id: { operator: '=', values: [idNum] } }),
+      '[["updatedAt","desc"]]',
+    );
+
+    if (isPureNum) {
+      return byIdRows;
+    }
+
+    const bySubjectRows = await this.listWorkPackagesWithFilters(
+      buildFilters({ subject: { operator: '~', values: [trimmedQuery] } }),
+      '[["updatedAt","desc"]]',
+    );
+
+    const map = new Map<number, OpenProjectWorkPackage>();
+    for (const row of byIdRows) {
+      if (!row.displayId || row.displayId.toLowerCase() === trimmedQuery.toLowerCase()) {
+        map.set(row.id, row);
+      }
+    }
+    for (const row of bySubjectRows) {
+      map.set(row.id, row);
+    }
+    return [...map.values()];
+  }
+
   async listUpdatedWorkPackages(start: string, end: string): Promise<OpenProjectWorkPackage[]> {
     const filters = JSON.stringify([
       { updatedAt: { operator: '<>d', values: [start, end] } },

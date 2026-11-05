@@ -124,6 +124,17 @@ export interface Project {
   afterMerge?: { steps: string[][]; timeoutSec: number; restartHub: boolean; push?: { remote: string; from: string; to: string; ffOnly: boolean } } | null;
 }
 
+export interface ProjectGitStatus {
+  path: string;
+  currentBranch: string | null;
+  defaultBranch: string;
+  dirty: { changed: boolean; files: number };
+  remote: string | null;
+  localBranches: string[];
+  remoteBranches: string[];
+  aheadBehind: { ahead: number; behind: number } | null;
+}
+
 export interface ProjectInspection {
   path: string;
   exists: boolean;

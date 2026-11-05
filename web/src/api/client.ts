@@ -38,7 +38,7 @@ import {
   ApplyPresetInput,
   ApplyPresetResult,
   EffectiveConfigResponse,
-  OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto, OpenProjectTypeDto, OpenProjectSyncResult, GiteaStatus, RemoteDeployStatus,
+  OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto, OpenProjectTypeDto, OpenProjectSyncResult, GiteaStatus, RemoteDeployStatus, ProjectGitStatus,
 } from '../types/api';
 import { getActiveLocale, translateApiErrorMessage } from '../utils/apiError';
 
@@ -322,6 +322,9 @@ export async function getProjects(): Promise<Project[]> {
   return apiFetch<Project[]>('/api/projects');
 }
 
+export const getProjectGitStatus = (projectId: string) =>
+  apiFetch<ProjectGitStatus>(`/api/projects/${encodeURIComponent(projectId)}/git`);
+
 export const getOpenProjectSources = () => apiFetch<OpenProjectSource[]>('/api/integrations/openproject/sources');
 export const saveOpenProjectSource = (id: string, data: OpenProjectSourceInput) => apiFetch<OpenProjectSource>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) });
 export const deleteOpenProjectSource = (id: string) => apiFetch<{ ok: boolean }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}`, { method: 'DELETE' });
@@ -365,6 +368,7 @@ export async function getArchivedProjects(): Promise<Project[]> {
 }
 
 export const inspectProject = (path: string) => apiFetch<ProjectInspection>('/api/projects/inspect', { method: 'POST', body: JSON.stringify({ path }) });
+export const inspectProjectGit = (path: string) => apiFetch<ProjectGitStatus>('/api/projects/inspect-git', { method: 'POST', body: JSON.stringify({ path }) });
 export const createNewProject = (data: CreateNewProjectInput) => apiFetch<Project>('/api/projects/new', { method: 'POST', body: JSON.stringify(data) });
 export const writeProjectGuidance = (projectId: string, content: string) =>
   apiFetch<{ ok: boolean }>(`/api/projects/${encodeURIComponent(projectId)}/guidance`, {

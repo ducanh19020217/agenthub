@@ -321,6 +321,8 @@ export const vi = {
     modelChainHint: 'Để trống để dùng chuỗi model mặc định.',
     externalRefLabel: 'Mã tham chiếu bên ngoài',
     externalRefPlaceholder: 'vd: PROJ-45, OP-123',
+    mergeWarningTitle: 'Task đã tạo nhưng chưa có cấu hình merge đầy đủ',
+    openCreatedTask: 'Mở task vừa tạo',
   },
   taskDetail: {
     openTicket: 'Mở ticket',

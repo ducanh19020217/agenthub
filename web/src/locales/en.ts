@@ -323,6 +323,8 @@ export const en: typeof vi = {
     modelChainHint: 'Leave blank to use the default chain.',
     externalRefLabel: 'External reference',
     externalRefPlaceholder: 'e.g. PROJ-45, OP-123',
+    mergeWarningTitle: 'Task created, but merge configuration is incomplete',
+    openCreatedTask: 'Open created task',
   },
   taskDetail: {
     openTicket: 'Open ticket',

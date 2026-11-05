@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { commitConventionExample, renderCommitTemplate, renderTaskBranch, taskCommitRef } from '../src/commit-convention.js';
-import { buildCommitConventionPrompt, buildTicketWorkflowPrompt } from '../src/scheduler/index.js';
+import { buildCommitConventionPrompt, buildTicketWorkflowPrompt, isBugTask } from '../src/scheduler/index.js';
 import { projectSettings } from '../src/projects/settings.js';
 
 describe('project commit conventions', () => {
@@ -56,6 +56,41 @@ describe('project commit conventions', () => {
     expect(prompt).toContain('SIE-25');
     expect(prompt).toContain('In progress (status 94)');
     expect(prompt).toContain('Resolved (status 95)');
+    expect(prompt).toContain('## Đã làm');
+  });
+
+  it('prints bug report template when ticket is identified as a bug', () => {
+    const bugTask = { id: 'p1/fix-login', slug: 'fix-login', title: '[Bug] Login error' };
+    expect(isBugTask(bugTask)).toBe(true);
+
+    const normalTask = { id: 'p1/feat-login', slug: 'feat-login', title: 'Feature login' };
+    expect(isBugTask(normalTask)).toBe(false);
+
+    // Tracker item override
+    expect(isBugTask(normalTask, { writeback: JSON.stringify({ isBug: true }) })).toBe(true);
+
+    const prompt = buildTicketWorkflowPrompt({
+      externalRef: 'SIE-30',
+      sourceId: 'sie',
+      source: { inProgressStatusId: 94, resolvedStatusId: 95 },
+      isBug: true,
+    });
+    expect(prompt).toContain('### Mẫu báo cáo DONE cho task sửa bug');
+    expect(prompt).toContain('### Lỗi');
+    expect(prompt).toContain('### Nguyên nhân');
+    expect(prompt).toContain('### Cách sửa');
+    expect(prompt).toContain('### Kiểm tra');
+  });
+
+  it('prints ticket rules with defaultRef for task without externalRef when OpenProject is enabled', () => {
+    const prompt = buildTicketWorkflowPrompt({
+      externalRef: null,
+      sourceId: 'sie',
+      defaultRef: 'SIE-19',
+      source: { inProgressStatusId: 94 },
+    });
+    expect(prompt).toContain('Mã commit mặc định: `SIE-19`');
+    expect(prompt).toContain('Không tạo ticket tổng hợp hoặc ticket trùng');
     expect(prompt).toContain('## Đã làm');
   });
 });

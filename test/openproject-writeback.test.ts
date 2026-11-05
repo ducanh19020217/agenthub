@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { OpenProjectWritebackService } from '../src/integrations/openproject/writeback.js';
+import { extractBugReport, OpenProjectWritebackService } from '../src/integrations/openproject/writeback.js';
 import { saveOpenProjectKey } from '../src/integrations/openproject/secrets.js';
 
 type TestTask = Record<string, unknown> & { id: string; projectId: string; externalRef: string };
@@ -246,6 +246,31 @@ describe('OpenProjectWritebackService', () => {
     await h.emit('task.running', task.id);
     expect(fetchCalled).toBe(false);
     expect(h.row.writeback).toBe('{}');
+    h.cleanup();
+  });
+
+  it('extractBugReport parses all 4 bug sections accurately', () => {
+    const report = `# Tóm tắt\nĐã sửa xong\n\n### Lỗi\nLỗi 500 khi submit form\n\n### Nguyên nhân\nsrc/api.ts:42 null pointer\n\n### Cách sửa\nThêm null check tại commit abc123\n\n### Kiểm tra\nChạy test pass 10/10`;
+    const extracted = extractBugReport(report);
+    expect(extracted).toContain('#### Lỗi\nLỗi 500 khi submit form');
+    expect(extracted).toContain('#### Nguyên nhân\nsrc/api.ts:42 null pointer');
+    expect(extracted).toContain('#### Cách sửa\nThêm null check tại commit abc123');
+    expect(extracted).toContain('#### Kiểm tra\nChạy test pass 10/10');
+
+    expect(extractBugReport('Không có mục nào')).toBeNull();
+  });
+
+  it('includes 4-section bug report in writeback comment when resolving a bug task', async () => {
+    const bugReportDone = `## Báo cáo\nĐã xong\n\n### Lỗi\nCrash khi mở màn hình\n\n### Nguyên nhân\nsrc/app.ts:12 biến undefined\n\n### Cách sửa\nKhởi tạo giá trị mặc định ở commit f00ba\n\n### Kiểm tra\nMở màn hình không còn crash`;
+    const task = done('app/fix-bug', 'app', bugReportDone);
+    const bodies: string[] = [];
+    const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
+      if (init?.body) bodies.push(String(init.body));
+      return new Response(JSON.stringify({ id: 10, lockVersion: 2 }), { status: 200 });
+    }) as typeof fetch;
+    const h = harness({ tasks: [task], fetchFn });
+    await h.emit('task.merged', task.id, { mergeCommit: 'f00ba' });
+    expect(bodies.some((b) => b.includes('#### Lỗi') && b.includes('Crash khi mở màn hình') && b.includes('#### Nguyên nhân') && b.includes('#### Cách sửa') && b.includes('#### Kiểm tra'))).toBe(true);
     h.cleanup();
   });
 });

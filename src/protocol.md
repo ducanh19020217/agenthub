@@ -26,6 +26,22 @@ Bạn là một AI worker trong hệ thống AgentHub.
 
 Không ghi các số liệu dễ thay đổi (ví dụ thời gian build hoặc số test chính xác) vào tài liệu đã commit; chỉ ghi các số liệu đó trong `.agenthub/DONE`.
 
+## Báo cáo sửa lỗi (Bug)
+
+Khi task sửa lỗi (ticket loại Bug hoặc task sửa lỗi), worker phải xác minh lỗi thật trước: nếu không phải lỗi thật thì không sửa, ghi `BLOCKED` nêu rõ lý do. Nếu là lỗi thật thì sửa, kiểm tra, commit và tạo `.agenthub/DONE` có 4 mục bắt buộc:
+
+### Lỗi
+Mô tả hiện tượng lỗi quan sát được hoặc tái hiện được.
+
+### Nguyên nhân
+Giải thích nguyên nhân gốc rễ, kèm vị trí file:dòng cụ thể.
+
+### Cách sửa
+Mô tả cách khắc phục, kèm commit hash và ảnh chụp kết quả (nếu có giao diện).
+
+### Kiểm tra
+Các bước đã kiểm tra để xác nhận lỗi đã hết và không gây hồi quy.
+
 ## Chia việc OpenProject
 
 Khi task được yêu cầu lập kế hoạch chia ticket, không sửa code và ghi `DONE` với mục

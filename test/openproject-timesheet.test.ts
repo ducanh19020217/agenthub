@@ -9,6 +9,9 @@ import { mergeProjectSettings, DEFAULT_PROJECT_SETTINGS } from '../src/projects/
 import { saveOpenProjectKey } from '../src/integrations/openproject/secrets.js';
 import { OpenProjectTimesheetService } from '../src/integrations/openproject/timesheet.js';
 import { allocateTimesheetHours } from '../src/integrations/openproject/timesheet.js';
+import Fastify from 'fastify';
+import { HttpError } from '../src/errors.js';
+import { registerOpenProjectRoutes } from '../src/integrations/openproject/routes.js';
 
 describe('OpenProject timesheet allocation', () => {
   it('keeps the configured total after minimum and rounding', () => {
@@ -46,11 +49,22 @@ describe('OpenProject timesheet service', () => {
     await service.run('op', '2026-11-04'); expect(patch).toBe(1); db.close(); fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it('skips weekends and disabled or incomplete configuration', async () => {
-    const config = loadConfig('/tmp/agenthub-timesheet-noop'); config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo', timesheet: { enabled: false } })];
-    const empty = { getAll: () => [], getByTask: () => [] } as never;
-    const service = new OpenProjectTimesheetService({ config, projectRepo: empty, taskRepo: empty, runRepo: empty, eventRepo: empty, entryRepo: { listForDate: () => [] } as never, eventBus: { emit: () => true }, now: () => new Date('2026-11-08T17:30:00').getTime() });
-    expect((await service.preview('op', '2026-11-08')).entries).toEqual([]); expect((await service.preview('op', '2026-11-04')).entries).toEqual([]);
+  it('skips weekends, previews when writing is disabled, and does not write without activity', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-timesheet-weekend-')); const repoPath = path.join(root, 'repo'); fs.mkdirSync(repoPath);
+    const git = (args: string[], env?: NodeJS.ProcessEnv) => execFileSync('git', ['-C', repoPath, ...args], { env: { ...process.env, ...env }, stdio: 'pipe' });
+    git(['init', '-q']); git(['config', 'user.email', 'test@example.test']); git(['config', 'user.name', 'Test']); fs.writeFileSync(path.join(repoPath, 'README'), 'base'); git(['add', 'README']); git(['commit', '-qm', 'base']); git(['branch', '-M', 'main']);
+    git(['checkout', '-qb', 'task']); fs.writeFileSync(path.join(repoPath, 'README'), 'work'); git(['add', 'README']); git(['commit', '-qm', 'feat: export report', '--date', '2026-11-06T10:00:00Z'], { GIT_AUTHOR_DATE: '2026-11-06T10:00:00Z', GIT_COMMITTER_DATE: '2026-11-06T10:00:00Z' });
+    const config = loadConfig(root); config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo', timesheet: { enabled: true, activityId: 7 } })]; saveOpenProjectKey(root, 'op', 'test-key');
+    const db = openDatabase(path.join(root, 'hub.db')); const projectRepo = new ProjectRepo(db); const taskRepo = new TaskRepo(db); const runRepo = new RunRepo(db); const eventRepo = new EventRepo(db); const entryRepo = new TimesheetEntryRepo(db); projectRepo.insert({ id: 'p', name: 'P', path: repoPath, defaultBranch: 'main', maxParallel: 1, settings: JSON.stringify(mergeProjectSettings(DEFAULT_PROJECT_SETTINGS, { openproject: { enabled: true, sourceId: 'op', role: 'primary' } })) }); taskRepo.insert({ id: 't', projectId: 'p', slug: 't', title: 't', branch: 'task', externalRef: '42', status: 'done' });
+    const fetchFn = (async (url: string | URL) => url.toString().endsWith('/work_packages/42') ? new Response(JSON.stringify({ id: 42, displayId: 'OP-42', subject: 'Export' })) : new Response(JSON.stringify({ id: 99 }))) as typeof fetch;
+    const service = new OpenProjectTimesheetService({ config, projectRepo, taskRepo, runRepo, eventRepo, entryRepo, fetchFn, eventBus: { emit: () => true } });
+    expect((await service.preview('op', '2026-11-07')).entries).toEqual([]);
+    expect((await service.preview('op', '2026-11-06')).entries).toHaveLength(1);
+    config.integrations.openproject.sources[0].timesheet!.enabled = false;
+    expect((await service.preview('op', '2026-11-06')).entries).toHaveLength(1);
+    config.integrations.openproject.sources[0].timesheet!.activityId = null;
+    await expect(service.run('op', '2026-11-06')).resolves.toMatchObject({ entries: [{ wpId: 42 }] });
+    db.close(); fs.rmSync(root, { recursive: true, force: true });
   });
 
   it('runs at or after the configured time, retries after failure, and does not run twice', async () => {
@@ -70,5 +84,28 @@ describe('OpenProject timesheet service', () => {
     expect(() => OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo', timesheet: { time: '25:00' } })).toThrow();
     expect(() => OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo', timesheet: { hours: 8.1 } })).toThrow();
     expect(() => OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo', timesheet: { enabled: true } })).toThrow();
+  });
+
+  it('serves preview and validates manual run hours', async () => {
+    const config = loadConfig('/tmp/agenthub-timesheet-routes');
+    config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo' })];
+    const app = Fastify({ logger: false });
+    app.setErrorHandler((error, _request, reply) => {
+      if (error instanceof HttpError) return reply.status(error.statusCode).send({ error: error.error, message: error.message });
+      return reply.status(400).send({ error: 'bad_request', message: error.message });
+    });
+    const preview = { sourceId: 'op', date: '2026-11-05', entries: [] };
+    const calls: Array<{ date?: string; hours?: number }> = [];
+    registerOpenProjectRoutes(app, config, {
+      timesheetPreview: async () => preview,
+      timesheetRun: async (_id, date, hours) => { calls.push({ date, hours }); return preview; },
+    });
+    await app.ready();
+    expect((await app.inject({ method: 'GET', url: '/api/integrations/openproject/sources/op/timesheet?date=2026-11-05' })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: '/api/integrations/openproject/sources/op/timesheet/run', payload: { date: '2026-11-05', hours: 8.25 } })).statusCode).toBe(200);
+    expect(calls).toEqual([{ date: '2026-11-05', hours: 8.25 }]);
+    expect((await app.inject({ method: 'POST', url: '/api/integrations/openproject/sources/op/timesheet/run', payload: { hours: 7.75 } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: '/api/integrations/openproject/sources/op/timesheet/run', payload: { hours: 8.1 } })).statusCode).toBe(400);
+    await app.close();
   });
 });

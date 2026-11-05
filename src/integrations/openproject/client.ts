@@ -63,6 +63,14 @@ export interface OpenProjectActivity {
   };
 }
 
+export interface OpenProjectTimeEntry {
+  id: number;
+  hours: string;
+  spentOn: string;
+  comment?: { raw?: string };
+  _links?: { workPackage?: OpenProjectHalLink; activity?: OpenProjectHalLink; [key: string]: OpenProjectHalLink | undefined };
+}
+
 export interface OpenProjectCollection<T> {
   _type?: string;
   total?: number;
@@ -208,6 +216,25 @@ export class OpenProjectClient {
       `/api/v3/work_packages/${encodeURIComponent(String(id))}/activities`,
     );
     return res._embedded?.elements || [];
+  }
+
+  async listTimeEntryActivities(): Promise<Array<{ id: number; name: string }>> {
+    const result = await this.request<OpenProjectCollection<{ id: number; name: string }>>('/api/v3/time_entries/activities?pageSize=100');
+    return (result._embedded?.elements || []).map((item) => ({ id: item.id, name: item.name }));
+  }
+
+  async createTimeEntry(input: { hours: string; spentOn: string; comment: string; workPackageId: number; activityId: number }): Promise<OpenProjectTimeEntry> {
+    return this.request<OpenProjectTimeEntry>('/api/v3/time_entries', { method: 'POST', body: JSON.stringify({
+      hours: input.hours, spentOn: input.spentOn, comment: { raw: input.comment },
+      _links: { workPackage: { href: `/api/v3/work_packages/${input.workPackageId}` }, activity: { href: `/api/v3/time_entries/activities/${input.activityId}` } },
+    }) });
+  }
+
+  async updateTimeEntry(id: number, input: { hours: string; spentOn: string; comment: string; workPackageId: number; activityId: number }): Promise<OpenProjectTimeEntry> {
+    return this.request<OpenProjectTimeEntry>(`/api/v3/time_entries/${id}`, { method: 'PATCH', body: JSON.stringify({
+      hours: input.hours, spentOn: input.spentOn, comment: { raw: input.comment },
+      _links: { workPackage: { href: `/api/v3/work_packages/${input.workPackageId}` }, activity: { href: `/api/v3/time_entries/activities/${input.activityId}` } },
+    }) });
   }
 
   async getUserName(href: string): Promise<string> {

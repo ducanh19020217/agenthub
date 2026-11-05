@@ -316,6 +316,16 @@ export const DailyReportConfigSchema = z.object({
   telegram: z.boolean().default(false),
 });
 
+export const TimesheetConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default('17:30'),
+  weekdaysOnly: z.boolean().default(true),
+  hours: z.number().min(8).multipleOf(0.25).default(8),
+  activityId: z.number().int().positive().nullable().default(null),
+  minEntryHours: z.number().positive().multipleOf(0.25).default(0.5),
+  roundTo: z.number().positive().multipleOf(0.25).default(0.25),
+});
+
 export const OpenProjectSplitConfigSchema = z.object({
   typeIds: z.array(z.number().int()).default([]),
   keyword: z.string().nullable().default('[chia]'),
@@ -347,6 +357,7 @@ export const OpenProjectSourceSchema = z.object({
   language: z.string().default('vi'),
   split: OpenProjectSplitConfigSchema.default({}),
   dailyReport: DailyReportConfigSchema.optional(),
+  timesheet: TimesheetConfigSchema.default({}),
 });
 
 export type OpenProjectSource = z.infer<typeof OpenProjectSourceSchema>;

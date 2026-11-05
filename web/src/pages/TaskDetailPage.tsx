@@ -39,6 +39,7 @@ import { CollapsibleList } from '../components/CollapsibleList';
 import { formatEventType, formatReason, formatReviewWaitingReason } from '../utils/events';
 import { Pagination } from '../components/ui/Pagination';
 import { getReviewerEngine } from '../utils/reviewer';
+import { autoMergeReasonKey } from '../utils/autoMerge';
 import {
   ArrowLeft,
   Play,
@@ -508,6 +509,11 @@ export const TaskDetailPage: React.FC = () => {
         <div className="rounded-xl border border-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_12%,transparent)] px-4 py-3 text-sm text-[var(--t-text)]">
           {t('extra.waitingApprover')}
           {task.reviewerEscalationReason ? ` (${task.reviewerEscalationReason})` : ''}.
+        </div>
+      ) : null}
+      {task.autoMergeSkippedReason ? (
+        <div data-testid="task-manual-approval" className="rounded-xl border border-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_12%,transparent)] px-4 py-3 text-sm text-[var(--t-text)]">
+          {t('extra.manualApproval')}: {t(autoMergeReasonKey(task.autoMergeSkippedReason))}
         </div>
       ) : null}
       {(task.status === 'review' || task.reviewMaxRounds) ? (

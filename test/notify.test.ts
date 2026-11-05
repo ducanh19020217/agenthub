@@ -142,6 +142,20 @@ describe('NotificationService (Desktop Notifications)', () => {
     notifier.stop();
   });
 
+  it('formats auto-merge skips with the first safe error line and retry state', () => {
+    taskRepo.insert({ id: 'proj/task-skipped', projectId: 'proj', slug: 'task-skipped', title: 'Needs manual merge', status: 'review' });
+    const notifier = new NotificationService({ eventBus, config, taskRepo, exec: fakeExec });
+    notifier.start();
+    eventBus.emit('review.auto_merge_skipped', 'proj/task-skipped', {
+      reason: 'checks_failed', retried: true,
+      checks: [{ name: 'test', ok: false, outputTail: 'npm test\nError: token=super-secret-value\nmore output' }],
+    });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toBe('✋ Needs manual merge đã được duyệt nhưng chưa tự merge: check `test` đỏ (đã chạy lại 1 lần). Cần duyệt tay.\nError: token=[redacted]');
+    expect(execCalls.join(' ')).not.toContain('super-secret-value');
+    notifier.stop();
+  });
+
   it('notifies when Claude has no fallback step without including credentials', () => {
     const notifier = new NotificationService({ eventBus, config, exec: fakeExec });
     notifier.start();

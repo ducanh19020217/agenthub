@@ -366,6 +366,9 @@ export interface Task {
   reviewerEscalated?: number;
   reviewerEscalatedAt?: string | null;
   reviewerEscalationReason?: string | null;
+  autoMergeSkippedReason?: string | null;
+  autoMergeSkippedChecks?: Array<{ name?: string; outputTail?: string }>;
+  autoMergeSkippedRetried?: boolean;
   reviewStep?: number;
   reviewRound?: number;
   reviewMaxRounds?: number;

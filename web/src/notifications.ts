@@ -3,7 +3,7 @@ import { getActiveLocale } from './utils/apiError';
 import { formatEventType } from './utils/events';
 
 const IMPORTANT = new Set([
-  'brain.notify', 'task.review_ready', 'task.failed', 'task.blocked', 'review.escalated',
+  'brain.notify', 'task.review_ready', 'review.auto_merge_skipped', 'task.failed', 'task.blocked', 'review.escalated',
   'disk.low', 'disk.docker_low', 'quota.exhausted', 'claude.quota_exhausted', 'ci.failed', 'task.pause_reminder',
   'merge.conflict', 'merge.failed',
 ]);
@@ -47,6 +47,16 @@ export const KNOWN_RUNNABLE_MODELS = [
   'gpt-oss-120b-medium',
   'codex:gpt-5.6-luna',
 ];
+
+function firstCheckError(output: unknown): string | undefined {
+  if (typeof output !== 'string') return undefined;
+  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const line = lines.find((item) => /error|fail(?:ed|ure)?|exception|fatal|assert|npm err|✗/i.test(item)) || lines[0];
+  return line?.replace(/(bearer\s+)[^\s]+/gi, '$1[redacted]')
+    .replace(/\b((?:token|secret|password|passwd|api[_-]?key))\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]')
+    .replace(/\b(?:gh[pousr]|sk|xox[baprs])-[-\w]+/g, '[redacted]')
+    .slice(0, 200);
+}
 
 export function getModelFamily(model: string): string {
   if (model.startsWith('codex:')) return 'codex';
@@ -180,6 +190,20 @@ export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 
   if (event.type === 'review.escalated') {
     const title = typeof payload.title === 'string' ? payload.title : (event.taskId || 'Task');
     return isEn ? `Approval required: ${title}` : `Cần người duyệt: ${title}`;
+  }
+  if (event.type === 'review.auto_merge_skipped') {
+    const title = typeof payload.title === 'string' ? payload.title : (event.taskId || 'Task');
+    const failed = Array.isArray(payload.checks) ? payload.checks.find((check) => check && typeof check === 'object' && ('outputTail' in check || (check as { ok?: boolean }).ok === false)) as { name?: string; outputTail?: string } | undefined : undefined;
+    const retryText = payload.retried === true ? (isEn ? ' (retried once)' : ' (đã chạy lại 1 lần)') : '';
+    const reason = payload.reason === 'checks_failed'
+      ? (isEn ? `${failed?.name || 'test'} check failed${retryText}` : `check ${failed?.name || 'test'} đỏ${retryText}`)
+      : (isEn
+        ? ({ checks_missing: 'checks missing', escalated: 'review escalated', chain_incomplete: 'review chain incomplete', merge_failed: 'merge failed', auto_merge_disabled: 'auto-merge disabled' } as Record<string, string>)[String(payload.reason)] || 'unknown reason'
+        : ({ checks_missing: 'thiếu check', escalated: 'review đã escalated', chain_incomplete: 'chưa đủ chuỗi review', merge_failed: 'merge thất bại', auto_merge_disabled: 'đã tắt auto-merge' } as Record<string, string>)[String(payload.reason)] || 'không rõ lý do');
+    const detail = firstCheckError(failed?.outputTail);
+    return isEn
+      ? `✋ ${title} was approved but not auto-merged: ${reason}. Manual approval required.${detail ? ` ${detail}` : ''}`
+      : `✋ ${title} đã được duyệt nhưng chưa tự merge: ${reason}. Cần duyệt tay.${detail ? ` ${detail}` : ''}`;
   }
   if (event.type === 'brain.notify') {
     const text = typeof payload.text === 'string' ? payload.text : '';

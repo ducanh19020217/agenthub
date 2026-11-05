@@ -1108,6 +1108,13 @@ export class Scheduler {
     return promise;
   }
 
+  async rerunFailedChecksForTask(taskId: string, runId: string, names: string[]): Promise<{ passed: boolean; failed: string[]; results: import('../checks.js').CheckResult[] }> {
+    const task = this.taskRepo.get(taskId);
+    const project = task ? this.projectRepo.get(task.projectId) : undefined;
+    if (!task || !project || !names.length) return { passed: false, failed: names, results: [] };
+    return this.checkRunner!.run(task, project, runId, { onlyNames: names });
+  }
+
   private pumpChecks(): void {
     const limit = Math.max(1, this.config.checks?.maxConcurrent || 2);
     while (!this.stopped && this.checkingActive.size < limit) {

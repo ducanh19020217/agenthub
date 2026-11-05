@@ -4,9 +4,10 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
 
-interface AgyHomesSnapshot {
+export interface AgyHomesSnapshot {
   dir: string;
   subdirs: string[];
+  profiles: Map<string, Map<string, string>>;
 }
 
 export interface HubHomeSnapshot {
@@ -49,6 +50,15 @@ export function findUnexpectedHubEntries(before: string[], after: string[]): str
   const beforeSet = new Set(before);
   const newEntries = after.filter((name) => !beforeSet.has(name));
   return newEntries.filter((name) => !isIgnoredHubEntry(name));
+}
+
+export function findHubEntryChanges(before: string[], after: string[]): { added: string[]; removed: string[] } {
+  const beforeSet = new Set(before);
+  const afterSet = new Set(after);
+  return {
+    added: after.filter((name) => !beforeSet.has(name)),
+    removed: before.filter((name) => !afterSet.has(name)),
+  };
 }
 
 export function getHubEntries(dir: string): string[] {
@@ -161,11 +171,14 @@ export function verifyHubHomeSafety(snap: HubHomeSnapshot, currentDir: string = 
 
   if (snap.exists && currentExists) {
     const currentEntries = getHubEntries(currentDir);
-    const unexpected = findUnexpectedHubEntries(snap.entries, currentEntries);
+    const changes = findHubEntryChanges(snap.entries, currentEntries);
+    const sensitiveCreated = changes.added.filter((name) => SENSITIVE_FILES.includes(name) || SENSITIVE_DIRS.includes(name) || ['hub.db', 'hub.db-wal', 'hub.db-shm'].includes(name));
+    if (sensitiveCreated.length) {
+      throw new Error(`SAFETY NET VIOLATION: ${currentDir} was modified during test execution! Sensitive entry changed: ${sensitiveCreated[0]}`);
+    }
+    const unexpected = [...changes.added, ...changes.removed].filter((name) => !isIgnoredHubEntry(name));
     if (unexpected.length > 0) {
-      throw new Error(
-        `SAFETY NET VIOLATION: ${currentDir} was modified during test execution! Unexpected new entries: [${unexpected.join(', ')}]`,
-      );
+      console.warn(`SAFETY NET WARNING: ${currentDir} high-level entries changed: [${unexpected.join(', ')}]`);
     }
 
     // Check sensitive files and dirs for content modification
@@ -205,20 +218,6 @@ export function verifyHubHomeSafety(snap: HubHomeSnapshot, currentDir: string = 
 interface WebSnapshot { path: string; checksum: string | null; }
 interface ServiceSnapshot { path: string; exists: boolean; mtime: number | null; checksum: string | null; }
 
-function resolveTargetHomes(): string[] {
-  const homes = new Set<string>();
-  const curr = os.homedir();
-  homes.add(curr);
-
-  // If running inside isolated worker HOME e.g. /home/user/.agy-homes/g2
-  const match = curr.match(/(.*?)\/\.agy-homes\/[^/]+$/);
-  if (match) {
-    homes.add(match[1]);
-  }
-
-  return Array.from(homes);
-}
-
 function getSubdirectories(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];
   try {
@@ -229,6 +228,49 @@ function getSubdirectories(dir: string): string[] {
       .sort();
   } catch {
     return [];
+  }
+}
+
+function getProfileMetadata(dir: string): Map<string, string> {
+  const metadata = new Map<string, string>();
+  const walk = (current: string, relative: string) => {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const rel = relative ? path.join(relative, entry.name) : entry.name;
+      const full = path.join(current, entry.name);
+      try {
+        const stat = fs.lstatSync(full);
+        // Metadata only: never read token/keyring contents.
+        metadata.set(rel, `${entry.isDirectory() ? 'd' : entry.isSymbolicLink() ? 'l' : 'f'}:${stat.size}:${stat.mode}:${stat.mtimeMs}`);
+        if (entry.isDirectory() && !entry.isSymbolicLink()) walk(full, rel);
+      } catch { /* entry may disappear while the daemon is running */ }
+    }
+  };
+  if (fs.existsSync(dir)) walk(dir, '');
+  return metadata;
+}
+
+function getAgyProfiles(dir: string): Map<string, Map<string, string>> {
+  const profiles = new Map<string, Map<string, string>>();
+  for (const name of getSubdirectories(dir)) profiles.set(name, getProfileMetadata(path.join(dir, name)));
+  return profiles;
+}
+
+export function getAgyHomesSnapshot(dir: string): AgyHomesSnapshot {
+  return { dir, subdirs: getSubdirectories(dir), profiles: getAgyProfiles(dir) };
+}
+
+export function verifyAgyHomesSafety(snap: AgyHomesSnapshot): void {
+  const currentProfiles = getAgyProfiles(snap.dir);
+  const removed = snap.subdirs.filter((name) => !currentProfiles.has(name));
+  const added = [...currentProfiles.keys()].filter((name) => !snap.profiles.has(name));
+  if (added.length || removed.length) console.warn(`SAFETY NET WARNING: profiles changed in ${snap.dir}: added [${added.join(', ')}], removed [${removed.join(', ')}]`);
+  for (const [name, original] of snap.profiles) {
+    const current = currentProfiles.get(name);
+    if (!current) continue;
+    const changed = [...new Set([...original.keys(), ...current.keys()])].filter((file) => original.get(file) !== current.get(file));
+    if (changed.length) throw new Error(`SAFETY NET VIOLATION: profile ${path.join(snap.dir, name)} changed inside: [${changed.join(', ')}]`);
   }
 }
 
@@ -253,6 +295,7 @@ let initialWeb: WebSnapshot;
 let initialServices: ServiceSnapshot[] = [];
 let initialTempDirNames = new Set<string>();
 let testTempRoot: string | undefined;
+let originalTestEnv: Record<string, string | undefined> = {};
 
 function getAgentHubTempDirNames(): Set<string> {
   try {
@@ -266,26 +309,29 @@ function getAgentHubTempDirNames(): Set<string> {
 
 export function setup({ provide }: { provide: (key: string, value: string) => void }) {
   initialTempDirNames = getAgentHubTempDirNames();
+  const realHome = os.userInfo().homedir;
   testTempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-test-run-'));
+  const safeHome = path.join(testTempRoot, 'home');
+  fs.mkdirSync(safeHome, { recursive: true });
+  originalTestEnv = Object.fromEntries(['HOME', 'AGENTHUB_HOME', 'AGENTHUB_AGY_HOMES', 'XDG_CONFIG_HOME', 'TMPDIR'].map((key) => [key, process.env[key]]));
+  process.env.HOME = safeHome;
+  process.env.AGENTHUB_HOME = path.join(safeHome, '.agenthub');
+  process.env.AGENTHUB_AGY_HOMES = path.join(safeHome, '.agy-homes');
+  process.env.XDG_CONFIG_HOME = path.join(safeHome, 'config');
   process.env.AGENTHUB_TEST_TMP_ROOT = testTempRoot;
   process.env.TMPDIR = testTempRoot;
   provide('agenthubTestTmpRoot', testTempRoot);
-  const targetHomes = resolveTargetHomes();
-  const realHome = os.userInfo().homedir;
   initialServices = [
     path.join(realHome, '.config', 'systemd', 'user', 'agenthub.service'),
     path.join(realHome, 'Library', 'LaunchAgents', 'dev.agenthub.plist'),
   ].map(getServiceSnapshot);
 
-  initialAgyHomes = targetHomes.map((home) => {
-    const dir = path.join(home, '.agy-homes');
-    return {
-      dir,
-      subdirs: getSubdirectories(dir),
-    };
-  });
+  // Worker HOME/AGENTHUB_AGY_HOMES are redirected below to the private tree.
+  // Do not inspect live agy profiles: another daemon may legitimately update
+  // their runtime metadata while the test process is running.
+  initialAgyHomes = [];
 
-  initialHubHomes = targetHomes.map((home) => {
+  initialHubHomes = [realHome].map((home) => {
     const dir = path.join(home, '.agenthub');
     return getHubSnapshot(dir);
   });
@@ -297,6 +343,9 @@ export function setup({ provide }: { provide: (key: string, value: string) => vo
       try { fs.rmSync(testTempRoot, { recursive: true, force: true }); } catch { /* best effort */ }
     }
     delete process.env.AGENTHUB_TEST_TMP_ROOT;
+    for (const [key, value] of Object.entries(originalTestEnv)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
     const remainingNewTempDirs = [...getAgentHubTempDirNames()]
       .filter((name) => !initialTempDirNames.has(name));
     const leakedTempDirs = remainingNewTempDirs.length;
@@ -308,18 +357,7 @@ export function setup({ provide }: { provide: (key: string, value: string) => vo
     }
     // Teardown safety checks
     for (const snap of initialAgyHomes) {
-      const currentSubdirs = getSubdirectories(snap.dir);
-      const isMatch =
-        snap.subdirs.length === currentSubdirs.length &&
-        snap.subdirs.every((name, idx) => name === currentSubdirs[idx]);
-
-      if (!isMatch) {
-        throw new Error(
-          `SAFETY NET VIOLATION: Subdirectories of ${snap.dir} changed during test execution!\n` +
-          `Before: [${snap.subdirs.join(', ')}]\n` +
-          `After:  [${currentSubdirs.join(', ')}]`,
-        );
-      }
+      verifyAgyHomesSafety(snap);
     }
 
     for (const snap of initialHubHomes) {

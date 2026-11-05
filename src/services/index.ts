@@ -953,6 +953,8 @@ export class AppService {
   private gitVersionCheck?: Promise<string | null>;
   private static readonly SETUP_VERSION_CACHE_MS = 10 * 60 * 1000;
   private failedAutoMerges = new Set<string>();
+  private autoMergeCheckRetries = new Set<string>();
+  private autoMergeSkipped = new Set<string>();
   constructor(
     public config: AgentHubConfig,
     public projectRepo: ProjectRepo,
@@ -4176,8 +4178,16 @@ export class AppService {
     if (!task || task.status !== 'review') return;
     const project = this.projectRepo.get(task.projectId);
     if (!project) return;
+    const last = this.reviewRepo.getByTask(taskId).at(-1);
+    if (!last || !isAutoReviewer(last.actor) || last.verdict !== 'approved') return;
+    const skip = (reason: 'checks_failed' | 'checks_missing' | 'escalated' | 'chain_incomplete' | 'merge_failed' | 'auto_merge_disabled', checks?: unknown[]) => {
+      const key = `${taskId}:${last.id}`;
+      if (this.autoMergeSkipped.has(key)) return;
+      this.autoMergeSkipped.add(key);
+      this.scheduler.getEventBus().emit('review.auto_merge_skipped', taskId, { reason, ...(checks ? { checks } : {}) });
+    };
     const settings = projectSettings(project);
-    if (!(settings.review.autoMerge || settings.integration.autoMerge)) return;
+    if (!(settings.review.autoMerge || settings.integration.autoMerge)) { skip('auto_merge_disabled'); return; }
     const rawChain = project.review
       ? (() => {
           try {
@@ -4196,16 +4206,26 @@ export class AppService {
       : typeof rawChain === 'string'
         ? parseReviewChain(rawChain)
         : [];
-    if (!chain.length) return;
+    if (!chain.length) { skip('chain_incomplete'); return; }
     const lastStep = chain.at(-1);
-    if (!lastStep || lastStep.mode !== 'gate') return;
-    if ((task.reviewStep ?? 0) < chain.length) return;
-    if (task.reviewerEscalated) return;
-    const last = this.reviewRepo.getByTask(taskId).at(-1);
-    if (!last || !isAutoReviewer(last.actor) || last.verdict !== 'approved') return;
-    const checks = this.scheduler.getCheckResults(taskId);
-    if (checks.length === 0 || checks.some((c) => !c.ok)) return;
-    if (this.failedAutoMerges.has(taskId)) return;
+    if (!lastStep || lastStep.mode !== 'gate' || (task.reviewStep ?? 0) < chain.length) { skip('chain_incomplete'); return; }
+    if (task.reviewerEscalated) { skip('escalated'); return; }
+    let checks = this.scheduler.getCheckResults(taskId);
+    if (checks.length === 0) { skip('checks_missing'); return; }
+    if (checks.some((c) => !c.ok)) {
+      const retryKey = `${taskId}:${last.id}`;
+      if (!this.autoMergeCheckRetries.has(retryKey)) {
+        this.autoMergeCheckRetries.add(retryKey);
+        const failed = checks.filter((check) => !check.ok).map((check) => check.name);
+        const runId = checks.find((check) => check.runId)?.runId;
+        if (runId) {
+          try { await this.scheduler.rerunFailedChecksForTask(taskId, runId, failed); } catch { /* retain failed result below */ }
+          checks = this.scheduler.getCheckResults(taskId);
+        }
+      }
+      if (checks.length === 0 || checks.some((c) => !c.ok)) { skip('checks_failed', checks); return; }
+    }
+    if (this.failedAutoMerges.has(taskId)) { skip('merge_failed', checks); return; }
     // The ready event can arrive twice for one approval; the first call is already merging.
     if (this.reviewingTasks.has(taskId)) {
       // A reviewer approval emits task.review_ready before the outer review API call
@@ -4223,6 +4243,7 @@ export class AppService {
       this.failedAutoMerges.delete(taskId);
     } catch (error) {
       this.failedAutoMerges.add(taskId);
+      skip('merge_failed', this.scheduler.getCheckResults(taskId));
       const isConflict = (error instanceof HttpError && (error.error === 'conflict' || error.statusCode === 409)) ||
         (error instanceof MergeError && error.error === 'conflict') ||
         (error instanceof Error && /conflict/i.test(error.message));

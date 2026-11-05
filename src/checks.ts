@@ -11,7 +11,7 @@ const MAX_OUTPUT = 8192;
 const CONFLICT_MARKER_REGEX = /^(<{7}|={7}|>{7})( |$)/m;
 export interface CheckDefinition { name: string; cmd: string[]; timeoutSec?: number }
 export interface CheckResult { name: string; ok: boolean; exitCode: number | null; durationMs: number; outputTail: string; runId?: string; runStartedAt?: string }
-export interface CheckRunOptions { reuseSavedResults?: boolean }
+export interface CheckRunOptions { reuseSavedResults?: boolean; onlyNames?: string[] }
 
 /** Release packaging is deliberately opt-in: it may run npm ci and rebuild the hub. */
 export function isHeavyReleaseCheck(check: CheckDefinition): boolean {
@@ -192,9 +192,14 @@ export class CheckRunner {
     const configured = project.checks ? JSON.parse(project.checks) as CheckDefinition[] : detectChecks(repo);
     // Explicit project checks are authoritative. Only auto-detected release
     // checks are excluded because they may run npm ci/package.
-    const checks = [...(project.checks ? configured : configured.filter((check) => !isHeavyReleaseCheck(check))), ...mandatoryChecks(repo, task, project)];
+    const allChecks = [...(project.checks ? configured : configured.filter((check) => !isHeavyReleaseCheck(check))), ...mandatoryChecks(repo, task, project)];
+    const checks = options.onlyNames ? allChecks.filter((check) => options.onlyNames!.includes(check.name)) : allChecks;
     if (!options.reuseSavedResults) {
-      this.db.prepare('DELETE FROM check_results WHERE taskId = ? AND runId = ?').run(task.id, runId);
+      if (options.onlyNames?.length) {
+        this.db.prepare(`DELETE FROM check_results WHERE taskId = ? AND runId = ? AND name IN (${options.onlyNames.map(() => '?').join(',')})`).run(task.id, runId, ...options.onlyNames);
+      } else {
+        this.db.prepare('DELETE FROM check_results WHERE taskId = ? AND runId = ?').run(task.id, runId);
+      }
     }
     const head = worktreeHead(repo);
     const existingRows = options.reuseSavedResults

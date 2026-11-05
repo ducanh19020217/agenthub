@@ -537,7 +537,8 @@ export class BrainRunner {
     const checklist = settings?.reviewChecklist.length
       ? `\nCHECKLIST KHI DUYỆT (BẮT BUỘC):\n${settings.reviewChecklist.map((item) => `- ${item}`).join('\n')}\nKhi review phải liệt kê mục vi phạm hoặc ghi rõ “đã đối chiếu checklist: không vi phạm”.`
       : '';
-    return { text: `${context}\n${knowledgePrompt}${checklist}\nCHỈ THỊ CỦA NGƯỜI DÙNG (bắt buộc tuân theo):\n${directives}\nSự kiện: ${lines.join('\n')}\n${mode === 'suggest' ? 'Chế độ suggest: chỉ đề xuất, chờ người dùng duyệt.' : 'Chế độ auto: làm theo BRAIN-PLAYBOOK khi an toàn.'}`, knowledgeHash };
+    const ticketRules = buildBrainTicketWorkflowInstruction(settings);
+    return { text: `${context}\n${knowledgePrompt}${checklist}${ticketRules}\nCHỈ THỊ CỦA NGƯỜI DÙNG (bắt buộc tuân theo):\n${directives}\nSự kiện: ${lines.join('\n')}\n${mode === 'suggest' ? 'Chế độ suggest: chỉ đề xuất, chờ người dùng duyệt.' : 'Chế độ auto: làm theo BRAIN-PLAYBOOK khi an toàn.'}`, knowledgeHash };
   }
 
   private formatDirectiveAcknowledgement(event: BrainQueuedEvent, projectId: string | null): string {
@@ -566,4 +567,11 @@ export class BrainRunner {
     this.pending.unshift(...active.events);
     this.schedule();
   }
+}
+
+export function buildBrainTicketWorkflowInstruction(settings: ReturnType<typeof projectSettings> | null | undefined): string {
+  if (!settings?.openproject?.enabled) return '';
+  const defaultRef = settings.commitConvention.defaultRef;
+  const refText = defaultRef ? ` Mã ref mặc định: \`${defaultRef}\`.` : '';
+  return `\nQUY ĐỊNH TICKET OPENPROJECT (BẮT BUỘC):\n- Mỗi việc một ticket; không tạo ticket tổng hợp; việc cùng chủ đề là ticket con.${refText}\n- Nội dung ticket: ## Đã làm + ## Còn lại (checklist), tiếng Việt, không chứa secret.\n- Trạng thái: xong hẳn → Done/Resolved; còn bước → In progress.\n- Commit: dòng đầu theo commit convention, thân commit bắt buộc có mô tả chi tiết.\n- Khi duyệt/sửa bug: xác minh lỗi thật trước; task sửa bug phải có đủ 4 mục trong báo cáo: Lỗi / Nguyên nhân (file:dòng) / Cách sửa (commit, image) / Kiểm tra.`;
 }

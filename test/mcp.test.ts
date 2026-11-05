@@ -892,5 +892,83 @@ describe('AgentHub MCP Server Tools', () => {
     expect(res.content[0].text).toContain('✓ Đã tạo báo cáo ngày cho nguồn op-demo');
     expect(res.content[0].text).toContain('Ngày: 03/11/2026');
   });
+
+  it('hub_create_task tool schema and description clearly document createTicket', async () => {
+    const tools = await client.listTools();
+    const createTool = tools.tools.find((t) => t.name === 'hub_create_task');
+    expect(createTool).toBeDefined();
+    expect(createTool?.description).toContain('createTicket');
+    expect(createTool?.inputSchema.properties?.createTicket).toBeDefined();
+  });
+
+  it('hub_ticket_search and hub_ticket_create interact with OpenProject via MCP tools', async () => {
+    const source = OpenProjectSourceSchema.parse({
+      id: 'op-mcp',
+      url: 'https://op.example.test',
+      project: 'mcp-demo',
+      openStatusIds: [],
+    });
+    ctx.config.integrations.openproject.sources = [source];
+    saveOpenProjectKey(ctx.config.hubHome, 'op-mcp', 'mcp-api-key');
+
+    let createRequested = false;
+    let createBody = '';
+    const originalFetch = globalThis.fetch;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: string | URL, init?: RequestInit) => {
+      const u = url.toString();
+      if (u.includes('127.0.0.1') || u.includes('localhost')) {
+        return originalFetch(url, init);
+      }
+      if (u.endsWith('/statuses?pageSize=100')) {
+        return new Response(JSON.stringify({ _embedded: { elements: [{ id: 1, name: 'New' }] } }), { status: 200 });
+      }
+      if (u.endsWith('/users/me')) {
+        return new Response(JSON.stringify({ id: 9, name: 'Worker' }), { status: 200 });
+      }
+      if (u.includes('/projects/mcp-demo/work_packages') && init?.method === 'POST') {
+        createRequested = true;
+        createBody = String(init?.body || '');
+        return new Response(JSON.stringify({ id: 42, displayId: 'DEMO-42' }), { status: 201 });
+      }
+      if (u.includes('/projects/mcp-demo/work_packages?')) {
+        return new Response(JSON.stringify({
+          total: 1,
+          _embedded: { elements: [{ id: 42, displayId: 'DEMO-42', subject: 'Search target', lockVersion: 1 }] },
+        }), { status: 200 });
+      }
+      return new Response('Not found', { status: 404 });
+    });
+
+    // Test hub_ticket_search
+    const searchRes = (await client.callTool({
+      name: 'hub_ticket_search',
+      arguments: {
+        sourceId: 'op-mcp',
+        query: 'DEMO-42',
+      },
+    })) as { content: Array<{ type: string; text: string }>; isError?: boolean };
+
+    expect(searchRes.isError).toBeUndefined();
+    const searchParsed = JSON.parse(searchRes.content[0].text);
+    expect(searchParsed).toEqual([
+      expect.objectContaining({ displayId: 'DEMO-42', subject: 'Search target' }),
+    ]);
+
+    // Test hub_ticket_create
+    const createRes = (await client.callTool({
+      name: 'hub_ticket_create',
+      arguments: {
+        sourceId: 'op-mcp',
+        subject: 'Fresh ticket from MCP',
+        description: 'Ticket details markdown',
+      },
+    })) as { content: Array<{ type: string; text: string }>; isError?: boolean };
+
+    expect(createRes.isError).toBeUndefined();
+    expect(createRequested).toBe(true);
+    expect(createBody).toContain('Fresh ticket from MCP');
+    const createdParsed = JSON.parse(createRes.content[0].text);
+    expect(createdParsed).toEqual(expect.objectContaining({ id: 42, displayId: 'DEMO-42' }));
+  });
 });
 

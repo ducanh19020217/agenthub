@@ -721,7 +721,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
 
   server.tool(
     'hub_create_task',
-    'Tạo task mới trong AgentHub. Nếu start=true thì đưa thẳng vào hàng đợi (queued)',
+    'Tạo task mới trong AgentHub. Nếu start=true thì đưa thẳng vào hàng đợi (queued). Hỗ trợ createTicket: { sourceId } để tạo ticket OpenProject đi kèm task (nếu client MCP hiển thị schema cũ chưa thấy createTicket thì server vẫn nhận bình thường).',
     {
       project: z.string().describe('ID của project'),
       slug: z.string().describe('Slug định danh task'),
@@ -734,7 +734,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
       modelChain: z.array(z.string()).optional().describe('Chuỗi model chỉ định'),
       start: z.boolean().optional().describe('Đưa thẳng vào hàng đợi để chạy ngay'),
       goal: z.string().optional().describe('Mục tiêu người dùng của nhóm task'),
-      createTicket: z.object({ sourceId: z.string().min(1).optional() }).optional().describe('Tạo ticket OpenProject cùng task'),
+      createTicket: z.object({ sourceId: z.string().min(1).optional().describe('ID nguồn OpenProject; nếu bỏ trống dùng nguồn primary của project') }).optional().describe('Tạo ticket OpenProject đi kèm task (server hỗ trợ đầy đủ)'),
     },
     async (args) => {
       try {

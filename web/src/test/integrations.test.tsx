@@ -180,6 +180,36 @@ describe('Integrations UI Suite', () => {
       await waitFor(() => expect(updateSpy).toHaveBeenCalledWith('proj-1', expect.objectContaining({ defaultBranch: 'dev-ss' })));
     });
 
+    it('confirms a default branch change when tasks are active', async () => {
+      vi.mocked(client.getTasks).mockResolvedValue([{ id: 'task-1', status: 'running' } as Task]);
+      const updateSpy = vi.spyOn(client, 'updateProject').mockResolvedValue(mockProject);
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+      renderWithProviders(<ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />);
+
+      const gitSection = await screen.findByTestId('project-git-section');
+      await waitFor(() => expect(client.getTasks).toHaveBeenCalledWith({ project: 'proj-1' }));
+      fireEvent.change(within(gitSection).getByTestId('project-git-default-branch'), { target: { value: 'dev-ss' } });
+      fireEvent.click(screen.getByTestId('save-changes-button'));
+
+      await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
+      expect(updateSpy).not.toHaveBeenCalled();
+    });
+
+    it('shows the PATCH error when saving Git settings fails', async () => {
+      vi.spyOn(client, 'updateProject').mockRejectedValue(new Error('branch is invalid on server'));
+      renderWithProviders(<ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />);
+
+      const gitSection = await screen.findByTestId('project-git-section');
+      await waitFor(() => expect(within(gitSection).getByText(/2 file chưa commit/i)).toBeInTheDocument());
+      const branchInput = within(gitSection).getByTestId('project-git-default-branch');
+      fireEvent.change(branchInput, { target: { value: 'dev-ss' } });
+      await waitFor(() => expect(branchInput).toHaveValue('dev-ss'));
+      fireEvent.click(screen.getByTestId('save-changes-button'));
+
+      await waitFor(() => expect(client.updateProject).toHaveBeenCalled());
+      expect(await screen.findByTestId('settings-error-msg')).toHaveTextContent('branch is invalid on server');
+    });
+
     it('renders OpenProject section and saves changes via updateProject', async () => {
       const updateSpy = vi.spyOn(client, 'updateProject').mockResolvedValue(mockProject);
 

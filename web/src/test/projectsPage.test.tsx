@@ -40,6 +40,10 @@ describe('ProjectsPage', () => {
         maxTurnsPerHour: 20,
       },
     } as any);
+    vi.spyOn(client, 'inspectProjectGit').mockResolvedValue({
+      path: '/tmp/repo', currentBranch: 'dev-real', defaultBranch: 'main', dirty: { changed: false, files: 0 },
+      remote: null, localBranches: ['dev-real', 'main'], remoteBranches: ['team'], aheadBehind: null,
+    });
   });
 
   afterEach(() => {
@@ -121,6 +125,17 @@ describe('ProjectsPage', () => {
     expect(
       screen.queryByRole('heading', { name: /Đăng ký Project mới/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it('gợi ý nhánh thật từ repository khi nhập path đăng ký', async () => {
+    const inspectSpy = vi.mocked(client.inspectProjectGit);
+    renderPage();
+    await screen.findByText('XFarm');
+    fireEvent.click(screen.getByRole('button', { name: /Đăng ký Project/i }));
+    fireEvent.change(screen.getByPlaceholderText('vd: /home/user/projects/xfarm'), { target: { value: '/tmp/repo' } });
+
+    await waitFor(() => expect(inspectSpy).toHaveBeenCalledWith('/tmp/repo'));
+    await waitFor(() => expect(document.querySelector('option[value="dev-real"]')).not.toBeNull());
   });
 
   it('2. envTemplate JSON sai cú pháp thì hiện lỗi validation và vô hiệu hóa nút submit', async () => {

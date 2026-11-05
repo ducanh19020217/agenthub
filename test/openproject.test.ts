@@ -742,6 +742,66 @@ describe('OpenProject Integration', () => {
         }),
       ).not.toThrow();
     });
+
+    it('links ticket to task, preserves tracker row state on update, and validates source and task existence', () => {
+      const trackerRepo = new TrackerItemRepo(db);
+      const taskRepo = new TaskRepo(db);
+      service.taskRepo = taskRepo;
+      service.setTrackerRepo(trackerRepo);
+
+      projectRepo.insert({
+        id: 'p1',
+        name: 'Project 1',
+        path: tmpDir,
+        defaultBranch: 'main',
+        envTemplate: null,
+        maxParallel: 1,
+      });
+      taskRepo.insert({
+        id: 'p1/task-1',
+        projectId: 'p1',
+        slug: 'task-1',
+        title: 'Task 1',
+        level: 'easy',
+      });
+      taskRepo.insert({
+        id: 'p1/task-2',
+        projectId: 'p1',
+        slug: 'task-2',
+        title: 'Task 2',
+        level: 'easy',
+      });
+
+      // 404 on missing source
+      expect(() => service.linkOpenProjectTicket('unknown-source', 10, 'SIE-10', 'p1/task-1')).toThrowError(/Nguồn OpenProject "unknown-source" không tồn tại/);
+
+      // 404 on missing task
+      expect(() => service.linkOpenProjectTicket('soar', 10, 'SIE-10', 'p1/missing-task')).toThrowError(/Task "p1\/missing-task" không tồn tại/);
+
+      // New link creates row
+      service.linkOpenProjectTicket('soar', 10, 'SIE-10', 'p1/task-1');
+      const row1 = trackerRepo.get('soar', 10);
+      expect(row1).toBeDefined();
+      expect(JSON.parse(row1!.task_ids)).toEqual(['p1/task-1']);
+      expect(row1!.writeback).toBe('{}');
+
+      // Update existing tracker row with status and writeback to simulate prior work
+      trackerRepo.upsert({
+        ...row1!,
+        status_id: 95,
+        last_comment_id: 1234,
+        writeback: JSON.stringify({ commented: true, resolved: true }),
+      });
+
+      // Linking another task preserves state and merges task_ids
+      service.linkOpenProjectTicket('soar', 10, 'SIE-10', 'p1/task-2');
+      const row2 = trackerRepo.get('soar', 10);
+      expect(row2).toBeDefined();
+      expect(row2!.status_id).toBe(95);
+      expect(row2!.last_comment_id).toBe(1234);
+      expect(JSON.parse(row2!.writeback)).toEqual({ commented: true, resolved: true });
+      expect(JSON.parse(row2!.task_ids)).toEqual(['p1/task-1', 'p1/task-2']);
+    });
   });
 
   describe('OpenProject HTTP Routes', () => {

@@ -7,7 +7,7 @@ import { saveOpenProjectKey } from '../src/integrations/openproject/secrets.js';
 
 type TestTask = Record<string, unknown> & { id: string; projectId: string; externalRef: string };
 
-function harness(input: { tasks: TestTask[]; autoResolve?: boolean; autoStart?: boolean; triage?: 'off' | 'approve' | 'auto'; pushProjects?: string[]; targetProject?: string; rowWriteback?: string; extraProjects?: string[]; fetchFn?: typeof fetch; git?: (cwd: string, args: string[]) => Promise<{ code: number; output: string }> }) {
+function harness(input: { tasks: TestTask[]; autoResolve?: boolean; autoStart?: boolean; inProgressStatusId?: number | null; triage?: 'off' | 'approve' | 'auto'; pushProjects?: string[]; targetProject?: string; rowWriteback?: string; extraProjects?: string[]; fetchFn?: typeof fetch; git?: (cwd: string, args: string[]) => Promise<{ code: number; output: string }> }) {
   const hubHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-writeback-'));
   saveOpenProjectKey(hubHome, 'op', 'key');
   const tasks = new Map(input.tasks.map((task) => [task.id, task]));
@@ -21,7 +21,7 @@ function harness(input: { tasks: TestTask[]; autoResolve?: boolean; autoStart?: 
   }
   const created: unknown[] = [];
   const service = new OpenProjectWritebackService({
-    config: { hubHome, integrations: { openproject: { sources: [{ id: 'op', url: 'https://op.test', project: 'main', triage: input.triage || 'off', feedbackStatusId: 6, autoResolve: input.autoResolve !== false, resolvedStatusId: 5, reviewStatusId: 6, watchStatusIds: [], reopenedStatusIds: [], openStatusIds: [], minTicketNumber: 0, pollIntervalSec: 60, autoStart: input.autoStart !== false, language: 'vi' }] } }, deploy: {} } as never,
+    config: { hubHome, integrations: { openproject: { sources: [{ id: 'op', url: 'https://op.test', project: 'main', inProgressStatusId: input.inProgressStatusId ?? null, triage: input.triage || 'off', feedbackStatusId: 6, autoResolve: input.autoResolve !== false, resolvedStatusId: 5, reviewStatusId: 6, watchStatusIds: [], reopenedStatusIds: [], openStatusIds: [], minTicketNumber: 0, pollIntervalSec: 60, autoStart: input.autoStart !== false, language: 'vi' }] } }, deploy: {} } as never,
     projectRepo: { get: (id: string) => projects.get(id), getAll: () => [...projects.values()] } as never,
     taskRepo: { get: (id: string) => tasks.get(id) } as never,
     trackerRepo: { listAll: () => [row], get: () => row, upsert: (next: any) => { Object.assign(row, next); return row; } } as never,
@@ -214,6 +214,38 @@ describe('OpenProjectWritebackService', () => {
     await h.emit('task.merged', 'app/op-op-1-app', { mergeCommit: 'a' });
     await h.emit('task.merged', 'web/op-op-1-web', { mergeCommit: 'b' });
     expect(h.events.some((event) => event.type === 'tracker.resolved')).toBe(true);
+    h.cleanup();
+  });
+
+  it('updates ticket to inProgressStatusId when task.running is received', async () => {
+    let patched = false;
+    let patchBody = '';
+    const fetchFn = (async (url: string | URL, init?: RequestInit) => {
+      if (init?.method === 'PATCH' && url.toString().includes('/work_packages/10')) {
+        patched = true;
+        patchBody = String(init?.body || '');
+      }
+      return new Response(JSON.stringify({ id: 10, lockVersion: 2 }), { status: 200 });
+    }) as typeof fetch;
+    const task = { id: 'app/task-1', projectId: 'app', slug: 'task-1', title: 'Task 1', externalRef: 'OP-1', status: 'running' } as TestTask;
+    const h = harness({ tasks: [task], inProgressStatusId: 94, fetchFn });
+    await h.emit('task.running', task.id);
+    expect(patched).toBe(true);
+    expect(patchBody).toContain('/statuses/94');
+    h.cleanup();
+  });
+
+  it('ignores task.running and does not advance writeback when inProgressStatusId is not configured', async () => {
+    let fetchCalled = false;
+    const fetchFn = (async () => {
+      fetchCalled = true;
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+    const task = { id: 'app/task-1', projectId: 'app', slug: 'task-1', title: 'Task 1', externalRef: 'OP-1', status: 'running' } as TestTask;
+    const h = harness({ tasks: [task], inProgressStatusId: null, fetchFn });
+    await h.emit('task.running', task.id);
+    expect(fetchCalled).toBe(false);
+    expect(h.row.writeback).toBe('{}');
     h.cleanup();
   });
 });

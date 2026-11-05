@@ -3335,7 +3335,29 @@ export class AppService {
   }
 
   linkOpenProjectTicket(sourceId: string, wpId: number, displayId: string, taskId: string): void {
+    if (!this.config.integrations.openproject.sources.some((s) => s.id === sourceId)) {
+      throw new HttpError(404, 'not_found', `Nguồn OpenProject "${sourceId}" không tồn tại`);
+    }
     if (!this.trackerRepo || !this.taskRepo.get(taskId)) throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    const existing = this.trackerRepo.get(sourceId, wpId);
+    if (existing) {
+      let taskIds: string[] = [];
+      try {
+        taskIds = JSON.parse(existing.task_ids || '[]');
+      } catch {
+        taskIds = [];
+      }
+      if (!taskIds.includes(taskId)) {
+        taskIds.push(taskId);
+      }
+      this.trackerRepo.upsert({
+        ...existing,
+        display_id: displayId || existing.display_id,
+        task_ids: JSON.stringify(taskIds),
+        updated_at: new Date().toISOString(),
+      });
+      return;
+    }
     this.trackerRepo.upsert({ source_id: sourceId, wp_id: wpId, display_id: displayId, status_id: null, updated_at: new Date().toISOString(), last_comment_id: null, task_ids: JSON.stringify([taskId]), writeback: '{}' });
   }
 

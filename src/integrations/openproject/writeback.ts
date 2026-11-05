@@ -151,12 +151,14 @@ export class OpenProjectWritebackService {
     const matches = this.trackerRepo.listAll().filter((row) => parseIds(row).includes(taskId) || row.display_id === task.externalRef);
     for (const row of matches) await this.enqueue(row, async () => {
       const source = sourceFor(this.config, row.source_id);
-      if (type === 'task.running' && source?.inProgressStatusId !== null && source?.inProgressStatusId !== undefined) {
-        const key = readOpenProjectKey(this.config.hubHome, row.source_id);
-        if (!key) return;
-        try {
-          await new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn }).setStatus(row.wp_id, source.inProgressStatusId);
-        } catch (error) { await this.handleError(row, error, 'start writeback'); }
+      if (type === 'task.running') {
+        if (source?.inProgressStatusId !== null && source?.inProgressStatusId !== undefined) {
+          const key = readOpenProjectKey(this.config.hubHome, row.source_id);
+          if (!key) return;
+          try {
+            await new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn }).setStatus(row.wp_id, source.inProgressStatusId);
+          } catch (error) { await this.handleError(row, error, 'start writeback'); }
+        }
         return;
       }
       const isPlanTask = task.slug.endsWith('-plan');

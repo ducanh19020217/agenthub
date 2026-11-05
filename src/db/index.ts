@@ -3233,6 +3233,9 @@ export class TimesheetEntryRepo {
   get(sourceId: string, date: string, wpId: number): TimesheetEntryRow | undefined {
     return this.db.prepare('SELECT * FROM timesheet_entries WHERE source_id = ? AND spent_on = ? AND wp_id = ?').get(sourceId, date, wpId) as TimesheetEntryRow | undefined;
   }
+  listForDate(sourceId: string, date: string): TimesheetEntryRow[] {
+    return this.db.prepare('SELECT * FROM timesheet_entries WHERE source_id = ? AND spent_on = ? ORDER BY wp_id').all(sourceId, date) as TimesheetEntryRow[];
+  }
   upsert(row: Omit<TimesheetEntryRow, 'updated_at'>): void {
     this.db.prepare(`INSERT INTO timesheet_entries (source_id, spent_on, wp_id, entry_id, hours) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(source_id, spent_on, wp_id) DO UPDATE SET entry_id=excluded.entry_id, hours=excluded.hours, updated_at=datetime('now')`)

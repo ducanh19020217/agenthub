@@ -183,7 +183,7 @@ export function registerOpenProjectRoutes(
   });
   fastify.post('/api/integrations/openproject/sources/:id/timesheet/run', async (req: FastifyRequest) => {
     const { id } = idParams.parse(req.params); if (!options.timesheetRun) throw new HttpError(503, 'unavailable', 'Timesheet chưa sẵn sàng');
-    const body = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), hours: z.number().min(8).multipleOf(0.25).optional() }).parse(req.body || {}); return options.timesheetRun(id, body.date, body.hours);
+    const body = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), hours: z.number().min(8).refine((value) => Math.abs(value * 4 - Math.round(value * 4)) < 1e-8, 'hours must be a multiple of 0.25').optional() }).parse(req.body || {}); return options.timesheetRun(id, body.date, body.hours);
   });
 
   fastify.get('/api/integrations/openproject/sources/:id/work-packages/:wp', async (req: FastifyRequest) => {

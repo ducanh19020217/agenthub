@@ -12,6 +12,8 @@ import { allocateTimesheetHours } from '../src/integrations/openproject/timeshee
 import Fastify from 'fastify';
 import { HttpError } from '../src/errors.js';
 import { registerOpenProjectRoutes } from '../src/integrations/openproject/routes.js';
+import { NotificationService } from '../src/notify.js';
+import { TelegramBotService } from '../src/telegram.js';
 
 describe('OpenProject timesheet allocation', () => {
   it('keeps the configured total after minimum and rounding', () => {
@@ -27,6 +29,11 @@ describe('OpenProject timesheet allocation', () => {
   it('does not turn zero weights into a fake unit of work', () => {
     expect(allocateTimesheetHours([{ weight: 10 }, { weight: 0 }], 8, 0.5, 0.25)).toEqual([7.5, 0.5]);
   });
+
+  it('reduces rounded excess and assigns the remainder to the largest weight', () => {
+    expect(allocateTimesheetHours([{ weight: 1 }, { weight: 1 }, { weight: 1 }], 8, 0.5, 0.25)).toEqual([2.5, 2.75, 2.75]);
+    expect(allocateTimesheetHours([{ weight: 3 }, { weight: 1 }, { weight: 1 }], 8, 0.5, 0.25)).toEqual([5, 1.5, 1.5]);
+  });
 });
 
 describe('OpenProject timesheet service', () => {
@@ -40,13 +47,39 @@ describe('OpenProject timesheet service', () => {
     const config = loadConfig(root); config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo', activityId: 7, timesheet: { enabled: true, activityId: 7 } })]; saveOpenProjectKey(root, 'op', 'test-key');
     const db = openDatabase(path.join(root, 'hub.db')); const projectRepo = new ProjectRepo(db); const taskRepo = new TaskRepo(db); const runRepo = new RunRepo(db); const eventRepo = new EventRepo(db); const entryRepo = new TimesheetEntryRepo(db);
     projectRepo.insert({ id: 'p', name: 'P', path: repoPath, defaultBranch: 'main', maxParallel: 1, settings: JSON.stringify(mergeProjectSettings(DEFAULT_PROJECT_SETTINGS, { openproject: { enabled: true, sourceId: 'op', role: 'primary' } })) });
-    for (const [id, externalRef] of [['fe', '42'], ['be', '42'], ['no-ticket', null] as const]) taskRepo.insert({ id, projectId: 'p', slug: id, title: id, branch: 'task', externalRef, status: 'done' });
+    taskRepo.insert({ id: 'fe', projectId: 'p', slug: 'fe', title: 'fe', branch: 'task', externalRef: '42', status: 'done', level: 'hard' });
+    taskRepo.insert({ id: 'be', projectId: 'p', slug: 'be', title: 'be', branch: 'task', externalRef: '42', status: 'done', level: 'easy' });
+    taskRepo.insert({ id: 'no-ticket', projectId: 'p', slug: 'no-ticket', title: 'no-ticket', branch: 'task', externalRef: null, status: 'done' });
     runRepo.insert({ id: 'r', taskId: 'fe', engine: 'test', model: 'test', profileName: 'test', startedAt: '2026-11-04T09:00:00Z', kind: 'worker' }); runRepo.finish('r', 'done');
+    runRepo.insert({ id: 'r-be', taskId: 'be', engine: 'test', model: 'test', profileName: 'test', startedAt: '2026-11-04T10:00:00Z', kind: 'worker' }); runRepo.finish('r-be', 'done');
+    db.prepare('UPDATE runs SET endedAt = ? WHERE id = ?').run('2026-11-04T10:00:00Z', 'r');
+    db.prepare('UPDATE runs SET endedAt = ? WHERE id = ?').run('2026-11-04T12:00:00Z', 'r-be');
+    eventRepo.insert('review.waiting', 'fe'); eventRepo.insert('tracker.comment', 'fe'); eventRepo.insert('tracker.comment', 'be');
+    db.prepare('UPDATE events SET ts = ? WHERE taskId = ? AND type = ?').run('2026-11-04T09:30:00Z', 'fe', 'review.waiting');
+    db.prepare('UPDATE events SET ts = ? WHERE taskId = ? AND type = ?').run('2026-11-04T09:40:00Z', 'fe', 'tracker.comment');
+    db.prepare('UPDATE events SET ts = ? WHERE taskId = ? AND type = ?').run('2026-11-04T11:00:00Z', 'be', 'tracker.comment');
     let post = 0; let patch = 0;
     const fetchFn = (async (url: string | URL, init?: RequestInit) => { const value = url.toString(); if (value.endsWith('/work_packages/42')) return new Response(JSON.stringify({ id: 42, displayId: 'OP-42', subject: 'Export', lockVersion: 1 })); if (value.includes('/time_entries')) { if (init?.method === 'PATCH') patch++; else post++; return new Response(JSON.stringify({ id: 99, hours: 'PT8H', spentOn: '2026-11-04' })); } throw new Error(`unexpected ${value}`); }) as typeof fetch;
     const service = new OpenProjectTimesheetService({ config, projectRepo, taskRepo, runRepo, eventRepo, entryRepo, fetchFn, eventBus: { emit: () => true } });
-    const first = await service.run('op', '2026-11-04'); expect(first.entries).toHaveLength(1); expect(first.entries[0].run).toBeGreaterThan(0); expect(first.withoutTicket).toHaveLength(1); expect(post).toBe(1);
+    const first = await service.run('op', '2026-11-04'); expect(first.entries).toHaveLength(1); expect(first.entries[0].run).toBe(180); expect(first.entries[0].wait).toBe(60); expect(first.entries[0].chat).toBe(30); expect(first.entries[0].weight).toBe(295); expect(first.entries[0].level).toBeCloseTo(295 / 240); expect(first.withoutTicket).toHaveLength(1); expect(post).toBe(1);
     await service.run('op', '2026-11-04'); expect(patch).toBe(1); db.close(); fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('emits a redacted partial failure and keeps successful idempotency rows', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-timesheet-partial-')); const repoPath = path.join(root, 'repo'); fs.mkdirSync(repoPath);
+    const git = (args: string[], env?: NodeJS.ProcessEnv) => execFileSync('git', ['-C', repoPath, ...args], { env: { ...process.env, ...env }, stdio: 'pipe' });
+    git(['init', '-q']); git(['config', 'user.email', 'test@example.test']); git(['config', 'user.name', 'Test']); fs.writeFileSync(path.join(repoPath, 'README'), 'base'); git(['add', 'README']); git(['commit', '-qm', 'base']); git(['branch', '-M', 'main']);
+    git(['checkout', '-qb', 'task']); fs.writeFileSync(path.join(repoPath, 'README'), 'work'); git(['add', 'README']); git(['commit', '-qm', 'work', '--date', '2026-11-04T10:00:00Z'], { GIT_AUTHOR_DATE: '2026-11-04T10:00:00Z', GIT_COMMITTER_DATE: '2026-11-04T10:00:00Z' });
+    const config = loadConfig(root); config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo', timesheet: { enabled: true, activityId: 7 } })]; saveOpenProjectKey(root, 'op', 'secret-api-key');
+    const db = openDatabase(path.join(root, 'hub.db')); const projectRepo = new ProjectRepo(db); const taskRepo = new TaskRepo(db); const runRepo = new RunRepo(db); const eventRepo = new EventRepo(db); const entryRepo = new TimesheetEntryRepo(db);
+    projectRepo.insert({ id: 'p', name: 'P', path: repoPath, defaultBranch: 'main', maxParallel: 1, settings: JSON.stringify(mergeProjectSettings(DEFAULT_PROJECT_SETTINGS, { openproject: { enabled: true, sourceId: 'op', role: 'primary' } })) });
+    taskRepo.insert({ id: 'a', projectId: 'p', slug: 'a', title: 'a', branch: 'task', externalRef: '42', status: 'done' }); taskRepo.insert({ id: 'b', projectId: 'p', slug: 'b', title: 'b', branch: 'task', externalRef: '43', status: 'done' });
+    const emitted: Array<{ type: string; payload?: unknown }> = []; const eventBus = { emit: (type: string, _task?: string, payload?: unknown) => { emitted.push({ type, payload }); return true; } };
+    const fetchFn = (async (url: string | URL, init?: RequestInit) => { const value = url.toString(); if (value.endsWith('/work_packages/42')) return new Response(JSON.stringify({ id: 42, displayId: 'OP-42', subject: 'First' })); if (value.endsWith('/work_packages/43')) return new Response(JSON.stringify({ id: 43, displayId: 'OP-43', subject: 'Second' })); if (value.includes('/time_entries')) { if (init?.method === 'POST' && String(init.body).includes('43')) throw new Error('request failed for secret-api-key'); return new Response(JSON.stringify({ id: 99 })); } throw new Error(`unexpected ${value}`); }) as typeof fetch;
+    const service = new OpenProjectTimesheetService({ config, projectRepo, taskRepo, runRepo, eventRepo, entryRepo, fetchFn, eventBus });
+    await expect(service.run('op', '2026-11-04')).rejects.toThrow('[REDACTED]');
+    const failed = emitted.find((item) => item.type === 'tracker.timesheet.failed'); expect(failed).toBeDefined(); expect(JSON.stringify(failed)).not.toContain('secret-api-key'); expect((failed?.payload as { entries: unknown[] }).entries).toHaveLength(1); expect(entryRepo.listForDate('op', '2026-11-04')).toHaveLength(1);
+    db.close(); fs.rmSync(root, { recursive: true, force: true });
   });
 
   it('skips weekends, previews when writing is disabled, and does not write without activity', async () => {
@@ -107,5 +140,41 @@ describe('OpenProject timesheet service', () => {
     expect((await app.inject({ method: 'POST', url: '/api/integrations/openproject/sources/op/timesheet/run', payload: { hours: 7.75 } })).statusCode).toBe(400);
     expect((await app.inject({ method: 'POST', url: '/api/integrations/openproject/sources/op/timesheet/run', payload: { hours: 8.1 } })).statusCode).toBe(400);
     await app.close();
+  });
+});
+
+describe('OpenProject timesheet notifications', () => {
+  const payload = {
+    sourceId: 'op', hours: 8.25, overMinimum: true, missingFromDate: [41],
+    withoutTicket: [{ taskId: 'p/no-ticket', subject: 'Unlinked work' }],
+    entries: [{ displayId: 'OP-42', subject: 'Export report', hours: 8.25 }],
+  };
+
+  it('includes posted details and partial failures in desktop notifications', () => {
+    const config = loadConfig('/tmp/agenthub-timesheet-notify'); config.notifications.desktop = true; config.notifications.desktopLevel = 'all';
+    const calls: string[] = [];
+    const service = new NotificationService({ config, eventBus: {} as never, exec: (_file, args) => { calls.push(args.join(' ')); } });
+    service.handleEvent('tracker.timesheet.posted', undefined, payload);
+    service.handleEvent('tracker.timesheet.failed', undefined, { error: 'temporary failure', entries: payload.entries });
+    expect(calls.join('\n')).toContain('[OP-42] Export report — 8.25h');
+    expect(calls.join('\n')).toContain('chưa có ticket');
+    expect(calls.join('\n')).toContain('ticket không còn trong ngày');
+    expect(calls.join('\n')).toContain('tổng vượt giờ do mức tối thiểu');
+    expect(calls.join('\n')).toContain('ghi bảng giờ thất bại');
+    expect(calls.join('\n')).toContain('đã ghi được');
+  });
+
+  it('includes posted details and partial failures in Telegram notifications', () => {
+    const config = loadConfig('/tmp/agenthub-timesheet-telegram'); config.telegram.enabled = true; config.telegram.allowedChatIds = [123];
+    const messages: string[] = [];
+    const service = new TelegramBotService({ config, service: {} as never, eventBus: {} as never, taskRepo: {} as never, projectRepo: {} as never, tokenOverride: 'test-token' });
+    (service as unknown as { broadcastMessage: (text: string) => void }).broadcastMessage = (text) => { messages.push(text); };
+    service.handleEvent('tracker.timesheet.posted', undefined, payload);
+    service.handleEvent('tracker.timesheet.failed', undefined, { error: 'temporary failure', entries: payload.entries });
+    expect(messages.join('\n')).toContain('[OP-42] Export report — 8.25h');
+    expect(messages.join('\n')).toContain('Chưa có ticket');
+    expect(messages.join('\n')).toContain('Ticket không còn trong ngày');
+    expect(messages.join('\n')).toContain('Tổng vượt giờ do mức tối thiểu');
+    expect(messages.join('\n')).toContain('Đã ghi được');
   });
 });

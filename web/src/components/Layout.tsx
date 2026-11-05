@@ -117,7 +117,7 @@ export const Layout: React.FC = () => {
     { to: '/projects', label: t('common.projects'), icon: FolderGit2 },
     { to: '/departments', label: t('common.departments'), icon: Building2 },
     { to: '/settings', label: t('common.settings'), icon: Settings },
-    { to: '/timesheet', label: 'Bảng giờ', icon: Clock3 },
+    { to: '/timesheet', label: t('timesheet.title'), icon: Clock3 },
     { to: '/setup', label: t('setup.navLabel'), icon: Wrench },
   ];
 
@@ -133,7 +133,7 @@ export const Layout: React.FC = () => {
     if (pathname.startsWith('/departments')) return t('common.departments');
     if (pathname.startsWith('/savings')) return t('extra.pageSavings');
     if (pathname.startsWith('/settings')) return t('common.settings');
-    if (pathname.startsWith('/timesheet')) return 'Bảng giờ';
+    if (pathname.startsWith('/timesheet')) return t('timesheet.title');
     if (pathname.startsWith('/setup')) return t('setup.navLabel');
     return t('extra.pageAgentHub');
   };

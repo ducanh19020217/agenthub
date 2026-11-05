@@ -1664,6 +1664,7 @@ export const vi = {
     review_rounds_exhausted: "Hết số lượt review tối đa",
     exit: "Tiến trình kết thúc",
   },
+  timesheet: { title: 'Bảng giờ', source: 'Nguồn OpenProject', previousDay: 'Ngày trước', nextDay: 'Ngày sau', date: 'Ngày', ticket: 'Ticket', work: 'Việc', kind: 'Loại', raw: 'Gốc', actual: 'Thực tế', pinned: 'Cố định', actions: 'Thao tác', loading: 'Đang tải…', fixedWarning: 'Giờ cố định đã vượt tổng ngày', dailyTotal: 'Tổng giờ ngày', totalActual: 'Tổng thực tế', write: 'Ghi lên OpenProject', addTitle: 'Thêm việc thủ công', createNew: 'Tạo ticket mới', parent: 'Ticket cha (tùy chọn)', ticketPlaceholder: 'Mã ticket (ví dụ OP-42)', description: 'Mô tả', active: 'Giờ làm', wait: 'Giờ chờ', add: 'Thêm', commit: '◈ commit', manual: '✍ thủ công', delete: 'Xóa {ticket}' },
   integrations: {
     splitTitle: 'Chia ticket lớn', splitTypeIds: 'Loại ticket luôn cần lập kế hoạch', splitKeyword: 'Từ khóa ép chia', splitMaxParts: 'Số phần con tối đa', splitWorkerMayRequest: 'Cho phép worker tự yêu cầu chia', splitCreateChildren: 'Tạo ticket con khi giao đợt',
     createTypeId: 'Loại ticket khi tạo', createStatusId: 'Trạng thái khi tạo',

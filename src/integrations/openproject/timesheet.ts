@@ -9,7 +9,7 @@ import { readOpenProjectKey } from './secrets.js';
 import { formatYYYYMMDD } from './daily-report.js';
 
 const execFileAsync = promisify(execFile);
-export interface TimesheetTicket { wpId: number; displayId: string; subject: string; hours: number; rawHours: number; estimateHours: number; comment: string; run: number; wait: number; chat: number; level: number; weight: number; kind: 'commit' | 'manual' | 'mixed'; pinned: boolean; fixedHours?: number; manualIds?: string[]; }
+export interface TimesheetTicket { wpId: number; displayId: string; subject: string; hours: number; rawHours: number; estimateHours: number; comment: string; run: number; wait: number; chat: number; level: number; weight: number; kind: 'commit' | 'manual' | 'mixed'; pinned: boolean; fixedHours?: number; manualIds?: string[]; writtenAt?: string; writeError?: string; }
 export interface TimesheetPreview { sourceId: string; date: string; hours: number; entries: TimesheetTicket[]; withoutTicket: Array<{ taskId: string; subject: string }>; missingFromDate: number[]; overMinimum: boolean; fixedHours?: number; fixedOverHours?: boolean; estimateSkipped?: Array<{ wpId: number; displayId: string; reason: string }>; }
 
 function dateBounds(date: string): { start: string; end: string } { return { start: `${date} 00:00:00`, end: `${date} 23:59:59.999` }; }
@@ -142,7 +142,14 @@ export class OpenProjectTimesheetService {
       const pastRaw = this.options.entryRepo.sumRawHours(sourceId, entry.wpId, date);
       entry.estimateHours = roundHours(pastRaw + entry.rawHours, cfg.roundTo);
     });
-    const currentWpIds = new Set(entries.map((entry) => entry.wpId)); const missingFromDate = this.options.entryRepo.listForDate(sourceId, date).map((row) => row.wp_id).filter((id) => !currentWpIds.has(id));
+    const currentWpIds = new Set(entries.map((entry) => entry.wpId)); const storedEntries = this.options.entryRepo.listForDate(sourceId, date); const missingFromDate = storedEntries.map((row) => row.wp_id).filter((id) => !currentWpIds.has(id));
+    const recentEvents = this.options.eventRepo.getRecent(500).map((event) => ({ event, payload: (() => { try { return JSON.parse(event.payload || '{}') as Record<string, unknown>; } catch { return {}; } })() }));
+    for (const entry of entries) {
+      const stored = storedEntries.find((row) => row.wp_id === entry.wpId);
+      if (stored) entry.writtenAt = stored.updated_at;
+      const failure = recentEvents.find(({ event, payload }) => event.type === 'tracker.timesheet.failed' && payload.sourceId === sourceId && payload.date === date);
+      if (failure) entry.writeError = String(failure.payload.error || 'Ghi OpenProject thất bại');
+    }
     return { sourceId, date, hours: dayHours, entries, withoutTicket, missingFromDate, overMinimum: entries.length * cfg.minEntryHours + fixedHours > dayHours, fixedHours, fixedOverHours: fixedHours >= dayHours };
   }
   private async commits(cwd: string, defaultBranch: string, branch: string, date: string): Promise<string[]> { const { start } = dateBounds(date); try { const range = branch === defaultBranch ? branch : `${defaultBranch}..${branch}`; const result = await execFileAsync('git', ['-C', cwd, 'log', range, `--since=${start}`, `--until=${date} 23:59:59.999`, '--format=%s']); return result.stdout.split('\n').map((x) => x.trim()).filter(Boolean); } catch { return []; } }

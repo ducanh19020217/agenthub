@@ -185,6 +185,16 @@ export function registerOpenProjectRoutes(
     const { id } = idParams.parse(req.params); if (!options.timesheetPreview) throw new HttpError(503, 'unavailable', 'Timesheet chưa sẵn sàng');
     const query = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).parse(req.query); return options.timesheetPreview(id, query.date);
   });
+  fastify.get('/api/integrations/openproject/sources/:id/work-packages', async (req: FastifyRequest) => {
+    const { id } = idParams.parse(req.params);
+    const query = z.object({ q: z.string().trim().min(1).max(100) }).parse(req.query);
+    const source = config.integrations.openproject.sources.find((item) => item.id === id);
+    if (!source) throw new HttpError(404, 'not_found', 'Không tìm thấy nguồn OpenProject');
+    const key = readOpenProjectKey(config.hubHome, id);
+    if (!key) throw new HttpError(400, 'bad_request', 'Nguồn chưa có API key');
+    const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: options.fetch });
+    return (await client.searchWorkPackages(query.q)).slice(0, 20).map((item) => ({ id: item.id, displayId: item.displayId || String(item.id), subject: item.subject || '' }));
+  });
   fastify.post('/api/integrations/openproject/sources/:id/timesheet/run', async (req: FastifyRequest) => {
     const { id } = idParams.parse(req.params); if (!options.timesheetRun) throw new HttpError(503, 'unavailable', 'Timesheet chưa sẵn sàng');
     const body = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), hours: z.number().min(8).refine((value) => Math.abs(value * 4 - Math.round(value * 4)) < 1e-8, 'hours must be a multiple of 0.25').optional() }).parse(req.body || {}); return options.timesheetRun(id, body.date, body.hours);

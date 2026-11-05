@@ -188,6 +188,13 @@ export class OpenProjectClient {
     return this.listWorkPackagesWithFilters(filters, '[["updatedAt","desc"]]');
   }
 
+  async searchWorkPackages(query: string): Promise<OpenProjectWorkPackage[]> {
+    const value = query.trim();
+    if (!value) return [];
+    const filters = JSON.stringify([{ subject: { operator: '~', values: [value] } }]);
+    return this.listWorkPackagesWithFilters(filters, '[["id","asc"]]');
+  }
+
   async getWorkPackage(id: number | string): Promise<OpenProjectWorkPackage> {
     return this.request<OpenProjectWorkPackage>(`/api/v3/work_packages/${encodeURIComponent(String(id))}`);
   }

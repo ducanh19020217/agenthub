@@ -4076,6 +4076,21 @@ export class TelegramBotService {
         this.broadcastMessage(`${prefix}🔗 <b>${this.escapeHtml(ref)}</b> ${label}.`);
         break;
       }
+      case 'tracker.timesheet.posted': {
+        const rows = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; subject?: string; hours?: number }> : [];
+        const missing = Array.isArray(p.withoutTicket) && p.withoutTicket.length ? `\nChưa có ticket: ${p.withoutTicket.map((item: { taskId?: string; subject?: string }) => `${this.escapeHtml(String(item.taskId || '?'))} ${this.escapeHtml(String(item.subject || ''))}`).join(', ')}` : '';
+        const stale = Array.isArray(p.missingFromDate) && p.missingFromDate.length ? `\nTicket không còn trong ngày: ${p.missingFromDate.join(', ')}` : '';
+        const minimum = p.overMinimum ? '\nTổng vượt giờ do mức tối thiểu.' : '';
+        this.broadcastMessage(`${prefix}🕒 <b>Đã ghi bảng giờ</b> (${this.escapeHtml(String(p.hours || 0))}h)\n${rows.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${this.escapeHtml(String(row.subject || ''))} — ${row.hours || 0}h`).join('\n')}${missing}${stale}${minimum}`);
+        break;
+      }
+      case 'tracker.timesheet.failed':
+        {
+          const posted = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; hours?: number }> : [];
+          const partial = posted.length ? `\nĐã ghi được: ${posted.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${row.hours || 0}h`).join(', ')}` : '';
+          this.broadcastMessage(`${prefix}❌ <b>Ghi bảng giờ thất bại</b>: ${this.escapeHtml(String(p.error || ''))}${partial}`);
+        }
+        break;
       case 'tracker.triage_ready': {
         const sourceId = typeof p.sourceId === 'string' ? p.sourceId : '';
         const wpId = typeof p.wpId === 'number' ? p.wpId : 0;

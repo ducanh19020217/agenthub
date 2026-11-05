@@ -38,6 +38,7 @@ import {
 import type { CiWatchService } from '../ci.js';
 import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
 import type { DailyReportService } from '../integrations/openproject/daily-report.js';
+import type { OpenProjectTimesheetService } from '../integrations/openproject/timesheet.js';
 import type { GiteaSyncService } from '../integrations/gitea/service.js';
 import { isGiteaTokenConfigured, saveGiteaToken } from '../integrations/gitea/secrets.js';
 import { parseRemote } from '../integrations/gitea/client.js';
@@ -944,6 +945,7 @@ export class AppService {
   public ciService?: CiWatchService;
   public intakeService?: OpenProjectIntakeService;
   public dailyReportService?: DailyReportService;
+  public timesheetService?: OpenProjectTimesheetService;
   public giteaSyncService?: GiteaSyncService;
   private perfCollector?: PerfCollector;
   private profileChecks = new Set<string>();

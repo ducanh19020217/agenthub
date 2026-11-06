@@ -143,6 +143,53 @@ describe('OpenProject timesheet service', () => {
   });
 });
 
+describe('OpenProject timesheet commit selection regressions', () => {
+  it('uses merged task commits, ignores default-branch commits, old tasks, and allocates zero weights', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-timesheet-commits-')); const repoPath = path.join(root, 'repo'); fs.mkdirSync(repoPath);
+    const git = (args: string[], env?: NodeJS.ProcessEnv) => execFileSync('git', ['-C', repoPath, ...args], { env: { ...process.env, ...env }, stdio: 'pipe' });
+    git(['init', '-q']); git(['config', 'user.email', 'test@example.test']); git(['config', 'user.name', 'Test']);
+    fs.writeFileSync(path.join(repoPath, 'README'), 'base'); git(['add', 'README']); git(['commit', '-qm', 'base'], { GIT_AUTHOR_DATE: '2026-11-03T10:00:00Z', GIT_COMMITTER_DATE: '2026-11-03T10:00:00Z' }); git(['branch', '-M', 'main']);
+    git(['checkout', '-qb', 'task']); fs.writeFileSync(path.join(repoPath, 'task.txt'), 'task'); git(['add', 'task.txt']); git(['commit', '-qm', '[SIE-31] task work'], { GIT_AUTHOR_DATE: '2026-11-05T10:00:00Z', GIT_COMMITTER_DATE: '2026-11-05T10:00:00Z' }); const taskSha = String(git(['rev-parse', 'HEAD'])).trim();
+    git(['checkout', 'main']); fs.writeFileSync(path.join(repoPath, 'main.txt'), 'main'); git(['add', 'main.txt']); git(['commit', '-qm', 'unrelated default work'], { GIT_AUTHOR_DATE: '2026-11-05T11:00:00Z', GIT_COMMITTER_DATE: '2026-11-05T11:00:00Z' });
+    git(['merge', '--no-ff', 'task', '-m', 'merge task'], { GIT_AUTHOR_DATE: '2026-11-05T12:00:00Z', GIT_COMMITTER_DATE: '2026-11-05T12:00:00Z' }); const mergeSha = String(git(['rev-parse', 'HEAD'])).trim(); git(['branch', '-D', 'task']);
+    const config = loadConfig(root); config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo', timesheet: { enabled: true, activityId: 7, minEntryHours: 0.5, roundTo: 0.25 } })]; saveOpenProjectKey(root, 'op', 'test-key');
+    const db = openDatabase(path.join(root, 'hub.db')); const projectRepo = new ProjectRepo(db); const taskRepo = new TaskRepo(db); const runRepo = new RunRepo(db); const eventRepo = new EventRepo(db); const entryRepo = new TimesheetEntryRepo(db);
+    projectRepo.insert({ id: 'p', name: 'P', path: repoPath, defaultBranch: 'main', maxParallel: 1, settings: JSON.stringify(mergeProjectSettings(DEFAULT_PROJECT_SETTINGS, { openproject: { enabled: true, sourceId: 'op', role: 'primary' } })) });
+    taskRepo.insert({ id: 'p/task', projectId: 'p', slug: 'task', title: 'task', branch: 'task', externalRef: null, status: 'done' });
+    taskRepo.insert({ id: 'p/no-branch', projectId: 'p', slug: 'no-branch', title: 'no branch', branch: null, externalRef: '32', status: 'done' });
+    taskRepo.insert({ id: 'p/old', projectId: 'p', slug: 'old', title: 'old', branch: 'main', externalRef: '33', status: 'done' });
+    eventRepo.insert('task.merged', 'p/task', { mergeCommit: mergeSha });
+    const fetchFn = (async (url: string | URL) => { const value = url.toString(); const id = value.match(/work_packages\/(\d+)/)?.[1]; if (id) return new Response(JSON.stringify({ id: Number(id), displayId: `SIE-${id}`, subject: `Ticket ${id}` })); if (value.includes('/work_packages?')) return new Response(JSON.stringify({ total: 1, _embedded: { elements: [{ id: 31, displayId: 'SIE-31', subject: 'Ticket 31' }] } })); throw new Error(`unexpected ${value}`); }) as typeof fetch;
+    const service = new OpenProjectTimesheetService({ config, projectRepo, taskRepo, runRepo, eventRepo, entryRepo, fetchFn, eventBus: { emit: () => true } });
+    const preview = await service.preview('op', '2026-11-05');
+    expect(preview.entries.map((entry) => entry.displayId)).toEqual(['SIE-31']);
+    expect(preview.entries[0].hours).toBe(8);
+    expect(preview.entries[0].comment).toContain('task work');
+    expect(preview.entries[0].comment).not.toContain('unrelated default work');
+    expect(taskSha).toMatch(/^[0-9a-f]{40}$/);
+    db.close(); fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('loads activities from the time entry form before the legacy endpoint', async () => {
+    const config = loadConfig('/tmp/agenthub-timesheet-activity-form'); config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({ id: 'op', url: 'https://op.test', project: 'demo' })]; saveOpenProjectKey(config.hubHome, 'op', 'test-key');
+    const calls: Array<{ url: string; method: string }> = [];
+    const fetchFn = (async (url: string | URL, init?: RequestInit) => {
+      const value = url.toString(); calls.push({ url: value, method: init?.method || 'GET' });
+      if (value.includes('/work_packages?')) return new Response(JSON.stringify({ total: 1, _embedded: { elements: [{ id: 17, displayId: 'SIE-17', subject: 'Ticket' }] } }));
+      if (value.endsWith('/time_entries/form')) return new Response(JSON.stringify({ _embedded: { schema: { activity: { _embedded: { allowedValues: [{ id: 9, name: 'Development' }] } } } } }));
+      if (value.includes('/time_entries/activities')) throw new Error('legacy endpoint must not be called');
+      throw new Error(`unexpected ${value}`);
+    }) as typeof fetch;
+    const app = Fastify({ logger: false });
+    app.setErrorHandler((error, _request, reply) => reply.status(error instanceof HttpError ? error.statusCode : 500).send({ message: error.message }));
+    registerOpenProjectRoutes(app, config, { fetch: fetchFn }); await app.ready();
+    const response = await app.inject({ method: 'GET', url: '/api/integrations/openproject/sources/op/time-entry-activities' });
+    expect(response.statusCode).toBe(200); expect(response.json()).toEqual([{ id: 9, name: 'Development' }]);
+    expect(calls.some((call) => call.url.endsWith('/time_entries/form') && call.method === 'POST')).toBe(true);
+    await app.close();
+  });
+});
+
 describe('OpenProject timesheet notifications', () => {
   const payload = {
     sourceId: 'op', hours: 8.25, overMinimum: true, missingFromDate: [41],

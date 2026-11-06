@@ -1261,6 +1261,134 @@ describe('OpenProject Integration', () => {
 
       await testApp.close();
     });
+
+    it('POST /api/integrations/openproject/sources/:id/clone copies config and key, disables timesheet, rejects duplicate project', async () => {
+      const sourceApp = Fastify();
+      sourceApp.setErrorHandler((error, _req, reply) => {
+        if (error instanceof ZodError) {
+          return reply.status(400).send({ error: 'bad_request', message: error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ') });
+        }
+        if (error instanceof HttpError) {
+          return reply.status(error.statusCode).send({ error: error.error, message: error.message });
+        }
+        return reply.status(500).send({ error: 'internal_error', message: error.message });
+      });
+
+      // Setup: a source with timesheet enabled, a known API key, and type IDs
+      config.integrations.openproject.sources = [
+        OpenProjectSourceSchema.parse({
+          id: 'src-clone-orig',
+          url: 'https://op.example.com',
+          project: 'SIE',
+          timesheet: { enabled: true, time: '08:00', activityId: 5, hours: 8, min: 0.5, roundTo: 0.25, dailyReport: { enabled: true, time: '09:00', weekdaysOnly: true, maxItems: 10, telegram: false } },
+          split: { typeIds: [1, 2, 99] },
+          createTypeId: 1,
+        }),
+      ];
+      saveOpenProjectKey(tmpDir, 'src-clone-orig', 'my-secret-key');
+
+      // Fake fetch: returns types 1 and 2 (not 99) for the new project
+      const fakeFetch = vi.fn().mockImplementation(async (url: string | URL) => {
+        const urlStr = url.toString();
+        if (urlStr.includes('/api/v3/projects/NEW-PROJ/types')) {
+          return new Response(
+            JSON.stringify({ _embedded: { elements: [{ id: 1, name: 'Bug' }, { id: 2, name: 'Feature' }] } }),
+            { status: 200, headers: { 'Content-Type': 'application/hal+json' } },
+          );
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      registerOpenProjectRoutes(sourceApp, config, { fetch: fakeFetch as unknown as typeof globalThis.fetch });
+      await sourceApp.ready();
+
+      // Clone the source
+      const res = await sourceApp.inject({
+        method: 'POST',
+        url: '/api/integrations/openproject/sources/src-clone-orig/clone',
+        payload: { project: 'NEW-PROJ' },
+      });
+      expect(res.statusCode).toBe(200);
+      const cloned = JSON.parse(res.body);
+
+      // id generated correctly
+      expect(cloned.id).toMatch(/^openproject-\d+$/);
+      // project changed
+      expect(cloned.project).toBe('NEW-PROJ');
+      // timesheet disabled
+      expect(cloned.timesheet?.enabled).toBe(false);
+      // API key NOT in response body
+      expect(res.body).not.toContain('my-secret-key');
+      // key was copied server-side
+      expect(readOpenProjectKey(tmpDir, cloned.id)).toBe('my-secret-key');
+      // keyConfigured reported correctly
+      expect(cloned.keyConfigured).toBe(true);
+      // type IDs filtered – 99 not in new project types
+      expect(cloned.split?.typeIds).toEqual([1, 2]);
+      expect(cloned.createTypeId).toBe(1);
+      // source was persisted
+      expect(config.integrations.openproject.sources).toHaveLength(2);
+
+      // 404 when source does not exist
+      const notFoundRes = await sourceApp.inject({
+        method: 'POST',
+        url: '/api/integrations/openproject/sources/nonexistent/clone',
+        payload: { project: 'OTHER' },
+      });
+      expect(notFoundRes.statusCode).toBe(404);
+
+      // 400 when project conflicts with another source sharing the same url
+      const conflictRes = await sourceApp.inject({
+        method: 'POST',
+        url: '/api/integrations/openproject/sources/src-clone-orig/clone',
+        payload: { project: 'NEW-PROJ' }, // already taken by the clone we just created
+      });
+      expect(conflictRes.statusCode).toBe(400);
+      expect(JSON.parse(conflictRes.body).error).toBe('duplicate_project');
+
+      await sourceApp.close();
+    });
+
+    it('POST /api/integrations/openproject/sources/:id/clone keeps type IDs when network fails', async () => {
+      const networkFailApp = Fastify();
+      networkFailApp.setErrorHandler((error, _req, reply) => {
+        if (error instanceof HttpError) {
+          return reply.status(error.statusCode).send({ error: error.error, message: error.message });
+        }
+        return reply.status(500).send({ error: 'internal_error', message: error.message });
+      });
+
+      config.integrations.openproject.sources = [
+        OpenProjectSourceSchema.parse({
+          id: 'src-clone-net',
+          url: 'https://op.example.com',
+          project: 'ALPHA',
+          split: { typeIds: [10, 20] },
+          createTypeId: 10,
+        }),
+      ];
+      saveOpenProjectKey(tmpDir, 'src-clone-net', 'net-key');
+
+      // Fetch always fails
+      const failFetch = vi.fn().mockRejectedValue(new Error('Network error'));
+
+      registerOpenProjectRoutes(networkFailApp, config, { fetch: failFetch as unknown as typeof globalThis.fetch });
+      await networkFailApp.ready();
+
+      const res = await networkFailApp.inject({
+        method: 'POST',
+        url: '/api/integrations/openproject/sources/src-clone-net/clone',
+        payload: { project: 'BETA' },
+      });
+      expect(res.statusCode).toBe(200);
+      const cloned = JSON.parse(res.body);
+      // Network failure → original type IDs preserved
+      expect(cloned.split?.typeIds).toEqual([10, 20]);
+      expect(cloned.createTypeId).toBe(10);
+      expect(cloned.timesheet?.enabled).toBe(false);
+
+      await networkFailApp.close();
+    });
   });
 
   describe('Database migration & TrackerItemRepo', () => {

@@ -27,6 +27,9 @@ export interface PresetDetails {
       requireApproval: boolean;
       approvalMinTasks: number;
     };
+    publish: {
+      enabled: boolean;
+    };
   };
 }
 
@@ -59,6 +62,9 @@ export const PRESET_DEFINITIONS: Record<PresetLevel, PresetDetails> = {
         requireApproval: true,
         approvalMinTasks: 0,
       },
+      publish: {
+        enabled: false,
+      },
     },
   },
   balanced: {
@@ -88,6 +94,9 @@ export const PRESET_DEFINITIONS: Record<PresetLevel, PresetDetails> = {
       planning: {
         requireApproval: false,
         approvalMinTasks: 5,
+      },
+      publish: {
+        enabled: false,
       },
     },
   },
@@ -119,6 +128,9 @@ export const PRESET_DEFINITIONS: Record<PresetLevel, PresetDetails> = {
         requireApproval: false,
         approvalMinTasks: 0,
       },
+      publish: {
+        enabled: true,
+      },
     },
   },
 };
@@ -148,6 +160,7 @@ export function detectPresetMatch(
     autoMerge?: boolean;
     autoFixOnFail?: boolean;
     planning?: { requireApproval?: boolean; approvalMinTasks?: number };
+    publish?: { enabled?: boolean } | boolean;
   },
   preset: PresetLevel,
 ): boolean {
@@ -161,6 +174,11 @@ export function detectPresetMatch(
   const approvalMin = config.planning?.approvalMinTasks ?? 0;
   if (reqApproval !== def.config.planning.requireApproval) return false;
   if (approvalMin !== def.config.planning.approvalMinTasks) return false;
+
+  if (config.publish !== undefined) {
+    const pubEnabled = typeof config.publish === 'boolean' ? config.publish : Boolean(config.publish?.enabled);
+    if (pubEnabled !== def.config.publish.enabled) return false;
+  }
 
   const chain = config.reviewChain || [];
   if (preset === 'safe') {
@@ -284,6 +302,7 @@ export function detectProjectPreset(
     autoMerge: settings.review.autoMerge || settings.integration.autoMerge,
     autoFixOnFail: settings.autoFixOnFail ?? globalConfig.autoFixOnFail,
     planning: settings.planning ?? globalConfig.planning,
+    publish: settings.publish.enabled,
   };
 
   if (settings.preset && (settings.preset === 'safe' || settings.preset === 'balanced' || settings.preset === 'auto')) {
@@ -366,6 +385,9 @@ export function presetProjectPatch(project: ProjectRow, preset: PresetLevel, cod
       integration: enableIntegration
         ? { enabled: true, branch: current.branch || 'agenthub/integration', autoMerge: true }
         : { autoMerge: def.config.review.autoMerge },
+      publish: {
+        enabled: def.config.publish.enabled,
+      },
     },
     review: { chain, maxRounds: def.config.review.maxRounds },
     reviewChain: chain,
@@ -497,6 +519,7 @@ export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput)
       'settings.integration.autoMerge': settings.integration.autoMerge,
       'settings.autoFixOnFail': settings.autoFixOnFail,
       'settings.planning': settings.planning,
+      'settings.publish.enabled': settings.publish.enabled,
       'settings.preset': settings.preset,
       'review.chain': currentReview.chain,
       'review.maxRounds': currentReview.maxRounds ?? 2,
@@ -509,6 +532,7 @@ export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput)
       'settings.integration.autoMerge': def.config.review.autoMerge,
       'settings.autoFixOnFail': def.config.autoFixOnFail,
       'settings.planning': def.config.planning,
+      'settings.publish.enabled': def.config.publish.enabled,
       'settings.preset': preset,
       'review.chain': chain,
       'review.maxRounds': def.config.review.maxRounds,
@@ -550,6 +574,9 @@ export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput)
             autoMerge: def.config.review.autoMerge,
           },
           integration: presetProjectPatch(project, preset, codexModel).settings.integration,
+          publish: {
+            enabled: def.config.publish.enabled,
+          },
         },
         review: {
           chain,

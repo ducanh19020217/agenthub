@@ -194,3 +194,9 @@
 - `wait` dùng các event trạng thái chờ check/review/merge làm mốc bắt đầu, kéo dài tới mốc kế tiếp hoặc hết ngày, rồi giới hạn không vượt `run`. Đây là xấp xỉ vì schema event hiện chưa lưu khoảng chờ riêng.
 - `chat` tính các event review/comment/question/decision/blocked trong ngày; mỗi lượt quy đổi thành 10 phút. Nội dung `## Cần quyết định` trong payload được tính thêm khi event không có type tương ứng.
 - Khi nhiều task cùng ticket có level khác nhau, `weight` cộng theo từng task; trường `level` hiển thị là level hiệu dụng (trung bình có trọng số) để khớp với tổng weight.
+
+## DEC-017: Ô review trong sơ đồ Quy trình được coi là đang hoạt động khi có task chờ duyệt
+
+- **Bối cảnh**: Yêu cầu task t-flow-live-animation quy định ô trạng thái "đang hoạt động" gồm `running`, `checking`, và "review khi reviewer đang chạy". Tuy nhiên, view Quy trình (`TaskFlow.tsx`) truy vấn số đếm task theo trạng thái (`useStatusTotal`) và API REST hiện tại không trả về tín hiệu phân biệt liệu một task ở trạng thái `review` có tiến trình reviewer nền đang thực thi hay đang ở hàng chờ / chờ người dùng duyệt qua UI.
+- **Quyết định**: Coi ô `review` là "đang hoạt động" (`data-active="true"`, có viền sáng pulse, icon review chớp nhẹ, cạnh luồng animated) mỗi khi tổng số task ở trạng thái `review` > 0 (`total > 0`), đồng bộ với cách xử lý của `running` và `checking`.
+- **Hệ quả**: Giữ logic frontend đơn giản, không phát sinh thêm truy vấn kiểm tra subprocess nền của reviewer làm tăng tải API, đảm bảo trải nghiệm người dùng trực quan khi có task ở bước duyệt.

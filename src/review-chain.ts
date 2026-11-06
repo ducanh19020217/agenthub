@@ -20,6 +20,8 @@ export const ReviewChainStepSchema = z.object({
       },
     ),
   mode: z.enum(['gate', 'final']),
+  engine: z.string().nullable().optional(),
+  profileName: z.string().nullable().optional(),
 });
 
 export const ReviewChainSchema = z.array(ReviewChainStepSchema).max(10);

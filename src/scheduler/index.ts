@@ -3010,6 +3010,8 @@ export class Scheduler {
         verdict: review.verdict as ReviewerVerdict,
         feedback: review.feedback,
         createdAt: review.createdAt,
+        engine: review.engine,
+        profileName: review.profileName,
       })) || [];
       child = engine.spawn({
         profile,
@@ -3050,7 +3052,8 @@ export class Scheduler {
     this.reviewerRuns.set(task.id, { taskId: task.id, runId, pid: child.pid, profileName, engine, actor, outputPath, lockSlot, lockFile, startedAt: Date.now(), timeout });
     this.locks.invalidate(profileName);
     child.unref();
-    this.eventBus.emit('review.started', task.id, { actor: reviewerActor, model: reviewerModel, profile: profileName, runId });
+    const actualEngine = engine.id;
+    this.eventBus.emit('review.started', task.id, { actor: reviewerActor, model: reviewerModel, profile: profileName, engine: actualEngine, runId });
     child.once('error', () => {
       if (!this.stopped) this.finishReview(task.id, runId, profileName, 'error', null);
     });
@@ -3131,11 +3134,23 @@ export class Scheduler {
         return;
       }
     }
+    const reviewerEngine = run?.engine || active.engine.id;
+    const reviewerProfile = run?.profileName || active.profileName;
     this.runRepo.finish(runId, 'done');
     this.reviewerErrorCounts.delete(taskId);
-    this.reviewTask(taskId, result.verdict, result.feedback, active.actor);
+    this.reviewTask(taskId, result.verdict, result.feedback, active.actor, 'content', {
+      engine: reviewerEngine,
+      profileName: reviewerProfile,
+    });
     const defaultReviewer = this.config.reviewer?.order?.[0];
-    this.eventBus.emit('review.completed', taskId, { actor: active.actor, verdict: result.verdict, model: run?.model || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna'), runId });
+    this.eventBus.emit('review.completed', taskId, {
+      actor: active.actor,
+      verdict: result.verdict,
+      model: run?.model || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna'),
+      runId,
+      engine: reviewerEngine,
+      profile: reviewerProfile,
+    });
     if (!this.stopped) this.triggerTick();
   }
 
@@ -3431,6 +3446,7 @@ export class Scheduler {
         this.notifiedSkippedModels.add(key);
         this.eventBus.emit('task.model_skipped', task.id, {
           model,
+          engine: getModelEngine(model) || null,
           message: `Bỏ qua model không thuộc engine đã cấu hình: ${model}`,
         });
       }
@@ -3851,7 +3867,7 @@ export class Scheduler {
       // Unref so the child doesn't prevent daemon from exiting
       child.unref();
 
-      this.eventBus.emit('task.running', task.id, { runId, model, profile: profileName });
+      this.eventBus.emit('task.running', task.id, { runId, model, profile: profileName, engine: engine.id });
 
       // Listen for exit
       child.on('exit', (code) => {
@@ -3940,17 +3956,36 @@ export class Scheduler {
   /**
    * Review a task
    */
-  reviewTask(taskId: string, verdict: 'approved' | 'changes_requested', feedback?: string, by?: string, source: ReviewSource = 'content'): void {
+  reviewTask(
+    taskId: string,
+    verdict: 'approved' | 'changes_requested',
+    feedback?: string,
+    by?: string,
+    source: ReviewSource = 'content',
+    options?: { engine?: string | null; profileName?: string | null },
+  ): void {
     const task = this.taskRepo.get(taskId);
     if (!task || task.status !== 'review') return;
     this.reviewNotified.delete(taskId);
     const chain = this.reviewChainForTask(task);
     const step = chain[task.reviewStep ?? 0];
 
+    const fallbackEngine = by === 'claude-reviewer' || by === 'claude-review' ? 'claude' : by === 'codex-reviewer' ? 'codex' : null;
+    const reviewEngine = options?.engine ?? fallbackEngine;
+    const reviewProfile = options?.profileName ?? null;
+
     if (verdict === 'approved') {
       if (isAutoReviewer(by) && (!feedback || feedback.trim() === '')) return;
       if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
-        this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback: feedback || null, actor: by || 'reviewer' });
+        this.reviewRepo.insert({
+          id: crypto.randomUUID(),
+          taskId,
+          verdict,
+          feedback: feedback || null,
+          actor: by || 'reviewer',
+          engine: reviewEngine,
+          profileName: reviewProfile,
+        });
       }
       if ((isAutoReviewer(by) || by === 'claude-review') && isAutomatedStep(step)) {
         this.advanceReviewStep(task, chain, 'approved');
@@ -3982,7 +4017,15 @@ export class Scheduler {
         throw new Error('Feedback is required when requesting changes');
       }
       if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
-        this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback, actor: by || 'reviewer' });
+        this.reviewRepo.insert({
+          id: crypto.randomUUID(),
+          taskId,
+          verdict,
+          feedback,
+          actor: by || 'reviewer',
+          engine: reviewEngine,
+          profileName: reviewProfile,
+        });
       }
       if (isContentReview(by, source)) {
         const count = (task.reviewerChangesRequested || 0) + 1;

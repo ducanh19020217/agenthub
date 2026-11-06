@@ -187,7 +187,10 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
 
     await waitFor(() => {
-      expect(runningNode.querySelector('.flow-count-bounce')).not.toBeNull();
+      const bounceEl = runningNode.querySelector('.flow-count-bounce');
+      expect(bounceEl).not.toBeNull();
+      // Ensure bounce class is on an SVG <text> graphics element rather than <tspan> so transforms apply
+      expect(bounceEl?.tagName.toLowerCase()).toBe('text');
     });
 
     // After bounce duration, class disappears
@@ -235,5 +238,43 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
 
     const dots = previewGroup.querySelectorAll('.flow-dot-pulse');
     expect(dots.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('(f) does not display +N more placeholder before runningTasks data finishes loading', async () => {
+    let resolveRunningTasks: ((value: client.PageResponse<Task>) => void) | null = null;
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      if (params?.limit === 3 && params?.status === 'running') {
+        // Delay runningTasks query
+        return new Promise((resolve) => {
+          resolveRunningTasks = resolve;
+        });
+      }
+      // Status query returns total = 3
+      return {
+        items: [],
+        total: 3,
+        nextCursor: null,
+      };
+    });
+
+    renderPage('/tasks?view=flow');
+    const runningNode = await screen.findByTestId('flow-node-running');
+    await waitFor(() => expect(runningNode).toHaveAttribute('data-count', '3'));
+
+    const previewGroup = within(runningNode).getByTestId('flow-running-tasks');
+    // While runningTasks is loading, no +N more label should be visible
+    expect(within(previewGroup).queryByText(/\+.*nữa/)).toBeNull();
+
+    // Now resolve the running tasks query
+    resolveRunningTasks!({
+      items: [makeTask('run-1', 'running'), makeTask('run-2', 'running')],
+      total: 3,
+      nextCursor: null,
+    });
+
+    // After loading completes, +1 nữa is rendered
+    await waitFor(() => {
+      expect(within(previewGroup).getByText('+1 nữa')).toBeInTheDocument();
+    });
   });
 });

@@ -173,6 +173,7 @@ export const vi = {
       showMore: 'Xem thêm {count} task',
       levelHard: 'Khó',
       levelEasy: 'Dễ',
+      runningMore: '+{count} nữa',
     },
     triagePending: 'Chờ bạn quyết định',
     title: 'Quản lý Task',

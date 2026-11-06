@@ -175,6 +175,7 @@ export const en: typeof vi = {
       showMore: 'Show {count} more',
       levelHard: 'Hard',
       levelEasy: 'Easy',
+      runningMore: '+{count} more',
     },
     triagePending: 'Waiting for your decision',
     title: 'Task Management',

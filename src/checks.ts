@@ -10,7 +10,7 @@ import { taskCommitRef } from './commit-convention.js';
 const MAX_OUTPUT = 8192;
 const CONFLICT_MARKER_REGEX = /^(<{7}|={7}|>{7})( |$)/m;
 export interface CheckDefinition { name: string; cmd: string[]; timeoutSec?: number }
-export interface CheckResult { name: string; ok: boolean; exitCode: number | null; durationMs: number; outputTail: string; runId?: string; runStartedAt?: string; seq?: number; startedAt?: string }
+export interface CheckResult { name: string; ok: boolean; exitCode: number | null; durationMs: number; outputTail: string; runId?: string; runStartedAt?: string; seq?: number; startedAt?: string; skipped?: boolean }
 export interface CheckRunOptions { reuseSavedResults?: boolean; onlyNames?: string[] }
 
 /** Release packaging is deliberately opt-in: it may run npm ci and rebuild the hub. */

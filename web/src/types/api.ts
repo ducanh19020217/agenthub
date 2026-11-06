@@ -455,6 +455,7 @@ export interface CheckResult {
   runStartedAt?: string;
   seq?: number;
   startedAt?: string;
+  skipped?: boolean;
 }
 
 export interface TaskDetail extends Task {

@@ -71,7 +71,7 @@ import { mergeTaskIntoBase, MergeError } from '../merge.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
-import { ReviewChainSchema, isAutomatedStep, parseReviewChain, type ReviewChainStep } from '../review-chain.js';
+import { ReviewChainSchema, isAutomatedStep, parseReviewChain, type ReviewChainStep, type ReviewChainStepView } from '../review-chain.js';
 import { isAutoReviewer } from '../reviewer.js';
 import { isKnownModel } from '../quota/index.js';
 import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, ReviewerOrderSchema, reviewerSettingsFromLegacy } from '../reviewer-config.js';
@@ -3647,23 +3647,14 @@ export class AppService {
       reviews: reviewsWithModels.map(apiReview),
       reviewChain: (() => {
         const rawChain: ReviewChainStep[] = (Array.isArray(reviewSettings?.chain) ? reviewSettings.chain as ReviewChainStep[] : undefined) || parseReviewChain(project?.reviewChain);
-        return rawChain.map((step, idx) => {
+        return rawChain.map((step): ReviewChainStepView => {
           const stepEngine = step.reviewer.startsWith('codex:')
             ? 'codex'
             : (step.reviewer === 'claude' ? 'claude' : null);
-          const matchingReview = reviewsWithModels.filter((r) => {
-            if (step.reviewer.startsWith('codex:')) {
-              return r.actor === 'codex-reviewer' || r.engine === 'codex';
-            }
-            return r.actor === 'claude-reviewer' || r.engine === 'claude';
-          })[idx];
-          const runningReviewer = idx === (task.reviewStep ?? 0) ? reviewerRun : null;
-          const profileName = matchingReview?.profileName || runningReviewer?.profileName || null;
-          const engine = matchingReview?.engine || runningReviewer?.engine?.id || stepEngine || null;
           return {
             ...step,
-            engine,
-            profileName,
+            engine: stepEngine,
+            profileName: null,
           };
         });
       })(),
@@ -4583,7 +4574,8 @@ export class AppService {
       }
     }
 
-    const reviewEngine = parsed.engine || (parsed.by === 'claude' || !parsed.by ? 'claude' : null);
+    const fallbackEngine = parsed.by === 'claude-reviewer' || parsed.by === 'claude-review' ? 'claude' : parsed.by === 'codex-reviewer' ? 'codex' : null;
+    const reviewEngine = parsed.engine || fallbackEngine;
     const reviewProfile = parsed.profileName || null;
     if (!['codex-reviewer', 'claude-reviewer', 'claude-review'].includes(parsed.by || '')) {
       this.reviewRepo.insert({

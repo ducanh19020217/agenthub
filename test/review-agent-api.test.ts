@@ -166,14 +166,79 @@ describe('API & Scheduler agent metadata for reviews and runs (t-model-agent-bad
     const task = JSON.parse(getRes.body);
 
     expect(task.reviewChain).toHaveLength(2);
-    // Step 0 was completed: has engine and profileName
+    // Step 0: has inferred engine 'codex' and null profileName (DEC-017)
     expect(task.reviewChain[0].reviewer).toBe('codex:gpt-5.6-luna');
     expect(task.reviewChain[0].engine).toBe('codex');
-    expect(task.reviewChain[0].profileName).toBe('codex-fast');
+    expect(task.reviewChain[0].profileName).toBeNull();
 
-    // Step 1 not yet reviewed: has inferred engine 'claude' and null profileName
+    // Step 1: has inferred engine 'claude' and null profileName (DEC-017)
     expect(task.reviewChain[1].reviewer).toBe('claude');
     expect(task.reviewChain[1].engine).toBe('claude');
     expect(task.reviewChain[1].profileName).toBeNull();
+  });
+
+  it('correctly sets engine for multi-step chains and leaves manual review engine null', async () => {
+    const projectRepoPath = path.join(tmpDir, 'multi-chain-repo');
+    initGitRepo(projectRepoPath);
+
+    await server.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: authHeaders(),
+      payload: {
+        id: 'multi-chain-proj',
+        name: 'Multi Chain Proj',
+        path: projectRepoPath,
+        reviewChain: [
+          { reviewer: 'codex:gpt-5.6-luna', mode: 'gate' },
+          { reviewer: 'codex:gpt-5.6-luna', mode: 'gate' },
+          { reviewer: 'claude', mode: 'final' },
+        ],
+      },
+    });
+
+    const taskRes = await server.inject({
+      method: 'POST',
+      url: '/api/tasks',
+      headers: authHeaders(),
+      payload: { project: 'multi-chain-proj', slug: 't-multi', title: 'Multi Chain Task' },
+    });
+    expect(taskRes.statusCode).toBe(201);
+    ctx.taskRepo.updateStatus('multi-chain-proj/t-multi', 'review');
+
+    // Submit manual review without agent engine
+    const manualReviewRes = await server.inject({
+      method: 'POST',
+      url: '/api/tasks/multi-chain-proj~t-multi/review',
+      headers: authHeaders(),
+      payload: {
+        verdict: 'approved',
+        feedback: 'LGTM by human',
+        by: 'human-user',
+      },
+    });
+    expect(manualReviewRes.statusCode).toBe(200);
+
+    const getRes = await server.inject({
+      method: 'GET',
+      url: '/api/tasks/multi-chain-proj~t-multi',
+      headers: authHeaders(),
+    });
+    expect(getRes.statusCode).toBe(200);
+    const task = JSON.parse(getRes.body);
+
+    // Manual review has actor 'human-user', engine null, profileName null
+    expect(task.reviews[0].actor).toBe('human-user');
+    expect(task.reviews[0].engine).toBeNull();
+    expect(task.reviews[0].profileName).toBeNull();
+
+    // Multi-step chain has 3 steps with inferred engines
+    expect(task.reviewChain).toHaveLength(3);
+    expect(task.reviewChain[0].engine).toBe('codex');
+    expect(task.reviewChain[0].profileName).toBeNull();
+    expect(task.reviewChain[1].engine).toBe('codex');
+    expect(task.reviewChain[1].profileName).toBeNull();
+    expect(task.reviewChain[2].engine).toBe('claude');
+    expect(task.reviewChain[2].profileName).toBeNull();
   });
 });

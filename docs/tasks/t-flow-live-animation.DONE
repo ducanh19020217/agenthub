@@ -42,20 +42,23 @@
 - `web/src/locales/vi.ts`: Key `tasks.flow.runningMore`.
 - `web/src/locales/en.ts`: Key `tasks.flow.runningMore`.
 - `web/src/components/TaskFlow.tsx`: Live animation, tách `<text>` cho count bounce, dynamic refetchInterval, running tasks preview và loading guard, `data-active`, và `data-animated`.
-- `docs/DECISIONS.md`: Thêm DEC-018 giải thích trạng thái active của ô review.
+- `docs/DECISIONS.md`: Thêm DEC-018 giải thích trạng thái active của ô review (đồng thời bảo toàn DEC-017 từ agenthub/integration).
+- `src/db/index.ts`: Bảo toàn migrations 65-69 từ main và chuyển migration reviews từ integration thành Migration 70.
+- `test/fixtures/migrations.lock`: Cập nhật hash cho migrations 68, 69 và 70.
 - `web/src/test/taskFlow.test.tsx`: 10 unit test kiểm tra toàn bộ tiêu chí (a)-(f).
 
 ## Kết quả lint / typecheck / test / build
 - **Lint**: `npm run lint` pass (0 errors, 80 existing warnings in test files).
-- **Typecheck**: `npx tsc --noEmit -p web` pass (0 errors).
+- **Typecheck**: `npx tsc --noEmit -p web` và `npx tsc --noEmit -p .` pass (0 errors).
 - **Web Tests**: `npm run test:web -- --run` pass:
   - 67/67 test files passed
-  - 574/574 tests passed
+  - 580/580 tests passed
   - Trong đó `web/src/test/taskFlow.test.tsx` có 10/10 tests passed (4 test cũ + 6 test mới cho live animation và review feedback).
-- **Build Web**: `npm run build:web` pass (tsc & vite production build thành công trong 4.76s).
+- **Backend Tests**: `test/review-agent-api.test.ts`, `test/review-agent-db.test.ts`, `test/departments.test.ts`, `test/migrations-append-only.test.ts` pass (100%).
+- **Build**: `npm run build` và `npm run build:web` pass (tsc & vite production build thành công trong 4.69s).
 
 ## Việc chưa làm được / còn thiếu
-- Không có (toàn bộ các yêu cầu trong task.md, feedback review và tiêu chí nghiệm thu (a)-(f) đều đã hoàn thành và kiểm tra đầy đủ).
+- Không có (toàn bộ các yêu cầu trong task.md, feedback review P2/P3, giải quyết xung đột merge lần 1 và tiêu chí nghiệm thu (a)-(f) đều đã hoàn thành và kiểm tra đầy đủ).
 
 ## Danh sách commit
 - `344008b2` feat(flow): add pulse and icon animations for active flow nodes and reduced motion styles
@@ -66,3 +69,5 @@
 - `d4249dd4` fix(flow): avoid showing more label when running tasks data is still loading
 - `0460e063` docs(decisions): record active condition decision for review node in TaskFlow
 - `2202d779` test(flow): assert text element on count bounce and guard loading state of preview
+- `e5f92e94` docs(tasks): update completion report with review feedback resolutions
+- `06b8b594` Merge branch 'agenthub/integration' into agenthub/t-flow-live-animation

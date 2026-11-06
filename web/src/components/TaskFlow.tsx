@@ -110,11 +110,20 @@ const FlowNodeView: React.FC<{
   const Icon = STATUS_ICON[node.status];
   const open = () => onOpen(node.status);
 
-  // Requirement 3: Count bounce effect on change
+  // Requirement 3: Count bounce effect on change between fetches
+  const isInitialLoadRef = useRef(true);
   const prevTotalRef = useRef<number | null>(null);
   const [isBouncing, setIsBouncing] = useState(false);
 
   useEffect(() => {
+    if (isLoading) return;
+
+    if (isInitialLoadRef.current) {
+      isInitialLoadRef.current = false;
+      prevTotalRef.current = total;
+      return;
+    }
+
     if (prevTotalRef.current !== null && prevTotalRef.current !== total) {
       setIsBouncing(true);
       const timer = setTimeout(() => setIsBouncing(false), 400);
@@ -122,7 +131,7 @@ const FlowNodeView: React.FC<{
       return () => clearTimeout(timer);
     }
     prevTotalRef.current = total;
-  }, [total]);
+  }, [total, isLoading]);
 
   // Requirement 5: Details of running tasks inside the 'running' node
   const isRunning = node.status === 'running';

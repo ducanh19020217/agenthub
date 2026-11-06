@@ -4,7 +4,12 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TasksPage } from '../pages/TasksPage';
 import { LocaleProvider } from '../context/LocaleContext';
-import { FLOW_STATUSES } from '../components/TaskFlow';
+import {
+  FLOW_STATUSES,
+  FLOW_ACTIVE_REFETCH_INTERVAL,
+  FLOW_IDLE_REFETCH_INTERVAL,
+  getFlowRefetchInterval,
+} from '../components/TaskFlow';
 import { KANBAN_STATUSES } from '../utils/tasks';
 import * as client from '../api/client';
 import type { Project, Task, TaskStatus } from '../types/api';
@@ -111,5 +116,124 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
 
     fireEvent.click(screen.getByTestId('flow-node-failed'));
     expect(await screen.findByText('Không có task nào ở trạng thái này.')).toBeInTheDocument();
+  });
+
+  it('(a) active node and animated edges when 1 task is running', async () => {
+    const singleRunningTask = [makeTask('run-single', 'running')];
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      const matching = singleRunningTask.filter((task) => !params?.status || params.status === 'all' || task.status === params.status);
+      const limit = params?.limit || 20;
+      return {
+        items: matching.slice(0, limit),
+        total: matching.length,
+        nextCursor: null,
+      };
+    });
+
+    renderPage('/tasks?view=flow');
+    const runningNode = await screen.findByTestId('flow-node-running');
+    await waitFor(() => expect(runningNode).toHaveAttribute('data-count', '1'));
+
+    // (a) ô flow-node-running có data-active="true"
+    expect(runningNode).toHaveAttribute('data-active', 'true');
+
+    // ô queued không có data-active
+    expect(screen.getByTestId('flow-node-queued')).not.toHaveAttribute('data-active');
+    expect(screen.getByTestId('flow-node-done')).not.toHaveAttribute('data-active');
+
+    // cạnh vào/ra nó có data-animated="true"
+    const edgesGroup = screen.getByTestId('flow-edges');
+    const animatedEdges = edgesGroup.querySelectorAll('[data-animated="true"]');
+    // 3 edges: queued -> running (vào), running -> checking (ra), running -> waiting_quota (ra)
+    expect(animatedEdges.length).toBe(3);
+  });
+
+  it('(b) no active nodes or animated edges when no tasks are running', async () => {
+    vi.spyOn(client, 'getTasksPage').mockResolvedValue({
+      items: [],
+      total: 0,
+      nextCursor: null,
+    });
+
+    renderPage('/tasks?view=flow');
+    await waitFor(() => expect(screen.getByTestId('flow-node-running')).toHaveAttribute('data-count', '0'));
+
+    // không phần tử nào có data-active
+    const activeNodes = document.querySelectorAll('[data-active="true"]');
+    expect(activeNodes.length).toBe(0);
+
+    // không phần tử nào có data-animated
+    const animatedEdges = document.querySelectorAll('[data-animated="true"]');
+    expect(animatedEdges.length).toBe(0);
+  });
+
+  it('(c) bounce class appears and disappears when count changes between renders', async () => {
+    let count = 1;
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async () => ({
+      items: count > 0 ? [makeTask('run-a', 'running')] : [],
+      total: count,
+      nextCursor: null,
+    }));
+
+    renderPage('/tasks?view=flow');
+    const runningNode = await screen.findByTestId('flow-node-running');
+    await waitFor(() => expect(runningNode).toHaveAttribute('data-count', '1'));
+
+    // Initially before count change, bounce class is not present
+    expect(runningNode.querySelector('.flow-count-bounce')).toBeNull();
+
+    // Trigger count change between fetches
+    count = 2;
+    queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
+
+    await waitFor(() => {
+      expect(runningNode.querySelector('.flow-count-bounce')).not.toBeNull();
+    });
+
+    // After bounce duration, class disappears
+    await waitFor(
+      () => {
+        expect(runningNode.querySelector('.flow-count-bounce')).toBeNull();
+      },
+      { timeout: 1500 },
+    );
+  });
+
+  it('(d) refetchInterval is 5s when tasks are running and 30s when idle', () => {
+    expect(FLOW_ACTIVE_REFETCH_INTERVAL).toBe(5_000);
+    expect(FLOW_IDLE_REFETCH_INTERVAL).toBe(30_000);
+    expect(getFlowRefetchInterval(1)).toBe(5_000);
+    expect(getFlowRefetchInterval(3)).toBe(5_000);
+    expect(getFlowRefetchInterval(0)).toBe(30_000);
+  });
+
+  it('(e) displays preview of running tasks with project name, slug, and +N more when > 2', async () => {
+    const threeRunning = [
+      makeTask('slug-alpha', 'running'),
+      makeTask('slug-beta', 'running'),
+      makeTask('slug-gamma', 'running'),
+    ];
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      const matching = threeRunning.filter((t) => !params?.status || params.status === 'all' || t.status === params.status);
+      const limit = params?.limit || 20;
+      return {
+        items: matching.slice(0, limit),
+        total: matching.length,
+        nextCursor: null,
+      };
+    });
+
+    renderPage('/tasks?view=flow');
+    const runningNode = await screen.findByTestId('flow-node-running');
+    await waitFor(() => expect(runningNode).toHaveAttribute('data-count', '3'));
+
+    const previewGroup = within(runningNode).getByTestId('flow-running-tasks');
+    expect(previewGroup).toBeInTheDocument();
+    expect(within(previewGroup).getByText('slug-alpha')).toBeInTheDocument();
+    expect(within(previewGroup).getByText('slug-beta')).toBeInTheDocument();
+    expect(within(previewGroup).getByText('+1 nữa')).toBeInTheDocument();
+
+    const dots = previewGroup.querySelectorAll('.flow-dot-pulse');
+    expect(dots.length).toBeGreaterThanOrEqual(1);
   });
 });

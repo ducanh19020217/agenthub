@@ -342,6 +342,8 @@ export class TelegramBotService {
   }>>();
   private chatSessions = new Map<number, string>();
   private pendingAutoTasks = new Map<string, { chatId: number; projectId: string; description: string; externalRef?: string }>();
+  /** Project đã được báo "hết task"; xoá khi project lại có task đang chạy. */
+  private projectIdleNotified = new Set<string>();
   /** Per-chat selected project (persisted in config.telegram.chats). */
   private selectedProject = new Map<number, string>();
   private selectedDepartment = new Map<number, string>();
@@ -3822,7 +3824,9 @@ export class TelegramBotService {
         type === 'merge.failed' ||
         type === 'review.fallback' ||
         type === 'quota.exhausted' ||
-        (type === 'task.waiting_quota' && p.reason === 'no_department_profile');
+        (type === 'task.waiting_quota' && p.reason === 'no_department_profile') ||
+        // Người dùng muốn biết kết quả dù bộ não tự duyệt/merge.
+        (type === 'task.done' && (this.config.telegram.notify.taskDone !== false || this.config.telegram.notify.projectIdle !== false));
 
         if (!isAllowedInAuto) {
           return;
@@ -4054,6 +4058,31 @@ export class TelegramBotService {
           `${prefix}${header}\nID: <code>${taskId}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>`,
           { inline_keyboard: keyboard },
         );
+        break;
+      }
+
+      case 'task.done': {
+        const wantDone = notify.taskDone !== false;
+        const wantIdle = notify.projectIdle !== false;
+        if (!wantDone && !wantIdle) return;
+        if (wantDone && taskId) {
+          const title = this.resolveTaskTitle(taskId, p);
+          const how = p.reason === 'merged_elsewhere'
+            ? '\nĐã merge ở nơi khác, tự đóng.'
+            : typeof p.by === 'string' && p.by
+              ? `\nDuyệt bởi: <b>${this.escapeHtml(p.by)}</b>`
+              : '';
+          const keyboard: InlineKeyboardButton[][] = [
+            [{ text: '🌐 Xem task', url: this.getDashboardUrl(`#/tasks/${toRouteId(taskId)}`) }],
+          ];
+          this.broadcastMessage(
+            minimal
+              ? `${prefix}✅ <b>Task hoàn thành</b>\nID: <code>${taskId}</code>`
+              : `${prefix}✅ <b>Task hoàn thành</b>\nID: <code>${taskId}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>${how}`,
+            { inline_keyboard: keyboard },
+          );
+        }
+        if (wantIdle && projectId) this.notifyProjectIdle(projectId, taskId);
         break;
       }
 
@@ -4816,6 +4845,33 @@ export class TelegramBotService {
     const lines = fullLog.split('\n');
     const last30 = lines.slice(-30).join('\n');
     return last30.length > 3500 ? last30.slice(0, 3500) + '\n... (đã cắt bớt)' : last30;
+  }
+
+  /** Trạng thái coi là "còn việc": task chưa kết thúc. */
+  private static readonly PROJECT_ACTIVE_STATUSES = new Set(['queued', 'running', 'checking', 'review', 'waiting_quota']);
+
+  /**
+   * Khi task vừa xong mà project không còn task nào đang chờ/chạy/duyệt thì báo
+   * "project đã hết task". Mỗi lần project rỗng chỉ báo một lần; có task mới
+   * rồi lại rỗng thì báo lại.
+   */
+  private notifyProjectIdle(projectId: string, justFinishedTaskId?: string): void {
+    const remaining = this.taskRepo.getByProject(projectId).filter((task) =>
+      task.id !== justFinishedTaskId && TelegramBotService.PROJECT_ACTIVE_STATUSES.has(task.status));
+    if (remaining.length > 0) {
+      this.projectIdleNotified.delete(projectId);
+      return;
+    }
+    if (this.projectIdleNotified.has(projectId)) return;
+    this.projectIdleNotified.add(projectId);
+    const project = this.projectRepo.get(projectId);
+    const name = project?.name || projectId;
+    const doneCount = this.taskRepo.getByProject(projectId).filter((task) => task.status === 'done').length;
+    this.broadcastMessage(
+      `🏁 <b>${this.escapeHtml(name)} đã hết task</b>\nKhông còn task nào đang chờ, chạy hay chờ duyệt. Tổng ${doneCount} task đã hoàn thành.`,
+      { inline_keyboard: [[{ text: '🌐 Xem dashboard', url: this.getDashboardUrl(`#/tasks?project=${encodeURIComponent(projectId)}`) }]] },
+      projectId,
+    );
   }
 
   private resolveTaskTitle(taskId?: string, payload?: Record<string, unknown>, taskObj?: TaskRow | null): string {

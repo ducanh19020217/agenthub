@@ -984,6 +984,8 @@ export interface TelegramStatus {
     quotaAllExhausted: boolean;
     fallback: boolean;
     disk: boolean;
+    taskDone: boolean;
+    projectIdle: boolean;
   };
 }
 

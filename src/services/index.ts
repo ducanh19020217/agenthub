@@ -688,6 +688,8 @@ export const UpdateConfigSchema = z.object({
       fallback: z.boolean().optional(),
       brainWaiting: z.boolean().optional(),
       disk: z.boolean().optional(),
+      taskDone: z.boolean().optional(),
+      projectIdle: z.boolean().optional(),
     }).optional(),
   }).optional(),
   updates: z.object({

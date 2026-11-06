@@ -2854,6 +2854,48 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     });
   }
 
+  it('task.done vẫn báo khi brain.mode = auto, và báo "hết task" khi project không còn task đang chạy', async () => {
+    ctx.projectRepo.insert({ id: 'pd', name: 'Dự án D', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'pd/t-1', projectId: 'pd', slug: 't-1', title: 'Việc một', body: '', level: 'easy', status: 'done' });
+    ctx.taskRepo.insert({ id: 'pd/t-2', projectId: 'pd', slug: 't-2', title: 'Việc hai', body: '', level: 'easy', status: 'running' });
+    const bot = createBot('auto');
+
+    bot.handleEvent('task.done', 'pd/t-1', { by: 'codex', verdict: 'approved' });
+    await bot.flushQueue(CHAT_ID);
+    let sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends).toHaveLength(1);
+    expect(sends[0].body?.text).toContain('Task hoàn thành');
+    expect(sends[0].body?.text).toContain('Việc một');
+    expect(sends[0].body?.text).toContain('codex');
+
+    ctx.taskRepo.update('pd/t-2', { status: 'done' });
+    bot.handleEvent('task.done', 'pd/t-2', undefined);
+    await bot.flushQueue(CHAT_ID);
+    sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends).toHaveLength(3);
+    expect(sends[1].body?.text).toContain('Việc hai');
+    expect(sends[2].body?.text).toContain('Dự án D đã hết task');
+    expect(sends[2].body?.text).toContain('2 task đã hoàn thành');
+
+    // Project rỗng rồi lại rỗng: không báo "hết task" lặp lại nếu chưa có task mới chạy
+    currentTime += 60_000;
+    bot.handleEvent('task.done', 'pd/t-1', { again: true });
+    await bot.flushQueue(CHAT_ID);
+    sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends.filter((c) => String(c.body?.text).includes('đã hết task'))).toHaveLength(1);
+  });
+
+  it('tắt notify.taskDone và notify.projectIdle thì task.done bị chặn trong auto mode như trước', async () => {
+    ctx.projectRepo.insert({ id: 'pq', name: 'PQ', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'pq/t-1', projectId: 'pq', slug: 't-1', title: 'Xong', body: '', level: 'easy', status: 'done' });
+    config.telegram.notify.taskDone = false;
+    config.telegram.notify.projectIdle = false;
+    const bot = createBot('auto');
+    bot.handleEvent('task.done', 'pq/t-1', undefined);
+    await bot.flushQueue(CHAT_ID);
+    expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
+  });
+
   it('1. khi brain.mode = auto: chan cac thong bao tho theo tung task, chi gui hub_notify va su co he thong', async () => {
     const bot = createBot('auto');
 

@@ -1389,6 +1389,96 @@ describe('OpenProject Integration', () => {
 
       await networkFailApp.close();
     });
+
+    it('POST /api/integrations/openproject/sources/:id/clone rejects duplicate newId', async () => {
+      const dupIdApp = Fastify();
+      dupIdApp.setErrorHandler((error, _req, reply) => {
+        if (error instanceof HttpError) {
+          return reply.status(error.statusCode).send({ error: error.error, message: error.message });
+        }
+        return reply.status(500).send({ error: 'internal_error', message: error.message });
+      });
+
+      config.integrations.openproject.sources = [
+        OpenProjectSourceSchema.parse({
+          id: 'src-dup-orig',
+          url: 'https://op.example.com',
+          project: 'ORIG',
+          split: { typeIds: [] },
+        }),
+        OpenProjectSourceSchema.parse({
+          id: 'src-existing',
+          url: 'https://op.example.com',
+          project: 'EXISTING',
+          split: { typeIds: [] },
+        }),
+      ];
+
+      registerOpenProjectRoutes(dupIdApp, config, { fetch: vi.fn() as unknown as typeof globalThis.fetch });
+      await dupIdApp.ready();
+
+      // Sending id that already exists → 400 duplicate_id
+      const res = await dupIdApp.inject({
+        method: 'POST',
+        url: '/api/integrations/openproject/sources/src-dup-orig/clone',
+        payload: { project: 'NEW-DUP', id: 'src-existing' },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toBe('duplicate_id');
+
+      // Ensure no source was added
+      expect(config.integrations.openproject.sources).toHaveLength(2);
+
+      await dupIdApp.close();
+    });
+
+    it('POST /api/integrations/openproject/sources/:id/clone filters type IDs when project has empty type list', async () => {
+      const emptyTypesApp = Fastify();
+      emptyTypesApp.setErrorHandler((error, _req, reply) => {
+        if (error instanceof HttpError) {
+          return reply.status(error.statusCode).send({ error: error.error, message: error.message });
+        }
+        return reply.status(500).send({ error: 'internal_error', message: error.message });
+      });
+
+      config.integrations.openproject.sources = [
+        OpenProjectSourceSchema.parse({
+          id: 'src-empty-types-orig',
+          url: 'https://op.example.com',
+          project: 'ORIG',
+          split: { typeIds: [5, 6] },
+          createTypeId: 5,
+        }),
+      ];
+      saveOpenProjectKey(tmpDir, 'src-empty-types-orig', 'empty-key');
+
+      // Fetch returns a valid response with an empty elements list
+      const emptyFetch = vi.fn().mockImplementation(async (url: string | URL) => {
+        if (url.toString().includes('/api/v3/projects/')) {
+          return new Response(
+            JSON.stringify({ _embedded: { elements: [] } }),
+            { status: 200, headers: { 'Content-Type': 'application/hal+json' } },
+          );
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      registerOpenProjectRoutes(emptyTypesApp, config, { fetch: emptyFetch as unknown as typeof globalThis.fetch });
+      await emptyTypesApp.ready();
+
+      const res = await emptyTypesApp.inject({
+        method: 'POST',
+        url: '/api/integrations/openproject/sources/src-empty-types-orig/clone',
+        payload: { project: 'DEST' },
+      });
+      expect(res.statusCode).toBe(200);
+      const cloned = JSON.parse(res.body);
+      // Empty type list → all type IDs must be filtered out
+      expect(cloned.split?.typeIds).toEqual([]);
+      expect(cloned.createTypeId).toBeNull();
+
+      await emptyTypesApp.close();
+    });
   });
 
   describe('Database migration & TrackerItemRepo', () => {

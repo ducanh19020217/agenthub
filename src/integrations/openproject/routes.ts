@@ -368,6 +368,10 @@ export function registerOpenProjectRoutes(
     const newId = body.id ?? `openproject-${Date.now()}`;
     const newProject = body.project.trim();
 
+    // Validate: new ID must not already exist
+    const idExists = config.integrations.openproject.sources.some((s) => s.id === newId);
+    if (idExists) throw new HttpError(400, 'duplicate_id', `ID "${newId}" đã tồn tại`);
+
     // Validate: project must not conflict with another source sharing the same url
     const conflict = config.integrations.openproject.sources.find(
       (s) => s.id !== id && s.url === source.url && s.project === newProject,
@@ -389,13 +393,12 @@ export function registerOpenProjectRoutes(
       try {
         const client = new OpenProjectClient({ baseUrl: source.url, project: newProject, apiKey: key, fetch: options.fetch });
         const typesCollection = await client.listTypes();
+        // Always filter when we get a successful response (even if list is empty)
         const validTypeIds = new Set((typesCollection._embedded?.elements || []).map((t) => t.id));
-        if (validTypeIds.size > 0) {
-          if (cloned.createTypeId !== null && !validTypeIds.has(cloned.createTypeId)) {
-            (cloned as { createTypeId: number | null }).createTypeId = null;
-          }
-          cloned.split.typeIds = cloned.split.typeIds.filter((tid) => validTypeIds.has(tid));
+        if (cloned.createTypeId !== null && !validTypeIds.has(cloned.createTypeId)) {
+          (cloned as { createTypeId: number | null }).createTypeId = null;
         }
+        cloned.split.typeIds = cloned.split.typeIds.filter((tid) => validTypeIds.has(tid));
       } catch {
         // Network error - keep original type IDs, do not fail
       }

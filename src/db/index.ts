@@ -948,24 +948,8 @@ export const MIGRATIONS: string[] = [
   `,
   // Migration 65: engine and profileName for reviews
   `
-  PRAGMA foreign_keys = OFF;
-  CREATE TABLE reviews_new (
-    id TEXT PRIMARY KEY,
-    taskId TEXT NOT NULL,
-    verdict TEXT NOT NULL CHECK(verdict IN ('approved', 'changes_requested')),
-    feedback TEXT,
-    createdAt TEXT NOT NULL DEFAULT (datetime('now')),
-    actor TEXT NOT NULL DEFAULT 'claude',
-    engine TEXT,
-    profileName TEXT,
-    FOREIGN KEY (taskId) REFERENCES tasks(id)
-  );
-  INSERT INTO reviews_new (id, taskId, verdict, feedback, createdAt, actor)
-    SELECT id, taskId, verdict, feedback, createdAt, actor FROM reviews;
-  DROP TABLE reviews;
-  ALTER TABLE reviews_new RENAME TO reviews;
-  CREATE INDEX IF NOT EXISTS idx_reviews_task ON reviews(taskId);
-  PRAGMA foreign_keys = ON;
+  ALTER TABLE reviews ADD COLUMN engine TEXT;
+  ALTER TABLE reviews ADD COLUMN profileName TEXT;
   `,
 ];
 

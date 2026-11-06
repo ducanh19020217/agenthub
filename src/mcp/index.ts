@@ -720,6 +720,35 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     },
   );
 
+  server.tool(
+    'hub_openproject_clone_source',
+    'Nhân bản nguồn OpenProject: sao chép toàn bộ cấu hình và API key, đổi project. timesheet tự tắt để tránh ghi trùng giờ.',
+    {
+      sourceId: z.string().min(1).describe('ID của nguồn gốc cần nhân bản'),
+      project: z.string().min(1).describe('Mã dự án OP mới (project identifier)'),
+      id: z.string().regex(/^[a-z0-9-]+$/).optional().describe('ID cho nguồn mới (mặc định openproject-<timestamp>)'),
+    },
+    async (args) => {
+      try {
+        const result = await callApi<Record<string, unknown>>(
+          'POST',
+          `/api/integrations/openproject/sources/${encodeURIComponent(args.sourceId)}/clone`,
+          { project: args.project, ...(args.id ? { id: args.id } : {}) },
+        );
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `✓ Đã nhân bản nguồn ${args.sourceId} → ${result['id']} (project: ${result['project']}). timesheet đã tắt. API key đã sao chép.`,
+            },
+          ],
+        };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
   server.tool('hub_timesheet_get', 'Xem bảng giờ OpenProject đã hợp nhất theo ngày', { sourceId: z.string().optional(), date: z.string().optional() }, async ({ sourceId, date }) => {
     try {
       const query = new URLSearchParams(); if (sourceId) query.set('sourceId', sourceId); if (date) query.set('date', date);

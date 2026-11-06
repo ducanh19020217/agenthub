@@ -68,6 +68,7 @@ import type { PageResult } from '../pagination.js';
 import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
 import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
+import { publishTask as executePublishTask, type PublishResult } from '../publish.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
@@ -4694,6 +4695,12 @@ export class AppService {
     if (mergeResult) {
       this.exportKnowledgeFile(task.projectId);
       this.scheduler.getEventBus().emit('task.merged', taskId, mergeResult);
+      const proj = this.projectRepo.get(task.projectId);
+      if (proj && projectSettings(proj).publish?.enabled) {
+        void this.publishTask(taskId).catch((err) => {
+          console.error(`[publish] Auto-publish failed for task ${taskId}:`, err);
+        });
+      }
     }
     return this.taskRepo.get(taskId)!;
     } finally {
@@ -5105,6 +5112,20 @@ export class AppService {
     }
 
     return { ok: true };
+  }
+
+  async publishTask(idParam: string, options?: { manual?: boolean }): Promise<PublishResult> {
+    const taskId = toTaskId(idParam);
+    return executePublishTask(
+      taskId,
+      {
+        taskRepo: this.taskRepo,
+        projectRepo: this.projectRepo,
+        eventBus: this.scheduler.getEventBus(),
+        hubHome: this.config.hubHome,
+      },
+      options,
+    );
   }
 
   getTaskLog(idParam: string, query?: { run?: string; tail?: string | number }): string {

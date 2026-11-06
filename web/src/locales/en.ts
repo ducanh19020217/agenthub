@@ -810,8 +810,8 @@ export const en: typeof vi = {
       "content": "This is retry, cancel, pause. Use it when you need to understand or manage this part of AgentHub. Select it to see the related details; check the impact before confirming changes."
     },
     "columns": {
-      "title": "Columns",
-      "content": "This is columns. Use it when you need to understand or manage this part of AgentHub. Select it to see the related details; check the impact before confirming changes."
+      "title": "Task statuses",
+      "content": "Each box (or column in the Kanban view) is a status: queued, running, review or done, with how many tasks are in it. Click a box to list its tasks, then a task to see its log and diff."
     },
     "help": {
       "title": "Help",
@@ -1227,6 +1227,19 @@ export const en: typeof vi = {
     presetsTitle: 'Configuration Presets',
     presetsSubtitle: 'Select one of 3 standard presets to quickly apply suitable configuration.',
     presetActive: 'In use',
+    presetBase: 'Base',
+    presetStatusActive: 'Active preset: {preset}',
+    presetStatusCustom: 'Active: Custom',
+    presetStatusBasedOn: 'hand-edited from the {preset} preset',
+    presetStatusClosest: 'closest to the {preset} preset',
+    presetStatusDiffers: 'Differs in: {fields}',
+    presetField_brain_mode: 'Brain mode',
+    presetField_brain_permissions: 'Brain permissions',
+    presetField_autoFixOnFail: 'Auto-fix on failed check',
+    presetField_planning_requireApproval: 'Plan approval',
+    presetField_planning_approvalMinTasks: 'Approval min tasks',
+    presetField_reviewer_maxChangesRequested: 'Review rounds',
+    presetField_reviewer_order: 'Reviewer chain',
     presetCustom: 'The current configuration has been customised and does not match any preset.',
     presetApplyBtn: 'Apply',
     presetApplying: 'Applying...',

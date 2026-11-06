@@ -503,6 +503,19 @@ describe('Config Presets, Priority, and Effective Config', () => {
       expect(patch.statusCode).toBe(200);
       expect(await current()).toBe('custom');
     });
+
+    it('khi custom thì báo preset gốc (vừa áp dụng) và các trường đã chỉnh', async () => {
+      const status = async () => JSON.parse((await server.inject({ method: 'GET', url: '/api/presets/current', headers: authHeaders() })).body);
+      await server.inject({ method: 'POST', url: '/api/presets/apply', headers: authHeaders(), payload: { scope: 'global', preset: 'balanced', dryRun: false } });
+      expect(await status()).toMatchObject({ preset: 'balanced', basePreset: 'balanced', baseFromHistory: true, mismatches: [] });
+
+      await server.inject({ method: 'PUT', url: '/api/config', headers: authHeaders(), payload: { autoFixOnFail: false, brain: { permissions: 'standard' } } });
+      const custom = await status();
+      expect(custom.preset).toBe('custom');
+      expect(custom.basePreset).toBe('balanced');
+      expect(custom.baseFromHistory).toBe(true);
+      expect(custom.mismatches.sort()).toEqual(['autoFixOnFail', 'brain.permissions']);
+    });
   });
 
   describe('5c. Project mới nhận preset', () => {

@@ -81,7 +81,7 @@ import { inspectGitProject } from '../projects/git.js';
 import type { DeployService } from '../deploy.js';
 import type { RemoteDeployService, RemoteDeployStatus } from '../remote-deploy.js';
 import type { PerfCollector } from '../perf.js';
-import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset, detectGlobalPreset, presetProjectPatch, type PresetLevel } from '../presets.js';
+import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset, describeGlobalPreset, presetProjectPatch, type PresetLevel } from '../presets.js';
 import type { SetupTools } from '../setup-tools.js';
 import { computeEffectiveConfig } from '../effective-config.js';
 import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
@@ -5525,7 +5525,7 @@ export class AppService {
   }
 
   getCurrentGlobalPreset() {
-    return { preset: detectGlobalPreset(this.config) };
+    return describeGlobalPreset(this.config);
   }
 
   applyPreset(raw: unknown) {

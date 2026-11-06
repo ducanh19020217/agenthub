@@ -1141,6 +1141,25 @@ export interface ApplyPresetResult {
   suggestedChecks?: Array<{ name: string; cmd: string[]; reason?: string }>;
 }
 
+export type GlobalPresetField =
+  | 'brain.mode'
+  | 'brain.permissions'
+  | 'autoFixOnFail'
+  | 'planning.requireApproval'
+  | 'planning.approvalMinTasks'
+  | 'reviewer.maxChangesRequested'
+  | 'reviewer.order';
+
+export interface GlobalPresetStatus {
+  preset: PresetLevel | 'custom';
+  /** Preset the config was derived from (last applied, or closest match). */
+  basePreset?: PresetLevel;
+  /** True when basePreset is the last preset actually applied, not a best guess. */
+  baseFromHistory?: boolean;
+  /** Fields where the config differs from basePreset. */
+  mismatches?: GlobalPresetField[];
+}
+
 export type ConfigSource = 'global' | 'department' | 'project';
 
 export interface EffectiveValue<T> {

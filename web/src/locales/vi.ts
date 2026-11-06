@@ -809,8 +809,8 @@ export const vi = {
       "content": "Đây là nhóm thao tác điều khiển task. Dùng Chạy lại khi lỗi tạm thời, Tạm dừng để giữ trạng thái, Huỷ để kết thúc. Bấm Huỷ là hành động khó hoàn tác; hãy xác nhận đúng task."
     },
     "columns": {
-      "title": "Các cột",
-      "content": "Các cột cho biết task đang chờ, chạy, review hay hoàn tất. Dùng để đọc tiến độ tổng thể. Bấm thẻ để xem log và diff; số lượng cột không phải số worker."
+      "title": "Trạng thái task",
+      "content": "Mỗi ô (hoặc cột ở view Kanban) là một trạng thái: chờ, chạy, review hay hoàn tất, kèm số task đang ở đó. Bấm vào ô để xem danh sách task, bấm task để xem log và diff."
     },
     "help": {
       "title": "Trợ giúp",
@@ -1226,6 +1226,19 @@ export const vi = {
     presetsTitle: 'Preset cấu hình',
     presetsSubtitle: 'Chọn một trong 3 preset chuẩn để áp dụng nhanh cấu hình phù hợp.',
     presetActive: 'Đang dùng',
+    presetBase: 'Gốc',
+    presetStatusActive: 'Đang dùng preset: {preset}',
+    presetStatusCustom: 'Đang dùng: Tuỳ chỉnh',
+    presetStatusBasedOn: 'chỉnh tay từ preset {preset}',
+    presetStatusClosest: 'gần giống preset {preset} nhất',
+    presetStatusDiffers: 'Khác ở: {fields}',
+    presetField_brain_mode: 'Chế độ bộ não',
+    presetField_brain_permissions: 'Quyền bộ não',
+    presetField_autoFixOnFail: 'Tự sửa khi check fail',
+    presetField_planning_requireApproval: 'Duyệt kế hoạch',
+    presetField_planning_approvalMinTasks: 'Số task cần duyệt',
+    presetField_reviewer_maxChangesRequested: 'Số vòng review',
+    presetField_reviewer_order: 'Chuỗi reviewer',
     presetCustom: 'Cấu hình hiện tại đã được chỉnh tay, không khớp preset nào.',
     presetApplyBtn: 'Áp dụng',
     presetApplying: 'Đang áp dụng...',

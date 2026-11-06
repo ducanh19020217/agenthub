@@ -5,7 +5,8 @@ import { getProjects, getStatus, getTaskGraph, getTasks, getTasksPage, resumeTas
 import { StatusBadge } from '../components/StatusBadge';
 import { KANBAN_STATUSES } from '../utils/tasks';
 import { Task } from '../types/api';
-import { Plus, Filter, ArrowUpRight, Zap, Flame, LayoutGrid, Network, List, FolderKanban, Play } from 'lucide-react';
+import { Plus, Filter, ArrowUpRight, Zap, Flame, LayoutGrid, Network, List, FolderKanban, Play, Workflow } from 'lucide-react';
+import { TaskFlow } from '../components/TaskFlow';
 import { SilentRunIndicator } from '../components/SilentRunIndicator';
 import { useLocale } from '../context/LocaleContext';
 import { TaskDag } from '../components/dag';
@@ -301,7 +302,7 @@ export const TasksPage: React.FC = () => {
   const { t } = useLocale();
   const navigate = useNavigate();
   const [urlParams, setUrlParams] = useSearchParams();
-  const [viewMode, setViewMode] = useState<'kanban' | 'dag' | 'list' | 'project'>((urlParams.get('view') as 'kanban' | 'dag' | 'list' | 'project') || 'kanban');
+  const [viewMode, setViewMode] = useState<'kanban' | 'flow' | 'dag' | 'list' | 'project'>((urlParams.get('view') as 'kanban' | 'flow' | 'dag' | 'list' | 'project') || 'kanban');
   const [selectedProject, setSelectedProject] = useState<string>(urlParams.get('project') || 'all');
   const [selectedStatus, setSelectedStatus] = useState<string>(urlParams.get('status') || 'all');
   const [doneFilter, setDoneFilter] = useState<'active_chains' | '1d' | '3d' | '7d' | '30d' | 'all'>('active_chains');
@@ -434,6 +435,10 @@ export const TasksPage: React.FC = () => {
               <LayoutGrid className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">{t('dag.toggleKanban')}</span>
             </button>
+            <button type="button" onClick={() => setViewMode('flow')} data-testid="view-toggle-flow" aria-label={t('tasks.flowView')} title={t('tasks.flowView')} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium cursor-pointer transition-colors ${viewMode === 'flow' ? 'bg-[var(--t-accent)] text-[var(--t-on-accent)] shadow-xs font-semibold' : 'text-[var(--t-text-2)] hover:text-[var(--t-text)]'}`}>
+              <Workflow className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">{t('tasks.flowView')}</span>
+            </button>
             <button type="button" onClick={() => setViewMode('project')} data-testid="view-toggle-project" aria-label={t('tasks.projectView')} title={t('tasks.projectView')} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium cursor-pointer transition-colors ${viewMode === 'project' ? 'bg-[var(--t-accent)] text-[var(--t-on-accent)] shadow-xs font-semibold' : 'text-[var(--t-text-2)] hover:text-[var(--t-text)]'}`}>
               <FolderKanban className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">{t('tasks.projectView')}</span>
@@ -503,7 +508,7 @@ export const TasksPage: React.FC = () => {
           </div>
 
           {/* DAG-specific filters (Status & Done cutoff) */}
-          {viewMode !== 'kanban' && viewMode !== 'project' && (
+          {viewMode !== 'kanban' && viewMode !== 'flow' && viewMode !== 'project' && (
             <>
               {/* Status Filter */}
               <div className="flex items-center gap-2 bg-[var(--t-surface)] border border-[var(--t-border)] rounded-lg px-3 py-1.5 shadow-xs">
@@ -572,7 +577,9 @@ export const TasksPage: React.FC = () => {
         </div>
       </div>
 
-      {viewMode === 'project' ? (
+      {viewMode === 'flow' ? (
+        <TaskFlow project={selectedProject} search={search} />
+      ) : viewMode === 'project' ? (
         <div className="space-y-4 pb-8" data-testid="project-view-wrapper">
           {projects.map((project) => <ProjectTaskGroup key={project.id} project={project} tasks={projectTasks.filter((task) => task.projectId === project.id)} />)}
         </div>

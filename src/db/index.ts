@@ -1005,6 +1005,11 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE reviews ADD COLUMN engine TEXT;
   ALTER TABLE reviews ADD COLUMN profileName TEXT;
   `,
+  // Migration 71: check execution sequence and startedAt timestamp.
+  `
+  ALTER TABLE check_results ADD COLUMN seq INTEGER;
+  ALTER TABLE check_results ADD COLUMN startedAt TEXT;
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -1051,6 +1056,7 @@ export function openDatabase(dbPath: string): Database.Database {
   }
   ensureProfileAvatarColumn(db);
   ensureSchedulerLimitColumns(db);
+  ensureCheckResultsColumns(db);
   cleanExpiredClaudeLimits(db);
 
   return db;
@@ -1102,6 +1108,19 @@ function ensureSchedulerLimitColumns(db: Database.Database): void {
   add('profiles', 'consecutiveCrashes', 'INTEGER NOT NULL DEFAULT 0');
   add('profiles', 'lastCrashAt', 'INTEGER');
   add('profiles', 'coolingUntil', 'INTEGER');
+}
+
+function ensureCheckResultsColumns(db: Database.Database): void {
+  const add = (column: string, definition: string) => {
+    if (hasColumn(db, 'check_results', column)) return;
+    try {
+      db.exec(`ALTER TABLE check_results ADD COLUMN ${column} ${definition}`);
+    } catch (error) {
+      if (!String(error).includes('duplicate column name')) throw error;
+    }
+  };
+  add('seq', 'INTEGER');
+  add('startedAt', 'TEXT');
 }
 
 // Repository helpers

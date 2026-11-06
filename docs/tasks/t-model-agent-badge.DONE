@@ -1,0 +1,84 @@
+# Task t-model-agent-badge - Hoàn thành
+
+## 1. Tóm tắt việc đã làm
+- **Component dùng chung ModelBadge (`web/src/components/ModelBadge.tsx`)**:
+  - Mở rộng `ModelBadgeProps` nhận `profileName?: string | null` (và export `AgentModelBadge`).
+  - Tích hợp `AgentIcon` hiển thị icon thương hiệu (Gemini, Codex, Claude) tương ứng engine.
+  - Hiển thị cấu trúc badge: `[AgentIcon] [profileName] · [model]`. Nếu không có profileName thì chỉ hiển thị model name định dạng gọn gàng, tuyệt đối không xuất hiện chuỗi "undefined".
+  - Tự động suy engine từ model (`codex:` / `gpt` -> codex, `gemini` / `agy` -> gemini, `claude` -> claude) khi engine không được truyền trực tiếp.
+  - Thuộc tính `title` tooltip chứa chuỗi đầy đủ dạng `engine / profile / model` (hoặc `engine / model` khi chưa có profile).
+  - Viết 21 unit tests trong `web/src/test/modelBadge.test.tsx` kiểm tra mọi trường hợp: có profile, không profile, suy engine từ model, format tooltip.
+
+- **Backend DB (`src/db/index.ts`)**:
+  - Thêm Migration 65 tạo bảng `reviews_new` bổ sung 2 cột nullable `engine TEXT` và `profileName TEXT` (đảm bảo 100% idempotent).
+  - Cập nhật interface `ReviewRow` và method `ReviewRepo.insert`.
+  - Khóa hash migration 65 (`a28c821f228e6760`) vào `test/fixtures/migrations.lock`.
+  - Viết test `test/review-agent-db.test.ts` kiểm tra lưu và đọc `engine`, `profileName`.
+
+- **Backend Scheduler & Services (`src/scheduler/index.ts`, `src/services/index.ts`, `src/savings.ts`, `src/services/dag.ts`)**:
+  - Scheduler:
+    - Ghi nhận `engine` và `profileName` khi ghi nhận kết quả review (`finishReview`, `reviewTask`).
+    - Bổ sung `engine` và `profile` vào event `review.started`, `review.completed`, `task.running`, `task.model_skipped`.
+    - Truyền `engine` và `profileName` vào review history trước đó (`previousReviews`).
+  - Services:
+    - `Task.currentRun`: bổ sung trường `engine` cùng với `model` và `profileName`.
+    - `Task.reviews[]`: trả ra `engine` và `profileName` từ DB (kèm fallback từ event nếu là bản ghi cũ).
+    - `Task.reviewChain[]`: làm giàu từng bước (`step.engine` và `step.profileName`) từ review đã hoàn thành hoặc reviewer đang chạy.
+    - `SavingsTaskItem`: bổ sung `profileName` từ lượt chạy cuối của task.
+    - API schema `ReviewTaskSchema` chấp nhận `engine` và `profileName`.
+    - Viết test `test/review-agent-api.test.ts` kiểm tra endpoint `POST /api/tasks/:id/review` và `GET /api/tasks/:id` trả về đầy đủ agent metadata.
+
+- **Frontend UI (`web/src/pages/`, `web/src/components/`)**:
+  - `TaskDetailPage.tsx`:
+    - Review chain: hiển thị `ModelBadge` với `engine` và `profileName` cho từng bước review kèm mode (`step.mode`).
+    - Review history: thay thế chuỗi raw `({review.model})` bằng `ModelBadge` hiển thị agent icon, profile và model.
+    - Timeline events: các sự kiện có `payload.model`, `payload.profile`, `payload.engine` hiển thị `ModelBadge`.
+    - Runs table: cột Model hiển thị `ModelBadge` với `r.profileName` và `r.engine`.
+    - Header trạng thái task đang chạy: hiển thị `ModelBadge` với model, engine và profile của `currentRun`.
+    - Model chain trong modal sửa task: hiển thị `ModelBadge` cạnh tên model.
+  - `DashboardPage.tsx`:
+    - Bảng worker đang chạy: truyền `worker.profileName` vào `ModelBadge`.
+    - Banner failover: hiển thị `ModelBadge` khi failover theo model.
+  - `SavingsPage.tsx`: truyền `task.profileName` vào `ModelBadge`.
+  - `TaskDag.tsx`: node đang chạy hiển thị `runningProfile · runningModel` cùng title đầy đủ `engine / profile / model`.
+  - `TasksPage.tsx`: card task đang chạy hiển thị `ModelBadge` bên cạnh chỉ báo hoạt động.
+  - `ClaudeSessionsPage.tsx`: cột Model trong bảng session và header chi tiết hiển thị Claude `ModelBadge`.
+  - `ChatPage.tsx`: header phiên chat hiển thị Claude `ModelBadge` kèm `profileName`.
+  - `ProjectSettingsDrawer.tsx`: mục Brain engine hiển thị `ModelBadge`.
+  - Cập nhật test `web/src/test/taskDetailPage.test.tsx` (thêm test 22) và `web/src/test/savings.test.tsx`.
+
+## 2. Thống kê chi tiết các vị trí hiển thị model và agent
+- **Vị trí có đầy đủ Engine + Profile + Model**:
+  1. `TaskDetailPage` - Runs table: lấy từ `run.engine`, `run.profileName`, `run.model`.
+  2. `TaskDetailPage` - Review history: lấy từ `review.engine`, `review.profileName`, `review.model`.
+  3. `TaskDetailPage` - Review chain (các bước đã chạy xong hoặc đang chạy): lấy từ review tương ứng hoặc reviewer đang chạy.
+  4. `TaskDetailPage` - Header trạng thái running: lấy từ `task.currentRun.engine`, `task.currentRun.profileName`, `task.currentRun.model`.
+  5. `DashboardPage` - Bảng worker đang chạy: lấy từ `worker.engine`, `worker.profileName`, `worker.model`.
+  6. `SavingsPage` - Bảng danh sách task: lấy từ `task.engine`, `task.profileName`, `task.model`.
+  7. `TaskDag` - Node trạng thái running: lấy từ `currentRun.engine`, `currentRun.profileName`, `currentRun.model`.
+  8. `TasksPage` - Card task running: lấy từ `currentRun.engine`, `currentRun.profileName`, `currentRun.model`.
+  9. `ChatPage` - Header phiên chat: engine `claude`, profile `activeSession.profileName`, model `activeSession.model`.
+
+- **Vị trí chỉ hiển thị Engine + Model (chưa có Profile) và lý do**:
+  1. `TaskDetailPage` - Review chain các bước chưa chạy: chỉ có cấu hình reviewer (ví dụ `codex:gpt-5.6-luna` hoặc `claude`) và engine suy ra; chưa có profile vì bước này chưa được scheduler phân bổ tài khoản thực thi.
+  2. `TaskDetailPage` - Model chain trong form sửa task: đây là chuỗi model dự phòng được cấu hình cho task trước khi chạy; chưa có profile tài khoản cụ thể cho đến khi scheduler cấp phát run.
+  3. `ClaudeSessionsPage` - Bảng và chi tiết Claude session: quản lý phiên Claude CLI cục bộ (engine luôn là `claude` theo binary claude của hệ thống), không thuộc hệ thống profile đa tài khoản của AgentHub.
+  4. `ProjectSettingsDrawer` - Brain effective config: cấu hình engine/model mặc định cho Brain của dự án (chưa phải một turn chạy cụ thể).
+
+## 3. Kết quả kiểm tra
+- `npm run lint`: 0 errors, 80 warnings (toàn bộ 80 warnings thuộc baseline cũ, không phát sinh cảnh báo mới).
+- `npx tsc --noEmit -p .`: Đạt (0 errors).
+- `npx tsc --noEmit -p web`: Đạt (0 errors).
+- `npm run test -- --run`: 129 test files passed, 1563 tests passed.
+- `npm run test:web -- --run`: 65 test files passed, 550 tests passed.
+- `npm run build:web`: Đạt (Vite production build thành công trong 4.44s).
+
+## 4. Việc chưa làm được
+- Không có. Tất cả các yêu cầu trong `.agenthub/task.md` đều đã được thực hiện và kiểm tra đầy đủ.
+
+## 5. Danh sách commits
+- `eae1a2cc`: `feat(db): add engine and profileName columns to reviews table`
+- `ecc281e7`: `feat(api): include agent engine and profile in reviews, runs, and events`
+- `6998f78c`: `feat(web): expand ModelBadge to display agent engine and profile`
+- `ff76c7f1`: `fix(db): ensure migration 65 is idempotent for reviews table`
+- `ff4e080d`: `feat(web): display agent badges across task detail, dashboard, savings, and dag`

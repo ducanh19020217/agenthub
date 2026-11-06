@@ -1,0 +1,59 @@
+# DONE: t-flow-live-animation – View "Quy trình" ở trang Task sinh động khi có task đang chạy
+
+## Tóm tắt công việc đã thực hiện
+1. **Ô trạng thái "đang hoạt động" (`running`, `checking`, `review`)**:
+   - Khi task count > 0: Ô hiển thị vòng sáng pulse quanh viền bằng CSS keyframes `@keyframes flow-pulse` sử dụng biến màu CSS tương ứng (`var(--status-${status}-color, var(--t-accent))`), kèm thuộc tính `data-active="true"`.
+   - Các icon trong ô chuyển động nhẹ theo nhịp đặc trưng: Play nhịp nhẹ (`flow-icon-play`), Flask lắc nhẹ (`flow-icon-flask`), ScanEye (Review) chớp mắt (`flow-icon-review`).
+   - Khi count = 0: Ô giữ trạng thái tĩnh như ban đầu, không có vòng sáng và không có `data-active`.
+
+2. **Mũi tên dòng chảy chuyển động (marching ants)**:
+   - Các cạnh dẫn vào/ra ô đang hoạt động được animate bằng `stroke-dasharray="6 5"` kết hợp `@keyframes flow-edge-flow` (chuyển động `stroke-dashoffset` theo hướng mũi tên, chu kỳ ~1.2s), gắn thuộc tính `data-animated="true"`.
+   - Cạnh không liên quan giữ nét liền tĩnh (không có `data-animated`).
+   - Nhánh quay lại (nét đứt: "Reviewer yêu cầu sửa" từ Review về Running; làn "Chạy lại / tiếp tục" từ Waiting Quota / Failed / Blocked về Queued) chỉ kích hoạt chuyển động khi ô nguồn tương ứng có task.
+
+3. **Hiệu ứng số đếm nảy khi đổi giá trị giữa các lần fetch**:
+   - Dùng `useEffect` kết hợp `prevTotalRef` và `isInitialLoadRef` để phát hiện giá trị thay đổi giữa 2 lần fetch (bỏ qua lần mount đầu tiên).
+   - Khi đổi giá trị, kích hoạt class `flow-count-bounce` (scale 1 → 1.25 → 1 trong 400ms và thoáng đổi màu `--t-accent`), sau 400ms class tự biến mất.
+
+4. **Nhịp refetch tự động**:
+   - Khi tổng số task ở các trạng thái active (`running`, `checking`, `review`) > 0: `refetchInterval = 5_000` (5s).
+   - Khi không có task active: `refetchInterval = 30_000` (30s).
+   - Luôn đặt `refetchIntervalInBackground: false` để dừng polling khi tab ở chế độ nền.
+   - Expose hằng số `FLOW_ACTIVE_REFETCH_INTERVAL`, `FLOW_IDLE_REFETCH_INTERVAL` và hàm helper `getFlowRefetchInterval`.
+
+5. **Chi tiết task đang chạy trong ô Đang chạy**:
+   - Khi ô `running` có task, chiều cao ô mở rộng phù hợp (116px) và hiển thị tối đa 2 dòng preview lấy từ `getTasksPage` (`limit: 3`, `status=running`):
+     - Mỗi dòng có dấu chấm xanh nhấp nháy (`flow-dot-pulse`, màu `--t-ok`), tên dự án và slug của task.
+     - Khi số lượng task running > 2, hiển thị thêm nhãn tóm tắt `+{count} nữa` (en: `+{count} more`) qua i18n `tasks.flow.runningMore`.
+   - Bấm vào ô vẫn mở popup danh sách đầy đủ có phân trang như trước.
+
+6. **Tôn trọng reduced-motion**:
+   - Toàn bộ animation (`flow-pulse`, `flow-edge-flow`, `flow-count-bounce`, `flow-dot-pulse`, `flow-icon-*`) được tắt hoàn toàn trong `@media (prefers-reduced-motion: reduce)`, giữ viền sáng tĩnh và không di chuyển.
+
+7. **CSS tokens & i18n**:
+   - Toàn bộ màu sắc dùng token CSS chuẩn: `--t-accent`, `--t-ok`, `--t-text`, `--t-text-2`, `--t-text-3`, `--status-*-color`.
+   - Thêm bản dịch `runningMore` vào cả `web/src/locales/vi.ts` và `web/src/locales/en.ts`.
+
+## Danh sách file đã sửa
+- `web/src/index.css`: Thêm keyframes và classes cho flow-pulse, flow-edge-flow, flow-count-bounce, flow-dot-pulse, flow-icon-*, và khối reduced-motion.
+- `web/src/locales/vi.ts`: Thêm key `tasks.flow.runningMore`.
+- `web/src/locales/en.ts`: Thêm key `tasks.flow.runningMore`.
+- `web/src/components/TaskFlow.tsx`: Triển khai live animation, dynamic refetchInterval, running tasks preview, count bounce, `data-active`, và `data-animated`.
+- `web/src/test/taskFlow.test.tsx`: Thêm 5 unit test kiểm tra toàn bộ tiêu chí nghiệm thu (a)-(e).
+
+## Kết quả lint / typecheck / test / build
+- **Lint**: `npm run lint` pass (0 errors, 80 existing warnings in test files).
+- **Typecheck**: `npx tsc --noEmit -p web` pass (0 errors).
+- **Web Tests**: `npm run test:web -- --run` pass:
+  - 67/67 test files passed
+  - 573/573 tests passed
+  - Trong đó `web/src/test/taskFlow.test.tsx` có 9/9 tests passed (4 test cũ + 5 test mới cho live animation).
+- **Build Web**: `npm run build:web` pass (tsc & vite production build thành công trong 4.40s).
+
+## Việc chưa làm được / còn thiếu
+- Không có (toàn bộ các yêu cầu trong task.md và tiêu chí nghiệm thu (a)-(d) đều đã hoàn thành và kiểm tra đầy đủ).
+
+## Danh sách commit
+- `344008b2` feat(flow): add pulse and icon animations for active flow nodes and reduced motion styles
+- `485920a9` feat(flow): animate active status nodes, flow edges, and running task preview
+- `9b6e57de` test(flow): add unit tests for live animation, active edges, count bounce, and refetch interval

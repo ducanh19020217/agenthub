@@ -222,17 +222,24 @@ const FlowNodeView: React.FC<{
       <text x={node.x + 70} y={node.y + 34} fontSize={13.5} fontWeight={600} style={{ fill: hasTasks ? 'var(--t-text)' : 'var(--t-text-2)' }}>
         {label}
       </text>
-      <text x={node.x + 70} y={node.y + 64} style={{ fill: 'var(--t-text-3)' }}>
-        <tspan
-          fontSize={24}
-          fontWeight={700}
-          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-          className={isBouncing ? 'flow-count-bounce' : undefined}
-          style={{ fill: hasTasks ? color : 'var(--t-text-3)' }}
-        >
-          {isLoading ? '…' : total}
-        </tspan>
-        <tspan dx={6} fontSize={12}>{t('tasks.flow.taskUnit')}</tspan>
+      <text
+        x={node.x + 70}
+        y={node.y + 64}
+        fontSize={24}
+        fontWeight={700}
+        fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+        className={isBouncing ? 'flow-count-bounce' : undefined}
+        style={{ fill: hasTasks ? color : 'var(--t-text-3)' }}
+      >
+        {isLoading ? '…' : total}
+      </text>
+      <text
+        x={node.x + 70 + Math.round((isLoading ? 1 : String(total).length) * 14.5 + 6)}
+        y={node.y + 64}
+        fontSize={12}
+        style={{ fill: 'var(--t-text-3)' }}
+      >
+        {t('tasks.flow.taskUnit')}
       </text>
 
       {/* Requirement 5: Details of running tasks */}

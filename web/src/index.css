@@ -803,7 +803,6 @@ em,
 }
 
 .flow-count-bounce {
-  display: inline-block;
   transform-origin: center;
   transform-box: fill-box;
   animation: flow-count-bounce 400ms ease-in-out;

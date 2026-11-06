@@ -7,6 +7,8 @@ import { KANBAN_STATUSES } from '../utils/tasks';
 import { Task } from '../types/api';
 import { Plus, Filter, ArrowUpRight, Zap, Flame, LayoutGrid, Network, List, FolderKanban, Play, Workflow } from 'lucide-react';
 import { TaskFlow } from '../components/TaskFlow';
+import { ProjectTag } from '../components/ProjectTag';
+import { useProjectColor } from '../utils/projectColor';
 import { SilentRunIndicator } from '../components/SilentRunIndicator';
 import { useLocale } from '../context/LocaleContext';
 import { TaskDag } from '../components/dag';
@@ -14,6 +16,10 @@ import { filterTasksForDag } from '../components/dag/dagUtils';
 import { DataTable } from '../components/ui';
 import { useShowMore } from '../components/CollapsibleList';
 import { autoMergeReasonKey } from '../utils/autoMerge';
+
+type TasksViewMode = 'kanban' | 'flow' | 'dag' | 'list' | 'project';
+/** View mở mặc định khi vào trang Task (không có ?view= trên URL). */
+export const DEFAULT_TASKS_VIEW: TasksViewMode = 'flow';
 
 export interface KanbanColumnProps {
   statusKey: (typeof KANBAN_STATUSES)[number];
@@ -23,6 +29,7 @@ export interface KanbanColumnProps {
 
 const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project, search }) => {
   const { t } = useLocale();
+  const colorOf = useProjectColor();
   const queryClient = useQueryClient();
   const resumeMutation = useMutation({
     mutationFn: (id: string) => resumeTask(id),
@@ -109,6 +116,7 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
               key={task.id}
               to={`/tasks/${encodeURIComponent(task.id.replace('/', '~'))}`}
               className="block bg-[var(--t-surface)] p-3.5 rounded-lg border border-[var(--t-border)] shadow-xs hover:border-[var(--t-accent)] hover:shadow-sm transition-all group"
+              style={{ borderLeft: `3px solid ${colorOf(task.projectId)}` }}
             >
               <div className="flex items-start justify-between gap-2 mb-1.5">
                 <span className="text-xs font-mono text-[var(--t-text-2)] font-medium">
@@ -219,9 +227,7 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
               )}
 
               <div className="flex items-center justify-between gap-2 pt-2 border-t border-[var(--t-border)] text-[11px]">
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-[var(--t-surface-2)] font-medium text-[var(--t-text-2)] border border-[var(--t-border)]">
-                  {task.projectId}
-                </span>
+                <ProjectTag projectId={task.projectId} />
 
                 <div className="flex items-center gap-1.5">
                   {task.level === 'hard' ? (
@@ -259,12 +265,14 @@ export const KanbanColumn = memo(KanbanColumnComponent);
 
 const ProjectTaskGroup: React.FC<{ project: { id: string; name: string }; tasks: Task[] }> = ({ project, tasks }) => {
   const { t } = useLocale();
+  const colorOf = useProjectColor();
   const visible = useShowMore(tasks, 20, 20, `agenthub:tasks:project:${project.id}`);
   return (
     <section className="rounded-xl border border-[var(--t-border)] bg-[var(--t-surface-2)] overflow-hidden">
       <div className="flex items-center gap-2 p-3 sm:p-4">
-        <FolderKanban className="h-4 w-4 text-[var(--t-accent)]" />
+        <FolderKanban className="h-4 w-4" style={{ color: colorOf(project.id) }} />
         <span className="font-semibold text-[var(--t-text)]">{project.name}</span>
+        <ProjectTag projectId={project.id} name={project.id} className="font-mono font-medium" />
       </div>
       <div className="border-t border-[var(--t-border)] p-3 sm:p-4">
         {visible.visibleItems.length > 0 ? <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">{visible.visibleItems.map((task) => (
@@ -302,7 +310,7 @@ export const TasksPage: React.FC = () => {
   const { t } = useLocale();
   const navigate = useNavigate();
   const [urlParams, setUrlParams] = useSearchParams();
-  const [viewMode, setViewMode] = useState<'kanban' | 'flow' | 'dag' | 'list' | 'project'>((urlParams.get('view') as 'kanban' | 'flow' | 'dag' | 'list' | 'project') || 'kanban');
+  const [viewMode, setViewMode] = useState<TasksViewMode>((urlParams.get('view') as TasksViewMode) || DEFAULT_TASKS_VIEW);
   const [selectedProject, setSelectedProject] = useState<string>(urlParams.get('project') || 'all');
   const [selectedStatus, setSelectedStatus] = useState<string>(urlParams.get('status') || 'all');
   const [doneFilter, setDoneFilter] = useState<'active_chains' | '1d' | '3d' | '7d' | '30d' | 'all'>('active_chains');
@@ -352,7 +360,7 @@ export const TasksPage: React.FC = () => {
     const next = new URLSearchParams(urlParams);
     const values: Record<string, string> = { project: selectedProject, status: selectedStatus, search, page: String(page), pageSize: String(pageSize), view: viewMode, sort: sortKey, order: sortDirection };
     for (const [key, value] of Object.entries(values)) {
-      if (value && value !== 'all' && value !== '1' && !(key === 'pageSize' && value === '20') && !(key === 'view' && value === 'kanban')) next.set(key, value);
+      if (value && value !== 'all' && value !== '1' && !(key === 'pageSize' && value === '20') && !(key === 'view' && value === DEFAULT_TASKS_VIEW)) next.set(key, value);
       else next.delete(key);
     }
     if (next.toString() !== urlParams.toString()) setUrlParams(next, { replace: true });
@@ -615,7 +623,7 @@ export const TasksPage: React.FC = () => {
                 />
               ),
             },
-            { key: 'project', title: t('tasks.project'), render: (task) => <span>{task.projectId}</span> },
+            { key: 'project', title: t('tasks.project'), render: (task) => <ProjectTag projectId={task.projectId} /> },
           ]}
           page={page}
           pageSize={pageSize}

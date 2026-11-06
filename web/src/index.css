@@ -155,6 +155,17 @@
   --t-gemini-from: #1ba1e2;
   --t-gemini-via: #4a88ec;
   --t-gemini-to: #9b51e0;
+  /* Project palette (light): màu tự gán theo mã dự án, xem utils/projectColor.ts */
+  --t-project-0: #2563eb;
+  --t-project-1: #c2410c;
+  --t-project-2: #15803d;
+  --t-project-3: #9333ea;
+  --t-project-4: #0e7490;
+  --t-project-5: #be123c;
+  --t-project-6: #a16207;
+  --t-project-7: #4f46e5;
+  --t-project-8: #0f766e;
+  --t-project-9: #c026d3;
   --t-info: var(--t-accent);
   --t-on-accent: #ffffff;
   --t-info-bg: color-mix(in srgb, var(--t-info) 12%, transparent);
@@ -347,6 +358,17 @@
   --t-ok-fill: #50bc29;
   --t-purple: hsl(277, 60%, 65%);
   --t-checking: #2dd4bf;
+  /* Project palette (dark): màu tự gán theo mã dự án, xem utils/projectColor.ts */
+  --t-project-0: #6ea8fe;
+  --t-project-1: #fb923c;
+  --t-project-2: #4ade80;
+  --t-project-3: #c084fc;
+  --t-project-4: #22d3ee;
+  --t-project-5: #fb7185;
+  --t-project-6: #facc15;
+  --t-project-7: #a5b4fc;
+  --t-project-8: #2dd4bf;
+  --t-project-9: #f0abfc;
   --t-claude: #d97757;
   --t-info: var(--t-accent);
   --t-on-accent: #ffffff;

@@ -6,6 +6,7 @@ import { getTasksPage } from '../api/client';
 import { Clock, ArrowRight } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
 import { StatusBadge } from './StatusBadge';
+import { ProjectTag } from './ProjectTag';
 
 export interface WaitingQueueProps {
   tasks?: Task[];
@@ -102,9 +103,7 @@ export const WaitingQueue: React.FC<WaitingQueueProps> = ({
                   </div>
 
                   <div className="flex items-center gap-2 text-xs text-[var(--t-text-2)] font-mono">
-                    <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-[var(--t-surface-2)] border border-[var(--t-border)]">
-                      {task.projectId || task.id.split('/')[0]}
-                    </span>
+                    <ProjectTag projectId={task.projectId || task.id.split('/')[0]} />
                     <span>{task.id}</span>
                   </div>
                 </div>

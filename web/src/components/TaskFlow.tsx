@@ -1,22 +1,38 @@
 import React, { useEffect, useState } from 'react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { ArrowUpRight, Flame, Zap } from 'lucide-react';
+import { ArrowUpRight, CircleCheck, CircleX, Clock, FilePen, Flame, FlaskConical, Hourglass, OctagonAlert, Play, ScanEye, Zap, type LucideIcon } from 'lucide-react';
 import { getTasksPage } from '../api/client';
 import { useLocale } from '../context/LocaleContext';
 import type { Task, TaskStatus } from '../types/api';
 import { StatusBadge } from './StatusBadge';
 import { Modal } from './ui';
+import { ProjectTag } from './ProjectTag';
+import { useProjectColor } from '../utils/projectColor';
 
 /** Sơ đồ quy trình: mỗi node là một trạng thái task, bấm vào để xem danh sách task. */
 
 const NODE_W = 172;
-const NODE_H = 92;
+const NODE_H = 80;
 const TOP_Y = 64;
-const BOTTOM_Y = 268;
-const LANE_Y = 404;
+const BOTTOM_Y = 248;
+const LANE_Y = 372;
 const VIEW_W = 1240;
-const VIEW_H = 440;
+const VIEW_H = 400;
+const EDGE_STYLE = { stroke: 'var(--t-text-3)', strokeOpacity: 0.6 } as const;
+
+const STATUS_ICON: Record<TaskStatus, LucideIcon> = {
+  draft: FilePen,
+  queued: Clock,
+  running: Play,
+  checking: FlaskConical,
+  waiting_quota: Hourglass,
+  review: ScanEye,
+  blocked: OctagonAlert,
+  failed: CircleX,
+  done: CircleCheck,
+  cancelled: CircleX,
+};
 const COL_X = [20, 224, 428, 632, 836, 1040];
 
 interface FlowNode { status: TaskStatus; x: number; y: number }
@@ -61,6 +77,7 @@ const FlowNodeView: React.FC<{
   const color = statusColor(node.status);
   const label = t(`status.${node.status}`);
   const active = total > 0;
+  const Icon = STATUS_ICON[node.status];
   const open = () => onOpen(node.status);
 
   return (
@@ -70,7 +87,7 @@ const FlowNodeView: React.FC<{
       data-testid={`flow-node-${node.status}`}
       data-count={isLoading ? '' : String(total)}
       aria-label={t('tasks.flow.nodeAria', { status: label, count: String(total) })}
-      className="cursor-pointer outline-hidden [&:focus-visible>rect.flow-node-frame]:stroke-[3]"
+      className="group cursor-pointer outline-hidden [&:focus-visible>rect.flow-node-frame]:stroke-[3]"
       onClick={open}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -86,7 +103,7 @@ const FlowNodeView: React.FC<{
           y={node.y - 4}
           width={NODE_W + 8}
           height={NODE_H + 8}
-          rx={16}
+          rx={18}
           fill="none"
           style={{ stroke: color, opacity: 0.35 }}
           strokeWidth={2}
@@ -94,36 +111,41 @@ const FlowNodeView: React.FC<{
         />
       )}
       <rect
-        className="flow-node-frame transition-[stroke-width]"
+        className="flow-node-frame transition-[stroke-width] group-hover:stroke-[2.5]"
         x={node.x}
         y={node.y}
         width={NODE_W}
         height={NODE_H}
-        rx={12}
+        rx={14}
         style={{
-          fill: `color-mix(in srgb, ${color} ${active ? 14 : 6}%, var(--t-surface))`,
+          fill: `color-mix(in srgb, ${color} ${active ? 12 : 4}%, var(--t-surface-2))`,
           stroke: color,
         }}
         strokeWidth={active ? 2 : 1.25}
-        strokeOpacity={active ? 1 : 0.55}
+        strokeOpacity={active ? 1 : 0.45}
       />
-      <rect x={node.x} y={node.y} width={NODE_W} height={5} rx={2.5} style={{ fill: color }} />
-      <circle cx={node.x + 18} cy={node.y + 28} r={5} style={{ fill: color }} />
-      <text x={node.x + 30} y={node.y + 33} fontSize={14} fontWeight={600} style={{ fill: 'var(--t-text)' }}>
+      <rect
+        x={node.x + 14}
+        y={node.y + 18}
+        width={44}
+        height={44}
+        rx={12}
+        style={{ fill: `color-mix(in srgb, ${color} ${active ? 26 : 14}%, transparent)` }}
+      />
+      <Icon x={node.x + 25} y={node.y + 29} width={22} height={22} strokeWidth={2.2} style={{ color }} aria-hidden="true" />
+      <text x={node.x + 70} y={node.y + 34} fontSize={13.5} fontWeight={600} style={{ fill: active ? 'var(--t-text)' : 'var(--t-text-2)' }}>
         {label}
       </text>
-      <text
-        x={node.x + 16}
-        y={node.y + 74}
-        fontSize={30}
-        fontWeight={700}
-        fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-        style={{ fill: active ? color : 'var(--t-text-3)' }}
-      >
-        {isLoading ? '…' : total}
-      </text>
-      <text x={node.x + NODE_W - 14} y={node.y + 72} fontSize={12} textAnchor="end" style={{ fill: 'var(--t-text-3)' }}>
-        {t('tasks.flow.taskUnit')}
+      <text x={node.x + 70} y={node.y + 64} style={{ fill: 'var(--t-text-3)' }}>
+        <tspan
+          fontSize={24}
+          fontWeight={700}
+          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+          style={{ fill: active ? color : 'var(--t-text-3)' }}
+        >
+          {isLoading ? '…' : total}
+        </tspan>
+        <tspan dx={6} fontSize={12}>{t('tasks.flow.taskUnit')}</tspan>
       </text>
     </g>
   );
@@ -137,7 +159,7 @@ const Edge: React.FC<{ d: string; label?: string; lx?: number; ly?: number; dash
       strokeWidth={1.75}
       strokeDasharray={dashed ? '6 5' : undefined}
       markerEnd="url(#flow-arrow)"
-      style={{ stroke: 'var(--t-border-strong, var(--t-text-3))' }}
+      style={EDGE_STYLE}
     />
     {label && lx !== undefined && ly !== undefined && (
       <text x={lx} y={ly} fontSize={11.5} textAnchor={anchor} style={{ fill: 'var(--t-text-3)' }}>
@@ -185,7 +207,7 @@ const FlowEdges: React.FC = () => {
           fill="none"
           strokeWidth={1.75}
           strokeDasharray="6 5"
-          style={{ stroke: 'var(--t-border-strong, var(--t-text-3))' }}
+          style={EDGE_STYLE}
         />
       ))}
       <Edge
@@ -210,6 +232,7 @@ const FlowEdges: React.FC = () => {
 
 const FlowTaskList: React.FC<{ status: TaskStatus; project: string; search: string }> = ({ status, project, search }) => {
   const { t } = useLocale();
+  const colorOf = useProjectColor();
   const pageSize = 20;
   const { data, isLoading, isError } = useQuery({
     queryKey: ['tasks-kanban', 'flow-list', project, status, search],
@@ -243,21 +266,22 @@ const FlowTaskList: React.FC<{ status: TaskStatus; project: string; search: stri
 
   const remaining = Math.max(0, (data?.total || 0) - items.length);
   return (
-    <div className="space-y-2">
-      <ul className="max-h-[60vh] space-y-2 overflow-y-auto pr-1" data-testid="flow-task-list">
+    <div className="space-y-3">
+      <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3" data-testid="flow-task-list">
         {items.map((task) => (
           <li key={task.id}>
             <Link
               to={taskHref(task)}
-              className="group block rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-3 transition-colors hover:border-[var(--t-accent)]"
+              className="group flex h-full flex-col rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-3.5 transition-colors hover:border-[var(--t-accent)]"
+              style={{ borderLeft: `3px solid ${colorOf(task.projectId)}` }}
             >
               <div className="flex items-start justify-between gap-2">
                 <span className="truncate font-mono text-xs text-[var(--t-text-2)]">{task.slug}</span>
                 <ArrowUpRight className="h-3.5 w-3.5 shrink-0 text-[var(--t-text-3)] group-hover:text-[var(--t-accent)]" />
               </div>
               <div className="mt-1 line-clamp-2 text-sm font-semibold text-[var(--t-text)]">{task.title}</div>
-              <div className="mt-2 flex items-center justify-between gap-2 text-xs">
-                <span className="truncate rounded bg-[var(--t-surface)] px-1.5 py-0.5 font-mono text-[var(--t-text-2)]">{task.projectId}</span>
+              <div className="mt-auto flex items-center justify-between gap-2 pt-3 text-xs">
+                <ProjectTag projectId={task.projectId} />
                 <span className="inline-flex shrink-0 items-center gap-1 text-[var(--t-text-3)]">
                   {task.level === 'hard' ? <Flame className="h-3 w-3" /> : <Zap className="h-3 w-3" />}
                   {task.level === 'hard' ? t('tasks.flow.levelHard') : t('tasks.flow.levelEasy')}
@@ -288,7 +312,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
 
   return (
     <div className="pb-8" data-testid="flow-view-wrapper">
-      <div className="overflow-x-auto rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-3">
+      <div className="overflow-x-auto rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-3" data-tour="task-columns">
         <svg
           viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
           className="block h-auto w-full min-w-[900px]"
@@ -297,7 +321,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
         >
           <defs>
             <marker id="flow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-              <path d="M 0 0 L 10 5 L 0 10 z" style={{ fill: 'var(--t-border-strong, var(--t-text-3))' }} />
+              <path d="M 0 0 L 10 5 L 0 10 z" style={{ fill: 'var(--t-text-3)', fillOpacity: 0.6 }} />
             </marker>
           </defs>
           <FlowEdges />
@@ -311,7 +335,8 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
       <Modal
         isOpen={openStatus !== null}
         onClose={() => setOpenStatus(null)}
-        maxWidth="max-w-xl"
+        maxWidth="max-w-[95vw] md:max-w-[70vw]"
+        className="h-[85vh] md:h-[70vh]"
         title={openStatus ? (
           <span className="flex items-center gap-2">
             <StatusBadge status={openStatus} size="sm" />

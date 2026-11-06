@@ -118,7 +118,7 @@ describe('Kanban Waiting Column & Wait Reason Badges', () => {
 
   it('renders Kanban column title as "Đang chờ" and displays badges for all wait reasons (vi)', async () => {
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={['/tasks?view=kanban']}>
         <QueryClientProvider client={queryClient}>
           <LocaleProvider initialLocale="vi">
             <TasksPage />
@@ -153,7 +153,7 @@ describe('Kanban Waiting Column & Wait Reason Badges', () => {
 
   it('renders Kanban column title as "Waiting" and displays badges for all wait reasons (en)', async () => {
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={['/tasks?view=kanban']}>
         <QueryClientProvider client={queryClient}>
           <LocaleProvider initialLocale="en">
             <TasksPage />
@@ -238,7 +238,7 @@ describe('Kanban Waiting Column & Wait Reason Badges', () => {
     });
 
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={['/tasks?view=kanban']}>
         <QueryClientProvider client={queryClient}>
           <LocaleProvider initialLocale="vi">
             <TasksPage />

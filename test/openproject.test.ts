@@ -1479,6 +1479,102 @@ describe('OpenProject Integration', () => {
 
       await emptyTypesApp.close();
     });
+
+    it('POST /api/integrations/openproject/sources/:id/clone handles concurrent clones safely without race conditions', async () => {
+      const concurApp = Fastify();
+      concurApp.setErrorHandler((error, _req, reply) => {
+        if (error instanceof HttpError) {
+          return reply.status(error.statusCode).send({ error: error.error, message: error.message });
+        }
+        return reply.status(500).send({ error: 'internal_error', message: error.message });
+      });
+
+      config.integrations.openproject.sources = [
+        OpenProjectSourceSchema.parse({
+          id: 'src-concur-orig',
+          url: 'https://op.example.com',
+          project: 'ORIG',
+          split: { typeIds: [1] },
+          createTypeId: 1,
+        }),
+      ];
+      saveOpenProjectKey(tmpDir, 'src-concur-orig', 'concur-key');
+
+      // Delayed fetch to ensure concurrent requests overlap in flight
+      const delayedFetch = vi.fn().mockImplementation(async (url: string | URL) => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        if (url.toString().includes('/api/v3/projects/')) {
+          return new Response(
+            JSON.stringify({ _embedded: { elements: [{ id: 1, name: 'Task' }] } }),
+            { status: 200, headers: { 'Content-Type': 'application/hal+json' } },
+          );
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      registerOpenProjectRoutes(concurApp, config, { fetch: delayedFetch as unknown as typeof globalThis.fetch });
+      await concurApp.ready();
+
+      // 1. Two concurrent requests with the SAME explicit ID
+      const [res1, res2] = await Promise.all([
+        concurApp.inject({
+          method: 'POST',
+          url: '/api/integrations/openproject/sources/src-concur-orig/clone',
+          payload: { project: 'CONCUR-1', id: 'shared-clone-id' },
+        }),
+        concurApp.inject({
+          method: 'POST',
+          url: '/api/integrations/openproject/sources/src-concur-orig/clone',
+          payload: { project: 'CONCUR-2', id: 'shared-clone-id' },
+        }),
+      ]);
+
+      const statuses = [res1.statusCode, res2.statusCode].sort();
+      expect(statuses).toEqual([200, 400]);
+      const errRes = res1.statusCode === 400 ? res1 : res2;
+      expect(JSON.parse(errRes.body).error).toBe('duplicate_id');
+
+      // 2. Two concurrent requests with the SAME project on same url
+      const [sameProj1, sameProj2] = await Promise.all([
+        concurApp.inject({
+          method: 'POST',
+          url: '/api/integrations/openproject/sources/src-concur-orig/clone',
+          payload: { project: 'DUPLICATE-PROJ' },
+        }),
+        concurApp.inject({
+          method: 'POST',
+          url: '/api/integrations/openproject/sources/src-concur-orig/clone',
+          payload: { project: 'DUPLICATE-PROJ' },
+        }),
+      ]);
+      const sameProjStatuses = [sameProj1.statusCode, sameProj2.statusCode].sort();
+      expect(sameProjStatuses).toEqual([200, 400]);
+      const sameProjErr = sameProj1.statusCode === 400 ? sameProj1 : sameProj2;
+      expect(JSON.parse(sameProjErr.body).error).toBe('duplicate_project');
+
+      // 3. Two concurrent requests with default (auto-generated) IDs
+      const [auto1, auto2] = await Promise.all([
+        concurApp.inject({
+          method: 'POST',
+          url: '/api/integrations/openproject/sources/src-concur-orig/clone',
+          payload: { project: 'AUTO-1' },
+        }),
+        concurApp.inject({
+          method: 'POST',
+          url: '/api/integrations/openproject/sources/src-concur-orig/clone',
+          payload: { project: 'AUTO-2' },
+        }),
+      ]);
+      expect(auto1.statusCode).toBe(200);
+      expect(auto2.statusCode).toBe(200);
+      const autoCloned1 = JSON.parse(auto1.body);
+      const autoCloned2 = JSON.parse(auto2.body);
+      expect(autoCloned1.id).toMatch(/^openproject-\d+$/);
+      expect(autoCloned2.id).toMatch(/^openproject-\d+$/);
+      expect(autoCloned1.id).not.toBe(autoCloned2.id);
+
+      await concurApp.close();
+    });
   });
 
   describe('Database migration & TrackerItemRepo', () => {

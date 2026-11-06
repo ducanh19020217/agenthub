@@ -364,21 +364,40 @@ export function registerOpenProjectRoutes(
   fastify.post('/api/integrations/openproject/sources/:id/clone', async (req: FastifyRequest) => {
     const { id } = idParams.parse(req.params);
     const source = sourceOrThrow(config, id);
-    const body = z.object({ project: z.string().min(1), id: z.string().regex(/^[a-z0-9-]+$/).optional() }).parse(req.body || {});
-    const newId = body.id ?? `openproject-${Date.now()}`;
-    const newProject = body.project.trim();
+    const body = z.object({ project: z.string().trim().min(1), id: z.string().regex(/^[a-z0-9-]+$/).optional() }).parse(req.body || {});
+    const newProject = body.project;
 
-    // Validate: new ID must not already exist
-    const idExists = config.integrations.openproject.sources.some((s) => s.id === newId);
-    if (idExists) throw new HttpError(400, 'duplicate_id', `ID "${newId}" đã tồn tại`);
+    // Kiểm tra trùng id/project. Gọi lại ngay trước khi lưu: giữa lần kiểm tra đầu và lúc lưu có await
+    // (gọi OP), một yêu cầu clone khác có thể đã lưu trước. Từ lần kiểm tra thứ hai tới persist không có
+    // await nên Node chạy liền một mạch, không yêu cầu nào chen vào được.
+    const assertFree = (candidateId: string | undefined): void => {
+      const sources = config.integrations.openproject.sources;
+      if (candidateId && sources.some((s) => s.id === candidateId)) throw new HttpError(400, 'duplicate_id', `ID "${candidateId}" đã tồn tại`);
+      const conflict = sources.find((s) => s.url === source.url && s.project === newProject);
+      if (conflict) throw new HttpError(400, 'duplicate_project', `Project "${newProject}" đã tồn tại ở nguồn ${conflict.id}`);
+    };
+    assertFree(body.id);
 
-    // Validate: project must not conflict with another source sharing the same url
-    const conflict = config.integrations.openproject.sources.find(
-      (s) => s.id !== id && s.url === source.url && s.project === newProject,
-    );
-    if (conflict) throw new HttpError(400, 'duplicate_project', `Project "${newProject}" đã tồn tại ở nguồn ${conflict.id}`);
+    // Lọc type id không có trong dự án mới; lỗi mạng thì giữ nguyên, không fail.
+    const key = readOpenProjectKey(config.hubHome, id);
+    let validTypeIds: Set<number> | null = null;
+    if (key) {
+      try {
+        const types = await new OpenProjectClient({ baseUrl: source.url, project: newProject, apiKey: key, fetch: options.fetch }).listTypes();
+        validTypeIds = new Set((types._embedded?.elements || []).map((t) => t.id));
+      } catch {
+        validTypeIds = null;
+      }
+    }
 
-    // Clone config: copy all fields, override id and project, disable timesheet/dailyReport
+    assertFree(body.id);
+    let newId = body.id;
+    if (!newId) {
+      let stamp = Date.now();
+      while (config.integrations.openproject.sources.some((s) => s.id === `openproject-${stamp}`)) stamp += 1;
+      newId = `openproject-${stamp}`;
+    }
+
     const cloned = OpenProjectSourceSchema.parse({
       ...source,
       id: newId,
@@ -386,34 +405,16 @@ export function registerOpenProjectRoutes(
       timesheet: { ...source.timesheet, enabled: false },
       dailyReport: source.dailyReport ? { ...source.dailyReport, enabled: false } : { enabled: false, time: '08:00', weekdaysOnly: true, maxItems: 10, telegram: false },
     });
-
-    // Optionally filter type IDs that don't exist in the new project
-    const key = readOpenProjectKey(config.hubHome, id);
-    if (key) {
-      try {
-        const client = new OpenProjectClient({ baseUrl: source.url, project: newProject, apiKey: key, fetch: options.fetch });
-        const typesCollection = await client.listTypes();
-        // Always filter when we get a successful response (even if list is empty)
-        const validTypeIds = new Set((typesCollection._embedded?.elements || []).map((t) => t.id));
-        if (cloned.createTypeId !== null && !validTypeIds.has(cloned.createTypeId)) {
-          (cloned as { createTypeId: number | null }).createTypeId = null;
-        }
-        cloned.split.typeIds = cloned.split.typeIds.filter((tid) => validTypeIds.has(tid));
-      } catch {
-        // Network error - keep original type IDs, do not fail
-      }
+    if (validTypeIds) {
+      const valid = validTypeIds;
+      if (cloned.createTypeId !== null && !valid.has(cloned.createTypeId)) (cloned as { createTypeId: number | null }).createTypeId = null;
+      cloned.split.typeIds = cloned.split.typeIds.filter((tid) => valid.has(tid));
     }
 
-    // Copy API key (server-side only)
-    if (key) {
-      saveOpenProjectKey(config.hubHome, newId, key);
-    }
-
+    // Sao API key phía server, không trả về response.
+    if (key) saveOpenProjectKey(config.hubHome, newId, key);
     persist(config, [...config.integrations.openproject.sources, cloned]);
-    return {
-      ...cloned,
-      keyConfigured: readOpenProjectKey(config.hubHome, newId) !== null,
-    };
+    return { ...cloned, keyConfigured: key !== null };
   });
 
   fastify.post('/api/integrations/openproject/sources/:id/sync', async (req: FastifyRequest) => {

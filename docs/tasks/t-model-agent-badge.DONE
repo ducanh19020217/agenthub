@@ -10,27 +10,36 @@
   - Viết 21 unit tests trong `web/src/test/modelBadge.test.tsx` kiểm tra mọi trường hợp: có profile, không profile, suy engine từ model, format tooltip.
 
 - **Backend DB (`src/db/index.ts`)**:
-  - Thêm Migration 65 tạo bảng `reviews_new` bổ sung 2 cột nullable `engine TEXT` và `profileName TEXT` (đảm bảo 100% idempotent).
+  - Migration 65 dùng `ALTER TABLE reviews ADD COLUMN engine TEXT; ALTER TABLE reviews ADD COLUMN profileName TEXT;` thay vì drop/recreate table.
+  - `openDatabase` hỗ trợ bỏ qua lỗi duplicate column name khi re-run migration trong các kịch bản rollback/re-run schema.
   - Cập nhật interface `ReviewRow` và method `ReviewRepo.insert`.
-  - Khóa hash migration 65 (`a28c821f228e6760`) vào `test/fixtures/migrations.lock`.
+  - Khóa hash migration 65 (`e5482e45f61e8c4f`) vào `test/fixtures/migrations.lock`.
   - Viết test `test/review-agent-db.test.ts` kiểm tra lưu và đọc `engine`, `profileName`.
 
 - **Backend Scheduler & Services (`src/scheduler/index.ts`, `src/services/index.ts`, `src/savings.ts`, `src/services/dag.ts`)**:
-  - Scheduler:
-    - Ghi nhận `engine` và `profileName` khi ghi nhận kết quả review (`finishReview`, `reviewTask`).
-    - Bổ sung `engine` và `profile` vào event `review.started`, `review.completed`, `task.running`, `task.model_skipped`.
-    - Truyền `engine` và `profileName` vào review history trước đó (`previousReviews`).
+  - Schema & Review chain:
+    - Giữ nguyên `ReviewChainStepSchema` (chỉ chứa `reviewer` và `mode`) để không làm thay đổi format lưu trữ trong DB khi client gửi lại chain.
+    - Tạo `ReviewChainStepView` bổ sung `engine` và `profileName` cho response API `GET /api/tasks/:id`.
+    - Ghi nhận `DEC-017` trong `docs/DECISIONS.md`: Không gán `profileName` cho các bước trong `task.reviewChain`, chỉ gán `engine` suy ra từ `reviewer` để tránh việc gán nhầm profile giữa các vòng lặp (`changes_requested`) hoặc giữa các bước cùng loại reviewer.
+  - Review Engine:
+    - Scheduler ghi nhận `engine` và `profileName` khi ghi nhận kết quả review (`finishReview`, `reviewTask`).
+    - API `POST /api/tasks/:id/review`: đối với review thủ công (người duyệt, `by` không thuộc agent reviewer), `engine` được để `null` thay vì tự gán `claude`.
+  - Events:
+    - Bổ sung `engine` và `profile` vào mọi event liên quan tới model: `review.started`, `review.completed`, `task.running`, `task.model_skipped`.
+    - Bổ sung `engine` và `profile` cho `review.fallback` ở tất cả các nhánh (available, timeout/error fallback, arbiter, arbiter_unavailable).
+    - Bổ sung `model`, `engine`, `profile` cho `task.failover`.
+    - Bổ sung `model`, `engine`, `profile` cho các event retry: `quota_retry`, `auth_retry`, `transient_retry`, `stalled_retry` trong `task.queued`.
+    - Bổ sung `model`, `engine`, `profile` cho `run.crashed` và `run.stalled`.
   - Services:
     - `Task.currentRun`: bổ sung trường `engine` cùng với `model` và `profileName`.
     - `Task.reviews[]`: trả ra `engine` và `profileName` từ DB (kèm fallback từ event nếu là bản ghi cũ).
-    - `Task.reviewChain[]`: làm giàu từng bước (`step.engine` và `step.profileName`) từ review đã hoàn thành hoặc reviewer đang chạy.
     - `SavingsTaskItem`: bổ sung `profileName` từ lượt chạy cuối của task.
     - API schema `ReviewTaskSchema` chấp nhận `engine` và `profileName`.
-    - Viết test `test/review-agent-api.test.ts` kiểm tra endpoint `POST /api/tasks/:id/review` và `GET /api/tasks/:id` trả về đầy đủ agent metadata.
+    - Viết test `test/review-agent-api.test.ts` kiểm tra endpoint `POST /api/tasks/:id/review`, `GET /api/tasks/:id`, multi-step review chains, và review thủ công để null engine.
 
 - **Frontend UI (`web/src/pages/`, `web/src/components/`)**:
   - `TaskDetailPage.tsx`:
-    - Review chain: hiển thị `ModelBadge` với `engine` và `profileName` cho từng bước review kèm mode (`step.mode`).
+    - Review chain: hiển thị `ModelBadge` với `engine` suy ra cho từng bước review kèm mode (`step.mode`).
     - Review history: thay thế chuỗi raw `({review.model})` bằng `ModelBadge` hiển thị agent icon, profile và model.
     - Timeline events: các sự kiện có `payload.model`, `payload.profile`, `payload.engine` hiển thị `ModelBadge`.
     - Runs table: cột Model hiển thị `ModelBadge` với `r.profileName` và `r.engine`.
@@ -51,16 +60,15 @@
 - **Vị trí có đầy đủ Engine + Profile + Model**:
   1. `TaskDetailPage` - Runs table: lấy từ `run.engine`, `run.profileName`, `run.model`.
   2. `TaskDetailPage` - Review history: lấy từ `review.engine`, `review.profileName`, `review.model`.
-  3. `TaskDetailPage` - Review chain (các bước đã chạy xong hoặc đang chạy): lấy từ review tương ứng hoặc reviewer đang chạy.
-  4. `TaskDetailPage` - Header trạng thái running: lấy từ `task.currentRun.engine`, `task.currentRun.profileName`, `task.currentRun.model`.
-  5. `DashboardPage` - Bảng worker đang chạy: lấy từ `worker.engine`, `worker.profileName`, `worker.model`.
-  6. `SavingsPage` - Bảng danh sách task: lấy từ `task.engine`, `task.profileName`, `task.model`.
-  7. `TaskDag` - Node trạng thái running: lấy từ `currentRun.engine`, `currentRun.profileName`, `currentRun.model`.
-  8. `TasksPage` - Card task running: lấy từ `currentRun.engine`, `currentRun.profileName`, `currentRun.model`.
-  9. `ChatPage` - Header phiên chat: engine `claude`, profile `activeSession.profileName`, model `activeSession.model`.
+  3. `TaskDetailPage` - Header trạng thái running: lấy từ `task.currentRun.engine`, `task.currentRun.profileName`, `task.currentRun.model`.
+  4. `DashboardPage` - Bảng worker đang chạy: lấy từ `worker.engine`, `worker.profileName`, `worker.model`.
+  5. `SavingsPage` - Bảng danh sách task: lấy từ `task.engine`, `task.profileName`, `task.model`.
+  6. `TaskDag` - Node trạng thái running: lấy từ `currentRun.engine`, `currentRun.profileName`, `currentRun.model`.
+  7. `TasksPage` - Card task running: lấy từ `currentRun.engine`, `currentRun.profileName`, `currentRun.model`.
+  8. `ChatPage` - Header phiên chat: engine `claude`, profile `activeSession.profileName`, model `activeSession.model`.
 
 - **Vị trí chỉ hiển thị Engine + Model (chưa có Profile) và lý do**:
-  1. `TaskDetailPage` - Review chain các bước chưa chạy: chỉ có cấu hình reviewer (ví dụ `codex:gpt-5.6-luna` hoặc `claude`) và engine suy ra; chưa có profile vì bước này chưa được scheduler phân bổ tài khoản thực thi.
+  1. `TaskDetailPage` - Review chain các bước: chỉ có cấu hình reviewer (ví dụ `codex:gpt-5.6-luna` hoặc `claude`) và engine suy ra; không gán profileName theo quyết định kiến trúc DEC-017 (bảng reviews không lưu reviewStep và task lặp lại nhiều vòng review khiến việc map profile theo bước dễ sai lệch). Profile thực tế đã chạy review được hiển thị chính xác trong mục Lịch sử review.
   2. `TaskDetailPage` - Model chain trong form sửa task: đây là chuỗi model dự phòng được cấu hình cho task trước khi chạy; chưa có profile tài khoản cụ thể cho đến khi scheduler cấp phát run.
   3. `ClaudeSessionsPage` - Bảng và chi tiết Claude session: quản lý phiên Claude CLI cục bộ (engine luôn là `claude` theo binary claude của hệ thống), không thuộc hệ thống profile đa tài khoản của AgentHub.
   4. `ProjectSettingsDrawer` - Brain effective config: cấu hình engine/model mặc định cho Brain của dự án (chưa phải một turn chạy cụ thể).
@@ -69,12 +77,12 @@
 - `npm run lint`: 0 errors, 80 warnings (toàn bộ 80 warnings thuộc baseline cũ, không phát sinh cảnh báo mới).
 - `npx tsc --noEmit -p .`: Đạt (0 errors).
 - `npx tsc --noEmit -p web`: Đạt (0 errors).
-- `npm run test -- --run`: 129 test files passed, 1563 tests passed.
+- `npm run test -- --run`: 129 test files passed, 1564 tests passed.
 - `npm run test:web -- --run`: 65 test files passed, 550 tests passed.
-- `npm run build:web`: Đạt (Vite production build thành công trong 4.44s).
+- `npm run build:web`: Đạt (Vite production build thành công trong 5.02s).
 
-## 4. Việc chưa làm được
-- Không có. Tất cả các yêu cầu trong `.agenthub/task.md` đều đã được thực hiện và kiểm tra đầy đủ.
+## 4. Việc chưa làm được / Ghi chú thiết kế
+- Quyết định kiến trúc `DEC-017`: Không gán `profileName` cho từng bước trong `task.reviewChain` (để `profileName: null`), chỉ trả về `engine` suy từ `reviewer`. Lý do: Bảng `reviews` không lưu `reviewStep`, và task có thể trải qua nhiều vòng review (`changes_requested` reset `reviewStep = 0`), khiến việc ánh xạ review vào bước chain không đảm bảo độ chính xác. UI hiển thị engine icon + reviewer model, còn thông tin profile chính xác được hiển thị trong mục Lịch sử review và Timeline sự kiện.
 
 ## 5. Danh sách commits
 - `eae1a2cc`: `feat(db): add engine and profileName columns to reviews table`
@@ -82,3 +90,8 @@
 - `6998f78c`: `feat(web): expand ModelBadge to display agent engine and profile`
 - `ff76c7f1`: `fix(db): ensure migration 65 is idempotent for reviews table`
 - `ff4e080d`: `feat(web): display agent badges across task detail, dashboard, savings, and dag`
+- `dd05abec`: `docs(tasks): add completion report for t-model-agent-badge`
+- `c1f30cd1`: `fix(db): use ALTER TABLE for migration 65 instead of table recreation`
+- `a58b7523`: `feat(api): simplify reviewChain step view and handle manual review engines`
+- `9df05d50`: `feat(scheduler): include agent engine and profile in failover, fallback, retry, and crash events`
+- `9de8cc65`: `fix(db): ensure openDatabase migration loop tolerates existing columns on rerun`

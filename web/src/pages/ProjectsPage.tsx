@@ -19,6 +19,7 @@ import {
   inspectGitRepo,
   GitInspectResult,
   getProfiles,
+  inspectProjectGit,
 } from '../api/client';
 import {
   FolderGit2,
@@ -428,7 +429,7 @@ export const ProjectsPage: React.FC = () => {
   const [formError, setFormError] = useState<string | null>(null);
   const [knowledgeProject, setKnowledgeProject] = useState<string | null>(null);
   const [knowledgeDraft, setKnowledgeDraft] = useState('');
-  const [gitBranches, setGitBranches] = useState<string[]>([]);
+  const [inspectedBranches, setGitBranches] = useState<string[]>([]);
   const [gitInspectResult, setGitInspectResult] = useState<GitInspectResult | null>(null);
   const [isInspectingGit, setIsInspectingGit] = useState(false);
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
@@ -530,6 +531,16 @@ export const ProjectsPage: React.FC = () => {
     queryKey: ['departments'],
     queryFn: getDepartments,
   });
+  const pathInspection = useQuery({
+    queryKey: ['project-register-inspection', path],
+    queryFn: () => inspectProjectGit(path.trim()),
+    enabled: Boolean(path.trim() && /^\//.test(path.trim())),
+    retry: false,
+  });
+  useEffect(() => {
+    const branch = pathInspection.data?.currentBranch || pathInspection.data?.localBranches?.[0] || pathInspection.data?.remoteBranches?.[0];
+    if (branch && (defaultBranch === 'main' || !defaultBranch.trim())) setDefaultBranch(branch);
+  }, [pathInspection.data]);
   const { data: focus } = useQuery({ queryKey: ['focus'], queryFn: getFocus });
   const focusMutation = useMutation({
     mutationFn: (projectId: string | null) => setFocus(projectId),
@@ -728,6 +739,13 @@ export const ProjectsPage: React.FC = () => {
     });
   };
 
+  // Gộp nhánh dò bằng inspectGitRepo với nhánh local/remote từ inspectProjectGit (upstream).
+  const gitBranches = Array.from(new Set([
+    ...inspectedBranches,
+    ...(pathInspection.data?.localBranches || []),
+    ...(pathInspection.data?.remoteBranches || []),
+  ]));
+
   const displayBranches = branchSearchFilter.trim()
     ? gitBranches.filter((b) => b.toLowerCase().includes(branchSearchFilter.trim().toLowerCase()))
     : gitBranches;
@@ -881,7 +899,7 @@ export const ProjectsPage: React.FC = () => {
                     <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
                     <span>
                       {t('projects.gitDetected', { count: gitBranches.length })}
-                      {gitInspectResult.currentBranch && t('projects.gitCurrentBranch', { branch: gitInspectResult.currentBranch })}
+                      {gitInspectResult.currentBranch && t('projects.gitCurrentBranchInline', { branch: gitInspectResult.currentBranch })}
                     </span>
                   </p>
                 )}

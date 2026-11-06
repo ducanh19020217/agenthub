@@ -25,6 +25,7 @@ const SavingsPage = lazy(() => import('./pages/SavingsPage').then((m) => ({ defa
 const ClaudeSessionsPage = lazy(() => import('./pages/ClaudeSessionsPage').then((m) => ({ default: m.ClaudeSessionsPage })));
 const SetupPage = lazy(() => import('./pages/SetupPage').then((m) => ({ default: m.SetupPage })));
 const ChatPage = lazy(() => import('./pages/ChatPage').then((m) => ({ default: m.ChatPage })));
+const TimesheetPage = lazy(() => import('./pages/TimesheetPage').then((m) => ({ default: m.TimesheetPage })));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -96,6 +97,7 @@ const AppShell: React.FC = () => {
                   <Route path="projects/:id/settings" element={<ProjectsPage />} />
                   <Route path="departments" element={<DepartmentsPage />} />
                   <Route path="settings" element={<SettingsPage />} />
+                  <Route path="timesheet" element={<TimesheetPage />} />
                 </Route>
               </Routes>
               </Suspense>

@@ -303,6 +303,13 @@ export interface SchedulerOptions {
   diskSpace?: (path: string) => DiskSpace;
 }
 
+export interface CancelInfo {
+  /** Lý do hủy do người/hệ thống đưa ra. */
+  reason?: string | null;
+  /** Nguồn hủy: dashboard, telegram:<user>, mcp:<client>, system:<what>. */
+  by?: string | null;
+}
+
 export class Scheduler {
   private running: Map<string, RunningTask> = new Map(); // taskId -> RunningTask
   /** Bumped by stop(); a start that began before it must not spawn afterwards. */
@@ -827,8 +834,21 @@ export class Scheduler {
 
   cancelAll(): void {
     for (const taskId of [...this.running.keys()]) {
+      this.pendingCancel.set(taskId, { reason: 'AgentHub dừng, task đang chạy bị hủy', by: 'system:shutdown' });
       this.killTask(taskId, 'cancelled');
     }
+  }
+
+  /** Lý do/người hủy chờ ghi khi run kết thúc với outcome "cancelled". */
+  private pendingCancel = new Map<string, CancelInfo>();
+
+  private recordCancel(taskId: string, info?: CancelInfo): CancelInfo {
+    const resolved: CancelInfo = {
+      reason: info?.reason?.trim() || null,
+      by: info?.by?.trim() || null,
+    };
+    this.taskRepo.update(taskId, { status: 'cancelled', cancelReason: resolved.reason, cancelledBy: resolved.by });
+    return resolved;
   }
 
   /** Persist a resumable state before the service manager terminates the daemon. */
@@ -931,7 +951,12 @@ export class Scheduler {
         // found during daemon recovery.
         if (task.status === 'done' || task.status === 'cancelled') continue;
         this.taskRepo.update(run.taskId, { status: 'queued', resume: 1 });
-        this.eventBus.emit('run.crashed', run.taskId, { runId: run.id });
+        this.eventBus.emit('run.crashed', run.taskId, {
+          runId: run.id,
+          model: run.model,
+          engine: run.engine,
+          profile: run.profileName,
+        });
         this.eventBus.emit('task.queued', run.taskId);
         continue;
       }
@@ -1890,7 +1915,12 @@ export class Scheduler {
     if (rt.lockFile) this.locks.release(rt.profileName, rt.lockFile);
     this.locks.invalidate(rt.profileName);
     this.runRepo.finish(rt.runId, 'crashed', undefined, 'stalled');
-    this.eventBus.emit('run.stalled', taskId, { runId: rt.runId });
+    this.eventBus.emit('run.stalled', taskId, {
+      runId: rt.runId,
+      model: rt.model,
+      engine: rt.engine.id,
+      profile: rt.profileName,
+    });
 
     const stalledCount = this.runRepo.getByTask(taskId).filter((run) => run.reason === 'stalled').length;
     if (stalledCount <= 2) {
@@ -1898,7 +1928,13 @@ export class Scheduler {
       if (!task) return;
       const body = `${task.body || task.title}\n\n${STALL_NOTE}`;
       this.taskRepo.update(taskId, { status: 'queued', resume: 1, body });
-      this.eventBus.emit('task.queued', taskId, { reason: 'stalled_retry', note: STALL_NOTE });
+      this.eventBus.emit('task.queued', taskId, {
+        reason: 'stalled_retry',
+        note: STALL_NOTE,
+        model: rt.model,
+        engine: rt.engine.id,
+        profile: rt.profileName,
+      });
     } else {
       this.taskRepo.updateStatus(taskId, 'failed');
       this.eventBus.emit('task.failed', taskId, { reason: 'stalled_limit' });
@@ -2261,18 +2297,32 @@ export class Scheduler {
           this.eventBus.emit('task.failover', taskId, {
             from: { profile: rt.profileName, model: rt.model, engine: rt.engine.id },
             to: next ? { profile: next.profileName, model: next.model, engine: getModelEngine(next.model) } : null,
+            model: next?.model || rt.model,
+            engine: next ? getModelEngine(next.model) : rt.engine.id,
+            profile: next?.profileName || rt.profileName,
             reason,
             runId: rt.runId,
             worktreePath: task.worktreePath,
           });
           this.taskRepo.update(taskId, { status: 'queued', resume: 1, transientRetries: 0, notBefore: null });
-          this.eventBus.emit('task.queued', taskId, { reason: 'quota_retry', failover: next ? 'available' : 'waiting_quota' });
+          this.eventBus.emit('task.queued', taskId, {
+            reason: 'quota_retry',
+            failover: next ? 'available' : 'waiting_quota',
+            model: rt.model,
+            engine: rt.engine.id,
+            profile: rt.profileName,
+          });
         } else if (rt.engine.detectAuthError(logTail).expired) {
           this.runRepo.finish(rt.runId, 'crashed', undefined, 'auth');
           this.markProfileAuthExpired(rt.profileName);
 
           this.taskRepo.update(taskId, { status: 'queued', attempt: task.attempt, resume: 1, transientRetries: 0, notBefore: null });
-          this.eventBus.emit('task.queued', taskId, { reason: 'auth_retry', profile: rt.profileName });
+          this.eventBus.emit('task.queued', taskId, {
+            reason: 'auth_retry',
+            profile: rt.profileName,
+            model: rt.model,
+            engine: rt.engine.id,
+          });
         } else {
           // Check for transient errors
           if (rt.engine.detectTransientError(logTail) && task.transientRetries < 3) {
@@ -2284,7 +2334,13 @@ export class Scheduler {
               notBefore: Math.floor(Date.now() / 1000) + Math.ceil(delay / 1000),
               transientRetries: task.transientRetries + 1,
             });
-            this.eventBus.emit('task.queued', taskId, { reason: 'transient_retry', delay });
+            this.eventBus.emit('task.queued', taskId, {
+              reason: 'transient_retry',
+              delay,
+              model: rt.model,
+              engine: rt.engine.id,
+              profile: rt.profileName,
+            });
           } else {
             // Failed
             if (this.recordWorkerCrash(taskId, rt)) return;
@@ -2626,7 +2682,14 @@ export class Scheduler {
           const key = `${task.id}:${index}`;
           if (!this.reviewerFallbackNotified.has(key)) {
             this.reviewerFallbackNotified.add(key);
-            this.eventBus.emit('review.fallback', task.id, { from: order[index - 1].engine, to: item.engine, reason: 'available', profile: free[0].name });
+            this.eventBus.emit('review.fallback', task.id, {
+              from: order[index - 1].engine,
+              to: item.engine,
+              engine: item.engine,
+              model,
+              reason: 'available',
+              profile: free[0].name,
+            });
           }
         }
         return { engine, model, profile: free[0] };
@@ -2641,7 +2704,13 @@ export class Scheduler {
         const key = `${task.id}:${index + 1}`;
         if (!this.reviewerFallbackNotified.has(key)) {
           this.reviewerFallbackNotified.add(key);
-          this.eventBus.emit('review.fallback', task.id, { from: item.engine, to: order[index + 1].engine, reason: unavailable ? 'unavailable' : busy ? 'busy' : 'error' });
+          this.eventBus.emit('review.fallback', task.id, {
+            from: item.engine,
+            to: order[index + 1].engine,
+            engine: order[index + 1].engine,
+            model: normalizeReviewerModel(order[index + 1].engine, order[index + 1].model),
+            reason: unavailable ? 'unavailable' : busy ? 'busy' : 'error',
+          });
         }
       }
     }
@@ -2752,7 +2821,14 @@ export class Scheduler {
     const key = `${task.id}:chain:codex:claude`;
     if (!this.reviewerFallbackNotified.has(key)) {
       this.reviewerFallbackNotified.add(key);
-      this.eventBus.emit('review.fallback', task.id, { from: 'codex', to: 'claude', reason: 'unavailable', profile: profile.name });
+      this.eventBus.emit('review.fallback', task.id, {
+        from: 'codex',
+        to: 'claude',
+        engine: 'claude',
+        model: normalizeReviewerModel('claude', item.model),
+        reason: 'unavailable',
+        profile: profile.name,
+      });
     }
     return { engine, model: normalizeReviewerModel('claude', item.model), profile };
   }
@@ -2890,7 +2966,14 @@ export class Scheduler {
         rank(a.name) - rank(b.name) || (b.priority ?? 0) - (a.priority ?? 0));
     const profile = candidates[0];
     if (!profile) return 'unavailable';
-    this.eventBus.emit('review.fallback', task.id, { from: 'reviewer', to: arbiter.engine, reason: 'arbiter', profile: profile.name });
+    this.eventBus.emit('review.fallback', task.id, {
+      from: 'reviewer',
+      to: arbiter.engine,
+      engine: arbiter.engine,
+      model: normalizeReviewerModel(arbiter.engine, arbiter.model),
+      reason: 'arbiter',
+      profile: profile.name,
+    });
     this.startReview(task, profile.name, engine, normalizeReviewerModel(arbiter.engine, arbiter.model), arbiter.engine === 'claude' ? 'claude-reviewer' : 'codex-reviewer');
     return 'started';
   }
@@ -2920,9 +3003,17 @@ export class Scheduler {
           (b.priority ?? 0) - (a.priority ?? 0));
       const profile = candidates[0];
       if (!profile) return;
-      this.eventBus.emit('review.fallback', task.id, { from: 'codex', to: 'claude', profile: profile.name, reason: 'arbiter_unavailable' });
       const claudeConfig = this.config.reviewer?.order?.find((item) => item.engine === 'claude');
-      this.startReview(task, profile.name, claudeEngine, `claude:${claudeConfig?.model || 'sonnet'}`, 'claude-reviewer');
+      const claudeModel = `claude:${claudeConfig?.model || 'sonnet'}`;
+      this.eventBus.emit('review.fallback', task.id, {
+        from: 'codex',
+        to: 'claude',
+        engine: 'claude',
+        model: claudeModel,
+        profile: profile.name,
+        reason: 'arbiter_unavailable',
+      });
+      this.startReview(task, profile.name, claudeEngine, claudeModel, 'claude-reviewer');
       return;
     }
 
@@ -2939,9 +3030,17 @@ export class Scheduler {
         (b.priority ?? 0) - (a.priority ?? 0));
     const profile = candidates[0];
     if (!profile) return;
-    this.eventBus.emit('review.fallback', task.id, { from: 'claude', to: 'codex', profile: profile.name, reason: 'arbiter_unavailable' });
     const codexConfig = this.config.reviewer?.order?.find((item) => item.engine === 'codex');
-    this.startReview(task, profile.name, codexEngine, `codex:${codexConfig?.model || 'gpt-5.6-luna'}`, 'codex-reviewer');
+    const codexModel = `codex:${codexConfig?.model || 'gpt-5.6-luna'}`;
+    this.eventBus.emit('review.fallback', task.id, {
+      from: 'claude',
+      to: 'codex',
+      engine: 'codex',
+      model: codexModel,
+      profile: profile.name,
+      reason: 'arbiter_unavailable',
+    });
+    this.startReview(task, profile.name, codexEngine, codexModel, 'codex-reviewer');
   }
 
   private reviewerInBackoff(profileName: string): boolean {
@@ -3010,6 +3109,8 @@ export class Scheduler {
         verdict: review.verdict as ReviewerVerdict,
         feedback: review.feedback,
         createdAt: review.createdAt,
+        engine: review.engine,
+        profileName: review.profileName,
       })) || [];
       child = engine.spawn({
         profile,
@@ -3050,7 +3151,8 @@ export class Scheduler {
     this.reviewerRuns.set(task.id, { taskId: task.id, runId, pid: child.pid, profileName, engine, actor, outputPath, lockSlot, lockFile, startedAt: Date.now(), timeout });
     this.locks.invalidate(profileName);
     child.unref();
-    this.eventBus.emit('review.started', task.id, { actor: reviewerActor, model: reviewerModel, profile: profileName, runId });
+    const actualEngine = engine.id;
+    this.eventBus.emit('review.started', task.id, { actor: reviewerActor, model: reviewerModel, profile: profileName, engine: actualEngine, runId });
     child.once('error', () => {
       if (!this.stopped) this.finishReview(task.id, runId, profileName, 'error', null);
     });
@@ -3131,11 +3233,23 @@ export class Scheduler {
         return;
       }
     }
+    const reviewerEngine = run?.engine || active.engine.id;
+    const reviewerProfile = run?.profileName || active.profileName;
     this.runRepo.finish(runId, 'done');
     this.reviewerErrorCounts.delete(taskId);
-    this.reviewTask(taskId, result.verdict, result.feedback, active.actor);
+    this.reviewTask(taskId, result.verdict, result.feedback, active.actor, 'content', {
+      engine: reviewerEngine,
+      profileName: reviewerProfile,
+    });
     const defaultReviewer = this.config.reviewer?.order?.[0];
-    this.eventBus.emit('review.completed', taskId, { actor: active.actor, verdict: result.verdict, model: run?.model || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna'), runId });
+    this.eventBus.emit('review.completed', taskId, {
+      actor: active.actor,
+      verdict: result.verdict,
+      model: run?.model || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna'),
+      runId,
+      engine: reviewerEngine,
+      profile: reviewerProfile,
+    });
     if (!this.stopped) this.triggerTick();
   }
 
@@ -3431,6 +3545,7 @@ export class Scheduler {
         this.notifiedSkippedModels.add(key);
         this.eventBus.emit('task.model_skipped', task.id, {
           model,
+          engine: getModelEngine(model) || null,
           message: `Bỏ qua model không thuộc engine đã cấu hình: ${model}`,
         });
       }
@@ -3851,7 +3966,7 @@ export class Scheduler {
       // Unref so the child doesn't prevent daemon from exiting
       child.unref();
 
-      this.eventBus.emit('task.running', task.id, { runId, model, profile: profileName });
+      this.eventBus.emit('task.running', task.id, { runId, model, profile: profileName, engine: engine.id });
 
       // Listen for exit
       child.on('exit', (code) => {
@@ -3898,9 +4013,10 @@ export class Scheduler {
   /**
    * Cancel a running or pending/idle task
    */
-  cancelTask(taskId: string): void {
+  cancelTask(taskId: string, info?: CancelInfo): void {
     const rt = this.running.get(taskId);
     if (rt) {
+      this.pendingCancel.set(taskId, info || {});
       this.killTask(taskId, 'cancelled');
     } else {
       const task = this.taskRepo.get(taskId);
@@ -3932,25 +4048,44 @@ export class Scheduler {
       this.reviewerFallbackNotified.delete(taskId);
       this.reviewerErrorCounts.delete(taskId);
       this.resetReviewerEscalation(taskId);
-      this.taskRepo.updateStatus(taskId, 'cancelled');
-      this.eventBus.emit('task.cancelled', taskId);
+      const recorded = this.recordCancel(taskId, info);
+      this.eventBus.emit('task.cancelled', taskId, { reason: recorded.reason, by: recorded.by, previousStatus: task?.status ?? null });
     }
   }
 
   /**
    * Review a task
    */
-  reviewTask(taskId: string, verdict: 'approved' | 'changes_requested', feedback?: string, by?: string, source: ReviewSource = 'content'): void {
+  reviewTask(
+    taskId: string,
+    verdict: 'approved' | 'changes_requested',
+    feedback?: string,
+    by?: string,
+    source: ReviewSource = 'content',
+    options?: { engine?: string | null; profileName?: string | null },
+  ): void {
     const task = this.taskRepo.get(taskId);
     if (!task || task.status !== 'review') return;
     this.reviewNotified.delete(taskId);
     const chain = this.reviewChainForTask(task);
     const step = chain[task.reviewStep ?? 0];
 
+    const fallbackEngine = by === 'claude-reviewer' || by === 'claude-review' ? 'claude' : by === 'codex-reviewer' ? 'codex' : null;
+    const reviewEngine = options?.engine ?? fallbackEngine;
+    const reviewProfile = options?.profileName ?? null;
+
     if (verdict === 'approved') {
       if (isAutoReviewer(by) && (!feedback || feedback.trim() === '')) return;
       if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
-        this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback: feedback || null, actor: by || 'reviewer' });
+        this.reviewRepo.insert({
+          id: crypto.randomUUID(),
+          taskId,
+          verdict,
+          feedback: feedback || null,
+          actor: by || 'reviewer',
+          engine: reviewEngine,
+          profileName: reviewProfile,
+        });
       }
       if ((isAutoReviewer(by) || by === 'claude-review') && isAutomatedStep(step)) {
         this.advanceReviewStep(task, chain, 'approved');
@@ -3982,7 +4117,15 @@ export class Scheduler {
         throw new Error('Feedback is required when requesting changes');
       }
       if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
-        this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback, actor: by || 'reviewer' });
+        this.reviewRepo.insert({
+          id: crypto.randomUUID(),
+          taskId,
+          verdict,
+          feedback,
+          actor: by || 'reviewer',
+          engine: reviewEngine,
+          profileName: reviewProfile,
+        });
       }
       if (isContentReview(by, source)) {
         const count = (task.reviewerChangesRequested || 0) + 1;
@@ -4066,8 +4209,10 @@ export class Scheduler {
     }
 
     if (outcome === 'cancelled') {
-      this.taskRepo.updateStatus(taskId, 'cancelled');
-      this.eventBus.emit('task.cancelled', taskId);
+      const info = this.pendingCancel.get(taskId);
+      this.pendingCancel.delete(taskId);
+      const recorded = this.recordCancel(taskId, info);
+      this.eventBus.emit('task.cancelled', taskId, { reason: recorded.reason, by: recorded.by, previousStatus: 'running' });
     } else if (outcome === 'timeout') {
       this.taskRepo.updateStatus(taskId, 'failed');
       this.eventBus.emit('task.timeout', taskId);

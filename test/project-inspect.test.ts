@@ -4,6 +4,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createNewGitProject, inspectProject } from '../src/projects/inspect.js';
+import { inspectGitProject } from '../src/projects/git.js';
 import { loadConfig } from '../src/config.js';
 import { createContext } from '../src/daemon.js';
 import { FakeEngine, type Engine } from '../src/engines/index.js';
@@ -14,6 +15,71 @@ afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: 
 function tempDir() { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-inspect-')); dirs.push(dir); return dir; }
 
 describe('project wizard inspection', () => {
+  it('reports git branches, sanitized origin, dirty files and ahead/behind asynchronously', async () => {
+    const dir = tempDir();
+    execFileSync('git', ['init', '-q', dir]);
+    execFileSync('git', ['-C', dir, 'config', 'user.email', 'test@example.com']);
+    execFileSync('git', ['-C', dir, 'config', 'user.name', 'Test']);
+    execFileSync('git', ['-C', dir, 'checkout', '-qb', 'main']);
+    fs.writeFileSync(path.join(dir, 'tracked.txt'), 'one');
+    execFileSync('git', ['-C', dir, 'add', '.']);
+    execFileSync('git', ['-C', dir, 'commit', '-qm', 'initial']);
+    execFileSync('git', ['-C', dir, 'branch', 'dev']);
+    execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', 'https://user:password@example.com/team/repo.git']);
+    execFileSync('git', ['-C', dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD']);
+    execFileSync('git', ['-C', dir, 'update-ref', 'refs/remotes/origin/dev', 'HEAD']);
+    execFileSync('git', ['-C', dir, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main']);
+    fs.writeFileSync(path.join(dir, 'dirty.txt'), 'uncommitted');
+
+    const result = await inspectGitProject(dir, 'main');
+    expect(result.localBranches).toEqual(expect.arrayContaining([result.currentBranch as string, 'dev']));
+    expect(result.remoteBranches).toEqual(expect.arrayContaining(['main', 'dev']));
+    expect(result.remoteBranches).not.toContain('origin');
+    expect(result.remoteBranches).not.toContain('HEAD');
+    expect(result.remote).toBe('https://example.com/team/repo.git');
+    expect(result.dirty).toEqual({ changed: true, files: 1 });
+    expect(result.aheadBehind).toEqual({ ahead: 0, behind: 0 });
+
+    execFileSync('git', ['-C', dir, 'config', 'remote.origin.url', 'git@host:team/repo.git']);
+    await expect(inspectGitProject(dir, 'main')).resolves.toMatchObject({ remote: 'git@host:team/repo.git' });
+    execFileSync('git', ['-C', dir, 'config', 'remote.origin.url', 'user:token@host:team/repo.git']);
+    await expect(inspectGitProject(dir, 'main')).resolves.toMatchObject({ remote: 'host:team/repo.git' });
+  });
+
+  it('reports a clean repository without origin and no ahead/behind data', async () => {
+    const dir = tempDir();
+    execFileSync('git', ['init', '-q', dir]);
+    execFileSync('git', ['-C', dir, 'checkout', '-qb', 'dev']);
+    const result = await inspectGitProject(dir, 'dev');
+    expect(result.dirty).toEqual({ changed: false, files: 0 });
+    expect(result.remote).toBeNull();
+    expect(result.remoteBranches).toEqual([]);
+    expect(result.aheadBehind).toBeNull();
+  });
+
+  it('reports divergence from the configured origin branch', async () => {
+    const dir = tempDir();
+    execFileSync('git', ['init', '-q', dir]);
+    execFileSync('git', ['-C', dir, 'config', 'user.email', 'test@example.com']);
+    execFileSync('git', ['-C', dir, 'config', 'user.name', 'Test']);
+    execFileSync('git', ['-C', dir, 'checkout', '-qb', 'main']);
+    fs.writeFileSync(path.join(dir, 'tracked.txt'), 'one');
+    execFileSync('git', ['-C', dir, 'add', '.']);
+    execFileSync('git', ['-C', dir, 'commit', '-qm', 'initial']);
+    execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', 'https://example.com/team/repo.git']);
+    execFileSync('git', ['-C', dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD']);
+    fs.writeFileSync(path.join(dir, 'tracked.txt'), 'two');
+    execFileSync('git', ['-C', dir, 'commit', '-qam', 'second']);
+
+    await expect(inspectGitProject(dir, 'main')).resolves.toMatchObject({ aheadBehind: { ahead: 1, behind: 0 } });
+  });
+
+  it('rejects a missing or non-git repository with a clear error', async () => {
+    const dir = tempDir();
+    await expect(inspectGitProject(dir, 'main')).rejects.toThrow(/Không thể đọc git repository/);
+    await expect(inspectGitProject(path.join(dir, 'missing'), 'main')).rejects.toThrow(/Không thể đọc git repository/);
+  });
+
   it('reports git, monorepo, hooks, lockfile and guidance metadata without reading secrets', () => {
     const dir = tempDir();
     execFileSync('git', ['init', '-q', dir]);

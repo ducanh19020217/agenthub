@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getProfiles, getModelOptions, getPresets, applyPreset, getCurrentPreset } from '../api/client';
-import type { ReviewerFallback, ReviewerOrderItem, PresetLevel, ApplyPresetResult } from '../types/api';
+import type { ReviewerFallback, ReviewerOrderItem, PresetLevel, ApplyPresetResult, GlobalPresetField } from '../types/api';
 import { Save, CheckCircle2, AlertCircle, Info, MessageSquare, Bell, ArrowUp, ArrowDown, Plus, Trash2 } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
 import { TelegramCard } from '../components/TelegramCard';
@@ -100,6 +100,10 @@ export const SettingsPage: React.FC = () => {
   const { data: presets = [] } = useQuery({ queryKey: ['presets'], queryFn: getPresets });
   // Under ['config'] so every config save/apply that invalidates the config also refreshes it.
   const { data: currentPreset } = useQuery({ queryKey: ['config', 'currentPreset'], queryFn: getCurrentPreset });
+  const presetLabel = (level: PresetLevel) =>
+    presets.find((p) => p.id === level)?.name?.[locale as 'vi' | 'en']
+    || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}`);
+  const presetFieldLabel = (field: GlobalPresetField) => t(`settings.presetField_${field.replace(/\./g, '_')}`);
   const [selectedPreset, setSelectedPreset] = useState<PresetLevel | null>(null);
   const [diffResult, setDiffResult] = useState<ApplyPresetResult | null>(null);
   const [presetApplySuccess, setPresetApplySuccess] = useState<string | null>(null);
@@ -522,8 +526,35 @@ export const SettingsPage: React.FC = () => {
         <div>
           <h2 className="text-base font-semibold text-[var(--t-text)]">{t('settings.presetsTitle')}</h2>
           <p className="text-sm text-[var(--t-text-3)]">{t('settings.presetsSubtitle')}</p>
-          {currentPreset?.preset === 'custom' && (
-            <p data-testid="preset-active-custom" className="text-xs text-[var(--t-text-3)]">{t('settings.presetCustom')}</p>
+          {currentPreset && (
+            <div
+              data-testid={currentPreset.preset === 'custom' ? 'preset-active-custom' : 'preset-status'}
+              className={`mt-2 inline-flex flex-col gap-0.5 rounded-lg border px-3 py-2 text-xs ${
+                currentPreset.preset === 'custom'
+                  ? 'border-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_10%,transparent)] text-[var(--t-text)]'
+                  : 'border-[var(--t-accent)] bg-[color-mix(in_srgb,var(--t-accent)_10%,transparent)] text-[var(--t-text)]'
+              }`}
+            >
+              {currentPreset.preset === 'custom' ? (
+                <>
+                  <span className="font-semibold">
+                    {t('settings.presetStatusCustom')}
+                    {currentPreset.basePreset && (
+                      <span className="font-normal text-[var(--t-text-2)]">
+                        {' '}({t(currentPreset.baseFromHistory ? 'settings.presetStatusBasedOn' : 'settings.presetStatusClosest', { preset: presetLabel(currentPreset.basePreset) })})
+                      </span>
+                    )}
+                  </span>
+                  {currentPreset.mismatches && currentPreset.mismatches.length > 0 && (
+                    <span data-testid="preset-status-mismatches" className="text-[var(--t-text-2)]">
+                      {t('settings.presetStatusDiffers', { fields: currentPreset.mismatches.map(presetFieldLabel).join(', ') })}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="font-semibold">{t('settings.presetStatusActive', { preset: presetLabel(currentPreset.preset) })}</span>
+              )}
+            </div>
           )}
         </div>
 
@@ -548,6 +579,7 @@ export const SettingsPage: React.FC = () => {
             const desc = pDef?.description?.[locale as 'vi' | 'en'] || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}Desc`);
             const isSelected = selectedPreset === level;
             const isActive = currentPreset?.preset === level;
+            const isBase = !isActive && currentPreset?.preset === 'custom' && currentPreset.basePreset === level;
             return (
               <div
                 key={level}
@@ -558,7 +590,9 @@ export const SettingsPage: React.FC = () => {
                     ? 'border-[var(--t-accent)] bg-[color-mix(in_srgb,var(--t-accent)_8%,transparent)] ring-2 ring-[var(--t-accent)]'
                     : isActive
                       ? 'border-[var(--t-accent)] bg-[color-mix(in_srgb,var(--t-accent)_8%,transparent)]'
-                      : 'border-[var(--t-border)] bg-[var(--t-surface-2)]'
+                      : isBase
+                        ? 'border-dashed border-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_6%,transparent)]'
+                        : 'border-[var(--t-border)] bg-[var(--t-surface-2)]'
                 }`}
               >
                 <div className="flex items-center justify-between">
@@ -567,6 +601,11 @@ export const SettingsPage: React.FC = () => {
                     {isActive && (
                       <span data-testid={`preset-active-${level}`} className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-[var(--t-accent)] text-[var(--t-on-accent)]">
                         {t('settings.presetActive')}
+                      </span>
+                    )}
+                    {isBase && (
+                      <span data-testid={`preset-base-${level}`} className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded border border-[var(--t-warn)] text-[var(--t-warn)]">
+                        {t('settings.presetBase')}
                       </span>
                     )}
                   </span>

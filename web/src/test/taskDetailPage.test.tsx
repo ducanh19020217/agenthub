@@ -119,13 +119,14 @@ describe('TaskDetailPage', () => {
 
     // Mở lại modal và bấm Xác nhận hủy
     fireEvent.click(cancelBtn);
+    fireEvent.change(screen.getByTestId('cancel-reason-input'), { target: { value: 'Trùng việc' } });
     const confirmCancelBtn = screen.getByRole('button', { name: /Xác nhận hủy/i });
     await act(async () => {
       fireEvent.click(confirmCancelBtn);
       await Promise.resolve();
     });
 
-    expect(cancelSpy).toHaveBeenCalledWith('proj-1~t1');
+    expect(cancelSpy).toHaveBeenCalledWith('proj-1~t1', 'Trùng việc');
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['task', 'proj-1~t1'] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['tasks'] });
     expect(screen.queryByRole('heading', { name: /Xác nhận hủy task/i })).not.toBeInTheDocument();
@@ -767,6 +768,69 @@ describe('TaskDetailPage', () => {
     fireEvent.change(input, { target: { value: 'log từ server' } });
     fireEvent.click(screen.getByRole('button', { name: /Gửi thêm thông tin/i }));
     await vi.waitFor(() => expect(client.submitOpenProjectTriageInput).toHaveBeenCalledWith('demo', 42, 'log từ server'));
+  });
+
+  it('22. Hiển thị agent badge (icon/engine/profileName) cạnh model ở review chain, review history, runs, và running header', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'running',
+      currentRun: {
+        startedAt: '2026-10-15T00:00:00Z',
+        lastOutputAt: '2026-10-15T00:05:00Z',
+        lastActivityAt: '2026-10-15T00:05:00Z',
+        activitySource: 'log',
+        model: 'gemini-3.8-flash-high',
+        profileName: 'gemini-fast',
+        engine: 'agy',
+        paused: false,
+        rss: 1024 * 1024 * 100,
+        cpu: 15.5,
+      },
+      reviewChain: [
+        { reviewer: 'codex:gpt-5.6-luna', mode: 'gate', engine: 'codex', profileName: 'codex-worker' },
+        { reviewer: 'claude', mode: 'final', engine: 'claude', profileName: null },
+      ],
+      reviews: [
+        {
+          id: 'rev-1',
+          taskId: 'proj-1~t1',
+          verdict: 'approved',
+          feedback: 'LGTM',
+          actor: 'codex-reviewer',
+          model: 'codex:gpt-5.6-luna',
+          engine: 'codex',
+          profileName: 'codex-worker',
+          createdAt: '2026-10-15T00:08:00Z',
+        },
+      ],
+      runs: [
+        {
+          id: 'run-1',
+          taskId: 'proj-1~t1',
+          engine: 'agy',
+          model: 'gemini-3.8-flash-high',
+          profileName: 'gemini-fast',
+          outcome: 'done',
+          startedAt: '2026-10-15T00:00:00Z',
+          endedAt: '2026-10-15T00:10:00Z',
+        },
+      ],
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const badges = screen.getAllByTestId('model-badge');
+    expect(badges.length).toBeGreaterThanOrEqual(3);
+
+    const profiles = screen.getAllByTestId('model-badge-profile');
+    const profileTexts = profiles.map((p) => p.textContent);
+    expect(profileTexts).toContain('gemini-fast');
+    expect(profileTexts).toContain('codex-worker');
+
+    const runsTabBtn = screen.getByRole('button', { name: /Runs/i });
+    fireEvent.click(runsTabBtn);
+    expect(screen.getAllByText('gemini-fast').length).toBeGreaterThanOrEqual(2);
   });
 });
 

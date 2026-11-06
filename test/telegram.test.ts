@@ -15,7 +15,27 @@ import {
   redactTelegramToken,
   slugify,
   generateTaskSlug,
+  parseTimesheetCommand,
 } from '../src/telegram.js';
+
+describe('Telegram timesheet parser', () => {
+  it('parses waiting, decimal and pinned hours', () => {
+    expect(parseTimesheetCommand('SIE-1 3.5h cho 2.5h co-dinh Cài lại máy')).toEqual({ ticket: 'SIE-1', activeHours: 3.5, waitHours: 2.5, pinned: true, description: 'Cài lại máy' });
+    expect(parseTimesheetCommand('new 1h Trao đổi khách')).toMatchObject({ ticket: 'new', activeHours: 1, waitHours: 0, pinned: false, description: 'Trao đổi khách' });
+  });
+
+  it('rejects missing descriptions and totals over 24 hours', () => {
+    expect(() => parseTimesheetCommand('OP-1 1h')).toThrow();
+    expect(() => parseTimesheetCommand('OP-1 20h cho 5h việc quá lâu')).toThrow(/24/);
+    expect(() => parseTimesheetCommand('OP-1 0h việc bằng không')).toThrow();
+  });
+
+  it('parses a standalone co-dinh flag and preserves ticket case', () => {
+    expect(parseTimesheetCommand('sie-42 2h co-dinh Cài đặt máy')).toEqual({
+      ticket: 'sie-42', activeHours: 2, waitHours: 0, pinned: true, description: 'Cài đặt máy',
+    });
+  });
+});
 
 interface RecordedFetchCall {
   url: string;
@@ -2833,6 +2853,73 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
       chatService: ctx.chatService,
     });
   }
+
+  it('task.done vẫn báo khi brain.mode = auto, và báo "hết task" khi project không còn task đang chạy', async () => {
+    ctx.projectRepo.insert({ id: 'pd', name: 'Dự án D', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'pd/t-1', projectId: 'pd', slug: 't-1', title: 'Việc một', body: '', level: 'easy', status: 'done' });
+    ctx.taskRepo.insert({ id: 'pd/t-2', projectId: 'pd', slug: 't-2', title: 'Việc hai', body: '', level: 'easy', status: 'running' });
+    const bot = createBot('auto');
+
+    bot.handleEvent('task.done', 'pd/t-1', { by: 'codex', verdict: 'approved' });
+    await bot.flushQueue(CHAT_ID);
+    let sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends).toHaveLength(1);
+    expect(sends[0].body?.text).toContain('Task hoàn thành');
+    expect(sends[0].body?.text).toContain('Việc một');
+    expect(sends[0].body?.text).toContain('codex');
+
+    ctx.taskRepo.update('pd/t-2', { status: 'done' });
+    bot.handleEvent('task.done', 'pd/t-2', undefined);
+    await bot.flushQueue(CHAT_ID);
+    sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends).toHaveLength(3);
+    expect(sends[1].body?.text).toContain('Việc hai');
+    expect(sends[2].body?.text).toContain('Dự án D đã hết task');
+    expect(sends[2].body?.text).toContain('2 task đã hoàn thành');
+
+    // Project rỗng rồi lại rỗng: không báo "hết task" lặp lại nếu chưa có task mới chạy
+    currentTime += 60_000;
+    bot.handleEvent('task.done', 'pd/t-1', { again: true });
+    await bot.flushQueue(CHAT_ID);
+    sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends.filter((c) => String(c.body?.text).includes('đã hết task'))).toHaveLength(1);
+  });
+
+  it('task.cancelled và các sự kiện ngắt task vẫn báo trong auto mode, kèm lý do và người hủy', async () => {
+    ctx.projectRepo.insert({ id: 'pc', name: 'PC', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'pc/t-1', projectId: 'pc', slug: 't-1', title: 'Việc bị hủy', body: '', level: 'easy', status: 'cancelled' });
+    ctx.taskRepo.insert({ id: 'pc/t-2', projectId: 'pc', slug: 't-2', title: 'Việc lặp', body: '', level: 'easy', status: 'running' });
+    const bot = createBot('auto');
+
+    bot.handleEvent('task.cancelled', 'pc/t-1', { reason: 'Trùng với T52', by: 'mcp', previousStatus: 'queued' });
+    bot.handleEvent('task.looping', 'pc/t-2', { command: 'npm test', count: 5 });
+    bot.handleEvent('task.timeout', 'pc/t-2', undefined);
+    await bot.flushQueue(CHAT_ID);
+    const sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends).toHaveLength(3);
+    expect(sends[0].body?.text).toContain('Task bị hủy');
+    expect(sends[0].body?.text).toContain('Trùng với T52');
+    expect(sends[0].body?.text).toContain('mcp');
+    expect(sends[1].body?.text).toContain('lặp lệnh');
+    expect(sends[1].body?.text).toContain('npm test');
+    expect(sends[2].body?.text).toContain('quá thời gian');
+
+    config.telegram.notify.interrupted = false;
+    bot.handleEvent('task.cancelled', 'pc/t-2', { reason: 'x', by: 'y' });
+    await bot.flushQueue(CHAT_ID);
+    expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(3);
+  });
+
+  it('tắt notify.taskDone và notify.projectIdle thì task.done bị chặn trong auto mode như trước', async () => {
+    ctx.projectRepo.insert({ id: 'pq', name: 'PQ', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'pq/t-1', projectId: 'pq', slug: 't-1', title: 'Xong', body: '', level: 'easy', status: 'done' });
+    config.telegram.notify.taskDone = false;
+    config.telegram.notify.projectIdle = false;
+    const bot = createBot('auto');
+    bot.handleEvent('task.done', 'pq/t-1', undefined);
+    await bot.flushQueue(CHAT_ID);
+    expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
+  });
 
   it('1. khi brain.mode = auto: chan cac thong bao tho theo tung task, chi gui hub_notify va su co he thong', async () => {
     const bot = createBot('auto');

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, CheckCircle2, RotateCw, Loader2, AlertCircle } from 'lucide-react';
+import { Plus, Trash2, CheckCircle2, RotateCw, Loader2, AlertCircle, Copy, X } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
 import {
   deleteOpenProjectSource,
@@ -15,6 +15,7 @@ import {
   getOpenProjectTimeEntryActivities,
   previewOpenProjectTimesheet,
   runOpenProjectTimesheet,
+  cloneOpenProjectSource,
 } from '../api/client';
 import type { OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto } from '../types/api';
 
@@ -22,8 +23,9 @@ type TimesheetPreview = {
   date?: string;
   hours?: number;
   overMinimum?: boolean;
-  entries?: Array<{ displayId?: string; subject?: string; run?: number; wait?: number; chat?: number; level?: number; weight?: number; hours?: number }>;
+  entries?: Array<{ displayId?: string; subject?: string; run?: number; wait?: number; chat?: number; level?: number; weight?: number; hours?: number; rawHours?: number; estimateHours?: number }>;
   withoutTicket?: Array<{ taskId?: string; subject?: string }>;
+  estimateSkipped?: Array<{ wpId?: number; displayId?: string; reason?: string }>;
 };
 
 const blank = (id: string): OpenProjectSourceInput => ({
@@ -47,7 +49,7 @@ const blank = (id: string): OpenProjectSourceInput => ({
   language: 'vi',
   split: { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true },
   dailyReport: { enabled: false, time: '18:00', weekdaysOnly: true, maxItems: 10, telegram: false },
-  timesheet: { enabled: false, time: '17:30', weekdaysOnly: true, hours: 8, activityId: null, minEntryHours: 0.5, roundTo: 0.25 },
+  timesheet: { enabled: false, time: '17:30', weekdaysOnly: true, hours: 8, activityId: null, minEntryHours: 0.5, roundTo: 0.25, writeEstimate: true },
 });
 
 export const parseIdList = (value: string): number[] =>
@@ -75,7 +77,7 @@ export const matchStatusIds = (statuses: OpenProjectStatusDto[], targetNames: st
 const normalizeSplit = (source: OpenProjectSource | OpenProjectSourceInput): OpenProjectSourceInput => ({
   ...source,
   split: source.split || { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true },
-  timesheet: source.timesheet || { enabled: false, time: '17:30', weekdaysOnly: true, hours: 8, activityId: null, minEntryHours: 0.5, roundTo: 0.25 },
+  timesheet: source.timesheet || { enabled: false, time: '17:30', weekdaysOnly: true, hours: 8, activityId: null, minEntryHours: 0.5, roundTo: 0.25, writeEstimate: true },
 });
 
 export const OpenProjectSettings: React.FC = () => {
@@ -88,9 +90,11 @@ export const OpenProjectSettings: React.FC = () => {
 
   const [draft, setDraft] = useState<OpenProjectSourceInput | null>(null);
   const [key, setKey] = useState('');
-  const [message, setMessage] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
+  const [message, setMessage] = useState<{ type: 'ok' | 'error' | 'warn'; text: string } | null>(null);
   const [timesheetPreview, setTimesheetPreview] = useState<TimesheetPreview | null>(null);
   const [manualInputs, setManualInputs] = useState<Partial<Record<'watchStatusIds' | 'reopenedStatusIds' | 'openStatusIds', string>>>({});
+  /** ID of the source that was active before switching to unsaved draft (for Cancel) */
+  const [prevSourceId, setPrevSourceId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!draft && sources[0]) {
@@ -145,10 +149,18 @@ export const OpenProjectSettings: React.FC = () => {
       }
       return saved;
     },
-    onSuccess: () => {
+    onSuccess: (saved) => {
       setKey('');
       setManualInputs({});
-      setMessage({ type: 'ok', text: t('integrations.saved') });
+      setPrevSourceId(null);
+      // Check if another source with same URL also has timesheet enabled
+      const timesheetConflict = draft?.timesheet?.enabled &&
+        sources.some((s) => s.id !== saved.id && s.url === saved.url && (s as any).timesheet?.enabled);
+      if (timesheetConflict) {
+        setMessage({ type: 'ok', text: `${t('integrations.saved')} ⚠ ${t('integrations.timesheetWarn')}` });
+      } else {
+        setMessage({ type: 'ok', text: t('integrations.saved') });
+      }
       qc.invalidateQueries({ queryKey: ['openproject-sources'] });
       if (draft?.id) {
         qc.invalidateQueries({ queryKey: ['openproject-statuses', draft.id] });
@@ -265,6 +277,22 @@ export const OpenProjectSettings: React.FC = () => {
   const timesheetPreviewMutation = useMutation({ mutationFn: (id: string) => previewOpenProjectTimesheet(id), onSuccess: (data) => { setTimesheetPreview(data as TimesheetPreview); setMessage({ type: 'ok', text: t('integrations.timesheetPreviewSuccess') }); }, onError: (err: any) => setMessage({ type: 'error', text: err?.message || t('common.error') }) });
   const timesheetRunMutation = useMutation({ mutationFn: (id: string) => runOpenProjectTimesheet(id), onSuccess: (data) => { setTimesheetPreview(data as TimesheetPreview); setMessage({ type: 'ok', text: t('integrations.timesheetRunSuccess') }); }, onError: (err: any) => setMessage({ type: 'error', text: err?.message || t('common.error') }) });
 
+  const cloneMutation = useMutation({
+    mutationFn: ({ sourceId, project }: { sourceId: string; project: string }) =>
+      cloneOpenProjectSource(sourceId, { project }),
+    onSuccess: (cloned) => {
+      qc.invalidateQueries({ queryKey: ['openproject-sources'] });
+      setDraft(normalizeSplit(cloned));
+      setManualInputs({});
+      setKey('');
+      setPrevSourceId(null);
+      setMessage({ type: 'ok', text: t('integrations.cloneSourceSuccess', { id: cloned.id }) });
+    },
+    onError: (err: any) => {
+      setMessage({ type: 'error', text: t('integrations.cloneSourceError', { error: err?.message || String(err) }) });
+    },
+  });
+
   const set = (patch: Partial<OpenProjectSourceInput>) =>
     setDraft((d) => (d ? { ...d, ...patch } : d));
 
@@ -273,6 +301,37 @@ export const OpenProjectSettings: React.FC = () => {
     setManualInputs({});
     setKey('');
     setMessage(null);
+    setPrevSourceId(null);
+  };
+
+  const startNewSource = () => {
+    const savedId = draft?.id && sources.some((s) => s.id === draft?.id) ? draft.id : null;
+    setDraft(normalizeSplit(blank(`openproject-${Date.now()}`)));
+    setManualInputs({});
+    setKey('');
+    setMessage(null);
+    setPrevSourceId(savedId);
+  };
+
+  const cancelUnsaved = () => {
+    if (prevSourceId) {
+      const prev = sources.find((s) => s.id === prevSourceId);
+      if (prev) {
+        selectSource(prev);
+        return;
+      }
+    }
+    // Fall back to first source
+    if (sources[0]) selectSource(sources[0]);
+    else { setDraft(null); setManualInputs({}); }
+    setPrevSourceId(null);
+  };
+
+  const handleClone = () => {
+    if (!draft) return;
+    const project = window.prompt(t('integrations.cloneSourcePrompt'));
+    if (!project?.trim()) return;
+    cloneMutation.mutate({ sourceId: draft.id, project: project.trim() });
   };
 
   const handleSuggestByName = () => {
@@ -313,22 +372,62 @@ export const OpenProjectSettings: React.FC = () => {
       </div>
 
       <div className="flex flex-wrap gap-2">
-        {sources.map((source) => (
+        {sources.map((source) => {
+          const host = (() => { try { return new URL(source.url).hostname; } catch { return source.url; } })();
+          const label = `${source.project} · ${host}`;
+          const isActive = draft?.id === source.id;
+          return (
+            <button
+              key={source.id}
+              type="button"
+              title={source.id}
+              onClick={() => selectSource(source)}
+              className={`rounded-lg border px-3 py-2 text-xs ${
+                isActive ? 'border-[var(--t-accent)]' : 'border-[var(--t-border)]'
+              }`}
+              data-testid={`source-btn-${source.id}`}
+            >
+              {label}
+            </button>
+          );
+        })}
+        {/* Unsaved draft button */}
+        {isUnsaved && draft && (
+          <>
+            <button
+              type="button"
+              className="rounded-lg border border-[var(--t-accent)] bg-[var(--t-accent)] px-3 py-2 text-xs text-[var(--t-on-accent)] font-medium"
+              data-testid="unsaved-source-btn"
+            >
+              {t('integrations.unsavedSource')}
+            </button>
+            <button
+              type="button"
+              className="rounded-lg border border-[var(--t-border)] px-3 py-2 text-xs flex items-center gap-1"
+              onClick={cancelUnsaved}
+              data-testid="cancel-unsaved-btn"
+            >
+              <X className="inline h-3 w-3" /> {t('integrations.cancelUnsaved')}
+            </button>
+          </>
+        )}
+        {/* Clone button – shown only when a saved source is active */}
+        {!isUnsaved && draft && (
           <button
-            key={source.id}
             type="button"
-            onClick={() => selectSource(source)}
-            className={`rounded-lg border px-3 py-2 text-xs ${
-              draft?.id === source.id ? 'border-[var(--t-accent)]' : 'border-[var(--t-border)]'
-            }`}
+            className="rounded-lg border border-[var(--t-border)] px-3 py-2 text-xs flex items-center gap-1 disabled:opacity-50"
+            onClick={handleClone}
+            disabled={cloneMutation.isPending}
+            data-testid="clone-source-btn"
           >
-            {source.id}
+            {cloneMutation.isPending ? <Loader2 className="inline h-3 w-3 animate-spin" /> : <Copy className="inline h-3 w-3" />}
+            {t('integrations.cloneSource')}
           </button>
-        ))}
+        )}
         <button
           type="button"
           className="rounded-lg border border-[var(--t-border)] px-3 py-2 text-xs"
-          onClick={() => selectSource(blank(`openproject-${Date.now()}`))}
+          onClick={startNewSource}
         >
           <Plus className="inline h-3 w-3" /> {t('integrations.addSource')}
         </button>
@@ -717,6 +816,7 @@ export const OpenProjectSettings: React.FC = () => {
             <label className="space-y-1 text-xs"><span>{t('integrations.timesheetMin')}</span><input type="number" min={0.25} step={0.25} value={draft.timesheet?.minEntryHours ?? 0.5} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), minEntryHours: Number(e.target.value) } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label>
             <label className="space-y-1 text-xs"><span>{t('integrations.timesheetRound')}</span><input type="number" min={0.25} step={0.25} value={draft.timesheet?.roundTo ?? 0.25} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), roundTo: Number(e.target.value) } })} className="w-full rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2" /></label>
             <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.timesheet?.weekdaysOnly ?? true} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), weekdaysOnly: e.target.checked } })} />{t('integrations.weekdaysOnly')}</label>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.timesheet?.writeEstimate ?? true} onChange={(e) => set({ timesheet: { ...(draft.timesheet || blank(draft.id).timesheet), writeEstimate: e.target.checked } })} />{t('integrations.timesheetWriteEstimate')}</label>
           </div>
 
           <label className="sm:col-span-2 space-y-1">
@@ -808,10 +908,11 @@ export const OpenProjectSettings: React.FC = () => {
           {timesheetPreview && (
             <div className="sm:col-span-2 overflow-x-auto rounded-lg border border-[var(--t-border)] p-3 text-xs" data-testid="timesheet-preview">
               <p className="mb-2">{timesheetPreview.date || ''} · {timesheetPreview.hours ?? 0}h</p>
-              <table className="w-full text-left"><thead><tr><th>Ticket</th><th>Subject</th><th>run</th><th>wait</th><th>chat</th><th>level</th><th>weight</th><th>hours</th></tr></thead>
-                <tbody>{(timesheetPreview.entries || []).map((entry) => <tr key={entry.displayId}><td>[{entry.displayId || '?'}]</td><td>{entry.subject || ''}</td><td>{entry.run ?? 0}</td><td>{entry.wait ?? 0}</td><td>{entry.chat ?? 0}</td><td>{entry.level ?? 0}</td><td>{entry.weight ?? 0}</td><td>{entry.hours ?? 0}h</td></tr>)}</tbody>
+              <table className="w-full text-left"><thead><tr><th>Ticket</th><th>Subject</th><th>run</th><th>wait</th><th>chat</th><th>level</th><th>weight</th><th>{t('integrations.timesheetEstimateCol')}</th><th>{t('integrations.timesheetActualCol')}</th></tr></thead>
+                <tbody>{(timesheetPreview.entries || []).map((entry) => <tr key={entry.displayId}><td>[{entry.displayId || '?'}]</td><td>{entry.subject || ''}</td><td>{entry.run ?? 0}</td><td>{entry.wait ?? 0}</td><td>{entry.chat ?? 0}</td><td>{entry.level ?? 0}</td><td>{entry.weight ?? 0}</td><td>{entry.estimateHours ?? entry.rawHours ?? 0}h</td><td>{entry.hours ?? 0}h</td></tr>)}</tbody>
               </table>
               {timesheetPreview.withoutTicket && timesheetPreview.withoutTicket.length > 0 && <p className="mt-2">{timesheetPreview.withoutTicket.map((item) => `${item.taskId || '?'} ${item.subject || ''}`).join(', ')}</p>}
+              {timesheetPreview.estimateSkipped && timesheetPreview.estimateSkipped.length > 0 && <p className="mt-2 text-[var(--t-warn)]">{timesheetPreview.estimateSkipped.map((item) => `[${item.displayId || '?'}] ${item.reason || ''}`).join(', ')}</p>}
               {timesheetPreview.overMinimum && <p className="mt-2 text-[var(--t-crit)]">{t('integrations.timesheetOverMinimum')}</p>}
             </div>
           )}

@@ -12,6 +12,7 @@ export interface GraphTaskItem {
   currentRun?: {
     model?: string;
     profileName?: string;
+    engine?: string | null;
   } | null;
 }
 
@@ -26,6 +27,7 @@ export interface TaskGraphNode {
   currentRun?: {
     model?: string;
     profileName?: string;
+    engine?: string | null;
   } | null;
   blockedCount: number;
   isCritical: boolean;

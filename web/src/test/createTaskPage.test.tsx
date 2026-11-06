@@ -303,4 +303,34 @@ describe('CreateTaskPage', () => {
 
     expect(await screen.findByText('Slug đã tồn tại')).toBeInTheDocument();
   });
+
+  it('hiển thị cảnh báo merge sau khi tạo task nếu API trả về mergeWarning', async () => {
+    vi.spyOn(client, 'createTask').mockResolvedValue({
+      id: 'proj-1/merge-warning',
+      projectId: 'proj-1',
+      slug: 'merge-warning',
+      title: 'Task cần cảnh báo',
+      level: 'easy',
+      status: 'draft',
+      mergeWarning: 'Project chưa có worktree tích hợp cho nhánh main.',
+      dependsOn: '[]',
+      attempt: 0,
+      resume: 0,
+      createdAt: '2026-10-15T00:00:00Z',
+      updatedAt: '2026-10-15T00:00:00Z',
+    });
+
+    renderPage();
+    expect(await screen.findByText('Tạo task mới')).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText('vd: user-auth, bugfix-login'), { target: { value: 'merge-warning' } });
+    fireEvent.change(screen.getByPlaceholderText(/Mô tả tóm tắt mục tiêu/i), { target: { value: 'Task cần cảnh báo' } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Tạo Task/i }));
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Project chưa có worktree tích hợp cho nhánh main.');
+    expect(screen.getByRole('button', { name: /Mở task vừa tạo/i })).toBeInTheDocument();
+  });
 });

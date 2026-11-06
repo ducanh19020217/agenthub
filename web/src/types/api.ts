@@ -92,7 +92,12 @@ export interface ProjectMerge {
   checks: string[];
   timeoutSec: number;
 }
-export interface ReviewChainStep { reviewer: string; mode: 'gate' | 'final'; }
+export interface ReviewChainStep {
+  reviewer: string;
+  mode: 'gate' | 'final';
+  engine?: string | null;
+  profileName?: string | null;
+}
 export interface ProjectReview { chain: ReviewChainStep[]; maxRounds: number; }
 export interface ReviewerOrderItem { engine: 'codex' | 'claude'; model: string; profiles: string[]; }
 export interface ReviewerFallback { onUnavailable: boolean; onBusyAfterMin: number; onError: boolean; }
@@ -126,6 +131,17 @@ export interface Project {
   ciStatus?: CiStatusSummary | null;
   createdAt?: string;
   afterMerge?: { steps: string[][]; timeoutSec: number; restartHub: boolean; push?: { remote: string; from: string; to: string; ffOnly: boolean } } | null;
+}
+
+export interface ProjectGitStatus {
+  path: string;
+  currentBranch: string | null;
+  defaultBranch: string;
+  dirty: { changed: boolean; files: number };
+  remote: string | null;
+  localBranches: string[];
+  remoteBranches: string[];
+  aheadBehind: { ahead: number; behind: number } | null;
 }
 
 export interface ProjectInspection {
@@ -252,10 +268,10 @@ export interface OpenProjectSource {
   triage?: 'off' | 'approve' | 'auto'; triageModelChain?: string[]; feedbackStatusId?: number | null;
   split?: OpenProjectSplitConfig;
   dailyReport?: { enabled?: boolean; time: string; weekdaysOnly: boolean; dir?: string; maxItems: number; telegram: boolean };
-  timesheet?: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number };
+  timesheet?: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number; writeEstimate: boolean };
 }
 export interface OpenProjectSplitConfig { typeIds: number[]; keyword: string | null; workerMayRequest: boolean; maxParts: number; createChildTickets: boolean; }
-export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured' | 'split' | 'timesheet'> { split: OpenProjectSplitConfig; timesheet: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number }; key?: string; }
+export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured' | 'split' | 'timesheet'> { split: OpenProjectSplitConfig; timesheet: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number; writeEstimate: boolean }; key?: string; }
 export interface OpenProjectStatusDto {
   id: number;
   name: string;
@@ -319,6 +335,8 @@ export interface Review {
   createdAt: string;
   actor?: string;
   model?: string;
+  engine?: string | null;
+  profileName?: string | null;
 }
 
 export type WaitReason =
@@ -360,6 +378,7 @@ export interface Task {
   waitReason?: WaitReason;
   blockingDisk?: BlockingDiskInfo | null;
   modelWarnings?: string[];
+  mergeWarning?: string | null;
   dependsOn: string | string[];
   attempt: number;
   resume: number;
@@ -373,6 +392,10 @@ export interface Task {
   autoMergeSkippedReason?: string | null;
   autoMergeSkippedChecks?: Array<{ name?: string; outputTail?: string }>;
   autoMergeSkippedRetried?: boolean;
+  /** Lý do task bị hủy, do người dùng nhập hoặc hệ thống ghi. */
+  cancelReason?: string | null;
+  /** Nguồn hủy: dashboard, telegram:@user, mcp, system:<what>, batch:discard. */
+  cancelledBy?: string | null;
   reviewStep?: number;
   reviewRound?: number;
   reviewMaxRounds?: number;
@@ -390,6 +413,7 @@ export interface Task {
     loopingCommand?: string | null;
     model?: string;
     profileName?: string;
+    engine?: string | null;
     paused?: boolean;
     pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
     rss?: number;
@@ -702,6 +726,7 @@ export interface SavingsTaskItem {
   completedAt: string | null;
   claudeCostSource?: 'measured' | 'estimated';
   claudeEffectiveTokens?: number;
+  profileName?: string | null;
 }
 
 export interface SavingsReport {
@@ -1072,6 +1097,7 @@ export interface TaskGraphNode {
   currentRun?: {
     model?: string;
     profileName?: string;
+    engine?: string | null;
   } | null;
   blockedCount: number;
   isCritical: boolean;
@@ -1132,6 +1158,25 @@ export interface ApplyPresetResult {
   };
   warnings?: string[];
   suggestedChecks?: Array<{ name: string; cmd: string[]; reason?: string }>;
+}
+
+export type GlobalPresetField =
+  | 'brain.mode'
+  | 'brain.permissions'
+  | 'autoFixOnFail'
+  | 'planning.requireApproval'
+  | 'planning.approvalMinTasks'
+  | 'reviewer.maxChangesRequested'
+  | 'reviewer.order';
+
+export interface GlobalPresetStatus {
+  preset: PresetLevel | 'custom';
+  /** Preset the config was derived from (last applied, or closest match). */
+  basePreset?: PresetLevel;
+  /** True when basePreset is the last preset actually applied, not a best guess. */
+  baseFromHistory?: boolean;
+  /** Fields where the config differs from basePreset. */
+  mismatches?: GlobalPresetField[];
 }
 
 export type ConfigSource = 'global' | 'department' | 'project';

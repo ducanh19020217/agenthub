@@ -28,6 +28,7 @@ import { SecretRequestCard } from '../components/chat/SecretRequestCard';
 import { NewSessionModal } from '../components/chat/NewSessionModal';
 import { useLocale } from '../context/LocaleContext';
 import { UI_Z_INDEX } from '../components/ui/layers';
+import { ModelBadge } from '../components/ModelBadge';
 import {
   Menu,
   X,
@@ -639,7 +640,14 @@ export const ChatPage: React.FC = () => {
                     {activeSession.projectId && (
                       <span>• {t('extra.project')}: {activeSession.projectId}</span>
                     )}
-                    <span>• Model: {activeSession.model || systemConfig?.chat?.model || 'sonnet'}</span>
+                    <span className="inline-flex items-center gap-1">
+                      <span>•</span>
+                      <ModelBadge
+                        model={activeSession.model || systemConfig?.chat?.model || 'sonnet'}
+                        engine="claude"
+                        profileName={activeSession.profileName}
+                      />
+                    </span>
                   </div>
                 </div>
               </div>

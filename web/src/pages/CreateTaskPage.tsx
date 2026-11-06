@@ -26,6 +26,8 @@ export const CreateTaskPage: React.FC = () => {
   const [createTicket, setCreateTicket] = useState(false);
   const [activeTab, setActiveTab] = useState<'edit' | 'preview'>('edit');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [mergeWarning, setMergeWarning] = useState<string | null>(null);
+  const [createdTaskId, setCreatedTaskId] = useState<string | null>(null);
   React.useEffect(() => {
     suggestModalTour('modal-create-task');
   }, [suggestModalTour]);
@@ -65,7 +67,12 @@ export const CreateTaskPage: React.FC = () => {
     onSuccess: (newTask) => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] });
       queryClient.invalidateQueries({ queryKey: ['status'] });
-      navigate(`/tasks/${encodeURIComponent(newTask.id.replace('/', '~'))}`);
+      if (newTask.mergeWarning) {
+        setMergeWarning(newTask.mergeWarning);
+        setCreatedTaskId(newTask.id);
+      } else {
+        navigate(`/tasks/${encodeURIComponent(newTask.id.replace('/', '~'))}`);
+      }
     },
     onError: (err: any) => {
       setErrorMsg(err.message || t('createTask.createError'));
@@ -75,6 +82,8 @@ export const CreateTaskPage: React.FC = () => {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    setMergeWarning(null);
+    setCreatedTaskId(null);
 
     if (!projectId) {
       setErrorMsg(t('createTask.selectProjectError'));
@@ -133,6 +142,19 @@ export const CreateTaskPage: React.FC = () => {
       {errorMsg && (
         <div className="p-4 rounded-lg bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)] text-sm border border-[var(--t-crit)]">
           {errorMsg}
+        </div>
+      )}
+      {mergeWarning && createdTaskId && (
+        <div role="alert" className="p-4 rounded-lg bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)] text-sm border border-[var(--t-warn)]">
+          <p className="font-semibold">{t('createTask.mergeWarningTitle')}</p>
+          <p className="mt-1">{mergeWarning}</p>
+          <button
+            type="button"
+            onClick={() => navigate(`/tasks/${encodeURIComponent(createdTaskId.replace('/', '~'))}`)}
+            className="mt-2 underline cursor-pointer"
+          >
+            {t('createTask.openCreatedTask')}
+          </button>
         </div>
       )}
 

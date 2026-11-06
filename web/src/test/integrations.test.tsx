@@ -102,6 +102,8 @@ describe('Integrations UI Suite', () => {
     vi.spyOn(client, 'getGiteaStatus').mockResolvedValue({ projectId: 'proj-1', status: 'ok', finishedAt: '2026-11-03T10:00:00Z' });
     vi.spyOn(client, 'getRemoteDeployStatus').mockResolvedValue({ projectId: 'proj-1', status: 'succeeded', finishedAt: '2026-11-03T11:00:00Z' });
     vi.spyOn(client, 'getEffectiveConfig').mockResolvedValue({} as any);
+    vi.spyOn(client, 'getProjectGitStatus').mockResolvedValue({ path: mockProject.path, currentBranch: 'main', defaultBranch: 'main', dirty: { changed: true, files: 2 }, remote: 'https://example.com/team/repo.git', localBranches: ['main'], remoteBranches: ['main', 'dev-ss'], aheadBehind: { ahead: 1, behind: 2 } });
+    vi.spyOn(client, 'getTasks').mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -165,6 +167,75 @@ describe('Integrations UI Suite', () => {
   });
 
   describe('2. ProjectSettingsDrawer Integrations Sections', () => {
+    it('renders Git status, warns for remote-only branch and saves the default branch', async () => {
+      const updateSpy = vi.spyOn(client, 'updateProject').mockResolvedValue({ ...mockProject, defaultBranch: 'dev-ss' });
+      renderWithProviders(<ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />);
+
+      const gitSection = await screen.findByTestId('project-git-section');
+      await waitFor(() => expect(within(gitSection).getByText(/2 file chưa commit/i)).toBeInTheDocument());
+      fireEvent.change(within(gitSection).getByTestId('project-git-default-branch'), { target: { value: 'dev-ss' } });
+      expect(within(gitSection).getByText(/chưa có ở máy/i)).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('save-changes-button'));
+
+      await waitFor(() => expect(updateSpy).toHaveBeenCalledWith('proj-1', expect.objectContaining({ defaultBranch: 'dev-ss' })));
+    });
+
+    it('warns when the default branch has no merge mapping and can use the repository folder', async () => {
+      const updateSpy = vi.spyOn(client, 'updateProject').mockResolvedValue({ ...mockProject, merge: { enabled: true, worktrees: { main: mockProject.path }, checks: [], timeoutSec: 600 } });
+      renderWithProviders(<ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />);
+
+      const gitSection = await screen.findByTestId('project-git-section');
+      expect(await within(gitSection).findByText(/chưa có worktree merge/i)).toBeInTheDocument();
+      fireEvent.click(within(gitSection).getByRole('button', { name: /dùng thư mục repo/i }));
+      fireEvent.click(screen.getByTestId('save-changes-button'));
+
+      await waitFor(() => expect(updateSpy).toHaveBeenCalledWith('proj-1', expect.objectContaining({
+        merge: { enabled: true, worktrees: { main: mockProject.path }, checks: [], timeoutSec: 600 },
+      })));
+    });
+
+    it('keeps newline while typing post-merge checks one command at a time', async () => {
+      renderWithProviders(<ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />);
+
+      const gitSection = await screen.findByTestId('project-git-section');
+      const checks = within(gitSection).getByLabelText('Lệnh check sau merge');
+      fireEvent.change(checks, { target: { value: 'npm test' } });
+      fireEvent.change(checks, { target: { value: 'npm test\n' } });
+      fireEvent.change(checks, { target: { value: 'npm test\nnpm run lint' } });
+
+      expect(checks).toHaveValue('npm test\nnpm run lint');
+    });
+
+    it('confirms a default branch change when tasks are active', async () => {
+      vi.mocked(client.getTasks).mockResolvedValue([{ id: 'task-1', status: 'running' } as Task]);
+      const updateSpy = vi.spyOn(client, 'updateProject').mockResolvedValue(mockProject);
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+      renderWithProviders(<ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />);
+
+      const gitSection = await screen.findByTestId('project-git-section');
+      await waitFor(() => expect(client.getTasks).toHaveBeenCalledWith({ project: 'proj-1' }));
+      fireEvent.change(within(gitSection).getByTestId('project-git-default-branch'), { target: { value: 'dev-ss' } });
+      fireEvent.click(screen.getByTestId('save-changes-button'));
+
+      await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
+      expect(updateSpy).not.toHaveBeenCalled();
+    });
+
+    it('shows the PATCH error when saving Git settings fails', async () => {
+      vi.spyOn(client, 'updateProject').mockRejectedValue(new Error('branch is invalid on server'));
+      renderWithProviders(<ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />);
+
+      const gitSection = await screen.findByTestId('project-git-section');
+      await waitFor(() => expect(within(gitSection).getByText(/2 file chưa commit/i)).toBeInTheDocument());
+      const branchInput = within(gitSection).getByTestId('project-git-default-branch');
+      fireEvent.change(branchInput, { target: { value: 'dev-ss' } });
+      await waitFor(() => expect(branchInput).toHaveValue('dev-ss'));
+      fireEvent.click(screen.getByTestId('save-changes-button'));
+
+      await waitFor(() => expect(client.updateProject).toHaveBeenCalled());
+      expect(await screen.findByTestId('settings-error-msg')).toHaveTextContent('branch is invalid on server');
+    });
+
     it('renders OpenProject section and saves changes via updateProject', async () => {
       const updateSpy = vi.spyOn(client, 'updateProject').mockResolvedValue(mockProject);
 
@@ -656,7 +727,7 @@ describe('Integrations UI Suite', () => {
       expect(keyInput.value).toBe('');
 
       // Switch to op-client which has keyConfigured: false
-      const clientSourceBtn = screen.getByText('op-client');
+      const clientSourceBtn = screen.getByTestId('source-btn-op-client');
       fireEvent.click(clientSourceBtn);
 
       expect(keyInput.placeholder).toBe('');
@@ -987,7 +1058,7 @@ describe('Integrations UI Suite', () => {
       });
 
       // Switch to op-client which has keyConfigured: false
-      fireEvent.click(screen.getByText('op-client'));
+      fireEvent.click(screen.getByTestId('source-btn-op-client'));
 
       await waitFor(() => {
         expect(screen.getByTestId('status-picker-hint')).toHaveTextContent('Lưu URL + API key rồi bấm Tải lại');
@@ -996,7 +1067,7 @@ describe('Integrations UI Suite', () => {
 
       // When API rejects with error on an existing source
       vi.spyOn(client, 'getOpenProjectStatuses').mockRejectedValueOnce(new Error('Network error'));
-      fireEvent.click(screen.getByText('op-corp'));
+      fireEvent.click(screen.getByTestId('source-btn-op-corp'));
 
       await waitFor(() => {
         expect(screen.getByTestId('status-picker-hint')).toHaveTextContent('Lưu URL + API key rồi bấm Tải lại');
@@ -1014,7 +1085,7 @@ describe('Integrations UI Suite', () => {
       });
 
       // Switch to op-client (manual input mode)
-      fireEvent.click(screen.getByText('op-client'));
+      fireEvent.click(screen.getByTestId('source-btn-op-client'));
 
       await waitFor(() => {
         expect(screen.getByTestId('manual-input-watchStatusIds')).toBeInTheDocument();
@@ -1128,6 +1199,99 @@ describe('Integrations UI Suite', () => {
         expect(reloadBtn).not.toBeDisabled();
         expect(reloadBtn).not.toHaveAttribute('aria-busy');
         expect(reloadBtn).toHaveTextContent('Tải lại trạng thái');
+      });
+    });
+  });
+
+  describe('3c. Source button labels, clone, and unsaved source flow', () => {
+    beforeEach(() => {
+      vi.restoreAllMocks();
+      vi.spyOn(client, 'getOpenProjectSources').mockResolvedValue(mockSources);
+      vi.spyOn(client, 'getOpenProjectStatuses').mockResolvedValue(mockStatuses);
+    });
+
+    it('source buttons show "project · host" label and source id as tooltip', async () => {
+      renderWithProviders(<OpenProjectSettings />);
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+      });
+
+      // op-corp: project=demo-proj, url=https://openproject.example.com
+      const corpBtn = screen.getByTestId('source-btn-op-corp');
+      expect(corpBtn).toHaveTextContent('demo-proj · openproject.example.com');
+      expect(corpBtn).toHaveAttribute('title', 'op-corp');
+
+      // op-client: project=client-proj, url=https://op-client.example.com
+      const clientBtn = screen.getByTestId('source-btn-op-client');
+      expect(clientBtn).toHaveTextContent('client-proj · op-client.example.com');
+      expect(clientBtn).toHaveAttribute('title', 'op-client');
+    });
+
+    it('shows clone button for saved source, invokes cloneOpenProjectSource and selects the new source', async () => {
+      const clonedSource: OpenProjectSource = {
+        ...mockSources[0],
+        id: 'openproject-9999',
+        project: 'NEW-PROJ',
+        keyConfigured: true,
+      };
+      const cloneSpy = vi.spyOn(client, 'cloneOpenProjectSource').mockResolvedValue(clonedSource);
+      vi.spyOn(client, 'getOpenProjectSources')
+        .mockResolvedValueOnce(mockSources)   // initial load
+        .mockResolvedValue([...mockSources, clonedSource]); // after clone invalidation
+
+      // Mock window.prompt to return a project name
+      vi.spyOn(window, 'prompt').mockReturnValue('NEW-PROJ');
+
+      renderWithProviders(<OpenProjectSettings />);
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+      });
+
+      // Clone button should be visible for the saved source (op-corp is first/active)
+      const cloneBtn = screen.getByTestId('clone-source-btn');
+      expect(cloneBtn).toBeInTheDocument();
+
+      fireEvent.click(cloneBtn);
+
+      await waitFor(() => {
+        expect(cloneSpy).toHaveBeenCalledWith('op-corp', { project: 'NEW-PROJ' });
+      });
+
+      await waitFor(() => {
+        // After clone, the new source should be selected (draft.id = clonedSource.id)
+        expect(screen.getByTestId('source-btn-openproject-9999')).toBeInTheDocument();
+      });
+    });
+
+    it('shows unsaved-source button and cancel button when "Add source" is clicked', async () => {
+      renderWithProviders(<OpenProjectSettings />);
+      await waitFor(() => {
+        expect(screen.getByTestId('openproject-global-settings')).toBeInTheDocument();
+      });
+
+      // Clone button is visible initially (saved source)
+      expect(screen.getByTestId('clone-source-btn')).toBeInTheDocument();
+      // No unsaved button initially
+      expect(screen.queryByTestId('unsaved-source-btn')).not.toBeInTheDocument();
+
+      // Click "Add source"
+      const addBtn = screen.getByText('Thêm nguồn');
+      fireEvent.click(addBtn);
+
+      // Now unsaved button and cancel button should appear
+      await waitFor(() => {
+        expect(screen.getByTestId('unsaved-source-btn')).toBeInTheDocument();
+        expect(screen.getByTestId('cancel-unsaved-btn')).toBeInTheDocument();
+      });
+      // Clone button should NOT be visible for unsaved source
+      expect(screen.queryByTestId('clone-source-btn')).not.toBeInTheDocument();
+
+      // Click cancel → go back to previous source
+      fireEvent.click(screen.getByTestId('cancel-unsaved-btn'));
+      await waitFor(() => {
+        expect(screen.queryByTestId('unsaved-source-btn')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('cancel-unsaved-btn')).not.toBeInTheDocument();
+        expect(screen.getByTestId('clone-source-btn')).toBeInTheDocument();
       });
     });
   });

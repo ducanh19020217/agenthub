@@ -45,6 +45,11 @@ describe('AgentHub MCP Server Tools', () => {
     const config = loadConfig(tmpDir);
     config.agyHomesDir = agyHomesDir;
     config.defaultLogDir = process.env.AGENTHUB_DEFAULT_LOG_DIR;
+    config.integrations.openproject.sources = [OpenProjectSourceSchema.parse({
+      id: 'op', url: 'https://op.test', project: 'demo',
+      timesheet: { enabled: true, activityId: 7, minEntryHours: 0.5, roundTo: 0.25 },
+    })];
+    saveOpenProjectKey(tmpDir, 'op', 'test-key');
     ctx = createContext(config);
     // Stop scheduler to prevent it from interfering with static db test fixtures
     ctx.scheduler.stop();
@@ -112,6 +117,39 @@ describe('AgentHub MCP Server Tools', () => {
     expect(preset?.inputSchema).toMatchObject({ properties: { dryRun: { default: true } } });
     const discover = tools.tools.find((tool) => tool.name === 'hub_integration_discover');
     expect(discover?.inputSchema.properties).not.toHaveProperty('key');
+  });
+
+  it('exposes manual timesheet tools with optional source/date and validated hours', async () => {
+    const tools = await client.listTools();
+    const get = tools.tools.find((tool) => tool.name === 'hub_timesheet_get');
+    const add = tools.tools.find((tool) => tool.name === 'hub_timesheet_add');
+    expect(get).toBeDefined(); expect(add).toBeDefined();
+    expect(get?.inputSchema.properties).toMatchObject({ sourceId: {}, date: {} });
+    expect(add?.inputSchema.properties).toMatchObject({ description: {}, activeHours: { minimum: 0, maximum: 24 }, waitHours: { minimum: 0, maximum: 24 } });
+  });
+
+  it('gets the sole timesheet source by default and rejects an empty manual total', async () => {
+    const get = (await client.callTool({ name: 'hub_timesheet_get', arguments: {} })) as { content: Array<{ text: string }> };
+    expect(get.content[0].text).toContain('"sourceId":"op"');
+    const add = (await client.callTool({ name: 'hub_timesheet_add', arguments: {
+      ticket: 'OP-1', description: 'Không có giờ', activeHours: 0, waitHours: 0,
+    } })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(add.isError).toBe(true);
+    expect(add.content[0].text).toMatch(/lớn hơn 0|greater than 0/i);
+  });
+
+  it('passes a valid manual entry through the MCP add tool', async () => {
+    (ctx.timesheetService as unknown as { fetchFn: typeof fetch }).fetchFn = (async (url: string | URL, _init?: RequestInit) => {
+      const value = url.toString();
+      if (value.includes('/work_packages?')) return new Response(JSON.stringify({ _embedded: { elements: [{ id: 1, displayId: 'OP-1', subject: 'Ticket 1', lockVersion: 1 }] }, total: 1 }));
+      if (value.endsWith('/time_entries')) return new Response(JSON.stringify({ id: 10 }));
+      return new Response(JSON.stringify({ _embedded: { elements: [] }, total: 0 }));
+    }) as typeof fetch;
+    const add = (await client.callTool({ name: 'hub_timesheet_add', arguments: {
+      ticket: 'OP-1', description: 'Trao đổi khách', activeHours: 1, waitHours: 0.5, pinned: true,
+    } })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(add.isError).not.toBe(true);
+    expect(add.content[0].text).toContain('source_id');
   });
 
   it('hub_status returns overview with task counts, running tasks, and profile quota status', async () => {
@@ -604,10 +642,15 @@ describe('AgentHub MCP Server Tools', () => {
 
     const cancelRes = (await client.callTool({
       name: 'hub_cancel',
-      arguments: { id: 'proj/t-queued' },
+      arguments: { id: 'proj/t-queued', reason: 'Trùng với task khác trong batch' },
     })) as { content: Array<{ type: string; text: string }> };
     expect(cancelRes.content[0].text).toContain('✓ Đã hủy task "proj/t-queued"');
     expect(ctx.taskRepo.get('proj/t-queued')?.status).toBe('cancelled');
+    expect(ctx.taskRepo.get('proj/t-queued')?.cancelReason).toBe('Trùng với task khác trong batch');
+    expect(ctx.taskRepo.get('proj/t-queued')?.cancelledBy).toBe('mcp');
+
+    const noReason = (await client.callTool({ name: 'hub_cancel', arguments: { id: 'proj/t-queued' } })) as { isError?: boolean; content: Array<{ type: string; text: string }> };
+    expect(noReason.isError ?? /validation/i.test(noReason.content[0]?.text || '')).toBeTruthy();
   });
 
   it('hub_wait returns immediately when target task is already terminal or wakes on SSE event', async () => {

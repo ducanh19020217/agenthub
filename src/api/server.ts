@@ -43,6 +43,9 @@ export async function createServer(
     openProjectDailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
     openProjectTimesheetPreview?: (sourceId: string, date?: string) => Promise<unknown>;
     openProjectTimesheetRun?: (sourceId: string, date?: string, hours?: number) => Promise<unknown>;
+    timesheetManualAdd?: (input: unknown) => Promise<unknown>;
+    timesheetManualUpdate?: (id: string, input: unknown) => Promise<unknown>;
+    timesheetManualDelete?: (id: string) => Promise<unknown>;
   },
 ): Promise<FastifyInstance> {
   const fastify = Fastify({ logger: false, forceCloseConnections: true });
@@ -189,6 +192,10 @@ export async function createServer(
     dailyReport: options?.openProjectDailyReport || (service.dailyReportService ? (sourceId, date) => service.dailyReportService!.generateReport(sourceId, date ? parseDateNoon(date) : undefined, { overwrite: true }) : undefined),
     timesheetPreview: options?.openProjectTimesheetPreview || (service.timesheetService ? (sourceId, date) => service.timesheetService!.preview(sourceId, date) : undefined),
     timesheetRun: options?.openProjectTimesheetRun || (service.timesheetService ? (sourceId, date, hours) => service.timesheetService!.run(sourceId, date, hours) : undefined),
+    timesheetDaySet: service.timesheetService ? (sourceId, date, hours) => service.timesheetService!.setDayHours(sourceId, date, hours) : undefined,
+    timesheetManualAdd: options?.timesheetManualAdd || (service.timesheetService ? (input) => service.timesheetService!.addManual(input as never) : undefined),
+    timesheetManualUpdate: options?.timesheetManualUpdate || (service.timesheetService ? (id, input) => Promise.resolve(service.timesheetService!.updateManual(id, input as never)) : undefined),
+    timesheetManualDelete: options?.timesheetManualDelete || (service.timesheetService ? (id) => Promise.resolve(service.timesheetService!.deleteManual(id)) : undefined),
     decision: (sourceId, wpId, action, note) => service.decideOpenProjectTicket(sourceId, wpId, action, note),
     triageInput: (sourceId, wpId, content) => service.submitOpenProjectTriageInput(sourceId, wpId, content),
     linkTicket: (sourceId, wpId, displayId, taskId) => service.linkOpenProjectTicket(sourceId, wpId, displayId, taskId),
@@ -333,6 +340,7 @@ export async function createServer(
   });
 
   fastify.post('/api/projects/inspect', async (req: FastifyRequest) => service.inspectProject(req.body));
+  fastify.post('/api/projects/inspect-git', async (req: FastifyRequest) => service.inspectProjectGit(req.body));
 
   fastify.post('/api/projects/:id/guidance', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
@@ -358,6 +366,11 @@ export async function createServer(
   fastify.get('/api/projects/:id', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
     return service.getProject(id);
+  });
+
+  fastify.get('/api/projects/:id/git', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getProjectGitStatus(id);
   });
 
   fastify.get('/api/projects/:id/effective-config', async (req: FastifyRequest) => {
@@ -623,7 +636,11 @@ export async function createServer(
 
   fastify.post('/api/tasks/:id/cancel', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
-    return service.cancelTask(id);
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as { reason?: unknown; by?: unknown };
+    return service.cancelTask(id, {
+      reason: typeof body.reason === 'string' ? body.reason.slice(0, 2000) : null,
+      by: typeof body.by === 'string' ? body.by.slice(0, 120) : 'api',
+    });
   });
 
   fastify.post('/api/tasks/:id/split', async (req: FastifyRequest) => {

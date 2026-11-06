@@ -175,8 +175,13 @@ describe('SetupPage', () => {
     });
 
     expect(screen.getByText(/Installing codex binary/)).toBeInTheDocument();
-    const viewLogLink = screen.getByText('Xem log').closest('a');
-    expect(viewLogLink).toHaveAttribute('href', '/api/setup/log/codex');
+    // Log cần token: tải qua API client (có Bearer) thay vì link trần sẽ bị 401.
+    const logSpy = vi.spyOn(client, 'getSetupLog').mockResolvedValue('full npm install log\n');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Xem log/ }));
+    });
+    expect(logSpy).toHaveBeenCalledWith('codex');
+    expect(await screen.findByText(/full npm install log/)).toBeInTheDocument();
 
     // Complete install via SSE
     emitSSE({
@@ -204,6 +209,33 @@ describe('SetupPage', () => {
 
     const result = await screen.findByTestId('install-result-codex');
     expect(result).toHaveTextContent('Cài đặt thất bại');
+  });
+
+  it('hiển thị lỗi khi API cài công cụ từ chối request', async () => {
+    vi.spyOn(client, 'installSetupTool').mockRejectedValue(new Error('Forbidden: invalid Origin header'));
+    renderPage();
+    await screen.findByText('Codex CLI');
+
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole('button', { name: /Cài đặt/ })[0]);
+    });
+
+    expect(await screen.findByText(/Forbidden: invalid Origin header/)).toBeInTheDocument();
+    expect(screen.getByTestId('install-result-codex')).toHaveTextContent('Cài đặt thất bại');
+  });
+
+  it('hiển thị lỗi khi đăng ký MCP thất bại', async () => {
+    vi.spyOn(client, 'installSetupMcp').mockRejectedValue(new Error('Không tìm thấy dist/cli.js'));
+    renderPage();
+    await screen.findByText('Codex CLI');
+
+    const buttons = screen.getAllByRole('button', { name: /Cài đặt/ });
+    await act(async () => {
+      fireEvent.click(buttons[buttons.length - 1]);
+    });
+
+    expect(await screen.findByText(/Không tìm thấy dist\/cli\.js/)).toBeInTheDocument();
+    expect(screen.getByTestId('install-result-mcp')).toHaveTextContent('Cài đặt thất bại');
   });
 
   it('hiển thị lỗi hậu cài và lệnh cài agy thủ công', async () => {

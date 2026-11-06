@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AgentHubConfig } from './config.js';
+import { AgentHubConfig, DEFAULT_QUOTA_LOW_PCT } from './config.js';
 import {
   openDatabase,
   ProjectRepo,
@@ -258,6 +258,7 @@ export function createContext(
     departmentRepo,
   );
   usageService.setEventBus(scheduler.getEventBus());
+  usageService.setQuotaLowThreshold(() => config.notifications?.quotaLowPct ?? DEFAULT_QUOTA_LOW_PCT);
   const setupManager = new SetupManager(config, scheduler.getEventBus(), (tool) => {
     profileService.registerAll();
     scheduler.refreshEngines();
@@ -573,6 +574,7 @@ export function closeContext(ctx: DaemonContext): void {
   }
   try {
     ctx.usageService?.stop();
+    ctx.service?.stopWakeupTimer();
   } catch {
     // ignore
   }
@@ -619,6 +621,7 @@ export async function startDaemon(
     });
   }
   ctx.usageService.start();
+  ctx.service.startWakeupTimer();
 
   // Start scheduler
   ctx.scheduler.start();

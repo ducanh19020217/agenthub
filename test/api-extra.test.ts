@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { loadConfig } from '../src/config.js';
+import { resolveClaudeProfile } from '../src/profiles/index.js';
 import { createContext } from '../src/daemon.js';
 import { createServer } from '../src/api/server.js';
 import { getOrCreateToken } from '../src/auth.js';
@@ -505,6 +506,64 @@ describe('AgentHub API Extra Endpoints', () => {
       // 4. Persisted on disk in config.json
       const onDisk = JSON.parse(fs.readFileSync(config.configFilePath, 'utf-8'));
       expect(onDisk.load.autoPauseThresholdSec).toBe(90);
+    });
+
+    it('GET /api/config returns the saved brain.permissions', async () => {
+      const putRes = await server.inject({
+        method: 'PUT',
+        url: '/api/config',
+        headers: authHeaders(),
+        payload: { brain: { permissions: 'full' }, confirm: true },
+      });
+      expect(putRes.statusCode).toBe(200);
+      expect(JSON.parse(putRes.body).brain.permissions).toBe('full');
+
+      const getRes = await server.inject({
+        method: 'GET',
+        url: '/api/config',
+        headers: authHeaders(),
+      });
+      expect(getRes.statusCode).toBe(200);
+      expect(JSON.parse(getRes.body).brain.permissions).toBe('full');
+    });
+
+    it('PUT /api/config applies the default Claude profile for brain and chat immediately, and clears it', async () => {
+      const repo = { getAll: () => [{ name: 'claude-may', engine: 'claude', kind: 'system' }] as never[] };
+      const brainProfile = () => resolveClaudeProfile(repo, config.brain.claudeProfile, config.brain.claudeProfileExplicit);
+      const chatProfile = () => resolveClaudeProfile(repo, config.chat.claudeProfile, config.chat.claudeProfileExplicit);
+      expect(brainProfile()).toBe('claude-may');
+
+      const putRes = await server.inject({
+        method: 'PUT',
+        url: '/api/config',
+        headers: authHeaders(),
+        payload: { chat: { claudeProfile: 'NCS' }, brain: { claudeProfile: 'NCS' } },
+      });
+      expect(putRes.statusCode).toBe(200);
+      const body = JSON.parse(putRes.body);
+      expect(body.chat.claudeProfile).toBe('NCS');
+      expect(body.brain.claudeProfile).toBe('NCS');
+      // Có hiệu lực ngay, không cần khởi động lại daemon.
+      expect(brainProfile()).toBe('NCS');
+      expect(chatProfile()).toBe('NCS');
+      const onDisk = JSON.parse(fs.readFileSync(config.configFilePath, 'utf-8'));
+      expect(onDisk.brain.claudeProfile).toBe('NCS');
+
+      const clearRes = await server.inject({
+        method: 'PUT',
+        url: '/api/config',
+        headers: authHeaders(),
+        payload: { chat: { claudeProfile: '' }, brain: { claudeProfile: '' } },
+      });
+      expect(clearRes.statusCode).toBe(200);
+      expect(JSON.parse(clearRes.body).brain.claudeProfile).toBe('');
+      expect(JSON.parse(clearRes.body).chat.claudeProfile).toBe('');
+      expect(brainProfile()).toBe('claude-may');
+      expect(chatProfile()).toBe('claude-may');
+
+      // Sau khi khởi động lại, giá trị rỗng trong config.json vẫn là hồ sơ hệ thống.
+      const reloaded = loadConfig(tmpDir);
+      expect(resolveClaudeProfile(repo, reloaded.brain.claudeProfile, reloaded.brain.claudeProfileExplicit)).toBe('claude-may');
     });
   });
 

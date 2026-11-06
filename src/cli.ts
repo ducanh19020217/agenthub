@@ -2,7 +2,7 @@
 
 import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig, AgentHubConfig } from './config.js';
-import { agyInstallHint, findAgyBin } from './agy.js';
+import { agyInstallHint, applyIsolatedAgyEnv, findAgyBin } from './agy.js';
 import { createContext, closeContext, startDaemon } from './daemon.js';
 import { runMcpServer } from './mcp/index.js';
 import { getOrCreateToken, getTokenPath, readExistingToken } from './auth.js';
@@ -18,6 +18,7 @@ import { WorktreeService } from './worktrees/index.js';
 import { parseCodexTokens } from './savings.js';
 import { getLockFileInfo, hashFile, getCacheNodeModulesDir, areDirectoriesHardLinked, verifyNativeModules } from './cache.js';
 import { findClaudeBin } from './chat/claude.js';
+import { mcpAddArgs, runMcpInstall } from './tools/mcp-install.js';
 import { findProcessesInDir } from './reaper.js';
 import { measureProcessTree } from './process-tree.js';
 import { getPlatform } from './platform/index.js';
@@ -317,16 +318,20 @@ export async function cmdMcpInstall(extraArgs: string[]): Promise<string> {
   const projectRoot = findProjectRoot();
   const cliPath = path.resolve(projectRoot, 'dist', 'cli.js');
   const nodePath = process.execPath;
-
-  const command = `claude mcp add --scope user agenthub -- ${nodePath} ${cliPath} mcp`;
+  // Claude có thể nằm trong Node khác (nvm) so với Node đang chạy AgentHub: dùng đường dẫn tuyệt đối.
+  const claudeBin = findClaudeBin(process.env.AGENTHUB_CLAUDE_BIN);
+  const command = `${claudeBin ?? 'claude'} ${mcpAddArgs(nodePath, cliPath).join(' ')}`;
 
   if (isPrint) {
     console.log(`Lệnh đăng ký MCP:\n  ${command}`);
     return command;
   }
+  if (!claudeBin) {
+    throw new Error('Không tìm thấy Claude Code. Hãy cài Claude Code rồi chạy lại `agenthub mcp-install`.');
+  }
 
-  const { execSync } = await import('node:child_process');
-  execSync(command, { stdio: 'inherit' });
+  const output = await runMcpInstall({ claudeBin, nodePath, cliPath });
+  if (output.trim()) console.log(output.trim());
   console.log('✓ Đã đăng ký MCP server với Claude Code');
   return command;
 }
@@ -1054,8 +1059,7 @@ export async function cmdProfile(
       if (profile.engine === 'claude' && profile.kind !== 'system' && profile.home) {
         env.CLAUDE_CONFIG_DIR = profile.home;
       } else if (profile.kind === 'isolated' && profile.home) {
-        env.HOME = profile.home;
-        env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent/agy-no-keyring';
+        applyIsolatedAgyEnv(env, profile.home);
       }
 
       console.log(`Đăng nhập hồ sơ "${name}"...`);
@@ -1093,9 +1097,11 @@ export async function cmdProfile(
       const sourceArg = extraArgs[0];
       const accountTypeArg = extraArgs.find((arg) => arg.startsWith('--account-type='))?.split('=')[1]
         || (extraArgs.includes('--account-type') ? extraArgs[extraArgs.indexOf('--account-type') + 1] : 'personal');
+      const engineArg = extraArgs.find((arg) => arg.startsWith('--engine='))?.split('=')[1]
+        || (extraArgs.includes('--engine') ? extraArgs[extraArgs.indexOf('--engine') + 1] : 'agy');
 
       if (!sourceArg) {
-        console.error('Cách dùng: agenthub profile import-tokens <đường_dẫn_file_json | chuỗi_json> [--account-type personal|team|api]');
+        console.error('Cách dùng: agenthub profile import-tokens <đường_dẫn_file_json | chuỗi_json> [--engine agy|codex] [--account-type personal|team|api]');
         process.exitCode = 1;
         break;
       }
@@ -1119,9 +1125,10 @@ export async function cmdProfile(
         }
       }
 
-      console.log('Đang kiểm tra và nhập tài khoản Antigravity từ Cockpit token...');
+      console.log(engineArg === 'codex' ? 'Đang nhập tài khoản Codex từ token...' : 'Đang kiểm tra và nhập tài khoản Antigravity từ Cockpit token...');
       try {
-        const result = await ctx.service.importAgyTokens({
+        const result = await ctx.service.importTokens({
+          engine: engineArg,
           tokens: payloadRaw,
           accountType: accountTypeArg,
         }, { verify: false });

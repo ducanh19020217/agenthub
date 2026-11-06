@@ -27,16 +27,43 @@ cd "$ROOT_DIR"
 
 MODE="${1:-service}"
 
+# macOS không có systemd: service là LaunchAgent dev.agenthub (xem src/platform/darwin.ts).
+IS_DARWIN=0
+[ "$(uname -s)" = "Darwin" ] && IS_DARWIN=1
+LAUNCHD_TARGET="gui/$(id -u)/dev.agenthub"
+LAUNCHD_PLIST="$HOME/Library/LaunchAgents/dev.agenthub.plist"
+
+health_ok() {
+  curl -fsS -m 2 http://127.0.0.1:7700/health >/dev/null 2>&1
+}
+
+wait_health() {
+  for _ in $(seq 1 60); do
+    health_ok && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+print_dashboard_link() {
+  TOKEN_FILE="$HOME/.agenthub/token"
+  if [ -f "$TOKEN_FILE" ]; then
+    TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null || true)
+    echo "  ► Mở Web Dashboard:    http://127.0.0.1:7700/#token=$TOKEN"
+  fi
+  echo "  (Hoặc chạy lệnh 'agenthub open' để tự mở trình duyệt)"
+}
+
 show_help() {
   echo "Cách dùng: $0 [tùy_chọn]"
   echo ""
   echo "Tùy chọn:"
-  echo "  (không truyền) / --service   Build và chạy nền qua Systemd User Service (Khuyến nghị Production)"
+  echo "  (không truyền) / --service   Build và chạy nền qua Systemd User Service / LaunchAgent trên macOS (Khuyến nghị Production)"
   echo "  -f, --foreground            Build và chạy Daemon trực tiếp ở tiền cảnh (Cho Docker/Debug)"
   echo "  -b, --build-only            Chỉ build mã nguồn (Backend & Frontend), không khởi chạy"
   echo "  -s, --status                Xem trạng thái dịch vụ Production hiện tại"
   echo "  --restart                   Khởi động lại dịch vụ Production"
-  echo "  --stop                      Dừng dịch vụ Production"
+  echo "  --stop                      Dừng dịch vụ Production (= ./scripts/stop-prod.sh)"
   echo "  -h, --help                  Xem hướng dẫn này"
   echo ""
 }
@@ -48,7 +75,11 @@ case "$MODE" in
     ;;
   -s|--status)
     echo "=== Trạng thái Dịch vụ AgentHub Production ==="
-    systemctl --user status agenthub --no-pager || true
+    if [ "$IS_DARWIN" = 1 ]; then
+      launchctl print "$LAUNCHD_TARGET" 2>/dev/null | grep -E "^$(printf '\t')(state|pid|last exit code) =" || echo "LaunchAgent dev.agenthub chưa được nạp"
+    else
+      systemctl --user status agenthub --no-pager || true
+    fi
     echo ""
     echo "=== Kiểm tra Health Endpoint ==="
     curl -s http://127.0.0.1:7700/health || echo "Daemon không phản hồi tại cổng 7700"
@@ -57,16 +88,18 @@ case "$MODE" in
     ;;
   --restart)
     echo "🔄 Đang khởi động lại dịch vụ agenthub..."
-    systemctl --user restart agenthub
-    sleep 1
-    systemctl --user status agenthub --no-pager
+    if [ "$IS_DARWIN" = 1 ]; then
+      launchctl kickstart -k "$LAUNCHD_TARGET"
+      if wait_health; then echo "  ✅ Đã khởi động lại."; print_dashboard_link; else echo "  ❌ Daemon chưa phản hồi /health sau 30 giây."; exit 1; fi
+    else
+      systemctl --user restart agenthub
+      sleep 1
+      systemctl --user status agenthub --no-pager
+    fi
     exit 0
     ;;
   --stop)
-    echo "🛑 Đang dừng dịch vụ agenthub..."
-    systemctl --user stop agenthub
-    echo "✓ Dịch vụ đã dừng."
-    exit 0
+    exec "$SCRIPT_DIR/stop-prod.sh"
     ;;
 esac
 
@@ -108,35 +141,56 @@ if [ "$MODE" = "-f" ] || [ "$MODE" = "--foreground" ]; then
   exec node dist/cli.js daemon
 else
   echo "=========================================================="
-  echo "  🚀 Kích hoạt Dịch vụ Nền Production (Systemd User Service)"
+  echo "  🚀 Kích hoạt Dịch vụ Nền Production (Systemd User Service / LaunchAgent)"
   echo "=========================================================="
   
-  # Cài đặt hoặc cập nhật service file
-  node dist/cli.js install-service >/dev/null 2>&1 || true
-
-  # Kích hoạt linger để service chạy 24/7 kể cả khi logout
-  loginctl enable-linger "$USER" 2>/dev/null || true
-
-  # Nạp lại và khởi động service
-  systemctl --user daemon-reload
-  systemctl --user restart agenthub
-  sleep 1
-
-  if systemctl --user is-active --quiet agenthub; then
-    echo "  ✅ Dịch vụ AgentHub đang chạy nền thành công!"
-    echo "  ► Kiểm tra trạng thái: systemctl --user status agenthub"
-    echo "  ► Theo dõi log:         journalctl --user -u agenthub -f"
-    echo ""
-    TOKEN_FILE="$HOME/.agenthub/token"
-    if [ -f "$TOKEN_FILE" ]; then
-      TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null || true)
-      echo "  ► Mở Web Dashboard:    http://127.0.0.1:7700/#token=$TOKEN"
+  if [ "$IS_DARWIN" = 1 ]; then
+    # bootstrap báo lỗi nếu job đã nạp: gỡ bản cũ trước rồi để install-service ghi plist và nạp lại.
+    launchctl bootout "$LAUNCHD_TARGET" 2>/dev/null || true
+    for _ in $(seq 1 20); do health_ok || break; sleep 0.5; done
+    if health_ok; then
+      echo "  ❌ Cổng 7700 đang bị tiến trình khác chiếm (thường là 'npm run dev:all'). Hãy tắt nó rồi chạy lại:"
+      lsof -nP -iTCP:7700 -sTCP:LISTEN 2>/dev/null || true
+      exit 1
     fi
-    echo "  (Hoặc chạy lệnh 'agenthub open' để tự mở trình duyệt)"
+    # stop-prod.sh --disable có thể đã tắt tự khởi động: bật lại trước khi nạp.
+    launchctl enable "$LAUNCHD_TARGET" 2>/dev/null || true
+    node dist/cli.js install-service
+
+    if wait_health; then
+      echo "  ✅ Dịch vụ AgentHub đang chạy nền thành công (LaunchAgent)!"
+      echo "  ► Kiểm tra trạng thái: ./scripts/run-prod.sh --status"
+      echo "  ► Plist:               $LAUNCHD_PLIST"
+      echo ""
+      print_dashboard_link
+    else
+      echo "  ❌ Cảnh báo: Service chưa phản hồi /health sau 30 giây."
+      launchctl print "$LAUNCHD_TARGET" 2>/dev/null | grep -E "^$(printf '\t')(state|pid|last exit code) =" || true
+      exit 1
+    fi
   else
-    echo "  ❌ Cảnh báo: Service chưa khởi động thành công. Xem log lỗi:"
-    systemctl --user status agenthub --no-pager || true
-    journalctl --user -u agenthub -n 15 --no-pager || true
+    # Cài đặt hoặc cập nhật service file
+    node dist/cli.js install-service >/dev/null 2>&1 || true
+
+    # Kích hoạt linger để service chạy 24/7 kể cả khi logout
+    loginctl enable-linger "$USER" 2>/dev/null || true
+
+    # Nạp lại và khởi động service
+    systemctl --user daemon-reload
+    systemctl --user restart agenthub
+    sleep 1
+
+    if systemctl --user is-active --quiet agenthub; then
+      echo "  ✅ Dịch vụ AgentHub đang chạy nền thành công!"
+      echo "  ► Kiểm tra trạng thái: systemctl --user status agenthub"
+      echo "  ► Theo dõi log:         journalctl --user -u agenthub -f"
+      echo ""
+      print_dashboard_link
+    else
+      echo "  ❌ Cảnh báo: Service chưa khởi động thành công. Xem log lỗi:"
+      systemctl --user status agenthub --no-pager || true
+      journalctl --user -u agenthub -n 15 --no-pager || true
+    fi
   fi
   echo "=========================================================="
 fi

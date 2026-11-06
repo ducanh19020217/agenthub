@@ -92,11 +92,10 @@ describe('ProfilesPage - Nút Check, SSE profile.check, 409 và timeout', () => 
     });
 
     // Toast hiển thị ✓ kèm message và thời gian chạy
-    const alert = screen.getByRole('alert');
-    expect(alert).toBeInTheDocument();
-    expect(alert).toHaveTextContent('✓');
-    expect(alert).toHaveTextContent('Kết nối Antigravity thành công');
-    expect(alert).toHaveTextContent('350ms');
+    const toast = document.querySelector('[data-kind="success"]')!;
+    expect(toast).toBeInTheDocument();
+    expect(toast).toHaveTextContent('Kết nối Antigravity thành công');
+    expect(toast).toHaveTextContent('350ms');
 
     // Nút Check quay lại bình thường
     expect(screen.getByRole('button', { name: /^Check$/ })).toBeEnabled();
@@ -141,7 +140,7 @@ describe('ProfilesPage - Nút Check, SSE profile.check, 409 và timeout', () => 
     });
 
     const alert = screen.getByRole('alert');
-    expect(alert).toHaveTextContent('✗');
+    expect(alert).toHaveAttribute('data-kind', 'error');
     expect(alert).toHaveTextContent('Không thể kết nối đến CLI');
     expect(alert).toHaveTextContent('500ms');
 

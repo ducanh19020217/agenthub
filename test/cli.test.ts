@@ -103,9 +103,9 @@ describe('AgentHub CLI and Installation', () => {
     const root = findProjectRoot();
     const expectedCliPath = path.resolve(root, 'dist', 'cli.js');
 
-    expect(command).toBe(
-      `claude mcp add --scope user agenthub -- ${process.execPath} ${expectedCliPath} mcp`,
-    );
+    // Lệnh dùng đường dẫn tuyệt đối của claude khi tìm thấy (Claude có thể nằm trong Node khác).
+    expect(command).toMatch(/(^|\/)claude mcp add /);
+    expect(command.endsWith(`mcp add --scope user agenthub -- ${process.execPath} ${expectedCliPath} mcp`)).toBe(true);
   });
 
   it('bin/agenthub wrapper script exists and is executable', () => {

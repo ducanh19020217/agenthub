@@ -35,6 +35,7 @@ import {
   Department,
   EventItem,
   PresetDetails,
+  GlobalPresetStatus,
   ApplyPresetInput,
   ApplyPresetResult,
   EffectiveConfigResponse,
@@ -77,6 +78,7 @@ export const getSetupStatus = () => apiFetch<SetupStatus>('/api/setup/status');
 export const installSetupTool = (tool: string) => apiFetch<{ jobId: string }>(`/api/setup/install/${encodeURIComponent(tool)}`, { method: 'POST' });
 export const completeSetup = (skip = false) => apiFetch(`/api/setup/${skip ? 'skip' : 'complete'}`, { method: 'POST' });
 export const installSetupMcp = () => apiFetch('/api/setup/mcp', { method: 'POST' });
+export const getSetupLog = (tool: string) => apiFetch<string>(`/api/setup/log/${encodeURIComponent(tool)}`);
 
 const TOKEN_STORAGE_KEY = 'agenthub_token';
 export const API_REQUEST_TIMEOUT_MS = 15_000;
@@ -360,6 +362,7 @@ export const updateDepartmentProfiles = (id: string, profiles: Array<Pick<Depart
 export const updateDepartmentProjects = (id: string, data: { projectIds?: string[]; projectId?: string }) => apiFetch<Department>(`/api/departments/${encodeURIComponent(id)}/projects`, { method: 'PUT', body: JSON.stringify(data) });
 
 export const getPresets = () => apiFetch<PresetDetails[]>('/api/presets');
+export const getCurrentPreset = () => apiFetch<GlobalPresetStatus>('/api/presets/current');
 export const applyPreset = (input: ApplyPresetInput) => apiFetch<ApplyPresetResult>('/api/presets/apply', { method: 'POST', body: JSON.stringify(input) });
 export const getEffectiveConfig = (projectId: string) => apiFetch<EffectiveConfigResponse>(`/api/projects/${encodeURIComponent(projectId)}/effective-config`);
 
@@ -388,6 +391,24 @@ export const getProjectContextSummary = (projectId: string, taskId: string) =>
 export const rerunProjectDeploy = (id: string) => apiFetch(`/api/projects/${encodeURIComponent(id)}/deploy`, { method: 'POST' });
 export const getProjectDeployStatus = (id: string) =>
   apiFetch<DeployStatus | null>(`/api/projects/${encodeURIComponent(id)}/deploy`);
+
+export interface GitInspectResult {
+  valid: boolean;
+  error?: string;
+  message?: string;
+  suggestedName?: string;
+  defaultBranch?: string;
+  currentBranch?: string;
+  branches: string[];
+  remoteUrl?: string | null;
+}
+
+export async function inspectGitRepo(path: string): Promise<GitInspectResult> {
+  return apiFetch<GitInspectResult>('/api/git/inspect', {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  });
+}
 
 export async function createProject(data: CreateProjectInput): Promise<Project> {
   return apiFetch<Project>('/api/projects', {
@@ -502,7 +523,9 @@ export interface ImportTokensResult {
   }>;
 }
 
+/** Nhập tài khoản từ token: Antigravity (mặc định) hoặc Codex (`engine: 'codex'`). */
 export async function importAgyTokens(data: {
+  engine?: 'agy' | 'codex';
   tokens: any;
   accountType?: 'personal' | 'team' | 'api';
 }): Promise<ImportTokensResult> {
@@ -537,6 +560,18 @@ export async function loginProfile(name: string): Promise<LoginSessionResponse> 
   return apiFetch<LoginSessionResponse>(`/api/profiles/${encodeURIComponent(name)}/login`, {
     method: 'POST',
   });
+}
+
+export interface WakeupResult {
+  profile: string;
+  ok: boolean;
+  skipped?: string;
+  results: Array<{ target: string; ok: boolean; message: string }>;
+}
+
+/** Đánh thức quota ngay (bỏ qua kiểm tra cửa sổ 5 giờ đang chạy). */
+export async function wakeupProfile(name: string): Promise<WakeupResult> {
+  return apiFetch<WakeupResult>(`/api/profiles/${encodeURIComponent(name)}/wakeup`, { method: 'POST' });
 }
 
 export async function checkProfile(name: string): Promise<CheckProfileResponse> {

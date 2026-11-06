@@ -22,6 +22,13 @@ export interface SetupToolStatus {
   installing: boolean;
 }
 
+/** PATH của service macOS (launchd) có thể thiếu npm/node: thêm thư mục của Node đang chạy daemon vào cuối. */
+function installPath(): string {
+  const nodeDir = path.dirname(process.execPath);
+  const current = process.env.PATH || '';
+  return current.split(path.delimiter).includes(nodeDir) ? current : [current, nodeDir].filter(Boolean).join(path.delimiter);
+}
+
 export class SetupManager {
   private installing = new Set<SetupTool>();
   private readonly versionCache = new Map<SetupTool, { bin: string; version: string | null; checkedAt: number }>();
@@ -91,13 +98,24 @@ export class SetupManager {
     const log = fs.createWriteStream(logPath, { flags: 'a' });
     const command = installer.command ? installer.command[0] : 'npm';
     const args = installer.command ? installer.command.slice(1) : ['install', '--prefix', path.join(this.config.hubHome, 'tools'), installer.package!];
-    const child = spawn(command, args, { cwd: this.config.hubHome, env: { ...process.env, AGENTHUB_TOOLS_DIR: path.join(this.config.hubHome, 'tools') }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { cwd: this.config.hubHome, env: { ...process.env, PATH: installPath(), AGENTHUB_TOOLS_DIR: path.join(this.config.hubHome, 'tools') }, stdio: ['ignore', 'pipe', 'pipe'] });
     const emit = (type: string, payload: unknown) => this.events?.emit(type, undefined, { jobId, tool: id, ...((payload && typeof payload === 'object') ? payload : { line: String(payload) }) });
     emit('setup.install_progress', { line: `$ ${command} ${args.join(' ')}` });
     child.stdout.on('data', (chunk: Buffer) => { log.write(chunk); emit('setup.install_progress', { line: chunk.toString() }); });
     child.stderr.on('data', (chunk: Buffer) => { log.write(chunk); emit('setup.install_progress', { line: chunk.toString(), stderr: true }); });
     const timer = setTimeout(() => child.kill('SIGTERM'), 10 * 60 * 1000);
+    let finished = false;
+    // spawn lỗi (vd. ENOENT khi service launchd không có npm trong PATH) phát 'error' thay vì 'close';
+    // không bắt sẽ làm sập daemon và UI chờ install_done mãi.
+    child.on('error', (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer); log.write(`${error.message}\n`); log.end(); this.installing.delete(id);
+      emit('setup.install_done', { ok: false, code: null, signal: null, path: null, logPath, error: `Không chạy được ${command}: ${error.message}` });
+    });
     child.on('close', (code, signal) => {
+      if (finished) return;
+      finished = true;
       clearTimeout(timer); log.end(); this.installing.delete(id);
       const installedBin = this.binary(id);
       const ok = code === 0 && Boolean(installedBin);

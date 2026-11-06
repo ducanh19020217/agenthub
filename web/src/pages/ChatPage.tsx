@@ -31,12 +31,12 @@ import { UI_Z_INDEX } from '../components/ui/layers';
 import {
   Menu,
   X,
-  AlertCircle,
   Plus,
   Bot,
   Square,
   RotateCcw,
 } from 'lucide-react';
+import { ToastViewport, useToasts, type ToastKind } from '../components/ui/Toast';
 
 const EMPTY_SESSIONS: ChatSession[] = [];
 type ChatSessionsQuery = { pages: Array<{ items: ChatSession[]; total: number; nextCursor: string | null }>; pageParams: unknown[] };
@@ -62,7 +62,8 @@ export const ChatPage: React.FC = () => {
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
+  const setToastMessage = (title: string, kind: ToastKind = 'error') => pushToast({ title, kind, duration: kind === 'error' ? 6000 : 3500 });
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
   const [isLocalBusy, setIsLocalBusy] = useState(false);
   const [permission, setPermission] = useState<ChatPermissionRequest | null>(null);
@@ -71,13 +72,6 @@ export const ChatPage: React.FC = () => {
     mutationFn: (id: string) => retryChatLimitNow(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['chatSessions'] }),
   });
-
-  // Auto-dismiss toast
-  useEffect(() => {
-    if (!toastMessage) return;
-    const timer = setTimeout(() => setToastMessage(null), 3000);
-    return () => clearTimeout(timer);
-  }, [toastMessage]);
 
   // Fetch chat sessions
   const sessionsQuery = useInfiniteQuery({
@@ -290,7 +284,7 @@ export const ChatPage: React.FC = () => {
 
         queryClient.invalidateQueries({ queryKey: ['chatSessions'] });
       } else if (type === 'chat.compacted') {
-        setToastMessage(t('extra.compacted'));
+        setToastMessage(t('extra.compacted'), 'success');
         queryClient.invalidateQueries({ queryKey: ['chatMessages', activeSession?.id] });
         queryClient.invalidateQueries({ queryKey: ['chatSessions'] });
       } else if (type === 'chat.status') {
@@ -414,7 +408,7 @@ export const ChatPage: React.FC = () => {
         err.message?.includes('busy') ||
         err.message?.includes('answering')
       ) {
-        setToastMessage(t('extra.claudeAnswering'));
+        setToastMessage(t('extra.claudeAnswering'), 'warning');
       } else {
         setToastMessage(err.message || t('extra.sendError'));
       }
@@ -436,7 +430,7 @@ export const ChatPage: React.FC = () => {
   const compactMutation = useMutation({
     mutationFn: compactChatSession,
     onSuccess: () => {
-      setToastMessage(t('extra.compactRequested'));
+      setToastMessage(t('extra.compactRequested'), 'info');
       queryClient.invalidateQueries({ queryKey: ['chatSessions'] });
       if (activeSession?.id) {
         queryClient.invalidateQueries({ queryKey: ['chatMessages', activeSession.id] });
@@ -506,17 +500,7 @@ export const ChatPage: React.FC = () => {
 
   return (
     <div className="relative h-[calc(100vh-8.5rem)] flex rounded-2xl border border-[var(--t-border)] bg-[var(--t-bg)] overflow-hidden shadow-xs">
-      {/* Toast Notification */}
-      {toastMessage && (
-        <div
-          role="alert"
-          className="absolute top-4 left-1/2 -translate-x-1/2 px-4 py-2.5 rounded-xl bg-[var(--t-warn)] text-[var(--t-on-accent)] font-medium text-xs shadow-xl flex items-center gap-2 animate-fade-in"
-          style={{ zIndex: UI_Z_INDEX.toast }}
-        >
-          <AlertCircle className="w-4 h-4 shrink-0" />
-          <span>{toastMessage}</span>
-        </div>
-      )}
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} closeLabel={t('common.close')} />
 
       {/* Desktop Left Column (Session List) >= 900px */}
       <aside className="hidden min-[900px]:block w-72 lg:w-80 shrink-0 h-full">

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { loadConfig } from '../src/config.js';
-import { exchangeAgyRefreshToken, writeAgyIsolatedToken, readAgyAccessToken, inspectAgyAccessToken } from '../src/profiles/agyToken.js';
+import { exchangeAgyRefreshToken, writeAgyIsolatedToken, readAgyAccessToken, inspectAgyAccessToken, agyTierToPlan } from '../src/profiles/agyToken.js';
 import { createContext } from '../src/daemon.js';
 
 describe('Antigravity Token Import from Cockpit', () => {
@@ -490,6 +490,53 @@ describe('Antigravity Token Import from Cockpit', () => {
 
       expect(result.results[0].message).not.toMatch(/kiểm tra/);
       expect(ctx.service['profileChecks'].size).toBe(0);
+    });
+  });
+
+  describe('Google AI plan from loadCodeAssist (like Cockpit tools)', () => {
+    function mockGoogle(tier: Record<string, unknown> | number) {
+      globalThis.fetch = vi.fn().mockImplementation(async (url: string | URL, init?: RequestInit) => {
+        const target = String(url);
+        if (target.includes('loadCodeAssist')) {
+          if (typeof tier === 'number') return { ok: false, status: tier, json: async () => ({}) } as unknown as Response;
+          expect(JSON.parse(String(init?.body))).toMatchObject({ metadata: { ideType: 'ANTIGRAVITY', pluginType: 'GEMINI' }, mode: 'FULL_ELIGIBILITY_CHECK' });
+          return { ok: true, status: 200, json: async () => tier } as unknown as Response;
+        }
+        if (target.includes('userinfo')) {
+          return { ok: true, status: 200, json: async () => ({ email: 'tier@example.com', picture: 'https://x/p.png' }) } as unknown as Response;
+        }
+        return { ok: true, status: 200, json: async () => ({ access_token: 'at', expires_in: 3600, token_type: 'Bearer' }) } as unknown as Response;
+      });
+    }
+
+    it.each([
+      ['g1-ultra-tier', 'ultra'],
+      ['g1-pro-tier', 'pro'],
+      ['free-tier', 'free'],
+      ['standard-tier', 'free'],
+      ['', null],
+    ])('maps tier %s to %s', (tierId, plan) => {
+      expect(agyTierToPlan(tierId)).toBe(plan);
+    });
+
+    it('prefers paidTier over currentTier when importing a refresh token', async () => {
+      mockGoogle({ paidTier: { id: 'g1-pro-tier' }, currentTier: { id: 'free-tier' } });
+      await ctx.service.importAgyTokens({ email: 'tier@example.com', refresh_token: 'rt' }, { verify: false });
+      expect(ctx.profileRepo.get('tier')?.plan).toBe('pro');
+    });
+
+    it('updates the plan on refresh and explains when it cannot be read', async () => {
+      ctx.service.createProfile({ name: 'tier', engine: 'agy', accountType: 'personal' });
+      ctx.profileRepo.upsert({ ...ctx.profileRepo.get('tier')!, email: 'tier@example.com' });
+      writeAgyIsolatedToken(path.join(agyHomesDir, 'tier'), { accessToken: 'at', refreshToken: 'rt', expiry: new Date(Date.now() + 3_600_000).toISOString() });
+
+      mockGoogle({ currentTier: { id: 'g1-ultra-tier' } });
+      expect((await ctx.service.syncAgyAvatarFromToken('tier')).message).toMatch(/Gói ULTRA/);
+      expect(ctx.profileRepo.get('tier')?.plan).toBe('ultra');
+
+      mockGoogle(403);
+      expect((await ctx.service.syncAgyAvatarFromToken('tier')).message).toMatch(/Không đọc được gói \(HTTP 403\)/);
+      expect(ctx.profileRepo.get('tier')?.plan).toBe('ultra');
     });
   });
 });

@@ -43,7 +43,9 @@ import type { GiteaSyncService } from '../integrations/gitea/service.js';
 import { isGiteaTokenConfigured, saveGiteaToken } from '../integrations/gitea/secrets.js';
 import { parseRemote } from '../integrations/gitea/client.js';
 import { BulletinService } from '../bulletin.js';
-import { ProfileService as CoreProfileService, accountKey, isProfileLoggedIn, exchangeAgyRefreshToken, writeAgyIsolatedToken, fetchAgyGoogleUserInfo, fetchAgyGoogleUserInfoDetailed, inspectAgyAccessToken } from '../profiles/index.js';
+import { parseCodexTokenItem, writeCodexAuthFile } from '../profiles/codexToken.js';
+import { defaultWakeupRunner, planWakeup, wakeupCommands, wakeupCwd, wakeupSucceeded, type WakeupRunner } from '../quota/wakeup.js';
+import { ProfileService as CoreProfileService, accountKey, isProfileLoggedIn, exchangeAgyRefreshToken, writeAgyIsolatedToken, fetchAgyGoogleUserInfo, fetchAgyGoogleUserInfoDetailed, inspectAgyAccessToken, fetchAgyTier, agyTierToPlan } from '../profiles/index.js';
 import { Scheduler } from '../scheduler/index.js';
 import { CodexEngine } from '../engines/index.js';
 import { hasClaudeQuotaAvailable, QuotaUsageService } from '../quota/usage.js';
@@ -69,7 +71,7 @@ import { mergeTaskIntoBase, MergeError } from '../merge.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
-import { ReviewChainSchema, parseReviewChain, type ReviewChainStep } from '../review-chain.js';
+import { ReviewChainSchema, isAutomatedStep, parseReviewChain, type ReviewChainStep } from '../review-chain.js';
 import { isAutoReviewer } from '../reviewer.js';
 import { isKnownModel } from '../quota/index.js';
 import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, ReviewerOrderSchema, reviewerSettingsFromLegacy } from '../reviewer-config.js';
@@ -79,7 +81,7 @@ import { inspectGitProject } from '../projects/git.js';
 import type { DeployService } from '../deploy.js';
 import type { RemoteDeployService, RemoteDeployStatus } from '../remote-deploy.js';
 import type { PerfCollector } from '../perf.js';
-import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset } from '../presets.js';
+import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset, describeGlobalPreset, presetProjectPatch, type PresetLevel } from '../presets.js';
 import type { SetupTools } from '../setup-tools.js';
 import { computeEffectiveConfig } from '../effective-config.js';
 import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
@@ -164,6 +166,7 @@ function apiProfile(profile: ProfileRow): ProfileRow {
     authMessage: profile.authMessage ?? null,
     verifyUrl: profile.verifyUrl ?? null,
     avatarUrl: profile.avatarUrl ?? null,
+    plan: profile.plan ?? null,
   };
 }
 
@@ -447,7 +450,8 @@ export const ReviewTaskSchema = z.object({
   feedback: z.string().optional(),
   by: z.string().optional(),
   source: z.enum(['content', 'operational']).optional().default('content'),
-  merge: z.boolean().optional().default(false),
+  /** Omitted: merge when the project has auto-merge on, so an approval from the brain/MCP never strands code. */
+  merge: z.boolean().optional(),
 }).refine(
   (d) => d.verdict !== 'changes_requested' || (typeof d.feedback === 'string' && d.feedback.trim().length > 0),
   { message: 'Feedback là bắt buộc khi changes_requested' },
@@ -531,6 +535,7 @@ export const UpdateConfigSchema = z.object({
     waitingMinutes: z.number().positive().optional(),
   }).optional(),
   autoFixOnFail: z.boolean().optional(),
+  defaultProjectPreset: z.enum(['safe', 'balanced', 'auto']).optional(),
   tools: z.object({ installers: z.record(z.object({
     package: z.string().regex(/^(@[a-z0-9-~][a-z0-9._~]*\/[a-z0-9-~][a-z0-9._~]*|[a-z0-9-~][a-z0-9._~]*)(@[\w.^~<>=*-]+)?$/).refine((value) => !value.startsWith('-'), 'Tên package npm không hợp lệ').optional(),
     versionArgs: z.array(z.string()).optional(),
@@ -575,7 +580,7 @@ export const UpdateConfigSchema = z.object({
       z.object({ type: z.literal('wait') }),
     ])).max(10).optional(),
     policy: z.array(z.string().min(1)).max(100).optional(),
-    claudeProfile: z.string().min(1).optional(),
+    claudeProfile: z.string().optional(),
     codexProfile: z.string().min(1).optional(),
     codexModel: z.string().trim().min(1).optional(),
     model: z.enum(['', 'opus', 'sonnet', 'haiku']).optional(),
@@ -611,6 +616,14 @@ export const UpdateConfigSchema = z.object({
       start: timeStringValidator,
       end: timeStringValidator,
     }).partial().optional(),
+    /** Báo khi quota 5h/tuần của một tài khoản tụt xuống dưới ngưỡng này (%); 0 = tắt. */
+    quotaLowPct: z.number().int().min(0).max(95).optional(),
+  }).optional(),
+  wakeup: z.object({
+    enabled: z.boolean().optional(),
+    times: z.array(z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/)).max(12).optional(),
+    profiles: z.array(z.string().regex(/^[a-zA-Z0-9_-]+$/)).max(100).optional(),
+    agyModels: z.array(z.string().min(1)).max(6).optional(),
   }).optional(),
   savings: z
     .object({
@@ -963,6 +976,20 @@ export function formatEventSummary(
       }
       return type;
   }
+}
+
+export interface TokenImportResult {
+  success: boolean;
+  total: number;
+  successCount: number;
+  failedCount: number;
+  results: Array<{
+    name: string;
+    email: string;
+    action: 'created' | 'updated' | 'skipped';
+    status: 'ok' | 'error';
+    message?: string;
+  }>;
 }
 
 export class AppService {
@@ -1866,6 +1893,129 @@ export class AppService {
     return this.deployService.pushNow(id);
   }
 
+  inspectGitRepo(raw: unknown): {
+    valid: boolean;
+    error?: string;
+    message?: string;
+    suggestedName?: string;
+    defaultBranch?: string;
+    currentBranch?: string;
+    branches: string[];
+    remoteUrl?: string | null;
+  } {
+    const body = (raw && typeof raw === 'object' ? raw : {}) as { path?: unknown };
+    let inputPath = typeof body.path === 'string' ? body.path.trim() : '';
+    if (!inputPath) {
+      return { valid: false, error: 'empty_path', message: 'Đường dẫn không được để trống', branches: [] };
+    }
+
+    if (inputPath.startsWith('~/') || inputPath === '~') {
+      inputPath = path.join(os.homedir(), inputPath.slice(1));
+    }
+    const resolvedPath = path.resolve(inputPath);
+
+    if (!fs.existsSync(resolvedPath)) {
+      return { valid: false, error: 'not_found', message: `Thư mục không tồn tại: ${resolvedPath}`, branches: [] };
+    }
+
+    try {
+      const stat = fs.statSync(resolvedPath);
+      if (!stat.isDirectory()) {
+        return { valid: false, error: 'not_directory', message: `Đường dẫn không phải thư mục: ${resolvedPath}`, branches: [] };
+      }
+    } catch {
+      return { valid: false, error: 'cannot_read', message: 'Không thể đọc thư mục', branches: [] };
+    }
+
+    let topLevel = '';
+    try {
+      topLevel = execFileSync('git', ['-C', resolvedPath, 'rev-parse', '--show-toplevel'], {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+    } catch {
+      return { valid: false, error: 'not_git_repo', message: 'Thư mục không phải là git repository', branches: [] };
+    }
+
+    const suggestedName = path.basename(topLevel || resolvedPath);
+
+    let remoteUrl: string | null = null;
+    try {
+      remoteUrl = execFileSync('git', ['-C', resolvedPath, 'remote', 'get-url', 'origin'], {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+    } catch {
+      remoteUrl = null;
+    }
+
+    let currentBranch = '';
+    try {
+      currentBranch = execFileSync('git', ['-C', resolvedPath, 'branch', '--show-current'], {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+    } catch {
+      currentBranch = '';
+    }
+
+    let defaultBranch = '';
+    try {
+      const originHead = execFileSync('git', ['-C', resolvedPath, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      defaultBranch = originHead.replace(/^origin\//, '');
+    } catch {
+      // ignore
+    }
+
+    const branchSet = new Set<string>();
+    try {
+      const output = execFileSync(
+        'git',
+        ['-C', resolvedPath, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/', 'refs/remotes/origin/'],
+        {
+          encoding: 'utf-8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        },
+      );
+      const lines = output.split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.includes('origin/HEAD')) continue;
+        const name = trimmed.startsWith('origin/') ? trimmed.slice(7) : trimmed;
+        if (name) branchSet.add(name);
+      }
+    } catch {
+      // ignore
+    }
+
+    if (!defaultBranch) {
+      if (branchSet.has('main')) defaultBranch = 'main';
+      else if (branchSet.has('master')) defaultBranch = 'master';
+      else defaultBranch = currentBranch || (branchSet.size > 0 ? Array.from(branchSet)[0] : 'main');
+    }
+
+    if (currentBranch) branchSet.add(currentBranch);
+    if (defaultBranch) branchSet.add(defaultBranch);
+
+    const branches = Array.from(branchSet).sort((a, b) => {
+      if (a === defaultBranch) return -1;
+      if (b === defaultBranch) return 1;
+      return a.localeCompare(b);
+    });
+
+    return {
+      valid: true,
+      suggestedName,
+      defaultBranch,
+      currentBranch,
+      branches,
+      remoteUrl,
+    };
+  }
+
   getGiteaStatus(id: string) {
     const project = this.getProject(id);
     if (this.giteaSyncService) {
@@ -2066,10 +2216,18 @@ export class AppService {
       departmentId: parsed.departmentId,
     });
 
-    if (effectiveSettings.integration.enabled) {
-      const projLike = { id, path: resolvedPath, defaultBranch: parsed.defaultBranch, settings: JSON.stringify(effectiveSettings) };
+    // Put the new project on its chosen preset, or on the one last applied globally, unless the
+    // caller set the review chain itself. Only the wizard's label was stored before, not the preset.
+    const presetToApply = parsed.settings?.preset ?? this.config.defaultProjectPreset;
+    if (presetToApply && presetToApply in PRESET_DEFINITIONS && !parsed.review && !parsed.reviewChain) {
+      this.updateProject(id, presetProjectPatch(this.projectRepo.get(id)!, presetToApply as PresetLevel, this.config.brain.codexModel || 'gpt-5.6-luna'));
+    }
+    const createdSettings = projectSettings(this.projectRepo.get(id)!);
+
+    if (createdSettings.integration.enabled) {
+      const projLike = { id, path: resolvedPath, defaultBranch: parsed.defaultBranch, settings: JSON.stringify(createdSettings) };
       ensureIntegrationWorktree(projLike, this.config.hubHome);
-      if (effectiveSettings.worktree.install === 'auto') {
+      if (createdSettings.worktree.install === 'auto') {
         void ensureIntegrationNodeModules(projLike, this.config.hubHome, {
           cacheDir: this.config.cacheDir,
           cacheMaxEntries: this.config.cacheMaxEntries,
@@ -2186,7 +2344,7 @@ export class AppService {
   }
 
   deleteProject(id: string, options?: { purge?: boolean; confirm?: string }): { ok: boolean; archived?: boolean; counts?: Record<string, number>; warnings?: string[] } {
-    const proj = this.projectRepo.get(id);
+    const proj = options?.purge ? this.projectRepo.getIncludingArchived(id) : this.projectRepo.get(id);
     if (!proj) {
       throw new HttpError(404, 'not_found', `Project "${id}" không tồn tại`);
     }
@@ -2305,7 +2463,34 @@ export class AppService {
       const fields = token.fieldNames?.length ? ` (các trường: ${token.fieldNames.slice(0, 12).join(', ')})` : '';
       return { avatarUrl: profile.avatarUrl ?? null, message: reasons[token.skip] + fields };
     }
-    const { info, status } = await fetchAgyGoogleUserInfoDetailed(token.accessToken);
+    const [{ info, status }, tier] = await Promise.all([
+      fetchAgyGoogleUserInfoDetailed(token.accessToken),
+      fetchAgyTier(token.accessToken),
+    ]);
+    const otherAccount = Boolean(info?.email && profile.email && info.email.toLowerCase() !== profile.email.toLowerCase());
+    const planNote = otherAccount ? '' : this.applyAgyTier(profile, tier);
+    const avatar = this.applyAgyAvatar(profile, info, status, otherAccount);
+    return { avatarUrl: avatar.avatarUrl, message: avatar.message + planNote };
+  }
+
+  /** Lưu gói Google AI (FREE/PRO/ULTRA) đọc từ loadCodeAssist; trả đoạn ghi chú cho thông báo. */
+  private applyAgyTier(profile: ProfileRow, tier: { tierId: string | null; status: number }): string {
+    const plan = agyTierToPlan(tier.tierId);
+    if (!plan) return tier.status === 200 ? '' : ` · Không đọc được gói (${tier.status ? `HTTP ${tier.status}` : 'lỗi mạng'})`;
+    if (plan !== profile.plan) {
+      this.profileRepo.updatePlan(profile.name, plan);
+      this.scheduler.getEventBus().emit('profile.updated', undefined, { name: profile.name, plan });
+    }
+    return ` · Gói ${plan.toUpperCase()}`;
+  }
+
+  private applyAgyAvatar(
+    profile: ProfileRow,
+    info: Awaited<ReturnType<typeof fetchAgyGoogleUserInfoDetailed>>['info'],
+    status: number,
+    otherAccount: boolean,
+  ): { avatarUrl: string | null; message: string } {
+    const name = profile.name;
     if (!info) {
       const message = status === 0
         ? 'Không kết nối được tới Google'
@@ -2316,16 +2501,104 @@ export class AppService {
             : `Google trả lỗi HTTP ${status}`;
       return { avatarUrl: profile.avatarUrl ?? null, message };
     }
-    if (!info.picture) return { avatarUrl: profile.avatarUrl ?? null, message: 'Google không trả về ảnh đại diện (token thiếu quyền profile hoặc tài khoản chưa đặt ảnh)' };
-    if (info.email && profile.email && info.email.toLowerCase() !== profile.email.toLowerCase()) {
+    if (otherAccount) {
       return { avatarUrl: profile.avatarUrl ?? null, message: `Token thuộc tài khoản khác (${info.email}), bỏ qua ảnh` };
     }
+    if (!info.picture) return { avatarUrl: profile.avatarUrl ?? null, message: 'Google không trả về ảnh đại diện (token thiếu quyền profile hoặc tài khoản chưa đặt ảnh)' };
     if (info.picture !== profile.avatarUrl) {
       this.profileRepo.updateAvatarUrl(name, info.picture);
       this.scheduler.getEventBus().emit('profile.updated', undefined, { name, avatarUrl: info.picture });
       return { avatarUrl: info.picture, message: 'Đã cập nhật ảnh đại diện' };
     }
     return { avatarUrl: info.picture, message: 'Ảnh đại diện đã là mới nhất' };
+  }
+
+  /** Chạy CLI khi đánh thức; test thay bằng runner giả để không bao giờ chạy agy/codex thật. */
+  wakeupRunner: WakeupRunner = defaultWakeupRunner;
+  private wakeupTimer?: NodeJS.Timeout;
+  private wakeupDone = new Set<string>();
+  private wakeupInFlight = new Set<string>();
+
+  /**
+   * Đánh thức quota một hồ sơ: gửi prompt rất ngắn để cửa sổ 5 giờ bắt đầu ngay.
+   * `force` (nút bấm) bỏ qua kiểm tra cửa sổ đang chạy; lịch hẹn thì không.
+   */
+  async wakeupProfile(name: string, options: { force?: boolean } = {}): Promise<{
+    profile: string;
+    ok: boolean;
+    skipped?: string;
+    results: Array<{ target: string; ok: boolean; message: string }>;
+  }> {
+    const profile = this.profileRepo.get(name);
+    if (!profile || profile.deletedAt) throw new HttpError(404, 'not_found', `Hồ sơ "${name}" không tồn tại`);
+    if (this.wakeupInFlight.has(name)) throw new HttpError(409, 'conflict', `Hồ sơ "${name}" đang được đánh thức`);
+    const busy = Array.from(this.scheduler.getRunning().values()).some((run) => run.profileName === name);
+    const plan = planWakeup(profile, this.usageService.getForProfile(name), this.config.wakeup, {
+      loggedIn: isProfileLoggedIn(profile),
+      busy,
+      nowSec: Math.floor(Date.now() / 1000),
+      force: options.force,
+    });
+    if (plan.skip) return { profile: name, ok: false, skipped: plan.skip, results: [] };
+
+    const commands = wakeupCommands(profile, plan, {
+      agy: process.env.AGENTHUB_AGY_BIN || path.join(os.homedir(), '.gemini', 'bin', 'agy'),
+      codex: process.env.AGENTHUB_CODEX_BIN || CodexEngine.findCodexPath() || null,
+      claude: findClaudeBin(this.config.chat.claudeBin) || process.env.AGENTHUB_CLAUDE_BIN || null,
+    });
+    if (commands.length === 0) return { profile: name, ok: false, skipped: `Không tìm thấy CLI của ${profile.engine}`, results: [] };
+
+    this.wakeupInFlight.add(name);
+    const results: Array<{ target: string; ok: boolean; message: string }> = [];
+    try {
+      const cwd = wakeupCwd(this.config.hubHome);
+      for (let i = 0; i < commands.length; i++) {
+        const target = plan.models[i] || profile.engine;
+        const result = await this.wakeupRunner(commands[i], cwd);
+        const ok = wakeupSucceeded(profile.engine, result);
+        results.push({ target, ok, message: ok ? 'Đã đánh thức' : (result.error ? 'CLI báo lỗi' : 'Không thấy phản hồi hợp lệ') });
+      }
+    } finally {
+      this.wakeupInFlight.delete(name);
+    }
+    const ok = results.some((r) => r.ok);
+    this.scheduler.getEventBus().emit('quota.wakeup', undefined, { profile: name, ok, results });
+    // Cập nhật quota để thấy cửa sổ 5 giờ mới bắt đầu.
+    await this.refreshUsage(name).catch(() => null);
+    return { profile: name, ok, results };
+  }
+
+  /** Chạy các lượt đánh thức đến giờ hẹn; mỗi giờ hẹn chỉ chạy một lần mỗi ngày. */
+  async runScheduledWakeups(now = new Date()): Promise<string[]> {
+    const wake = this.config.wakeup;
+    if (!wake?.enabled) return [];
+    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const due = wake.times.find((time) => time.padStart(5, '0') === hhmm);
+    if (!due) return [];
+    const key = `${now.toDateString()} ${due}`;
+    if (this.wakeupDone.has(key)) return [];
+    this.wakeupDone.add(key);
+
+    const targets = this.profileRepo.getAll()
+      .filter((p) => ['agy', 'codex', 'claude'].includes(p.engine))
+      .filter((p) => wake.profiles.length === 0 || wake.profiles.includes(p.name));
+    const woken: string[] = [];
+    for (const profile of targets) {
+      const result = await this.wakeupProfile(profile.name).catch(() => null);
+      if (result?.ok) woken.push(profile.name);
+    }
+    return woken;
+  }
+
+  startWakeupTimer(): void {
+    if (this.wakeupTimer) return;
+    this.wakeupTimer = setInterval(() => void this.runScheduledWakeups().catch(() => null), 30_000);
+    this.wakeupTimer.unref?.();
+  }
+
+  stopWakeupTimer(): void {
+    if (this.wakeupTimer) clearInterval(this.wakeupTimer);
+    this.wakeupTimer = undefined;
   }
 
   refreshProfileEmail(name: string): string | null {
@@ -2363,6 +2636,7 @@ export class AppService {
           this.profileRepo.upsert({ ...profile, email });
           // Ảnh đại diện thuộc tài khoản cũ; chỉ lấy lại được khi đăng nhập bằng refresh token.
           if (profile.avatarUrl) this.profileRepo.updateAvatarUrl(profile.name, null);
+          if (profile.plan) this.profileRepo.updatePlan(profile.name, null);
         } catch {
           return email;
         }
@@ -2437,6 +2711,7 @@ export class AppService {
         duplicateWarning: dupes.has(accountKey(p) || ''),
         duplicateEmailWith: (dupes.get(accountKey(p) || '') || []).filter((name) => name !== p.name),
         ...(claudeAccount?.plan ? { claudePlan: claudeAccount.plan } : {}),
+        plan: p.engine === 'claude' ? claudeAccount?.planId ?? null : p.plan ?? null,
       };
     });
   }
@@ -2472,23 +2747,17 @@ export class AppService {
     return apiProfile(this.profileRepo.get(parsed.name)!);
   }
 
-  /**
-   * verify: chạy Check bằng agy cho từng hồ sơ nhập thành công (kết quả về qua sự kiện profile.check).
-   * CLI tắt vì nó đóng DB ngay sau khi nhập.
-   */
-  async importAgyTokens(raw: unknown, options: { verify?: boolean } = {}): Promise<{
-    success: boolean;
-    total: number;
-    successCount: number;
-    failedCount: number;
-    results: Array<{
-      name: string;
-      email: string;
-      action: 'created' | 'updated' | 'skipped';
-      status: 'ok' | 'error';
-      message?: string;
-    }>;
-  }> {
+  /** Nhập token theo engine trong payload (`engine: "codex"`; mặc định agy). */
+  async importTokens(raw: unknown, options: { verify?: boolean } = {}): Promise<TokenImportResult> {
+    const engine = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).engine : undefined;
+    if (engine === 'codex') return this.importCodexTokens(raw, options);
+    if (engine !== undefined && engine !== 'agy') {
+      throw new HttpError(400, 'bad_request', `Chưa hỗ trợ nhập token cho engine "${String(engine)}"`);
+    }
+    return this.importAgyTokens(raw, options);
+  }
+
+  private parseTokenImportPayload(raw: unknown): { rawList: unknown[]; accountType: 'personal' | 'team' | 'api' } {
     let payload: unknown = raw;
     if (typeof payload === 'string') {
       try {
@@ -2516,6 +2785,10 @@ export class AppService {
       } catch {
         throw new HttpError(400, 'bad_request', 'Trường "tokens" không phải là JSON hợp lệ');
       }
+    } else if (payloadObj.tokens && typeof payloadObj.tokens === 'object') {
+      // Dán thẳng một object (vd. auth.json của Codex có "tokens" lồng bên trong).
+      const inner = payloadObj.tokens as Record<string, unknown>;
+      rawList = [inner.refresh_token || inner.tokens ? inner : payloadObj];
     } else if (payloadObj.refresh_token || payloadObj.refreshToken || payloadObj.token) {
       rawList = [payloadObj];
     } else {
@@ -2529,14 +2802,150 @@ export class AppService {
     if (rawList.length === 0) {
       throw new HttpError(400, 'bad_request', 'Danh sách token trống');
     }
+    return { rawList, accountType };
+  }
 
-    const results: Array<{
-      name: string;
-      email: string;
-      action: 'created' | 'updated' | 'skipped';
-      status: 'ok' | 'error';
-      message?: string;
-    }> = [];
+  /**
+   * Chọn hồ sơ nhận token: tên chỉ định, hồ sơ cùng email, hoặc tên mới từ email.
+   * Chỉ ghi vào hồ sơ isolated cùng engine; áp dụng chính sách multiplePerProvider như createProfile.
+   */
+  private resolveTokenImportTarget(
+    engine: 'agy' | 'codex',
+    email: string,
+    item: Record<string, unknown>,
+    accountType: 'personal' | 'team' | 'api',
+  ): { targetName: string; existing: ProfileRow | undefined; action: 'created' | 'updated' } | { name: string; error: string } {
+    const label = engine === 'codex' ? 'Codex' : 'Antigravity';
+    const isTarget = (p: ProfileRow) => p.engine === engine && p.kind === 'isolated';
+    const sameEmail = (p: ProfileRow) => (p.email || '').toLowerCase() === email;
+    const customName = String(item.name || item.profile_name || item.profileName || '').trim();
+    let targetName = '';
+    if (customName) {
+      if (!/^[a-zA-Z0-9_-]+$/.test(customName)) {
+        return { name: customName, error: 'Tên hồ sơ chỉ được chứa chữ, số, "_" và "-"' };
+      }
+      const named = this.profileRepo.get(customName);
+      if (named && !isTarget(named)) {
+        return { name: customName, error: `Hồ sơ "${customName}" đã tồn tại và không phải hồ sơ ${label} riêng` };
+      }
+      targetName = customName;
+    } else {
+      const all = this.profileRepo.getAll(true).filter((p) => isTarget(p) && sameEmail(p));
+      const match = all.find((p) => !p.deletedAt) || all[0];
+      if (match) {
+        targetName = match.name;
+      } else {
+        const base = email.split('@')[0].replace(/[^a-z0-9_-]/g, '_') || `${engine}_account`;
+        targetName = base;
+        for (let idx = 2; this.profileRepo.get(targetName); idx++) targetName = `${base}_${idx}`;
+      }
+    }
+
+    const existing = this.profileRepo.get(targetName);
+    const action: 'created' | 'updated' = existing && !existing.deletedAt ? 'updated' : 'created';
+    // Theo upstream: chỉ tính tài khoản cá nhân đã đăng nhập, và chỉ dẫn tới tuỳ chọn trong Cài đặt.
+    if (action === 'created' && !this.config.multiplePerProvider && accountType === 'personal') {
+      const personal = this.profileRepo.getAll().find((p) =>
+        p.engine === engine && p.accountType === 'personal' && isProfileLoggedIn(p),
+      );
+      if (personal) {
+        return {
+          name: targetName,
+          error: `Đã có tài khoản ${engine === 'codex' ? 'Codex' : 'Gemini'} cá nhân: ${personal.label || personal.name}. Bật 'Cho phép nhiều tài khoản' trong Cài đặt, hoặc chọn loại Team/API.`,
+        };
+      }
+    }
+    return { targetName, existing, action };
+  }
+
+  /** Bắt đầu Check cho các hồ sơ vừa nhập; kết quả về qua sự kiện profile.check. */
+  private verifyImportedProfiles(results: TokenImportResult['results']): void {
+    for (const item of results) {
+      if (item.status !== 'ok') continue;
+      try {
+        this.startProfileCheck(item.name);
+      } catch {
+        // Đang có lượt kiểm tra khác cho hồ sơ này; kết quả của nó cũng phản ánh token mới.
+      }
+    }
+  }
+
+  /**
+   * Nhập tài khoản Codex từ JSON export (id_token/access_token/refresh_token...) hoặc auth.json.
+   * Ghi auth.json vào CODEX_HOME riêng của hồ sơ rồi để `codex login status` xác nhận (verify).
+   */
+  async importCodexTokens(raw: unknown, options: { verify?: boolean } = {}): Promise<TokenImportResult> {
+    const { rawList, accountType } = this.parseTokenImportPayload(raw);
+    const results: TokenImportResult['results'] = [];
+    const fail = (name: string, email: string, message: string) =>
+      results.push({ name, email, action: 'skipped', status: 'error', message });
+
+    for (const rawItem of rawList) {
+      if (!rawItem || typeof rawItem !== 'object') {
+        fail('', '', 'Mục dữ liệu không phải là object hợp lệ');
+        continue;
+      }
+      const item = rawItem as Record<string, unknown>;
+      const parsed = parseCodexTokenItem(item);
+      if ('error' in parsed) {
+        fail('', typeof item.email === 'string' ? item.email : '', parsed.error);
+        continue;
+      }
+      if (!parsed.email) {
+        fail('', '', 'Không xác định được email (thiếu trường email và id_token không có email)');
+        continue;
+      }
+      const email = parsed.email;
+
+      const target = this.resolveTokenImportTarget('codex', email, item, accountType);
+      if ('error' in target) {
+        fail(target.name, email, target.error);
+        continue;
+      }
+      const { targetName, existing, action } = target;
+
+      if (action === 'created') {
+        if (existing) this.profileRepo.restore(targetName);
+        this.coreProfileService.createProfile(targetName, 'codex', accountType);
+      }
+      const current = this.profileRepo.get(targetName)!;
+      writeCodexAuthFile(current.home || path.join(this.config.hubHome, 'codex-homes', targetName), parsed);
+      this.profileRepo.upsert({ ...current, email });
+      this.profileRepo.updatePlan(targetName, parsed.plan);
+      this.profileRepo.updateAuthState(targetName, 'ok', 'Đã nhập token Codex', null);
+
+      if (action === 'created') {
+        this.scheduler.getEventBus().emit('profile.created', undefined, { name: targetName });
+      } else {
+        this.scheduler.getEventBus().emit('profile.updated', undefined, { name: targetName, email });
+      }
+      results.push({
+        name: targetName,
+        email,
+        action,
+        status: 'ok',
+        message: `${action === 'updated' ? 'Cập nhật token thành công' : 'Thêm tài khoản thành công'}${options.verify === false ? '' : ' · đang kiểm tra với Codex'}`,
+      });
+    }
+
+    if (options.verify !== false) this.verifyImportedProfiles(results);
+    return {
+      success: results.some((r) => r.status === 'ok'),
+      total: rawList.length,
+      successCount: results.filter((r) => r.status === 'ok').length,
+      failedCount: results.filter((r) => r.status === 'error').length,
+      results,
+    };
+  }
+
+  /**
+   * verify: chạy Check bằng agy cho từng hồ sơ nhập thành công (kết quả về qua sự kiện profile.check).
+   * CLI tắt vì nó đóng DB ngay sau khi nhập.
+   */
+  async importAgyTokens(raw: unknown, options: { verify?: boolean } = {}): Promise<TokenImportResult> {
+    const { rawList, accountType } = this.parseTokenImportPayload(raw);
+
+    const results: TokenImportResult['results'] = [];
     const fail = (name: string, email: string, message: string) =>
       results.push({ name, email, action: 'skipped', status: 'error', message });
 
@@ -2561,51 +2970,13 @@ export class AppService {
       }
       const refreshToken = refreshTokenRaw.trim();
 
-      // Chỉ cập nhật hồ sơ agy isolated; không bao giờ ghi token vào hồ sơ keyring hay engine khác.
-      const isAgyIsolated = (p: ProfileRow) => p.engine === 'agy' && p.kind === 'isolated';
       const sameEmail = (p: ProfileRow) => (p.email || '').toLowerCase() === email;
-      const customName = String(item.name || item.profile_name || item.profileName || '').trim();
-      let targetName = '';
-      if (customName) {
-        if (!/^[a-zA-Z0-9_-]+$/.test(customName)) {
-          fail(customName, email, 'Tên hồ sơ chỉ được chứa chữ, số, "_" và "-"');
-          continue;
-        }
-        const existing = this.profileRepo.get(customName);
-        if (existing && !isAgyIsolated(existing)) {
-          fail(customName, email, `Hồ sơ "${customName}" đã tồn tại và không phải hồ sơ Antigravity riêng`);
-          continue;
-        }
-        targetName = customName;
-      } else {
-        const all = this.profileRepo.getAll(true).filter((p) => isAgyIsolated(p) && sameEmail(p));
-        const match = all.find((p) => !p.deletedAt) || all[0];
-        if (match) {
-          targetName = match.name;
-        } else {
-          const base = email.split('@')[0].replace(/[^a-z0-9_-]/g, '_') || 'agy_account';
-          targetName = base;
-          for (let idx = 2; this.profileRepo.get(targetName); idx++) targetName = `${base}_${idx}`;
-        }
+      const target = this.resolveTokenImportTarget('agy', email, item, accountType);
+      if ('error' in target) {
+        fail(target.name, email, target.error);
+        continue;
       }
-
-      const existing = this.profileRepo.get(targetName);
-      const action: 'created' | 'updated' = existing && !existing.deletedAt ? 'updated' : 'created';
-
-      // Cùng chính sách với createProfile: không tạo thêm hồ sơ cá nhân khi multiplePerProvider tắt.
-      if (action === 'created' && !this.config.multiplePerProvider && accountType === 'personal') {
-        const personal = this.profileRepo.getAll().find((p) =>
-          p.engine === 'agy' && p.accountType === 'personal' && isProfileLoggedIn(p),
-        );
-        if (personal) {
-          fail(
-            targetName,
-            email,
-            `Đã có tài khoản Gemini cá nhân: ${personal.label || personal.name}. Bật 'Cho phép nhiều tài khoản' trong Cài đặt, hoặc chọn loại Team/API.`,
-          );
-          continue;
-        }
-      }
+      const { targetName, existing, action } = target;
 
       // Xác thực và đổi access_token qua Google OAuth
       let exchanged: Awaited<ReturnType<typeof exchangeAgyRefreshToken>>;
@@ -2616,16 +2987,13 @@ export class AppService {
         continue;
       }
 
-      // Lấy Google user info (bao gồm avatar / picture)
-      let avatarUrl: string | null = null;
-      try {
-        const userInfo = await fetchAgyGoogleUserInfo(exchanged.accessToken);
-        if (userInfo?.picture) {
-          avatarUrl = userInfo.picture;
-        }
-      } catch {
-        // bỏ qua nếu không lấy được ảnh
-      }
+      // Lấy ảnh Google và gói Google AI (loadCodeAssist, như Cockpit tools) bằng access token vừa đổi.
+      const [userInfo, tier] = await Promise.all([
+        fetchAgyGoogleUserInfo(exchanged.accessToken).catch(() => null),
+        fetchAgyTier(exchanged.accessToken),
+      ]);
+      const avatarUrl: string | null = userInfo?.picture ?? null;
+      const plan = agyTierToPlan(tier.tierId);
 
       if (action === 'created') {
         if (existing) this.profileRepo.restore(targetName);
@@ -2637,6 +3005,8 @@ export class AppService {
       const nextAvatar = avatarUrl ?? (sameEmail(current) ? current.avatarUrl ?? null : null);
       this.profileRepo.upsert({ ...current, email });
       this.profileRepo.updateAvatarUrl(targetName, nextAvatar);
+      // Gói cũ chỉ giữ khi vẫn là cùng tài khoản và lần này không đọc được gói.
+      this.profileRepo.updatePlan(targetName, plan ?? (sameEmail(current) ? current.plan ?? null : null));
       // Google đã nhận refresh token; agy có dùng được file token hay không thì Check bên dưới xác nhận.
       this.profileRepo.updateAuthState(targetName, 'ok', 'Đã xác thực qua refresh token', null);
 
@@ -2655,16 +3025,7 @@ export class AppService {
       });
     }
 
-    if (options.verify !== false) {
-      for (const item of results) {
-        if (item.status !== 'ok') continue;
-        try {
-          this.startProfileCheck(item.name);
-        } catch {
-          // Đang có lượt kiểm tra khác cho hồ sơ này; kết quả của nó cũng phản ánh token mới.
-        }
-      }
-    }
+    if (options.verify !== false) this.verifyImportedProfiles(results);
 
     return {
       success: results.some((r) => r.status === 'ok'),
@@ -2808,6 +3169,8 @@ export class AppService {
         const parsed = parseCodexLoginStatus(`${stdout}${stderr}`);
         if (parsed.email && parsed.email !== profile.email) {
           this.profileRepo.upsert({ ...profile, email: parsed.email });
+          // Gói đã lưu thuộc tài khoản cũ.
+          this.profileRepo.updatePlan(profile.name, null);
           return parsed.email;
         }
         return null;
@@ -2906,6 +3269,7 @@ export class AppService {
               message = parsed.plan ? `Đã đăng nhập (${parsed.plan})` : 'Đã đăng nhập';
               if (parsed.email) {
                 email = parsed.email;
+                if (parsed.email !== profile.email) this.profileRepo.updatePlan(profile.name, null);
                 this.profileRepo.upsert({ ...profile, email: parsed.email });
               }
               this.profileRepo.updateAuthState(profile.name, 'ok', null, null);
@@ -2970,7 +3334,13 @@ export class AppService {
   async refreshUsage(name: string) {
     const profile = this.profileRepo.get(name);
     if (!profile) throw new HttpError(404, 'not_found', `Hồ sơ "${name}" không tồn tại`);
-    if (profile.engine === 'codex') this.usageService.collectCodex(profile);
+    let codexMessage: string | null = null;
+    if (profile.engine === 'codex') {
+      this.usageService.collectCodex(profile);
+      const api = await this.usageService.collectCodexFromApi(profile).catch(() => null);
+      codexMessage = api?.message ?? null;
+      if (api?.plan && api.plan !== profile.plan) this.profileRepo.updatePlan(profile.name, api.plan);
+    }
     else if (profile.engine === 'claude') await this.usageService.collectClaude(profile, true);
     else await this.usageService.collect(profile);
     this.refreshProfileEmail(profile.name);
@@ -2978,7 +3348,9 @@ export class AppService {
       ? await this.syncAgyAvatarFromToken(profile.name).catch(() => ({ avatarUrl: null, message: 'Không lấy được ảnh đại diện' }))
       : null;
     const refreshed = this.listProfiles().find((p) => p.name === name);
-    return refreshed && avatar ? { ...refreshed, avatarMessage: avatar.message } : refreshed;
+    if (!refreshed) return refreshed;
+    if (avatar) return { ...refreshed, avatarMessage: avatar.message };
+    return codexMessage ? { ...refreshed, refreshMessage: codexMessage } : refreshed;
   }
 
   updateProfile(name: string, raw: unknown): ProfileRow {
@@ -4191,7 +4563,12 @@ export class AppService {
 
     let mergeResult: { mergeCommit: string; checks: string[] } | undefined;
     const isPlan = task.slug.endsWith('-plan');
-    let shouldMerge = parsed.verdict === 'approved' && Boolean(parsed.merge) && !isPlan;
+    const reviewedProject = this.projectRepo.get(task.projectId);
+    const projectAutoMerge = reviewedProject
+      ? (() => { const settings = projectSettings(reviewedProject); return settings.review.autoMerge || settings.integration.autoMerge; })()
+      : false;
+    // Automated reviewers never merge here: their approvals go through autoMergeReviewedTask and its guards.
+    let shouldMerge = parsed.verdict === 'approved' && (parsed.merge ?? (projectAutoMerge && !isAutoReviewer(parsed.by))) && !isPlan;
     if (shouldMerge && task.worktreePath) {
       const project = this.projectRepo.get(task.projectId);
       if (project) {
@@ -4337,7 +4714,7 @@ export class AppService {
         : [];
     if (!chain.length) { skip('chain_incomplete'); return; }
     const lastStep = chain.at(-1);
-    if (!lastStep || lastStep.mode !== 'gate' || (task.reviewStep ?? 0) < chain.length) { skip('chain_incomplete'); return; }
+    if (!lastStep || !isAutomatedStep(lastStep) || (task.reviewStep ?? 0) < chain.length) { skip('chain_incomplete'); return; }
     if (task.reviewerEscalated) { skip('escalated'); return; }
     let checks = this.scheduler.getCheckResults(taskId);
     if (checks.length === 0) { skip('checks_missing'); return; }
@@ -5004,6 +5381,7 @@ export class AppService {
       slotsPerCodexProfile: this.config.slotsPerCodexProfile,
       watchdog: this.config.watchdog,
       autoFixOnFail: this.config.autoFixOnFail,
+      defaultProjectPreset: this.config.defaultProjectPreset ?? null,
       chat: {
         claudeBin: this.config.chat.claudeBin,
         resolvedClaudeBin: findClaudeBin(this.config.chat.claudeBin),
@@ -5016,7 +5394,8 @@ export class AppService {
         model: this.config.chat.model,
         autoCompactPercent: this.config.chat.autoCompactPercent ?? 85,
         models: this.config.chat.models,
-        claudeProfile: this.config.chat.claudeProfile,
+        // Chỉ trả tên khi người dùng đã chọn; rỗng nghĩa là dùng hồ sơ Claude hệ thống.
+        claudeProfile: this.config.chat.claudeProfileExplicit ? this.config.chat.claudeProfile : '',
       },
       brain: {
         engine: this.config.brain.engine || 'claude',
@@ -5028,6 +5407,7 @@ export class AppService {
         digest: this.config.brain.digest,
         fallback: this.config.brain.fallback,
         policy: this.config.brain.policy,
+        claudeProfile: this.config.brain.claudeProfileExplicit ? this.config.brain.claudeProfile : '',
         codexProfile: this.config.brain.codexProfile,
         codexModel: this.config.brain.codexModel,
         turnTimeoutSec: this.config.brain.turnTimeoutSec,
@@ -5037,6 +5417,7 @@ export class AppService {
       reviewer: this.config.reviewer,
       focus: this.config.focus,
       notifications: this.config.notifications,
+      wakeup: this.config.wakeup,
       savings: this.config.savings,
       load: this.config.load,
       stall: this.config.stall,
@@ -5141,6 +5522,10 @@ export class AppService {
 
   getPresets() {
     return Object.values(PRESET_DEFINITIONS);
+  }
+
+  getCurrentGlobalPreset() {
+    return describeGlobalPreset(this.config);
   }
 
   applyPreset(raw: unknown) {

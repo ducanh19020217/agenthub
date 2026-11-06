@@ -622,6 +622,28 @@ export const handlers = [
     return HttpResponse.json(mockProjects);
   }),
 
+  // POST /api/git/inspect
+  http.post('/api/git/inspect', async ({ request }) => {
+    if (!checkAuth(request)) {
+      return HttpResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const body = (await request.json()) as any;
+    const p = body?.path || '';
+    if (!p) {
+      return HttpResponse.json({ valid: false, error: 'empty_path', message: 'Đường dẫn không được để trống', branches: [] });
+    }
+    const parts = p.split(/[/\\]/).filter(Boolean);
+    const suggestedName = parts.pop() || 'project';
+    return HttpResponse.json({
+      valid: true,
+      suggestedName,
+      defaultBranch: 'main',
+      currentBranch: 'main',
+      branches: ['main', 'develop', 'feature/test'],
+      remoteUrl: `https://github.com/example/${suggestedName}.git`,
+    });
+  }),
+
   // POST /api/projects
   http.post('/api/projects', async ({ request }) => {
     if (!checkAuth(request)) {

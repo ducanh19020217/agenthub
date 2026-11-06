@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   FolderGit2,
   GitBranch,
@@ -14,6 +14,9 @@ import {
   RotateCcw,
   Sparkles,
   Terminal,
+  Check,
+  RefreshCw,
+  Search,
   Loader2,
   Copy,
 } from 'lucide-react';
@@ -55,6 +58,7 @@ import {
   setFocus,
   getReviewChecklistPreview,
   createTask,
+  inspectGitRepo,
   getProfiles,
   getPresets,
   applyPreset,
@@ -380,6 +384,42 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const [draftMerge, setDraftMerge] = useState<ProjectMerge>({ enabled: false, worktrees: {}, checks: [], timeoutSec: 600 });
   const [draftMergeChecksText, setDraftMergeChecksText] = useState('');
   const [checklistDraft, setChecklistDraft] = useState('');
+  const [drawerInspectedBranches, setDrawerGitBranches] = useState<string[]>([]);
+  const [isDrawerInspectingGit, setIsDrawerInspectingGit] = useState(false);
+  const [isDrawerBranchDropdownOpen, setIsDrawerBranchDropdownOpen] = useState(false);
+  const [drawerBranchSearch, setDrawerBranchSearch] = useState('');
+  const drawerBranchDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (
+        drawerBranchDropdownRef.current &&
+        !drawerBranchDropdownRef.current.contains(event.target as Node)
+      ) {
+        setIsDrawerBranchDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, []);
+
+  const handleDrawerRefreshBranches = async () => {
+    if (!project?.path) return;
+    setIsDrawerInspectingGit(true);
+    void queryClient.invalidateQueries({ queryKey: ['project-git', project.id] });
+    try {
+      const res = await inspectGitRepo(project.path);
+      if (res.valid) {
+        setDrawerGitBranches(res.branches || []);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setIsDrawerInspectingGit(false);
+    }
+  };
   const [showCommitExample, setShowCommitExample] = useState(false);
   const [giteaToken, setGiteaToken] = useState('');
   const [deployEnv, setDeployEnv] = useState('');
@@ -584,6 +624,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     }
 
     setDraftEnvTemplate(targetProject.envTemplate ?? '');
+    setDraftDepartmentId(targetProject.departmentId ?? 'chung');
     setChecksError(null);
     setReviewError(null);
     setReviewerOrderError(null);
@@ -600,6 +641,14 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   useEffect(() => {
     if (project) {
       resetDraftState(project);
+      setDraftDefaultBranch(project.defaultBranch || 'main');
+      setIsDrawerBranchDropdownOpen(false);
+      setDrawerBranchSearch('');
+      if (project.path) {
+        inspectGitRepo(project.path).then((res) => {
+          if (res.valid) setDrawerGitBranches(res.branches || []);
+        }).catch(() => {});
+      }
     }
   }, [project, isOpen]);
 
@@ -971,8 +1020,14 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     [orderChanged, fallbackChanged],
   );
 
+  const defaultBranchChanged = useMemo(
+    () => draftDefaultBranch.trim() !== (project?.defaultBranch || 'main'),
+    [draftDefaultBranch, project?.defaultBranch],
+  );
+
   const changeCount = useMemo(() => {
     let count = 0;
+    if (defaultBranchChanged) count++;
     if (brainChanged) count++;
     if (JSON.stringify(draftSettings.commitConvention) !== JSON.stringify(origSettings.commitConvention)) count++;
     if (worktreeChanged) count++;
@@ -993,6 +1048,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     if (reviewerOverrideChanged) count++;
     return count;
   }, [
+    defaultBranchChanged,
     brainChanged,
     draftSettings.commitConvention,
     origSettings.commitConvention,
@@ -1136,6 +1192,9 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const handleDiscard = () => {
     if (!project) return;
     resetDraftState(project);
+    setDraftDefaultBranch(project.defaultBranch || 'main');
+    setIsDrawerBranchDropdownOpen(false);
+    setDrawerBranchSearch('');
   };
 
   const handleSave = () => {
@@ -1236,6 +1295,17 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     saveMutation.mutate(payload);
   };
 
+  // Gộp nhánh dò từ repo với nhánh local/remote của trạng thái Git (upstream).
+  const drawerGitBranches = Array.from(new Set([
+    ...drawerInspectedBranches,
+    ...(gitStatus?.localBranches || []),
+    ...(gitStatus?.remoteBranches || []),
+  ]));
+
+  const drawerDisplayBranches = drawerBranchSearch.trim()
+    ? drawerGitBranches.filter((b) => b.toLowerCase().includes(drawerBranchSearch.trim().toLowerCase()))
+    : drawerGitBranches;
+
   const handleChecklistChange = (value: string) => {
     const paths = value.split('\n').map((item) => item.trim()).filter(Boolean).slice(0, 5);
     setChecklistDraft(value);
@@ -1334,10 +1404,24 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
           )}
 
           {/* Section 0: Git */}
-          <Card className="p-5 space-y-4" data-testid="project-git-section">
-            <div>
-              <h3 className="text-sm font-bold text-[var(--t-text)] flex items-center gap-2"><GitBranch className="w-4 h-4 text-[var(--t-accent)]" />{t('projects.gitTitle')}</h3>
-              <p className="text-xs text-[var(--t-text-3)]">{t('projects.gitDescription')}</p>
+          <Card className="p-5 space-y-4" data-testid="project-git-section" data-tour="project-branch-settings">
+            <div className="flex items-start justify-between gap-3">
+              <div className="space-y-1">
+                <h3 className="text-sm font-bold text-[var(--t-text)] flex items-center gap-2"><GitBranch className="w-4 h-4 text-[var(--t-accent)]" />{t('projects.gitTitle')}</h3>
+                <p className="text-xs text-[var(--t-text-3)]">{t('projects.gitDescription')}</p>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={isDrawerInspectingGit}
+                onClick={handleDrawerRefreshBranches}
+                className="gap-1 text-xs text-[var(--t-accent)]"
+                title={t('projects.refreshBranchesTitle')}
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isDrawerInspectingGit ? 'animate-spin' : ''}`} />
+                <span>{t('projects.refreshBranches')}</span>
+              </Button>
             </div>
             {gitStatusLoading && <p className="text-xs text-[var(--t-text-3)]">{t('projects.gitLoading')}</p>}
             {gitStatusError && <p role="alert" className="text-xs text-[var(--t-crit)]">{t('projects.gitError')}</p>}
@@ -1348,7 +1432,137 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
             <div className="space-y-1.5">
               <label className="text-xs font-semibold">{t('projects.gitDefaultBranch')}</label>
               <p className="text-xs text-[var(--t-text-3)]">{t('projects.gitDefaultBranchHint')}</p>
-              <SelectOrCustomInput value={draftDefaultBranch} onChange={setDraftDefaultBranch} options={[...(gitStatus?.localBranches || []), ...(gitStatus?.remoteBranches || []).filter((branch) => !(gitStatus?.localBranches || []).includes(branch))]} validate={(value) => validateBranchSyntax(value, t)} ariaLabel={t('projects.gitDefaultBranch')} testId="project-git-default-branch" />
+              <div className="relative" ref={drawerBranchDropdownRef} data-testid="project-branch-settings">
+                <div className="relative">
+                  <Input
+                    type="text"
+                    placeholder="main"
+                    data-testid="project-git-default-branch"
+                    aria-label={t('projects.gitDefaultBranch')}
+                    value={draftDefaultBranch}
+                    onChange={(e) => setDraftDefaultBranch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') setIsDrawerBranchDropdownOpen(false);
+                      if (e.key === 'ArrowDown') setIsDrawerBranchDropdownOpen(true);
+                    }}
+                    className="pr-9 font-mono text-sm"
+                  />
+                  <button
+                    type="button"
+                    aria-label={t('projects.showBranchList')}
+                    title={t('projects.showBranchList')}
+                    onClick={() => {
+                      setIsDrawerBranchDropdownOpen((prev) => !prev);
+                      setDrawerBranchSearch('');
+                    }}
+                    className="absolute right-1 top-1/2 -translate-y-1/2 p-1.5 text-[var(--t-text-3)] hover:text-[var(--t-text)] hover:bg-[var(--t-hover)] rounded-md transition-colors cursor-pointer"
+                  >
+                    <ChevronDown
+                      className={`h-4 w-4 transition-transform duration-200 ${
+                        isDrawerBranchDropdownOpen ? 'rotate-180 text-[var(--t-accent)]' : ''
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {isDrawerBranchDropdownOpen && (
+                  <div className="absolute top-full left-0 right-0 mt-1 z-30 bg-[var(--t-surface)] border border-[var(--t-border)] rounded-lg shadow-xl overflow-hidden py-1">
+                    {drawerGitBranches.length === 0 ? (
+                      <div className="px-3 py-2 text-xs text-[var(--t-text-3)] text-center">
+                        {isDrawerInspectingGit
+                          ? t('projects.loadingBranches')
+                          : t('projects.noBranchesDrawer')}
+                      </div>
+                    ) : (
+                      <>
+                        <div className="px-3 py-1.5 text-[11px] font-medium text-[var(--t-text-3)] border-b border-[var(--t-border)] flex items-center justify-between bg-[var(--t-surface-2)]">
+                          <span>{t('projects.branchListCount', { count: drawerGitBranches.length })}</span>
+                          {drawerBranchSearch.trim() && (
+                            <span className="text-[10px] text-[var(--t-accent)]">
+                              {t('projects.branchMatchCount', { matched: drawerDisplayBranches.length, total: drawerGitBranches.length })}
+                            </span>
+                          )}
+                        </div>
+                        {drawerGitBranches.length > 5 && (
+                          <div className="p-1.5 border-b border-[var(--t-border)] bg-[var(--t-surface-2)]">
+                            <div className="relative">
+                              <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-[var(--t-text-3)]" />
+                              <input
+                                type="text"
+                                placeholder={t('projects.filterBranches')}
+                                value={drawerBranchSearch}
+                                onChange={(e) => setDrawerBranchSearch(e.target.value)}
+                                className="w-full h-7 pl-7 pr-2 text-xs bg-[var(--t-surface)] text-[var(--t-text)] border border-[var(--t-border)] rounded focus:outline-hidden focus:border-[var(--t-accent)]"
+                              />
+                            </div>
+                          </div>
+                        )}
+                        <ul className="max-h-56 overflow-y-auto py-1">
+                          {drawerDisplayBranches.length === 0 ? (
+                            <li className="px-3 py-2 text-xs text-[var(--t-text-3)] text-center">
+                              {t('projects.noBranchMatch')}
+                            </li>
+                          ) : (
+                            drawerDisplayBranches.map((b) => {
+                              const isSelected = draftDefaultBranch === b;
+                              return (
+                                <li key={b}>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setDraftDefaultBranch(b);
+                                      setIsDrawerBranchDropdownOpen(false);
+                                      setDrawerBranchSearch('');
+                                    }}
+                                    className={`w-full text-left px-3 py-1.5 text-xs font-mono flex items-center justify-between transition-colors cursor-pointer ${
+                                      isSelected
+                                        ? 'bg-[var(--t-accent)]/15 text-[var(--t-accent)] font-semibold'
+                                        : 'hover:bg-[var(--t-hover)] text-[var(--t-text)]'
+                                    }`}
+                                  >
+                                    <span className="flex items-center gap-2 truncate">
+                                      <GitBranch className="h-3.5 w-3.5 shrink-0 opacity-70" />
+                                      <span className="truncate">{b}</span>
+                                    </span>
+                                    {isSelected && <Check className="h-3.5 w-3.5 text-[var(--t-accent)] ml-2 shrink-0" />}
+                                  </button>
+                                </li>
+                              );
+                            })
+                          )}
+                        </ul>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {drawerGitBranches.length > 0 && (
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] text-[var(--t-text-3)] flex items-center gap-1">
+                      <GitBranch className="h-3 w-3" />
+                      {t('projects.branchSuggestions')}
+                    </span>
+                    {drawerGitBranches.map((b) => (
+                      <button
+                        key={b}
+                        type="button"
+                        onClick={() => {
+                          setDraftDefaultBranch(b);
+                          setIsDrawerBranchDropdownOpen(false);
+                          setDrawerBranchSearch('');
+                        }}
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-mono transition-colors cursor-pointer ${
+                          draftDefaultBranch === b
+                            ? 'bg-[var(--t-accent)] text-[var(--t-on-accent)] font-semibold shadow-xs'
+                            : 'bg-[var(--t-surface-2)] text-[var(--t-text-2)] hover:bg-[var(--t-hover)] hover:text-[var(--t-text)]'
+                        }`}
+                      >
+                        {b}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               {gitStatus?.remoteBranches.includes(draftDefaultBranch) && !gitStatus.localBranches.includes(draftDefaultBranch) && <p role="alert" className="text-xs text-[var(--t-warn)]">{t('projects.gitRemoteOnlyWarning', { branch: draftDefaultBranch })}</p>}
               {sectionErrors.git && <p role="alert" className="text-xs text-[var(--t-crit)]">{sectionErrors.git}</p>}
             </div>

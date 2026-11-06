@@ -6,10 +6,11 @@ import { AgentHubConfig, saveConfig } from '../config.js';
 import { CodexEngine } from '../engines/index.js';
 import { findClaudeBin } from '../chat/claude.js';
 import { accountKey } from './account.js';
+import { normalizePlan } from './plan.js';
 import { findAgyPath } from '../doctor.js';
 
 export { accountKey, sameAccount } from './account.js';
-export { exchangeAgyRefreshToken, writeAgyIsolatedToken, fetchAgyGoogleUserInfo, fetchAgyGoogleUserInfoDetailed, readAgyAccessToken, inspectAgyAccessToken, getAgyGoogleClientId, getAgyGoogleClientSecret, GOOGLE_TOKEN_ENDPOINT } from './agyToken.js';
+export { exchangeAgyRefreshToken, writeAgyIsolatedToken, fetchAgyGoogleUserInfo, fetchAgyGoogleUserInfoDetailed, readAgyAccessToken, inspectAgyAccessToken, fetchAgyTier, agyTierToPlan, getAgyGoogleClientId, getAgyGoogleClientSecret, GOOGLE_TOKEN_ENDPOINT } from './agyToken.js';
 
 /** Resolve the system Claude profile while keeping existing installations compatible. */
 export function resolveClaudeProfile(
@@ -65,7 +66,7 @@ const SYMLINK_TARGETS = [
 ];
 
 export class ProfileService {
-  private claudeAccountCache = new Map<string, { mtimeMs: number; account: { email: string | null; plan: string | null } | null }>();
+  private claudeAccountCache = new Map<string, { mtimeMs: number; account: { email: string | null; plan: string | null; planId: string | null } | null }>();
 
   constructor(
     private config: AgentHubConfig,
@@ -317,7 +318,7 @@ export class ProfileService {
     }
   }
 
-  readClaudeAccount(home: string): { email: string | null; plan: string | null } | null {
+  readClaudeAccount(home: string): { email: string | null; plan: string | null; planId: string | null } | null {
     const file = path.join(home, '.claude.json');
     let mtimeMs = -1;
     try {
@@ -329,7 +330,7 @@ export class ProfileService {
     const cached = this.claudeAccountCache.get(file);
     if (cached?.mtimeMs === mtimeMs) return cached.account;
 
-    let account: { email: string | null; plan: string | null } | null = null;
+    let account: { email: string | null; plan: string | null; planId: string | null } | null = null;
     try {
       const value = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
       const oauthAccount = value.oauthAccount;
@@ -338,7 +339,11 @@ export class ProfileService {
         const email = typeof data.emailAddress === 'string' && data.emailAddress.includes('@') ? data.emailAddress : null;
         const plan = [data.billingType, data.organizationName, data.userRateLimitTier]
           .find((v): v is string => typeof v === 'string' && v.length > 0) || null;
-        account = { email, plan };
+        // Tên tổ chức có thể chứa chữ "pro"…, nên chỉ chuẩn hoá từ các trường về gói.
+        const planId = normalizePlan(
+          ...[data.userRateLimitTier, data.subscriptionType, data.billingType].map((v) => (typeof v === 'string' ? v : null)),
+        );
+        account = { email, plan, planId };
       }
     } catch {
       // Ignore malformed or unrelated Claude configuration files.

@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getProfiles, getModelOptions, getPresets, applyPreset } from '../api/client';
-import type { ReviewerFallback, ReviewerOrderItem, PresetLevel, ApplyPresetResult } from '../types/api';
+import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getProfiles, getModelOptions, getPresets, applyPreset, getCurrentPreset } from '../api/client';
+import type { ReviewerFallback, ReviewerOrderItem, PresetLevel, ApplyPresetResult, GlobalPresetField } from '../types/api';
 import { Save, CheckCircle2, AlertCircle, Info, MessageSquare, Bell, ArrowUp, ArrowDown, Plus, Trash2 } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
 import { TelegramCard } from '../components/TelegramCard';
@@ -10,6 +10,7 @@ import { deletePermissionRule, getPermissionRules } from '../api/chat';
 import { useTour } from '../components/tour/TourContext';
 import { InfoTooltip } from '../components/tour/InfoTooltip';
 import { SetupChatButton } from '../components/SetupChatButton';
+import { ToastViewport, useToasts } from '../components/ui/Toast';
 import { DataTable, SelectOrCustomInput, SortableModelList } from '../components/ui';
 import {
   DEFAULT_CLAUDE_MODELS,
@@ -65,6 +66,7 @@ export const SettingsPage: React.FC = () => {
   const [desktopNotify, setDesktopNotify] = useState<boolean>(true);
   const [brainEngine, setBrainEngine] = useState<'claude' | 'codex'>('claude');
   const [codexProfile, setCodexProfile] = useState<string>('');
+  const [defaultClaudeProfile, setDefaultClaudeProfile] = useState<string>('');
   const [desktopNotifyLevel, setDesktopNotifyLevel] = useState<'all' | 'important' | 'critical' | 'off'>('important');
   const [brainMode, setBrainMode] = useState<'off' | 'suggest' | 'auto'>('suggest');
   const [brainPermissions, setBrainPermissions] = useState<'standard' | 'trusted' | 'full'>('standard');
@@ -72,6 +74,9 @@ export const SettingsPage: React.FC = () => {
   const [quietHoursEnabled, setQuietHoursEnabled] = useState<boolean>(false);
   const [quietHoursStart, setQuietHoursStart] = useState<string>('22:00');
   const [quietHoursEnd, setQuietHoursEnd] = useState<string>('07:00');
+  const [quotaLowPct, setQuotaLowPct] = useState<string>('20');
+  const [wakeupEnabled, setWakeupEnabled] = useState(false);
+  const [wakeupTimes, setWakeupTimes] = useState<string>('06:00');
   const [digestEnabled, setDigestEnabled] = useState<boolean>(true);
   const [digestTime, setDigestTime] = useState<string>('18:00');
   const [apiKey, setApiKey] = useState('');
@@ -79,8 +84,8 @@ export const SettingsPage: React.FC = () => {
   // 'none' | 'large' | 'all': how much of Claude's plan the user must approve
   const [approvalMode, setApprovalMode] = useState<'none' | 'large' | 'all'>('none');
   const [approvalMinTasks, setApprovalMinTasks] = useState<number>(5);
-  const [saveSuccess, setSaveSuccess] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const { toasts, push: pushToast, update: updateToast, dismiss: dismissToast } = useToasts();
+  const saveToastId = useRef<number | null>(null);
   const [brandingName, setBrandingName] = useState('AgentHub');
   const [brandingShortName, setBrandingShortName] = useState('AH');
   const [brandingTagline, setBrandingTagline] = useState('');
@@ -93,6 +98,12 @@ export const SettingsPage: React.FC = () => {
   const shutdownMutation = useMutation({ mutationFn: () => shutdownHub(shutdownDisable), onSuccess: () => { setShutdownOpen(false); setShutdownDone(true); } });
 
   const { data: presets = [] } = useQuery({ queryKey: ['presets'], queryFn: getPresets });
+  // Under ['config'] so every config save/apply that invalidates the config also refreshes it.
+  const { data: currentPreset } = useQuery({ queryKey: ['config', 'currentPreset'], queryFn: getCurrentPreset });
+  const presetLabel = (level: PresetLevel) =>
+    presets.find((p) => p.id === level)?.name?.[locale as 'vi' | 'en']
+    || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}`);
+  const presetFieldLabel = (field: GlobalPresetField) => t(`settings.presetField_${field.replace(/\./g, '_')}`);
   const [selectedPreset, setSelectedPreset] = useState<PresetLevel | null>(null);
   const [diffResult, setDiffResult] = useState<ApplyPresetResult | null>(null);
   const [presetApplySuccess, setPresetApplySuccess] = useState<string | null>(null);
@@ -150,6 +161,9 @@ export const SettingsPage: React.FC = () => {
     () => allProfiles.filter((p) => p.engine === 'claude'),
     [allProfiles],
   );
+
+  const systemClaudeProfile = availableClaudeProfiles.find((p) => p.kind === 'system');
+  const enabledClaudeProfiles = availableClaudeProfiles.filter((p) => Boolean(p.enabled));
 
   const allClaudeOptions = useMemo(() => {
     const fromProfiles = availableClaudeProfiles.map((p) => p.name);
@@ -277,6 +291,7 @@ export const SettingsPage: React.FC = () => {
       setDesktopNotify(config.notifications?.desktop ?? true);
       setBrainEngine(config.brain?.engine || 'claude');
       setCodexProfile(config.brain?.codexProfile || '');
+      setDefaultClaudeProfile(config.brain?.claudeProfile || config.chat?.claudeProfile || '');
       setDesktopNotifyLevel(config.notifications?.desktopLevel ?? 'important');
       setBrainMode(config.brain?.mode ?? 'suggest');
       setBrainPermissions(config.brain?.permissions ?? 'standard');
@@ -284,6 +299,9 @@ export const SettingsPage: React.FC = () => {
       setQuietHoursEnabled(Boolean(config.notifications?.quietHours?.enabled));
       setQuietHoursStart(config.notifications?.quietHours?.start || '22:00');
       setQuietHoursEnd(config.notifications?.quietHours?.end || '07:00');
+      setQuotaLowPct(String(config.notifications?.quotaLowPct ?? 20));
+      setWakeupEnabled(Boolean(config.wakeup?.enabled));
+      setWakeupTimes((config.wakeup?.times ?? ['06:00']).join(', '));
       setDigestEnabled(config.brain?.digest?.enabled ?? true);
       setDigestTime(config.brain?.digest?.time || '18:00');
     }
@@ -304,20 +322,25 @@ export const SettingsPage: React.FC = () => {
         setApiKey('');
         setApiKeyConfigured(true);
       }
-      setSaveSuccess(true);
-      setSaveError(null);
-      setTimeout(() => setSaveSuccess(false), 3000);
+      const toast = { kind: 'success' as const, title: t('settings.saveSuccess') };
+      if (saveToastId.current !== null) updateToast(saveToastId.current, toast);
+      else pushToast(toast);
+      saveToastId.current = null;
     },
     onError: (err: any) => {
-      setSaveError(typeof err?.message === 'string' && err.message.trim() ? err.message : t('settings.saveError'));
-      setSaveSuccess(false);
+      const message = typeof err?.message === 'string' && err.message.trim() ? err.message : t('settings.saveError');
+      const toast = { kind: 'error' as const, title: t('settings.saveError'), message: message === t('settings.saveError') ? undefined : message };
+      if (saveToastId.current !== null) updateToast(saveToastId.current, toast);
+      else pushToast(toast);
+      saveToastId.current = null;
     },
   });
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    setSaveSuccess(false);
-    setSaveError(null);
+    const failValidation = (message: string) => {
+      pushToast({ kind: 'error', title: t('settings.saveError'), message });
+    };
 
     const hardModels = hardChainModels
       .map((s) => s.trim())
@@ -328,28 +351,28 @@ export const SettingsPage: React.FC = () => {
       .filter(Boolean);
 
     if (hardModels.length === 0) {
-      setSaveError(t('settings.hardChainRequired'));
+      failValidation(t('settings.hardChainRequired'));
       return;
     }
     if (easyModels.length === 0) {
-      setSaveError(t('settings.easyChainRequired'));
+      failValidation(t('settings.easyChainRequired'));
       return;
     }
 
     const invalidHard = hardModels.find((m) => validateModelSyntax(m, t));
     if (invalidHard) {
-      setSaveError(`${t('settings.hardChainLabel')}: ${validateModelSyntax(invalidHard, t)} ("${invalidHard}")`);
+      failValidation(`${t('settings.hardChainLabel')}: ${validateModelSyntax(invalidHard, t)} ("${invalidHard}")`);
       return;
     }
     const invalidEasy = easyModels.find((m) => validateModelSyntax(m, t));
     if (invalidEasy) {
-      setSaveError(`${t('settings.easyChainLabel')}: ${validateModelSyntax(invalidEasy, t)} ("${invalidEasy}")`);
+      failValidation(`${t('settings.easyChainLabel')}: ${validateModelSyntax(invalidEasy, t)} ("${invalidEasy}")`);
       return;
     }
 
     const invalidChat = validateChatModelSyntax(chatModel, t);
     if (invalidChat) {
-      setSaveError(`${t('extra.chatModel')}: ${invalidChat} ("${chatModel}")`);
+      failValidation(`${t('extra.chatModel')}: ${invalidChat} ("${chatModel}")`);
       return;
     }
 
@@ -357,27 +380,29 @@ export const SettingsPage: React.FC = () => {
       ? validateReviewerModelSyntax(reviewerModel, reviewerModel.startsWith('claude') ? 'claude' : 'codex', t)
       : null;
     if (invalidReviewer) {
-      setSaveError(`${t('extra.reviewerModel')}: ${invalidReviewer} ("${reviewerModel}")`);
+      failValidation(`${t('extra.reviewerModel')}: ${invalidReviewer} ("${reviewerModel}")`);
       return;
     }
 
     for (let i = 0; i < reviewOrder.length; i++) {
       const err = validateReviewerModelSyntax(reviewOrder[i].model, reviewOrder[i].engine, t);
       if (err) {
-        setSaveError(`${t('settings.reviewerOrder')} ${i + 1}: ${err} ("${reviewOrder[i].model}")`);
+        failValidation(`${t('settings.reviewerOrder')} ${i + 1}: ${err} ("${reviewOrder[i].model}")`);
         return;
       }
     }
 
     const invalidArbiter = validateReviewerModelSyntax(arbiter.model, arbiter.engine, t);
     if (invalidArbiter) {
-      setSaveError(`${t('settings.arbiter')}: ${invalidArbiter} ("${arbiter.model}")`);
+      failValidation(`${t('settings.arbiter')}: ${invalidArbiter} ("${arbiter.model}")`);
       return;
     }
 
     const hours = Number(timeoutHours) || 3;
     const defaultTimeout = hours * 3600;
 
+    if (saveToastId.current !== null) dismissToast(saveToastId.current);
+    saveToastId.current = pushToast({ kind: 'loading', title: t('settings.savingConfigBtn') });
     mutation.mutate({
       modelChainHard: hardModels,
       modelChainEasy: easyModels,
@@ -395,6 +420,7 @@ export const SettingsPage: React.FC = () => {
         model: chatModel,
         autoCompactPercent: Number(autoCompactPercent) || 85,
         models: chatModels,
+        claudeProfile: defaultClaudeProfile,
       },
       reviewer: {
         model: reviewerModel.trim() || undefined,
@@ -415,6 +441,7 @@ export const SettingsPage: React.FC = () => {
       },
       brain: {
         engine: brainEngine,
+        claudeProfile: defaultClaudeProfile,
         codexProfile: codexProfile.trim() || undefined,
         mode: brainMode,
         permissions: brainPermissions,
@@ -434,6 +461,12 @@ export const SettingsPage: React.FC = () => {
           start: quietHoursStart.trim() || '22:00',
           end: quietHoursEnd.trim() || '07:00',
         },
+        quotaLowPct: Math.min(95, Math.max(0, Math.round(Number(quotaLowPct) || 0))),
+      },
+      wakeup: {
+        enabled: wakeupEnabled,
+        // Bỏ giờ sai định dạng thay vì làm hỏng cả lần lưu.
+        times: wakeupTimes.split(/[,\s]+/).map((time) => time.trim()).filter((time) => /^([01]?\d|2[0-3]):[0-5]\d$/.test(time)),
       },
       planning: {
         requireApproval: approvalMode === 'all',
@@ -493,6 +526,36 @@ export const SettingsPage: React.FC = () => {
         <div>
           <h2 className="text-base font-semibold text-[var(--t-text)]">{t('settings.presetsTitle')}</h2>
           <p className="text-sm text-[var(--t-text-3)]">{t('settings.presetsSubtitle')}</p>
+          {currentPreset && (
+            <div
+              data-testid={currentPreset.preset === 'custom' ? 'preset-active-custom' : 'preset-status'}
+              className={`mt-2 inline-flex flex-col gap-0.5 rounded-lg border px-3 py-2 text-xs ${
+                currentPreset.preset === 'custom'
+                  ? 'border-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_10%,transparent)] text-[var(--t-text)]'
+                  : 'border-[var(--t-accent)] bg-[color-mix(in_srgb,var(--t-accent)_10%,transparent)] text-[var(--t-text)]'
+              }`}
+            >
+              {currentPreset.preset === 'custom' ? (
+                <>
+                  <span className="font-semibold">
+                    {t('settings.presetStatusCustom')}
+                    {currentPreset.basePreset && (
+                      <span className="font-normal text-[var(--t-text-2)]">
+                        {' '}({t(currentPreset.baseFromHistory ? 'settings.presetStatusBasedOn' : 'settings.presetStatusClosest', { preset: presetLabel(currentPreset.basePreset) })})
+                      </span>
+                    )}
+                  </span>
+                  {currentPreset.mismatches && currentPreset.mismatches.length > 0 && (
+                    <span data-testid="preset-status-mismatches" className="text-[var(--t-text-2)]">
+                      {t('settings.presetStatusDiffers', { fields: currentPreset.mismatches.map(presetFieldLabel).join(', ') })}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="font-semibold">{t('settings.presetStatusActive', { preset: presetLabel(currentPreset.preset) })}</span>
+              )}
+            </div>
+          )}
         </div>
 
         {presetApplySuccess && (
@@ -515,6 +578,8 @@ export const SettingsPage: React.FC = () => {
             const title = pDef?.name?.[locale as 'vi' | 'en'] || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}`);
             const desc = pDef?.description?.[locale as 'vi' | 'en'] || t(`settings.preset${level.charAt(0).toUpperCase() + level.slice(1)}Desc`);
             const isSelected = selectedPreset === level;
+            const isActive = currentPreset?.preset === level;
+            const isBase = !isActive && currentPreset?.preset === 'custom' && currentPreset.basePreset === level;
             return (
               <div
                 key={level}
@@ -523,11 +588,27 @@ export const SettingsPage: React.FC = () => {
                 className={`cursor-pointer rounded-xl border p-4 space-y-2 transition-all hover:border-[var(--t-accent)] ${
                   isSelected
                     ? 'border-[var(--t-accent)] bg-[color-mix(in_srgb,var(--t-accent)_8%,transparent)] ring-2 ring-[var(--t-accent)]'
-                    : 'border-[var(--t-border)] bg-[var(--t-surface-2)]'
+                    : isActive
+                      ? 'border-[var(--t-accent)] bg-[color-mix(in_srgb,var(--t-accent)_8%,transparent)]'
+                      : isBase
+                        ? 'border-dashed border-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_6%,transparent)]'
+                        : 'border-[var(--t-border)] bg-[var(--t-surface-2)]'
                 }`}
               >
                 <div className="flex items-center justify-between">
-                  <span className="font-semibold text-sm text-[var(--t-text)]">{title}</span>
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-semibold text-sm text-[var(--t-text)]">{title}</span>
+                    {isActive && (
+                      <span data-testid={`preset-active-${level}`} className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-[var(--t-accent)] text-[var(--t-on-accent)]">
+                        {t('settings.presetActive')}
+                      </span>
+                    )}
+                    {isBase && (
+                      <span data-testid={`preset-base-${level}`} className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded border border-[var(--t-warn)] text-[var(--t-warn)]">
+                        {t('settings.presetBase')}
+                      </span>
+                    )}
+                  </span>
                   <button
                     type="button"
                     className="text-xs px-2.5 py-1 rounded bg-[var(--t-surface)] border border-[var(--t-border)] text-[var(--t-accent)] font-medium hover:bg-[var(--t-hover)]"
@@ -628,20 +709,6 @@ export const SettingsPage: React.FC = () => {
       </section>
 
       <OpenProjectSettings />
-
-      {saveSuccess && (
-        <div role="status" aria-live="polite" className="p-4 rounded-xl bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)] border border-[var(--t-ok)] text-[var(--t-ok)] text-sm flex items-center gap-2">
-          <CheckCircle2 className="w-5 h-5 text-[var(--t-ok)] shrink-0" />
-          <span>{t('settings.saveSuccess')}</span>
-        </div>
-      )}
-
-      {saveError && (
-        <div role="alert" aria-live="assertive" className="p-4 rounded-xl bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] border border-[var(--t-crit)] text-[var(--t-crit)] text-sm flex items-center gap-2">
-          <AlertCircle className="w-5 h-5 text-[var(--t-crit)] shrink-0" />
-          <span>{saveError}</span>
-        </div>
-      )}
 
       {isLoading ? (
         <div className="flex items-center justify-center p-12">
@@ -1485,6 +1552,35 @@ export const SettingsPage: React.FC = () => {
               )}
             </div>
 
+            <div className="py-2 border-b border-[var(--t-border)] space-y-2" data-testid="default-claude-profile">
+              <div>
+                <label htmlFor="default-claude-profile" className="text-sm font-semibold text-[var(--t-text)]">
+                  {t('settings.defaultClaudeProfileLabel')}
+                </label>
+                <p className="text-xs text-[var(--t-text-3)]">
+                  {t('settings.defaultClaudeProfileHint')}
+                </p>
+              </div>
+              <select
+                id="default-claude-profile"
+                value={defaultClaudeProfile}
+                onChange={(e) => setDefaultClaudeProfile(e.target.value)}
+                className="w-full max-w-xs rounded border border-[var(--t-border)] bg-[var(--t-surface-2)] p-2 text-xs"
+              >
+                <option value="">
+                  {systemClaudeProfile
+                    ? t('settings.defaultClaudeProfileSystem', { name: systemClaudeProfile.name })
+                    : t('settings.defaultClaudeProfileAuto')}
+                </option>
+                {enabledClaudeProfiles.map((p) => (
+                  <option key={p.name} value={p.name}>{p.name} {p.email ? `(${p.email})` : ''}</option>
+                ))}
+                {Boolean(defaultClaudeProfile) && !enabledClaudeProfiles.some((p) => p.name === defaultClaudeProfile) && (
+                  <option value={defaultClaudeProfile}>{`${defaultClaudeProfile} (${t('settings.inactiveOrOld')})`}</option>
+                )}
+              </select>
+            </div>
+
             <div className="py-2 border-b border-[var(--t-border)] space-y-2">
               <div>
                 <label className="text-sm font-semibold text-[var(--t-text)]">
@@ -1558,6 +1654,66 @@ export const SettingsPage: React.FC = () => {
                       className="w-full text-sm rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-[var(--t-text)] font-mono"
                     />
                   </div>
+                </div>
+              )}
+            </div>
+
+            <div className="py-2 border-b border-[var(--t-border)] flex items-center justify-between gap-4">
+              <div>
+                <label htmlFor="quota-low-pct" className="text-sm font-semibold text-[var(--t-text)]">
+                  {t('settings.quotaLowTitle')}
+                </label>
+                <p className="text-xs text-[var(--t-text-3)]">
+                  {t('settings.quotaLowHint')}
+                </p>
+              </div>
+              <div className="flex items-center gap-1">
+                <input
+                  id="quota-low-pct"
+                  type="number"
+                  min={0}
+                  max={95}
+                  data-testid="quota-low-pct"
+                  value={quotaLowPct}
+                  onChange={(e) => setQuotaLowPct(e.target.value)}
+                  className="w-20 text-sm rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-[var(--t-text)] font-mono"
+                />
+                <span className="text-sm text-[var(--t-text-3)]">%</span>
+              </div>
+            </div>
+
+            <div className="py-2 border-b border-[var(--t-border)] space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <label htmlFor="wakeup-toggle" className="text-sm font-semibold text-[var(--t-text)]">
+                    {t('settings.wakeupTitle')}
+                  </label>
+                  <p className="text-xs text-[var(--t-text-3)]">
+                    {t('settings.wakeupHint')}
+                  </p>
+                </div>
+                <input
+                  id="wakeup-toggle"
+                  type="checkbox"
+                  data-testid="wakeup-toggle"
+                  checked={wakeupEnabled}
+                  onChange={(e) => setWakeupEnabled(e.target.checked)}
+                  className="rounded border-[var(--t-border)]"
+                />
+              </div>
+              {wakeupEnabled && (
+                <div>
+                  <label htmlFor="wakeup-times" className="block text-xs font-semibold text-[var(--t-text-2)] mb-1">
+                    {t('settings.wakeupTimes')}
+                  </label>
+                  <input
+                    id="wakeup-times"
+                    data-testid="wakeup-times"
+                    value={wakeupTimes}
+                    onChange={(e) => setWakeupTimes(e.target.value)}
+                    placeholder="06:00, 13:00"
+                    className="w-full text-sm rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-[var(--t-text)] font-mono"
+                  />
                 </div>
               )}
             </div>
@@ -1645,6 +1801,7 @@ export const SettingsPage: React.FC = () => {
           <div className="flex justify-end gap-2"><button type="button" onClick={() => setShutdownOpen(false)} className="rounded-lg border px-3 py-2 text-xs">{t('common.cancel')}</button><button type="button" onClick={() => shutdownMutation.mutate()} className="rounded-lg bg-[var(--t-crit)] px-3 py-2 text-xs text-[var(--t-on-accent)]">{t('settings.shutdownButton')}</button></div>
         </div>
       </div>}
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} closeLabel={t('common.close')} />
     </div>
   );
 };

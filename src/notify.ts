@@ -7,6 +7,7 @@ import { toTaskId } from './services/index.js';
 import { isQuietHours, isSystemIncident, getMinutesSinceTime } from './brain/digest.js';
 import { effectiveBrainMode } from './brain/mode.js';
 import { formatReset } from './time-format.js';
+import { quotaLowText } from './quota/alerts.js';
 import { NotificationDeduper } from './notification-dedupe.js';
 import { QuotaService, QuotaCapacitySnapshot } from './quota/index.js';
 import { autoMergeReasonLabel, firstCheckError } from './auto-merge-notify.js';
@@ -660,6 +661,11 @@ export class NotificationService {
         this.allQuotaNotified.add(quotaKey);
         this.quotaIncidentActive = true;
         this.notify(this.quotaIncidentMessage(snapshot), 'critical');
+        break;
+      }
+
+      case 'quota.low': {
+        this.notify(quotaLowText(p), 'normal');
         break;
       }
 

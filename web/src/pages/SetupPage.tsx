@@ -6,12 +6,14 @@ import {
   AlertCircle,
   Download,
   ExternalLink,
+  FileText,
   Loader2,
   Wrench,
 } from 'lucide-react';
 import {
   completeSetup,
   getProjects,
+  getSetupLog,
   getSetupStatus,
   installSetupMcp,
   installSetupTool,
@@ -25,6 +27,8 @@ import { StatusBadge } from '../components/StatusBadge';
 import { Profile } from '../types/api';
 import { UsageModes } from '../components/UsageModes';
 import { SetupChatButton } from '../components/SetupChatButton';
+
+const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 export interface SetupCheckItem {
   key: string;
@@ -46,6 +50,23 @@ export const SetupCheckRow: React.FC<SetupCheckRowProps> = ({
 }) => {
   const { t } = useLocale();
   const showLog = item.key !== 'node' && item.key !== 'git' && item.key !== 'firstProject' && log !== undefined;
+  // Chỉ công cụ có file log trên server; MCP chỉ có lỗi trả về trực tiếp.
+  const hasLogFile = item.key === 'claude' || item.key === 'codex' || item.key === 'agy';
+  const [fullLog, setFullLog] = useState<string | null>(null);
+  const [loadingLog, setLoadingLog] = useState(false);
+  useEffect(() => setFullLog(null), [log]);
+
+  // Endpoint log cần Bearer token nên không mở bằng <a href> được (sẽ 401).
+  const loadFullLog = async () => {
+    setLoadingLog(true);
+    try {
+      setFullLog(await getSetupLog(item.key));
+    } catch (error) {
+      setFullLog(errorMessage(error));
+    } finally {
+      setLoadingLog(false);
+    }
+  };
 
   return (
     <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -73,17 +94,19 @@ export const SetupCheckRow: React.FC<SetupCheckRowProps> = ({
           {showLog && (
             <div className="mt-2 space-y-1">
               <pre className="max-h-36 overflow-auto rounded-lg bg-[var(--t-surface-2)] p-2.5 font-mono text-xs text-[var(--t-text)] border border-[var(--t-border)] whitespace-pre-wrap select-text leading-relaxed">
-                {log}
+                {fullLog ?? log}
               </pre>
-              <a
-                href={`/api/setup/log/${encodeURIComponent(item.key)}`}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-[var(--t-accent)] hover:underline"
-              >
-                <ExternalLink size={12} />
-                <span>{t('setup.log')}</span>
-              </a>
+              {hasLogFile && (
+                <button
+                  type="button"
+                  onClick={loadFullLog}
+                  disabled={loadingLog}
+                  className="inline-flex items-center gap-1 text-xs text-[var(--t-accent)] hover:underline disabled:opacity-60"
+                >
+                  {loadingLog ? <Loader2 className="animate-spin" size={12} /> : <FileText size={12} />}
+                  <span>{t('setup.log')}</span>
+                </button>
+              )}
             </div>
           )}
           {item.key === 'agy' && !item.ok && (
@@ -251,7 +274,15 @@ export const SetupPage: React.FC = () => {
   });
   const mcp = useMutation({
     mutationFn: () => installSetupMcp(),
+    onMutate: () => {
+      setInstallErrors((old) => ({ ...old, mcp: '' }));
+      setInstallResult(({ mcp: _previous, ...rest }) => rest);
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['setup-status'] }),
+    onError: (error) => {
+      setInstallResult((old) => ({ ...old, mcp: false }));
+      setInstallErrors((old) => ({ ...old, mcp: errorMessage(error) }));
+    },
   });
 
   useEffect(() => {
@@ -281,6 +312,7 @@ export const SetupPage: React.FC = () => {
     setInstallingTool(tool);
     setLogs((old) => ({ ...old, [tool]: '' }));
     setInstallErrors((old) => ({ ...old, [tool]: '' }));
+    setInstallResult(({ [tool]: _previous, ...rest }) => rest);
     let stop: (() => void) | undefined;
     const completed = new Promise<void>((resolve) => {
       const unsubscribe = subscribeToEvents((event) => {
@@ -295,6 +327,10 @@ export const SetupPage: React.FC = () => {
     try {
       await install.mutateAsync(tool);
       await completed;
+    } catch (error) {
+      // POST bị từ chối thì không có install_done: phải tự hiện lỗi, nếu không ô log trống và nút quay về im lặng.
+      setInstallResult((old) => ({ ...old, [tool]: false }));
+      setInstallErrors((old) => ({ ...old, [tool]: errorMessage(error) }));
     } finally {
       stop?.();
       setInstallingTool(null);

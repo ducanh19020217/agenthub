@@ -85,9 +85,37 @@ cleanup() {
 trap cleanup SIGINT SIGTERM EXIT
 
 # 5. Khởi chạy Backend Daemon với tsx --watch
+# Ổ mã hoá/mạng (VeraCrypt, NFS…) hay không phát sự kiện file, khiến watcher bỏ sót thay đổi:
+# tsx dùng chokidar nên bật polling qua biến môi trường. Đặt AGENTHUB_DEV_POLLING=0 để tắt.
+if [ "${AGENTHUB_DEV_POLLING:-1}" != "0" ]; then
+  export CHOKIDAR_USEPOLLING=1
+  export CHOKIDAR_INTERVAL="${CHOKIDAR_INTERVAL:-1000}"
+fi
 echo "⚙️  [1/2] Đang khởi chạy Backend Daemon (tsx --watch)..."
 npx tsx --watch src/cli.ts daemon &
 PID_BACKEND=$!
+
+# tsx --watch chỉ khởi động lại khi có file đổi, không tự bật lại khi daemon thoát.
+# Nếu cổng 7700 im lặng 3 lần liên tiếp (~30s) thì chạm src/cli.ts để watcher bật lại daemon.
+watch_daemon_health() {
+  local misses=0
+  sleep 30
+  while kill -0 "$PID_BACKEND" 2>/dev/null; do
+    if curl -s -o /dev/null --max-time 3 "http://127.0.0.1:7700/" 2>/dev/null; then
+      misses=0
+    else
+      misses=$((misses + 1))
+      if [ "$misses" -ge 3 ]; then
+        echo "⚠️  Daemon không phản hồi ~30s, đang khởi động lại (tsx --watch)..."
+        touch "$ROOT_DIR/src/cli.ts"
+        misses=0
+        sleep 20
+      fi
+    fi
+    sleep 10
+  done
+}
+watch_daemon_health &
 
 # 6. Khởi chạy Frontend Web với Vite dev server
 echo "⚙️  [2/2] Đang khởi chạy Frontend Web Dev Server (Vite)..."

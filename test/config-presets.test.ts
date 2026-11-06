@@ -491,6 +491,66 @@ describe('Config Presets, Priority, and Effective Config', () => {
     });
   });
 
+  describe('5b. Preset toàn cục đang dùng', () => {
+    it('GET /api/presets/current nhận ra preset vừa áp dụng, chỉnh tay thì thành custom', async () => {
+      const current = async () => JSON.parse((await server.inject({ method: 'GET', url: '/api/presets/current', headers: authHeaders() })).body).preset;
+      for (const preset of ['safe', 'balanced', 'auto'] as const) {
+        const res = await server.inject({ method: 'POST', url: '/api/presets/apply', headers: authHeaders(), payload: { scope: 'global', preset, dryRun: false } });
+        expect(res.statusCode).toBe(200);
+        expect(await current()).toBe(preset);
+      }
+      const patch = await server.inject({ method: 'PUT', url: '/api/config', headers: authHeaders(), payload: { autoFixOnFail: false } });
+      expect(patch.statusCode).toBe(200);
+      expect(await current()).toBe('custom');
+    });
+
+    it('khi custom thì báo preset gốc (vừa áp dụng) và các trường đã chỉnh', async () => {
+      const status = async () => JSON.parse((await server.inject({ method: 'GET', url: '/api/presets/current', headers: authHeaders() })).body);
+      await server.inject({ method: 'POST', url: '/api/presets/apply', headers: authHeaders(), payload: { scope: 'global', preset: 'balanced', dryRun: false } });
+      expect(await status()).toMatchObject({ preset: 'balanced', basePreset: 'balanced', baseFromHistory: true, mismatches: [] });
+
+      await server.inject({ method: 'PUT', url: '/api/config', headers: authHeaders(), payload: { autoFixOnFail: false, brain: { permissions: 'standard' } } });
+      const custom = await status();
+      expect(custom.preset).toBe('custom');
+      expect(custom.basePreset).toBe('balanced');
+      expect(custom.baseFromHistory).toBe(true);
+      expect(custom.mismatches.sort()).toEqual(['autoFixOnFail', 'brain.permissions']);
+    });
+  });
+
+  describe('5c. Project mới nhận preset', () => {
+    async function createProject(id: string, extra: Record<string, unknown> = {}) {
+      const repoDir = path.join(tmpDir, `repo-${id}`);
+      initGitRepo(repoDir);
+      const res = await server.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(), payload: { id, name: id, path: repoDir, defaultBranch: 'main', ...extra } });
+      expect(res.statusCode).toBe(201);
+      return JSON.parse((await server.inject({ method: 'GET', url: `/api/projects/${id}/effective-config`, headers: authHeaders() })).body);
+    }
+
+    it('áp preset toàn cục "auto" thì project đăng ký sau đó cũng tự merge (merge thẳng vào repo, không cần nhánh integration)', async () => {
+      const apply = await server.inject({ method: 'POST', url: '/api/presets/apply', headers: authHeaders(), payload: { scope: 'global', preset: 'auto', dryRun: false } });
+      expect(apply.statusCode).toBe(200);
+      expect(ctx.service.config.defaultProjectPreset).toBe('auto');
+
+      const eff = await createProject('later-proj');
+      expect(eff.review.autoMerge.value).toBe(true);
+      expect(eff.review.chain.value).toEqual([{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }]);
+      const project = ctx.projectRepo.get('later-proj')!;
+      // Project mới tự có merge mapping tới chính repo (upstream 0656299b), nên preset không bật integration.
+      expect(JSON.parse(project.merge!)).toMatchObject({ enabled: true, worktrees: { main: project.path } });
+      expect(JSON.parse(project.settings!).integration).toMatchObject({ enabled: false, autoMerge: true });
+    });
+
+    it('preset chọn trong wizard được áp thật, và chuỗi review truyền tay thì giữ nguyên', async () => {
+      const eff = await createProject('wizard-safe', { settings: { preset: 'safe' } });
+      expect(eff.review.autoMerge.value).toBe(false);
+      expect(eff.review.chain.value).toEqual([]);
+
+      const manual = await createProject('manual-chain', { settings: { preset: 'auto' }, reviewChain: [{ reviewer: 'claude', mode: 'final' }] });
+      expect(manual.review.chain.value).toEqual([{ reviewer: 'claude', mode: 'final' }]);
+    });
+  });
+
   describe('6. Tương thích ngược integration.autoMerge', () => {
     it('đọc JSON cũ có integration.autoMerge=true thì review.autoMerge nhận true', () => {
       const parsed = parseProjectSettings(JSON.stringify({

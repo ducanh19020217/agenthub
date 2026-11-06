@@ -84,12 +84,72 @@ function relative(ms: number, now: number, locale: TimeLocale): string {
   return locale === 'en' ? `in ${days} day${days === 1 ? '' : 's'}` : `còn ${days} ngày`;
 }
 
+const VI_SHORT_WEEKDAY: Record<string, string> = {
+  'thứ hai': 'T2',
+  'thứ ba': 'T3',
+  'thứ tư': 'T4',
+  'thứ năm': 'T5',
+  'thứ sáu': 'T6',
+  'thứ bảy': 'T7',
+  'chủ nhật': 'CN',
+};
+
+const EN_SHORT_WEEKDAY: Record<string, string> = {
+  monday: 'Mon',
+  tuesday: 'Tue',
+  wednesday: 'Wed',
+  thursday: 'Thu',
+  friday: 'Fri',
+  saturday: 'Sat',
+  sunday: 'Sun',
+};
+
+function shortWeekday(weekday: string, locale: TimeLocale): string {
+  const key = weekday.toLowerCase().trim();
+  if (locale === 'en') return EN_SHORT_WEEKDAY[key] || weekday.slice(0, 3);
+  return VI_SHORT_WEEKDAY[key] || weekday;
+}
+
+function relativeCompact(ms: number, now: number, locale: TimeLocale): string {
+  const seconds = Math.max(0, Math.floor((ms - now) / 1000));
+  if (seconds < 60) return locale === 'en' ? '<1m' : '<1p';
+  const minutes = Math.floor(seconds / 60);
+  if (seconds < 86400) {
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    if (hours && rest) return `${hours}h${rest}m`;
+    if (hours) return `${hours}h`;
+    return `${rest}m`;
+  }
+  const days = Math.ceil(seconds / 86400);
+  return `${days}d`;
+}
+
+function absoluteCompact(ms: number, now: number, locale: TimeLocale): string {
+  const p = parts(ms, locale);
+  const clock = `${p.hour}:${p.minute}`;
+  if (sameDay(ms, now)) return clock;
+  const wd = shortWeekday(p.weekday, locale);
+  return `${wd} ${p.day}/${p.month} ${clock}`;
+}
+
 export function formatReset(value: number | null | undefined, now?: number | Date, locale: TimeLocale = 'vi'): string {
   const ms = epochMs(value);
   if (ms === null) return locale === 'en' ? 'reset time unknown' : 'chưa rõ thời điểm reset';
   const current = nowMs(now);
   if (ms <= current) return locale === 'en' ? `reset at ${parts(ms, locale).hour}:${parts(ms, locale).minute} · updating data` : `đã reset lúc ${parts(ms, locale).hour}:${parts(ms, locale).minute} · đang cập nhật số liệu`;
   return `${relative(ms, current, locale)} · ${absolute(ms, current, locale)}`;
+}
+
+export function formatResetCompact(value: number | null | undefined, now?: number | Date, locale: TimeLocale = 'vi'): string {
+  const ms = epochMs(value);
+  if (ms === null) return locale === 'en' ? 'unknown' : 'chưa rõ';
+  const current = nowMs(now);
+  if (ms <= current) {
+    const clock = `${parts(ms, locale).hour}:${parts(ms, locale).minute}`;
+    return locale === 'en' ? `reset ${clock}` : `đã reset ${clock}`;
+  }
+  return `${relativeCompact(ms, current, locale)} - ${absoluteCompact(ms, current, locale)}`;
 }
 
 export function formatExpiry(value: number | null | undefined, now?: number | Date, locale: TimeLocale = 'vi'): string {

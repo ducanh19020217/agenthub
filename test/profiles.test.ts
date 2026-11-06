@@ -62,7 +62,7 @@ describe('Profile import from ~/.agy-homes', () => {
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
     fs.writeFileSync(path.join(home, '.claude', 'config.json'), JSON.stringify({ email: 'wrong@example.com' }));
 
-    expect(profileService.readClaudeAccount(home)).toEqual({ email: 'alice@example.com', plan: 'max' });
+    expect(profileService.readClaudeAccount(home)).toEqual({ email: 'alice@example.com', plan: 'max', planId: 'max' });
     profileRepo.upsert({ name: 'alice', engine: 'claude', kind: 'isolated', home, email: null, enabled: 1 });
     expect(isProfileLoggedIn(profileRepo.get('alice')!)).toBe(true);
   });

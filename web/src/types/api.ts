@@ -71,10 +71,14 @@ export interface Profile {
   notes?: string | null;
   priority?: number;
   avatarUrl?: string | null;
+  /** Gói tài khoản đã chuẩn hoá: free, plus, pro, team, max_20x… (null khi chưa biết). */
+  plan?: string | null;
   crashCount?: number;
   coolingUntil?: number | null;
   /** Chỉ có trong phản hồi của nút Làm mới: kết quả lấy ảnh đại diện. */
   avatarMessage?: string;
+  /** Chỉ có trong phản hồi của nút Làm mới cho Codex: kết quả lấy quota/gói qua API. */
+  refreshMessage?: string;
   currentTask?: { id?: string; title?: string } | null;
 }
 
@@ -770,6 +774,8 @@ export interface DailyUsageReport {
 }
 
 export interface SystemConfig {
+  /** Preset given to newly registered projects (the one last applied globally). */
+  defaultProjectPreset?: 'safe' | 'balanced' | 'auto' | null;
   branding?: { name: string; shortName: string; logo?: string; logoVersion?: number; accentColor?: string; tagline?: string };
   modelChainHard: string[];
   modelChainEasy: string[];
@@ -804,6 +810,8 @@ export interface SystemConfig {
   };
   brain?: {
     engine?: 'claude' | 'codex';
+    /** Hồ sơ Claude mặc định cho brain; rỗng = hồ sơ hệ thống. */
+    claudeProfile?: string;
     codexProfile?: string;
     codexModel?: string;
     mode?: 'off' | 'suggest' | 'auto';
@@ -831,6 +839,13 @@ export interface SystemConfig {
       start: string;
       end: string;
     };
+    quotaLowPct?: number;
+  };
+  wakeup?: {
+    enabled: boolean;
+    times: string[];
+    profiles?: string[];
+    agyModels?: string[];
   };
   load?: {
     enabled: boolean;
@@ -1124,6 +1139,25 @@ export interface ApplyPresetResult {
   };
   warnings?: string[];
   suggestedChecks?: Array<{ name: string; cmd: string[]; reason?: string }>;
+}
+
+export type GlobalPresetField =
+  | 'brain.mode'
+  | 'brain.permissions'
+  | 'autoFixOnFail'
+  | 'planning.requireApproval'
+  | 'planning.approvalMinTasks'
+  | 'reviewer.maxChangesRequested'
+  | 'reviewer.order';
+
+export interface GlobalPresetStatus {
+  preset: PresetLevel | 'custom';
+  /** Preset the config was derived from (last applied, or closest match). */
+  basePreset?: PresetLevel;
+  /** True when basePreset is the last preset actually applied, not a best guess. */
+  baseFromHistory?: boolean;
+  /** Fields where the config differs from basePreset. */
+  mismatches?: GlobalPresetField[];
 }
 
 export type ConfigSource = 'global' | 'department' | 'project';

@@ -169,4 +169,19 @@ describe('project archive and purge', () => {
     expect(response.statusCode).toBe(409);
     expect(ctx.projectRepo.get('busy')).toBeDefined();
   });
+
+  it('allows purging an already archived project', async () => {
+    const repo = path.join(root, 'repo-archived-purge');
+    initGitRepo(repo);
+    ctx.projectRepo.insert({ id: 'archived-then-purged', name: 'Archived Then Purged', path: repo, defaultBranch: 'main', maxParallel: 1 });
+    const archiveRes = await server.inject({ method: 'DELETE', url: '/api/projects/archived-then-purged', headers: headers() });
+    expect(archiveRes.statusCode).toBe(200);
+    expect(ctx.projectRepo.get('archived-then-purged')).toBeUndefined();
+    expect(ctx.projectRepo.getIncludingArchived('archived-then-purged')?.archivedAt).toBeTruthy();
+
+    const purgeRes = await server.inject({ method: 'DELETE', url: '/api/projects/archived-then-purged?purge=true&confirm=archived-then-purged', headers: headers() });
+    expect(purgeRes.statusCode).toBe(200);
+    expect(ctx.projectRepo.getIncludingArchived('archived-then-purged')).toBeUndefined();
+  });
 });
+

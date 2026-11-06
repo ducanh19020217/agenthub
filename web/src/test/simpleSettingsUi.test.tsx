@@ -165,6 +165,7 @@ describe('Simple Settings UI (f-simple-settings-ui)', () => {
     localStorage.clear();
 
     vi.spyOn(client, 'getPresets').mockResolvedValue(mockPresets);
+    vi.spyOn(client, 'getCurrentPreset').mockResolvedValue({ preset: 'balanced' });
     vi.spyOn(client, 'getDepartments').mockResolvedValue(mockDepartments);
     vi.spyOn(client, 'getProjects').mockResolvedValue([mockProject]);
     vi.spyOn(client, 'getProfiles').mockResolvedValue(mockProfiles);
@@ -195,6 +196,30 @@ describe('Simple Settings UI (f-simple-settings-ui)', () => {
         expect(advanced).toBeInTheDocument();
         expect(advanced.open).toBe(false);
       });
+    });
+
+    it('marks the preset currently in use', async () => {
+      renderWithProviders(<SettingsPage />);
+      await waitFor(() => expect(screen.getByTestId('preset-active-balanced')).toBeInTheDocument());
+      expect(screen.queryByTestId('preset-active-safe')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('preset-active-auto')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('preset-active-custom')).not.toBeInTheDocument();
+    });
+
+    it('says when the config matches no preset and shows which preset it came from', async () => {
+      vi.spyOn(client, 'getCurrentPreset').mockResolvedValue({
+        preset: 'custom',
+        basePreset: 'balanced',
+        baseFromHistory: true,
+        mismatches: ['autoFixOnFail', 'reviewer.order'],
+      });
+      renderWithProviders(<SettingsPage />);
+      await waitFor(() => expect(screen.getByTestId('preset-active-custom')).toBeInTheDocument());
+      expect(screen.queryByTestId('preset-active-balanced')).not.toBeInTheDocument();
+      expect(screen.getByTestId('preset-base-balanced')).toBeInTheDocument();
+      expect(screen.queryByTestId('preset-base-safe')).not.toBeInTheDocument();
+      expect(screen.getByTestId('preset-status-mismatches').textContent).toContain('Tự sửa khi check fail');
+      expect(screen.getByTestId('preset-status-mismatches').textContent).toContain('Chuỗi reviewer');
     });
 
     it('triggers dry-run on preset card click and displays diff table preview', async () => {

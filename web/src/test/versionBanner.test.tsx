@@ -137,4 +137,36 @@ describe('VersionBanner - Dashboard update notification', () => {
 
     expect(screen.getByText(/Có phiên bản dashboard mới/i)).toBeInTheDocument();
   });
+
+  it('người dùng có thể đóng thông báo khi nhấn nút X', async () => {
+    let currentBuildId = 'build-v1';
+
+    window.fetch = vi.fn().mockImplementation(async () => {
+      return new Response(JSON.stringify({ version: '0.1.0', webBuildId: currentBuildId }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    render(<VersionBanner />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    currentBuildId = 'build-v2';
+
+    await act(async () => {
+      vi.advanceTimersByTime(60000);
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText(/Có phiên bản dashboard mới/i)).toBeInTheDocument();
+
+    const closeBtn = screen.getByRole('button', { name: /Đóng/i });
+    expect(closeBtn).toBeInTheDocument();
+
+    fireEvent.click(closeBtn);
+    expect(screen.queryByText(/Có phiên bản dashboard mới/i)).not.toBeInTheDocument();
+  });
 });

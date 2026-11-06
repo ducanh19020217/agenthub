@@ -320,8 +320,8 @@ export const Layout: React.FC = () => {
           </div>
         </header>
 
-        {/* Content (max-width: 1440px, padding: 24px = p-6) */}
-        <main id="main-content" tabIndex={-1} className="flex-1 max-w-[1440px] w-full mx-auto p-6 min-w-0 focus:outline-hidden">
+        {/* Content (max-width: 1440px on laptop, 1680px on 2xl/FullHD desktop, padding: 24px = p-6) */}
+        <main id="main-content" tabIndex={-1} className="flex-1 max-w-[1440px] 2xl:max-w-[1680px] w-full mx-auto p-4 sm:p-6 min-w-0 focus:outline-hidden">
           <Outlet />
         </main>
       </div>

@@ -176,6 +176,90 @@ export function detectPresetMatch(
   return true;
 }
 
+export type GlobalPresetField =
+  | 'brain.mode'
+  | 'brain.permissions'
+  | 'autoFixOnFail'
+  | 'planning.requireApproval'
+  | 'planning.approvalMinTasks'
+  | 'reviewer.maxChangesRequested'
+  | 'reviewer.order';
+
+export interface GlobalPresetStatus {
+  /** Preset the global config matches exactly, or 'custom'. */
+  preset: PresetLevel | 'custom';
+  /**
+   * Preset the config was derived from: the last one applied globally if
+   * known, else the closest one. Equals `preset` when not custom.
+   */
+  basePreset: PresetLevel;
+  /** True when `basePreset` is the last preset applied, not just a best guess. */
+  baseFromHistory: boolean;
+  /** Fields where the config diverges from `basePreset` (empty when not custom). */
+  mismatches: GlobalPresetField[];
+}
+
+/**
+ * Fields of the global config that differ from a preset. Mirrors what
+ * applyPreset(scope=global) writes; reviewer models are not compared so a
+ * different Codex/Claude model still counts as the same preset.
+ */
+export function globalPresetMismatches(config: AgentHubConfig, level: PresetLevel): GlobalPresetField[] {
+  const engines = (config.reviewer?.order || []).map((item) => item.engine);
+  const expectedEngines: Record<PresetLevel, string[]> = {
+    safe: [],
+    balanced: ['codex', 'claude'],
+    auto: ['codex'],
+  };
+  const def = PRESET_DEFINITIONS[level].config;
+  const mismatches: GlobalPresetField[] = [];
+  if (config.brain.mode !== def.brain.mode) mismatches.push('brain.mode');
+  if (config.brain.permissions !== def.brain.permissions) mismatches.push('brain.permissions');
+  if (Boolean(config.autoFixOnFail) !== def.autoFixOnFail) mismatches.push('autoFixOnFail');
+  if (Boolean(config.planning?.requireApproval) !== def.planning.requireApproval) mismatches.push('planning.requireApproval');
+  if ((config.planning?.approvalMinTasks ?? 0) !== def.planning.approvalMinTasks) mismatches.push('planning.approvalMinTasks');
+  if ((config.reviewer?.maxChangesRequested ?? 2) !== def.review.maxRounds) mismatches.push('reviewer.maxChangesRequested');
+  if (engines.join(',') !== expectedEngines[level].join(',')) mismatches.push('reviewer.order');
+  return mismatches;
+}
+
+/**
+ * Which preset the global config currently matches, or 'custom'.
+ */
+export function detectGlobalPreset(config: AgentHubConfig): PresetLevel | 'custom' {
+  for (const level of ['safe', 'balanced', 'auto'] as const) {
+    if (globalPresetMismatches(config, level).length === 0) return level;
+  }
+  return 'custom';
+}
+
+/**
+ * Current preset plus, when the config was hand-edited, which preset it came
+ * from and which fields were changed, so the UI can show "custom (based on
+ * balanced, differs in autoFixOnFail)" instead of a bare "custom".
+ */
+export function describeGlobalPreset(config: AgentHubConfig): GlobalPresetStatus {
+  const preset = detectGlobalPreset(config);
+  if (preset !== 'custom') {
+    return { preset, basePreset: preset, baseFromHistory: true, mismatches: [] };
+  }
+  const lastApplied = config.defaultProjectPreset;
+  if (lastApplied) {
+    return {
+      preset,
+      basePreset: lastApplied,
+      baseFromHistory: true,
+      mismatches: globalPresetMismatches(config, lastApplied),
+    };
+  }
+  let best: { level: PresetLevel; mismatches: GlobalPresetField[] } | null = null;
+  for (const level of ['safe', 'balanced', 'auto'] as const) {
+    const mismatches = globalPresetMismatches(config, level);
+    if (!best || mismatches.length < best.mismatches.length) best = { level, mismatches };
+  }
+  return { preset, basePreset: best!.level, baseFromHistory: false, mismatches: best!.mismatches };
+}
+
 export function detectProjectPreset(
   project: ProjectRow,
   globalConfig: AgentHubConfig,
@@ -250,23 +334,50 @@ export interface ServiceForPresets {
   projectRepo: { get(id: string): ProjectRow | undefined; getAll?: () => ProjectRow[] };
 }
 
+/** True when an approved task of this project has somewhere to be merged. */
+export function projectHasMergeTarget(project: ProjectRow): boolean {
+  if (projectSettings(project).integration.enabled) return true;
+  if (!project.merge) return false;
+  try {
+    const merge = JSON.parse(project.merge) as { enabled?: boolean; worktrees?: Record<string, unknown> };
+    return merge.enabled === true && typeof merge.worktrees?.[project.defaultBranch] === 'string';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Patch that puts one project on a preset without touching its brain overrides (used for global,
+ * department and new projects). A preset that auto-merges also turns on the integration branch when
+ * the project has no merge target, otherwise every auto-merge would fail for want of a target.
+ */
+export function presetProjectPatch(project: ProjectRow, preset: PresetLevel, codexModel: string) {
+  const def = PRESET_DEFINITIONS[preset];
+  const cleanCodexModel = codexModel.startsWith('codex:') ? codexModel.slice('codex:'.length) : codexModel;
+  const chain = getPresetChain(preset, cleanCodexModel);
+  const enableIntegration = def.config.review.autoMerge && !projectHasMergeTarget(project);
+  const current = projectSettings(project).integration;
+  return {
+    settings: {
+      preset,
+      autoFixOnFail: def.config.autoFixOnFail,
+      planning: def.config.planning,
+      review: { autoMerge: def.config.review.autoMerge },
+      integration: enableIntegration
+        ? { enabled: true, branch: current.branch || 'agenthub/integration', autoMerge: true }
+        : { autoMerge: def.config.review.autoMerge },
+    },
+    review: { chain, maxRounds: def.config.review.maxRounds },
+    reviewChain: chain,
+  };
+}
+
 export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput): ApplyPresetResult {
   const { scope, preset, dryRun } = input;
   const def = PRESET_DEFINITIONS[preset];
   const codexModel = service.config.brain.codexModel || 'gpt-5.6-luna';
   const cleanCodexModel = codexModel.startsWith('codex:') ? codexModel.slice('codex:'.length) : codexModel;
   const chain = getPresetChain(preset, cleanCodexModel);
-  const projectPatch = {
-    settings: {
-      preset,
-      autoFixOnFail: def.config.autoFixOnFail,
-      planning: def.config.planning,
-      review: { autoMerge: def.config.review.autoMerge },
-      integration: { autoMerge: def.config.review.autoMerge },
-    },
-    review: { chain, maxRounds: def.config.review.maxRounds },
-    reviewChain: chain,
-  };
 
   if (scope === 'global') {
     const currentReviewer = service.config.reviewer;
@@ -311,9 +422,11 @@ export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput)
           maxChangesRequested: def.config.review.maxRounds,
           order,
         },
+        // Projects registered later start on the same preset.
+        defaultProjectPreset: preset,
       });
       for (const project of service.projectRepo.getAll?.() || []) {
-        service.updateProject(project.id, projectPatch);
+        service.updateProject(project.id, presetProjectPatch(project, preset, codexModel));
       }
     }
 
@@ -350,7 +463,7 @@ export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput)
         brainPermissions: after.brainPermissions,
       });
       for (const project of service.projectRepo.getAll?.().filter((item) => item.departmentId === departmentId) || []) {
-        service.updateProject(project.id, projectPatch);
+        service.updateProject(project.id, presetProjectPatch(project, preset, codexModel));
       }
     }
 
@@ -436,9 +549,7 @@ export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput)
           review: {
             autoMerge: def.config.review.autoMerge,
           },
-          integration: {
-            autoMerge: def.config.review.autoMerge,
-          },
+          integration: presetProjectPatch(project, preset, codexModel).settings.integration,
         },
         review: {
           chain,

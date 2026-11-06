@@ -281,3 +281,48 @@ export function readAgyAccessToken(profileHome: string): string | null {
   const result = inspectAgyAccessToken(profileHome);
   return 'accessToken' in result ? result.accessToken : null;
 }
+
+export const CLOUD_CODE_LOAD_CODE_ASSIST_URL = 'https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist';
+
+function cloudCodePlatform(): string {
+  const os = process.platform === 'darwin' ? 'DARWIN' : process.platform === 'win32' ? 'WINDOWS' : process.platform === 'linux' ? 'LINUX' : '';
+  const arch = process.arch === 'x64' ? 'AMD64' : process.arch === 'arm64' ? 'ARM64' : '';
+  return os && arch ? `${os}_${arch}` : 'PLATFORM_UNSPECIFIED';
+}
+
+/** Đổi tier id của Code Assist (vd. g1-pro-tier, g1-ultra-tier, free-tier) thành gói, giống Cockpit tools. */
+export function agyTierToPlan(tierId: string | null | undefined): string | null {
+  const tier = (tierId || '').trim().toLowerCase();
+  if (!tier) return null;
+  if (tier.includes('ultra')) return 'ultra';
+  if (tier.includes('pro')) return 'pro';
+  return 'free';
+}
+
+/**
+ * Hỏi gói Google AI của tài khoản agy qua Code Assist `loadCodeAssist` (cách Cockpit tools và agy dùng):
+ * paidTier.id, không có thì currentTier.id. `status` là mã HTTP (0 khi lỗi mạng) để báo lý do.
+ */
+export async function fetchAgyTier(
+  accessToken: string,
+  options?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<{ tierId: string | null; status: number }> {
+  const signal = options?.signal ?? AbortSignal.timeout(options?.timeoutMs ?? 10_000);
+  try {
+    const response = await fetch(CLOUD_CODE_LOAD_CODE_ASSIST_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        metadata: { ideName: 'antigravity', ideType: 'ANTIGRAVITY', platform: cloudCodePlatform(), pluginType: 'GEMINI' },
+        mode: 'FULL_ELIGIBILITY_CHECK',
+      }),
+      signal,
+    });
+    if (!response.ok) return { tierId: null, status: response.status };
+    const data = (await response.json()) as { paidTier?: { id?: unknown }; currentTier?: { id?: unknown } };
+    const pick = (value: unknown) => (typeof value === 'string' && value.trim() ? value.trim() : null);
+    return { tierId: pick(data?.paidTier?.id) ?? pick(data?.currentTier?.id), status: response.status };
+  } catch {
+    return { tierId: null, status: 0 };
+  }
+}

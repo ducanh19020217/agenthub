@@ -4,6 +4,7 @@ import {
   addProjectKnowledge,
   createNewProject,
   createProject,
+  getConfig,
   inspectProject,
   getProjectContextSummary,
   summarizeProjectContext,
@@ -103,6 +104,13 @@ export function ProjectWizard({
   const [contextSummary, setContextSummary] = useState('');
   const [summaryTaskId, setSummaryTaskId] = useState<string | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
+
+  // Start from the preset last applied globally, so new projects follow the hub-wide choice.
+  const { data: hubConfig } = useQuery({ queryKey: ['config'], queryFn: getConfig });
+  useEffect(() => {
+    const preset = hubConfig?.defaultProjectPreset;
+    if (preset) setDraft((current) => (current.preset || current.sensitive ? current : { ...current, preset }));
+  }, [hubConfig?.defaultProjectPreset]);
 
   const update = (patch: Partial<WizardDraft>) => {
     setError(null);

@@ -440,12 +440,19 @@ describe('GET /api/usage/daily integration & report generation', () => {
     expect(dayToday.totalTokens).toBe(125000); // 50000 + 75000
     expect(dayToday.claudeTokens).toBe(42000);
 
-    // Test API response via Fastify GET /api/usage/daily
-    const res = await server.inject({
-      method: 'GET',
-      url: '/api/usage/daily?days=7',
-      headers: authHeaders(),
-    });
+    // Test API response via Fastify GET /api/usage/daily (the API uses the real clock, so pin it to the fixture day)
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-16T10:00:00Z'));
+    let res;
+    try {
+      res = await server.inject({
+        method: 'GET',
+        url: '/api/usage/daily?days=7',
+        headers: authHeaders(),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
 
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.payload);

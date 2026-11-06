@@ -629,6 +629,72 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       const orderBlock = screen.getByTestId('reviewer-order');
       expect(within(orderBlock).queryByRole('combobox', { name: /^Model reviewer/i })).not.toBeInTheDocument();
     });
+
+    it('chooses the default Claude account for brain and chat and sends it on save', async () => {
+      const updateSpy = vi.spyOn(client, 'updateConfig').mockResolvedValue({} as any);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      const select = await screen.findByLabelText('Tài khoản Claude mặc định cho Brain và Chat');
+      expect(select).toHaveValue('');
+      await waitFor(() => expect(within(select).getByRole('option', { name: /claude-main/ })).toBeInTheDocument());
+      expect(within(select).queryByRole('option', { name: /codex-main/ })).not.toBeInTheDocument();
+      fireEvent.change(select, { target: { value: 'claude-main' } });
+
+      fireEvent.click(screen.getByRole('button', { name: /Lưu cấu hình/i }));
+      await waitFor(() => expect(updateSpy).toHaveBeenCalled());
+      const payload = updateSpy.mock.calls[0][0];
+      expect(payload.chat?.claudeProfile).toBe('claude-main');
+      expect(payload.brain?.claudeProfile).toBe('claude-main');
+    });
+
+    const renderSettings = () => render(
+      <LocaleProvider initialLocale="vi">
+        <ThemeProvider>
+          <QueryClientProvider client={queryClient}>
+            <MemoryRouter>
+              <SettingsPage />
+            </MemoryRouter>
+          </QueryClientProvider>
+        </ThemeProvider>
+      </LocaleProvider>,
+    );
+
+    it('shows a success toast after saving the config', async () => {
+      let resolveSave: (value: any) => void = () => {};
+      vi.spyOn(client, 'updateConfig').mockImplementation(() => new Promise((resolve) => { resolveSave = resolve; }));
+      renderSettings();
+
+      fireEvent.click(await screen.findByRole('button', { name: /Lưu cấu hình/i }));
+      await waitFor(() => expect(document.querySelector('[data-kind="loading"]')).toHaveTextContent('Đang lưu...'));
+
+      resolveSave({});
+      await waitFor(() => expect(document.querySelector('[data-kind="success"]')).toHaveTextContent('Cài đặt hệ thống đã được cập nhật thành công!'));
+      expect(document.querySelector('[data-kind="loading"]')).toBeNull();
+    });
+
+    it('shows an error toast with the server message when saving fails', async () => {
+      vi.spyOn(client, 'updateConfig').mockRejectedValue(new Error('boom from server'));
+      renderSettings();
+
+      fireEvent.click(await screen.findByRole('button', { name: /Lưu cấu hình/i }));
+      await waitFor(() => {
+        const toast = document.querySelector('[data-kind="error"]');
+        expect(toast).toHaveTextContent('Không thể lưu cài đặt');
+        expect(toast).toHaveTextContent('boom from server');
+      });
+      expect(document.querySelector('[data-kind="loading"]')).toBeNull();
+    });
   });
 
   describe('4. ProjectSettingsDrawer Reviewer Order, Fallback & Review Chain Integration', () => {

@@ -58,6 +58,27 @@ describe('first-run setup', () => {
     }
   });
 
+  it('reports install_done instead of crashing when the installer cannot be spawned', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-setup-enoent-'));
+    const previousWorker = process.env.AGENTHUB_WORKER;
+    delete process.env.AGENTHUB_WORKER;
+    try {
+      const config = loadConfig(home);
+      config.tools.installers.codex = { command: [path.join(home, 'missing-installer')], versionArgs: ['--version'] };
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const manager = new SetupManager(config, { emit: (type, _taskId, payload) => { events.push({ type, payload: payload as Record<string, unknown> }); return true; } });
+      await manager.install('codex');
+      await vi.waitFor(() => expect(events.some((event) => event.type === 'setup.install_done')).toBe(true), { timeout: 5000, interval: 10 });
+      const done = events.find((event) => event.type === 'setup.install_done')!;
+      expect(done.payload.ok).toBe(false);
+      expect(String(done.payload.error)).toContain('ENOENT');
+      expect((await manager.status()).find((tool) => tool.id === 'codex')?.installing).toBe(false);
+    } finally {
+      if (previousWorker === undefined) delete process.env.AGENTHUB_WORKER; else process.env.AGENTHUB_WORKER = previousWorker;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('runs the profile refresh callback only after a successful install', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-setup-refresh-'));
     const fakeBin = path.join(home, 'bin');

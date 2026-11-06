@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ProfilesPage } from '../pages/ProfilesPage';
@@ -237,9 +237,9 @@ describe('ProfilesPage - Bật/Tắt, Nút Check và Quota Mark', () => {
     });
 
     // Toast hiển thị icon ✓ và thời gian thực thi
-    const toast = screen.getByRole('alert');
-    expect(toast).toHaveTextContent('✓');
-    expect(toast).toHaveTextContent('Tài khoản hoạt động tốt (420ms)');
+    const toast = document.querySelector('[data-kind="success"]')!;
+    expect(toast).toHaveTextContent('Kiểm tra g1 thành công');
+    expect(toast).toHaveTextContent('Tài khoản hoạt động tốt · 420ms');
 
     // Invalidate queries và refresh usage
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['profiles'] });
@@ -278,8 +278,9 @@ describe('ProfilesPage - Bật/Tắt, Nút Check và Quota Mark', () => {
 
     // Toast hiển thị icon ✗ và message lỗi
     const toast = screen.getByRole('alert');
-    expect(toast).toHaveTextContent('✗');
-    expect(toast).toHaveTextContent('Token hết hạn (150ms)');
+    expect(toast).toHaveAttribute('data-kind', 'error');
+    expect(toast).toHaveTextContent('Kiểm tra g1 thất bại');
+    expect(toast).toHaveTextContent('Token hết hạn · 150ms');
   });
 
   it('6. Quota mark API: deleteQuota gọi đúng API DELETE /api/profiles/:name/quota?family=:family', async () => {
@@ -380,7 +381,7 @@ describe('ProfilesPage - Bật/Tắt, Nút Check và Quota Mark', () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['profiles'] });
 
     // Hiển thị toast thông báo thành công
-    const toast = screen.getByRole('alert');
+    const toast = document.querySelector('[data-kind="success"]')!;
     expect(toast).toHaveTextContent(/Đã gỡ khóa quota/i);
   });
 
@@ -396,7 +397,9 @@ describe('ProfilesPage - Bật/Tắt, Nút Check và Quota Mark', () => {
     });
 
     expect(client.refreshProfileUsage).toHaveBeenCalledWith('g1');
-    expect(await screen.findByRole('alert')).toHaveTextContent(/Đã làm mới g1 · Đã cập nhật ảnh đại diện/);
+    const toast = (await screen.findByText('Đã làm mới g1')).closest('[data-kind]')!;
+    expect(toast).toHaveAttribute('data-kind', 'success');
+    expect(toast).toHaveTextContent('Đã cập nhật ảnh đại diện');
   });
 
   it('9c. Dùng token: nhập xong thì thẻ tự chuyển sang đang kiểm tra, không cần bấm Check', async () => {
@@ -419,8 +422,80 @@ describe('ProfilesPage - Bật/Tắt, Nút Check và Quota Mark', () => {
       tokens: [{ name: 'g1', email: 'g1@example.com', refresh_token: '1//rt' }],
       accountType: undefined,
     });
-    expect(await screen.findByText(/Đang kiểm tra/)).toBeInTheDocument();
+    expect(await within(card).findByText(/Đang kiểm tra…/)).toBeInTheDocument();
     expect(checkSpy).not.toHaveBeenCalled();
+  });
+
+  it('9d. Thêm tài khoản Codex bằng JSON token: gửi engine codex và tự kiểm tra', async () => {
+    const importSpy = vi.spyOn(client, 'importAgyTokens').mockResolvedValue({
+      success: true, total: 1, successCount: 1, failedCount: 0,
+      results: [{ name: 'coder', email: 'coder@example.com', action: 'created', status: 'ok', message: 'ok' }],
+    });
+    renderPage();
+    expect(await screen.findByText('g1')).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole('button', { name: /Thêm tài khoản/ })[0]);
+    fireEvent.change(screen.getByRole('combobox', { name: /Nhà cung cấp|Provider/ }), { target: { value: 'codex' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Nhập token (JSON)' }));
+    const tokens = [{ email: 'coder@example.com', id_token: 'a.b.c', access_token: 'x', refresh_token: 'y', type: 'codex' }];
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: JSON.stringify(tokens) } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Nhập tài khoản' }));
+    });
+
+    expect(importSpy).toHaveBeenCalledWith({ engine: 'codex', tokens, accountType: 'personal' });
+    expect(await screen.findByText(/Kết quả nhập/)).toBeInTheDocument();
+  });
+
+  it('9e. Hiện tag gói tài khoản khi biết gói, ẩn khi chưa biết', async () => {
+    vi.mocked(client.getProfiles).mockResolvedValue([
+      { ...mockProfiles[0], name: 'plus_acc', engine: 'codex', plan: 'plus' },
+      { ...mockProfiles[0], name: 'no_plan', plan: null },
+    ] as Profile[]);
+    renderPage();
+    expect(await screen.findByText('plus_acc')).toBeInTheDocument();
+
+    expect(screen.getByTestId('profile-card-plus_acc').querySelector('[data-testid="plan-badge"]')?.textContent).toBe('PLUS');
+    expect(screen.getByTestId('profile-card-no_plan').querySelector('[data-testid="plan-badge"]')).toBeNull();
+  });
+
+  it('9f. Lọc theo gói: chỉ hiện hồ sơ đúng gói, có số lượng', async () => {
+    vi.mocked(client.getProfiles).mockResolvedValue([
+      { ...mockProfiles[0], name: 'plus_acc', engine: 'codex', plan: 'plus' },
+      { ...mockProfiles[0], name: 'pro_acc', plan: 'pro' },
+      { ...mockProfiles[0], name: 'no_plan', plan: null },
+    ] as Profile[]);
+    renderPage();
+    expect(await screen.findByText('plus_acc')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'PRO (1)' }));
+    expect(screen.queryByTestId('profile-card-plus_acc')).toBeNull();
+    expect(screen.getByTestId('profile-card-pro_acc')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Chưa rõ gói (1)' }));
+    expect(screen.getByTestId('profile-card-no_plan')).toBeInTheDocument();
+    expect(screen.queryByTestId('profile-card-pro_acc')).toBeNull();
+  });
+
+  it('9g. Đánh thức quota từ menu: gọi API và báo kết quả từng model', async () => {
+    const wakeSpy = vi.spyOn(client, 'wakeupProfile').mockResolvedValue({
+      profile: 'g1', ok: true, results: [{ target: 'gemini-3.8-flash-low', ok: true, message: 'Đã đánh thức' }],
+    });
+    renderPage();
+    expect(await screen.findByText('g1')).toBeInTheDocument();
+
+    const card = screen.getByTestId('profile-card-g1');
+    fireEvent.click(card.querySelector('button[aria-label]')!);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Đánh thức quota' }));
+    });
+
+    expect(wakeSpy).toHaveBeenCalledWith('g1');
+    // Toast "đang đánh thức" được cập nhật thành kết quả, không hiện thêm toast mới.
+    const toast = (await screen.findByText('Đã đánh thức g1')).closest('[data-kind]')!;
+    expect(toast).toHaveAttribute('data-kind', 'success');
+    expect(toast).toHaveTextContent('✓ gemini-3.8-flash-low');
+    expect(screen.queryByText(/Đang đánh thức g1/)).toBeNull();
   });
 
   it('10. Quota mark UI: không hiển thị quota mark đã hết hạn (until trong quá khứ)', async () => {

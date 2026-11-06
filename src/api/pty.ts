@@ -10,7 +10,7 @@ import { AppService, HttpError } from '../services/index.js';
 import { findClaudeBin } from '../chat/claude.js';
 import { CodexEngine } from '../engines/index.js';
 import { accountKey, isProfileLoggedIn } from '../profiles/index.js';
-import { agyInstallHint, findAgyBin } from '../agy.js';
+import { agyInstallHint, applyIsolatedAgyEnv, findAgyBin } from '../agy.js';
 
 const require = createRequire(import.meta.url);
 
@@ -126,10 +126,15 @@ export function applyNoBrowserEnv(env: Record<string, string>, hubHome?: string)
   if (process.env.AGENTHUB_LOGIN_OPEN_BROWSER === '1') return;
   const base = hubHome || process.env.AGENTHUB_HOME || path.join(os.tmpdir(), 'agenthub-no-browser');
   const shimDir = path.join(base, 'no-browser-bin');
-  fs.mkdirSync(shimDir, { recursive: true, mode: 0o700 });
-  for (const name of BROWSER_OPENERS) {
-    const file = path.join(shimDir, name);
-    if (!fs.existsSync(file)) fs.writeFileSync(file, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  try {
+    fs.mkdirSync(shimDir, { recursive: true, mode: 0o700 });
+    for (const name of BROWSER_OPENERS) {
+      const file = path.join(shimDir, name);
+      if (!fs.existsSync(file)) fs.writeFileSync(file, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    }
+  } catch {
+    // Không tạo được shim thì CLI có thể tự mở tab; không được chặn việc đăng nhập.
+    return;
   }
   env.BROWSER = path.join(shimDir, 'xdg-open');
   env.PATH = env.PATH ? `${shimDir}${path.delimiter}${env.PATH}` : shimDir;
@@ -164,8 +169,7 @@ export class PtyManager {
     if (profile.engine === 'claude' && profile.kind !== 'system' && profile.home) {
       env.CLAUDE_CONFIG_DIR = profile.home;
     } else if (profile.kind === 'isolated') {
-      env.HOME = home;
-      env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent/agy-no-keyring';
+      applyIsolatedAgyEnv(env, home);
     }
     applyNoBrowserEnv(env, this.service.config.hubHome);
 

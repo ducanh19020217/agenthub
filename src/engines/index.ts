@@ -6,7 +6,7 @@ import { ProfileRow } from '../db/index.js';
 import { LIMITED_TEST_ENV, lowPriority } from '../priority.js';
 import { workerEnvironment } from '../worker-guard.js';
 import { lockCommand } from '../profiles/locks.js';
-import { findAgyBin } from '../agy.js';
+import { applyIsolatedAgyEnv, findAgyBin } from '../agy.js';
 
 export interface SpawnOpts {
   profile: ProfileRow;
@@ -127,8 +127,7 @@ export class AgyEngine implements Engine {
 
     // Set up environment based on profile kind
     if (opts.profile.kind === 'isolated' && opts.profile.home) {
-      env.HOME = opts.profile.home;
-      env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent/agy-no-keyring';
+      applyIsolatedAgyEnv(env, opts.profile.home);
     }
 
     if (opts.env) {

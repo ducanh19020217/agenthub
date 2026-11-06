@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { DEFAULT_LOAD_CONFIG, LoadConfig } from './load.js';
 import type { ExtraDiskPath } from './disk.js';
 import { normalizeFallbackSteps, ClaudeFallbackStep } from './chat/failover.js';
+import { DEFAULT_WAKEUP_CONFIG, type WakeupConfig } from './quota/wakeup.js';
 import { BrandingConfig, parseBranding } from './branding.js';
 import { DEFAULT_REVIEWER_ARBITER, reviewerSettingsFromLegacy, type ReviewerArbiter, type ReviewerFallback, type ReviewerOrderItem } from './reviewer-config.js';
 
@@ -37,7 +38,11 @@ export interface NotificationsConfig {
   desktop: boolean;
   desktopLevel: 'all' | 'important' | 'critical' | 'off';
   quietHours?: QuietHoursConfig;
+  /** Báo `quota.low` khi quota một cửa sổ tụt xuống dưới ngưỡng (%); 0 = tắt. */
+  quotaLowPct?: number;
 }
+
+export const DEFAULT_QUOTA_LOW_PCT = 20;
 
 export const DEFAULT_QUIET_HOURS_CONFIG: QuietHoursConfig = {
   enabled: false,
@@ -306,6 +311,19 @@ export const DEFAULT_WORKERS_CONFIG: WorkersConfig = {
   codexSandbox: 'off',
 };
 
+/** Đọc cấu hình đánh thức quota, bỏ giá trị sai và dùng mặc định cho phần thiếu. */
+export function parseWakeupConfig(raw: unknown): WakeupConfig {
+  const value = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const strings = (input: unknown, valid: (item: string) => boolean): string[] | null =>
+    Array.isArray(input) ? input.filter((item): item is string => typeof item === 'string' && valid(item.trim())).map((item) => item.trim()) : null;
+  return {
+    enabled: typeof value.enabled === 'boolean' ? value.enabled : DEFAULT_WAKEUP_CONFIG.enabled,
+    times: strings(value.times, (t) => /^([01]?\d|2[0-3]):[0-5]\d$/.test(t)) ?? [...DEFAULT_WAKEUP_CONFIG.times],
+    profiles: strings(value.profiles, (n) => /^[a-zA-Z0-9_-]+$/.test(n)) ?? [],
+    agyModels: strings(value.agyModels, (m) => m.length > 0) ?? [...DEFAULT_WAKEUP_CONFIG.agyModels],
+  };
+}
+
 // --- OpenProject source configuration ---
 
 export const DailyReportConfigSchema = z.object({
@@ -422,6 +440,8 @@ export interface AgentHubConfig {
   };
   defaultLogDir: string;
   autoFixOnFail: boolean;
+  /** Preset applied to newly registered projects; set when a preset is applied globally. */
+  defaultProjectPreset?: 'safe' | 'balanced' | 'auto';
   chat: ChatConfig;
   brain: BrainConfig;
   assistant: AssistantConfig;
@@ -437,6 +457,8 @@ export interface AgentHubConfig {
     arbiter: ReviewerArbiter;
   };
   notifications: NotificationsConfig;
+  /** Đánh thức quota theo giờ hẹn (src/quota/wakeup.ts). */
+  wakeup: WakeupConfig;
   disk: {
     minFreeGB: number;
     hubHomeMinFreeGB: number;
@@ -491,6 +513,7 @@ export function saveConfig(
     watchdog: { stallMinutes?: number; waitingMinutes?: number };
     port: number;
     autoFixOnFail?: boolean;
+    defaultProjectPreset?: 'safe' | 'balanced' | 'auto';
     chat: Partial<ChatConfig>;
     brain?: Partial<Omit<BrainConfig, 'digest' | 'director'>> & {
       digest?: Partial<BrainDigestConfig>;
@@ -502,7 +525,9 @@ export function saveConfig(
       desktop: boolean;
       desktopLevel: NotificationsConfig['desktopLevel'];
       quietHours?: Partial<QuietHoursConfig>;
+      quotaLowPct: number;
     }>;
+    wakeup?: Partial<WakeupConfig>;
     disk?: { minFreeGB?: number; hubHomeMinFreeGB?: number; extraPaths?: ExtraDiskPath[] };
     cleanup?: { nodeModulesOnDone?: boolean; worktreeOnDoneAfterHours?: number };
     cacheDir?: string;
@@ -691,6 +716,7 @@ export function updateConfigInMemory(
     slotsPerCodexProfile: number;
     watchdog: { stallMinutes?: number; waitingMinutes?: number };
     autoFixOnFail: boolean;
+    defaultProjectPreset: 'safe' | 'balanced' | 'auto';
     chat: Partial<ChatConfig>;
     brain?: Partial<Omit<BrainConfig, 'digest' | 'director'>> & {
       digest?: Partial<BrainDigestConfig>;
@@ -702,7 +728,9 @@ export function updateConfigInMemory(
       desktop: boolean;
       desktopLevel: NotificationsConfig['desktopLevel'];
       quietHours?: Partial<QuietHoursConfig>;
+      quotaLowPct: number;
     }>;
+    wakeup?: Partial<WakeupConfig>;
     disk?: { minFreeGB?: number; hubHomeMinFreeGB?: number; extraPaths?: ExtraDiskPath[] };
     cleanup?: { nodeModulesOnDone?: boolean; worktreeOnDoneAfterHours?: number };
     cacheDir?: string;
@@ -757,6 +785,7 @@ export function updateConfigInMemory(
     config.watchdog = { ...config.watchdog, ...patch.watchdog };
   }
   if (patch.autoFixOnFail !== undefined) config.autoFixOnFail = patch.autoFixOnFail;
+  if (patch.defaultProjectPreset !== undefined) config.defaultProjectPreset = patch.defaultProjectPreset;
   if (patch.chat) {
     if (patch.chat.claudeBin !== undefined) {
       config.chat.claudeBin = patch.chat.claudeBin;
@@ -774,13 +803,22 @@ export function updateConfigInMemory(
     if (patch.chat.model !== undefined) config.chat.model = patch.chat.model;
     if (patch.chat.models !== undefined) config.chat.models = [...patch.chat.models];
     if (patch.chat.permissionTimeoutSec !== undefined) config.chat.permissionTimeoutSec = patch.chat.permissionTimeoutSec;
-    if (patch.chat.claudeProfile !== undefined) config.chat.claudeProfile = patch.chat.claudeProfile;
+    if (patch.chat.claudeProfile !== undefined) {
+      // Chuỗi rỗng = quay về hồ sơ Claude hệ thống; có tên thì áp dụng ngay, không cần khởi động lại.
+      config.chat.claudeProfile = patch.chat.claudeProfile.trim();
+      config.chat.claudeProfileExplicit = config.chat.claudeProfile.length > 0;
+    }
     if (patch.chat.autoCompactPercent !== undefined) config.chat.autoCompactPercent = patch.chat.autoCompactPercent;
   }
   if (patch.brain) {
     if (patch.brain.fallback) config.brain.fallback = normalizeFallbackSteps(patch.brain.fallback);
     if (patch.brain.policy) config.brain.policy = [...patch.brain.policy];
-    if (patch.brain.claudeProfile !== undefined) config.brain.claudeProfile = patch.brain.claudeProfile;
+    if (patch.brain.claudeProfile !== undefined) {
+      // Giống lúc đọc config.json: brain để trống thì theo hồ sơ của chat.
+      const brainProfile = patch.brain.claudeProfile.trim();
+      config.brain.claudeProfile = brainProfile || config.chat.claudeProfile || 'claude-default';
+      config.brain.claudeProfileExplicit = brainProfile.length > 0 || config.chat.claudeProfileExplicit === true;
+    }
     if (patch.brain.model !== undefined) config.brain.model = patch.brain.model;
     if (patch.brain.engine !== undefined) config.brain.engine = patch.brain.engine;
     if (patch.brain.codexProfile !== undefined) config.brain.codexProfile = patch.brain.codexProfile;
@@ -832,6 +870,9 @@ export function updateConfigInMemory(
     if (patch.notifications.desktop !== undefined) {
       config.notifications.desktop = patch.notifications.desktop;
     }
+    if (patch.notifications.quotaLowPct !== undefined) {
+      config.notifications.quotaLowPct = patch.notifications.quotaLowPct;
+    }
     if (patch.notifications.desktopLevel !== undefined) {
       config.notifications.desktopLevel = patch.notifications.desktopLevel;
     }
@@ -842,6 +883,9 @@ export function updateConfigInMemory(
         end: patch.notifications.quietHours.end ?? config.notifications.quietHours?.end ?? DEFAULT_QUIET_HOURS_CONFIG.end,
       };
     }
+  }
+  if (patch.wakeup) {
+    config.wakeup = parseWakeupConfig({ ...config.wakeup, ...patch.wakeup });
   }
   if (patch.disk?.minFreeGB !== undefined) {
     config.disk.minFreeGB = patch.disk.minFreeGB;
@@ -1266,6 +1310,9 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
     },
     defaultLogDir,
     autoFixOnFail: userConfig.autoFixOnFail === true,
+    ...(['safe', 'balanced', 'auto'].includes(userConfig.defaultProjectPreset as string)
+      ? { defaultProjectPreset: userConfig.defaultProjectPreset as 'safe' | 'balanced' | 'auto' }
+      : {}),
     chat,
     brain: {
       engine: brainRaw.engine === 'codex' ? 'codex' : 'claude',
@@ -1381,10 +1428,15 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
         };
       })(),
     },
+    wakeup: parseWakeupConfig(userConfig.wakeup),
     notifications: {
       desktop: typeof (userConfig.notifications as { desktop?: boolean } | undefined)?.desktop === 'boolean'
         ? (userConfig.notifications as { desktop: boolean }).desktop
         : true,
+      quotaLowPct: (() => {
+        const raw = (userConfig.notifications as { quotaLowPct?: unknown } | undefined)?.quotaLowPct;
+        return typeof raw === 'number' && raw >= 0 && raw <= 95 ? Math.round(raw) : DEFAULT_QUOTA_LOW_PCT;
+      })(),
       desktopLevel: (() => {
         const level = (userConfig.notifications as { desktopLevel?: unknown } | undefined)?.desktopLevel;
         return level === 'all' || level === 'critical' || level === 'off' || level === 'important' ? level : 'important';

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { AgentHubConfig, OpenProjectSource } from '../../config.js';
 import { OpenProjectSourceSchema, saveConfig, updateConfigInMemory } from '../../config.js';
 import { HttpError } from '../../errors.js';
-import { OpenProjectClient } from './client.js';
+import { OpenProjectClient, OpenProjectError } from './client.js';
 import { readOpenProjectKey, saveOpenProjectKey } from './secrets.js';
 import type { OpenProjectSyncResult } from './intake.js';
 
@@ -189,7 +189,16 @@ export function registerOpenProjectRoutes(
   fastify.get('/api/integrations/openproject/sources/:id/time-entry-activities', async (req: FastifyRequest) => {
     const { id } = idParams.parse(req.params); const source = sourceOrThrow(config, id); const key = readOpenProjectKey(config.hubHome, id);
     if (!key) throw new HttpError(400, 'bad_request', 'Nguồn chưa có API key');
-    return new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: options.fetch }).listTimeEntryActivities();
+    const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: options.fetch });
+    try {
+      let workPackage: import('./client.js').OpenProjectWorkPackage | undefined;
+      try { workPackage = (await client.searchWorkPackages({}))[0]; } catch { /* project link is a valid form input too */ }
+      return await client.listTimeEntryActivities(workPackage?.id);
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new HttpError(error instanceof OpenProjectError ? error.status : 502, 'openproject_error', `Không thể lấy Activity OpenProject: ${message}`);
+    }
   });
 
   fastify.get('/api/integrations/openproject/sources/:id/timesheet', async (req: FastifyRequest) => {

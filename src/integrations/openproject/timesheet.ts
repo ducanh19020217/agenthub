@@ -11,8 +11,8 @@ import { formatYYYYMMDD } from './daily-report.js';
 const execFileAsync = promisify(execFile);
 export interface TimesheetTicket { wpId: number; displayId: string; subject: string; hours: number; rawHours: number; estimateHours: number; comment: string; run: number; wait: number; chat: number; level: number; weight: number; kind: 'commit' | 'manual' | 'mixed'; pinned: boolean; fixedHours?: number; manualIds?: string[]; writtenAt?: string; writeError?: string; }
 export interface TimesheetPreview { sourceId: string; date: string; hours: number; entries: TimesheetTicket[]; withoutTicket: Array<{ taskId: string; subject: string }>; missingFromDate: number[]; overMinimum: boolean; fixedHours?: number; fixedOverHours?: boolean; estimateSkipped?: Array<{ wpId: number; displayId: string; reason: string }>; }
+interface CommitRecord { sha: string; committerDate: string; subject: string; }
 
-function dateBounds(date: string): { start: string; end: string } { return { start: `${date} 00:00:00`, end: `${date} 23:59:59.999` }; }
 function dayMs(date: string): { start: number; end: number } { const start = new Date(`${date}T00:00:00`).getTime(); return { start, end: start + 86400000 }; }
 function isoDuration(hours: number): string { const minutes = Math.round(hours * 60); return `PT${Math.floor(minutes / 60) ? `${Math.floor(minutes / 60)}H` : ''}${minutes % 60 ? `${minutes % 60}M` : ''}`; }
 function subjectFromCommits(commits: string[], language = 'vi'): string {
@@ -27,6 +27,10 @@ function subjectFromCommits(commits: string[], language = 'vi'): string {
 }
 function taskLevel(task: TaskRow): number { return task.level === 'hard' ? 1.5 : 1; }
 function roundHours(raw: number, roundTo: number): number { return Math.max(roundTo, Math.round(raw / roundTo) * roundTo); }
+function localDate(iso: string): string { const value = new Date(iso); if (Number.isNaN(value.getTime())) return ''; return formatYYYYMMDD(value); }
+function ticketFromSubjects(subjects: string[]): string | undefined {
+  return subjects.map((subject) => subject.match(/\b([A-Z][A-Z0-9_]*-\d+)\b/i)?.[1]).find(Boolean);
+}
 
 export function allocateTimesheetHours(weights: Array<{ weight: number }>, total: number, min: number, step: number): number[] {
   if (!weights.length) return [];
@@ -98,10 +102,23 @@ export class OpenProjectTimesheetService {
     const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: this.fetchFn });
     const projects = this.options.projectRepo.getAll().filter((project) => { try { return projectSettings(project).openproject?.enabled && projectSettings(project).openproject?.sourceId === sourceId; } catch { return false; } });
     const projectIds = new Set(projects.map((p) => p.id)); const tasks = this.options.taskRepo.getAll().filter((task) => projectIds.has(task.projectId)); const day = dayMs(date); const tickets = new Map<number, TimesheetTicket>(); const withoutTicket: Array<{ taskId: string; subject: string }> = [];
+    const tasksById = new Map(tasks.map((task) => [task.id, task]));
+    const commitsByTask = new Map<string, CommitRecord[]>();
     for (const task of tasks) {
       const project = projects.find((p) => p.id === task.projectId); if (!project) continue;
-      const commits = await this.commits(project.path, project.defaultBranch, task.branch || project.defaultBranch, date); if (!commits.length) continue;
-      let wp: OpenProjectWorkPackage | undefined; if (task.externalRef) wp = await client.findWorkPackage(task.externalRef); if (!wp) { withoutTicket.push({ taskId: task.id, subject: subjectFromCommits(commits, source.language) }); continue; }
+      const commits = await this.commits(project.path, project.defaultBranch, task, date); if (!commits.length) continue;
+      const helperMatch = task.slug.match(/^(.*)-fix-merge(?:-\d+)?$/);
+      const root = helperMatch ? tasks.find((candidate) => candidate.projectId === task.projectId && candidate.slug === helperMatch[1]) : undefined;
+      const targetId = root?.id || task.id;
+      commitsByTask.set(targetId, [...(commitsByTask.get(targetId) || []), ...commits]);
+    }
+    for (const [taskId, commitRecords] of commitsByTask) {
+      const task = tasksById.get(taskId); if (!task) continue;
+      const project = projects.find((p) => p.id === task.projectId); if (!project) continue;
+      const commits = [...new Map(commitRecords.map((commit) => [commit.sha, commit])).values()];
+      const subjects = commits.map((commit) => commit.subject);
+      const externalRef = task.externalRef || ticketFromSubjects(subjects);
+      let wp: OpenProjectWorkPackage | undefined; if (externalRef) wp = await client.findWorkPackage(externalRef); if (!wp) { withoutTicket.push({ taskId: task.id, subject: subjectFromCommits(subjects, source.language) }); continue; }
       const runs = this.options.runRepo.getByTask(task.id);
       const runMinutes = runs.reduce((sum, run) => { const start = Math.max(day.start, new Date(run.startedAt).getTime()); const end = Math.min(day.end, new Date(run.endedAt || new Date(day.end).toISOString()).getTime()); return sum + Math.max(0, (end - start) / 60000); }, 0);
       const events = this.options.eventRepo.getByTask(task.id).filter((event) => { const ts = new Date(event.ts).getTime(); return ts >= day.start && ts < day.end; });
@@ -109,8 +126,8 @@ export class OpenProjectTimesheetService {
       const chat = (events.filter((event) => /review|comment|decision|blocked|question|changes_requested|ticket.*(created|comment)|comment.*(created|added)/i.test(event.type)).length + (payloadText.includes('## Cần quyết định') ? 1 : 0)) * 10;
       const waitStarts = events.filter((event) => /checking|review\.waiting|review\.gate_started|merge\.waiting|wait/i.test(event.type)).map((event) => new Date(event.ts).getTime());
       const wait = Math.min(runMinutes, waitStarts.reduce((sum, start, index) => { const end = waitStarts[index + 1] || day.end; return sum + Math.max(0, Math.min(day.end, end) - Math.max(day.start, start)) / 60000; }, 0));
-      const level = taskLevel(task); const current = tickets.get(wp.id) || { wpId: wp.id, displayId: wp.displayId || String(wp.id), subject: wp.subject || '', hours: 0, rawHours: 0, estimateHours: 0, comment: subjectFromCommits(commits, source.language), run: 0, wait: 0, chat: 0, level: 0, weight: 0, kind: 'commit' as const, pinned: false };
-      current.run += runMinutes; current.wait += wait; current.chat += chat; current.weight += (runMinutes + 0.5 * wait + chat) * level; const base = current.run + 0.5 * current.wait + current.chat; current.level = base ? current.weight / base : level; current.comment = subjectFromCommits([current.comment, ...commits], source.language); tickets.set(wp.id, current);
+      const level = taskLevel(task); const current = tickets.get(wp.id) || { wpId: wp.id, displayId: wp.displayId || String(wp.id), subject: wp.subject || '', hours: 0, rawHours: 0, estimateHours: 0, comment: subjectFromCommits(subjects, source.language), run: 0, wait: 0, chat: 0, level: 0, weight: 0, kind: 'commit' as const, pinned: false };
+      current.run += runMinutes; current.wait += wait; current.chat += chat; current.weight += (runMinutes + 0.5 * wait + chat) * level; const base = current.run + 0.5 * current.wait + current.chat; current.level = base ? current.weight / base : level; current.comment = subjectFromCommits([current.comment, ...subjects], source.language); tickets.set(wp.id, current);
     }
     const manualRows = this.options.manualRepo?.listForDate(sourceId, date) || [];
     for (const row of manualRows) {
@@ -129,7 +146,7 @@ export class OpenProjectTimesheetService {
     }
     const entries = [...tickets.values()];
     const fixedHours = entries.reduce((sum, entry) => sum + (entry.fixedHours || 0), 0);
-    const flexible = entries.filter((entry) => entry.weight > 0 || entry.run > 0 || entry.wait > 0 || entry.chat > 0);
+    const flexible = entries.filter((entry) => entry.weight > 0 || entry.run > 0 || entry.wait > 0 || entry.chat > 0 || entry.kind === 'commit' || entry.kind === 'mixed');
     const target = Math.max(0, dayHours - fixedHours, flexible.length * cfg.minEntryHours);
     const allocated = allocateTimesheetHours(flexible, target, cfg.minEntryHours, cfg.roundTo);
     let flexibleIndex = 0;
@@ -152,7 +169,30 @@ export class OpenProjectTimesheetService {
     }
     return { sourceId, date, hours: dayHours, entries, withoutTicket, missingFromDate, overMinimum: entries.length * cfg.minEntryHours + fixedHours > dayHours, fixedHours, fixedOverHours: fixedHours >= dayHours };
   }
-  private async commits(cwd: string, defaultBranch: string, branch: string, date: string): Promise<string[]> { const { start } = dateBounds(date); try { const range = branch === defaultBranch ? branch : `${defaultBranch}..${branch}`; const result = await execFileAsync('git', ['-C', cwd, 'log', range, `--since=${start}`, `--until=${date} 23:59:59.999`, '--format=%s']); return result.stdout.split('\n').map((x) => x.trim()).filter(Boolean); } catch { return []; } }
+  private async commits(cwd: string, defaultBranch: string, task: TaskRow, date: string): Promise<CommitRecord[]> {
+    const ranges: string[] = [];
+    if (task.branch && task.branch !== defaultBranch) ranges.push(`${defaultBranch}..${task.branch}`);
+    for (const event of this.options.eventRepo.getByTask(task.id)) {
+      if (event.type !== 'task.merged' || !event.payload) continue;
+      try {
+        const payload = JSON.parse(event.payload) as { mergeCommit?: unknown };
+        if (typeof payload.mergeCommit === 'string' && payload.mergeCommit.trim()) ranges.push(`${payload.mergeCommit}^1..${payload.mergeCommit}^2`);
+      } catch { /* ignore malformed historical events */ }
+    }
+    if (!ranges.length) return [];
+    const records = new Map<string, CommitRecord>();
+    for (const range of ranges) {
+      try {
+        const result = await execFileAsync('git', ['-C', cwd, 'log', '--no-merges', range, '--format=%H%x00%cI%x00%s%x1e']);
+        for (const record of result.stdout.split('\x1e')) {
+          const [shaRaw, committerDateRaw, subjectRaw] = record.split('\0');
+          const sha = shaRaw?.trim(); const committerDate = committerDateRaw?.trim(); const subject = subjectRaw?.trim();
+          if (sha && committerDate && subject && localDate(committerDate) === date) records.set(sha, { sha, committerDate, subject });
+        }
+      } catch { /* branch may have been deleted; the merge range can still succeed */ }
+    }
+    return [...records.values()];
+  }
   async run(sourceId: string, date = formatYYYYMMDD(new Date(this.now())), hoursOverride?: number): Promise<TimesheetPreview> {
     const source = this.source(sourceId); const cfg = source.timesheet; const preview = await this.preview(sourceId, date, hoursOverride);
     if (!cfg?.enabled || cfg.activityId == null) return preview;

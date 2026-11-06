@@ -278,7 +278,24 @@ export class OpenProjectClient {
     return res._embedded?.elements || [];
   }
 
-  async listTimeEntryActivities(): Promise<Array<{ id: number; name: string }>> {
+  async listTimeEntryActivities(workPackageId?: number): Promise<Array<{ id: number; name: string }>> {
+    const formLinks = workPackageId
+      ? { workPackage: { href: `/api/v3/work_packages/${workPackageId}` } }
+      : this.options.project ? { project: { href: `/api/v3/projects/${encodeURIComponent(this.options.project)}` } } : {};
+    try {
+      const form = await this.request<{ _embedded?: { schema?: { activity?: { _embedded?: { allowedValues?: Array<{ id?: number; name?: string; title?: string; value?: number | string; label?: string }> } } } } }>('/api/v3/time_entries/form', {
+        method: 'POST',
+        body: JSON.stringify({ _links: formLinks }),
+      });
+      const values = form._embedded?.schema?.activity?._embedded?.allowedValues || [];
+      if (values.length) {
+        return values
+          .map((item) => ({ id: Number(item.id ?? item.value), name: item.name || item.title || item.label || String(item.id ?? item.value) }))
+          .filter((item) => Number.isInteger(item.id) && item.id > 0);
+      }
+    } catch {
+      // Older OpenProject versions may not expose the form endpoint.
+    }
     const result = await this.request<OpenProjectCollection<{ id: number; name: string }>>('/api/v3/time_entries/activities?pageSize=100');
     return (result._embedded?.elements || []).map((item) => ({ id: item.id, name: item.name }));
   }

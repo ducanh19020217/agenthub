@@ -177,19 +177,21 @@ else
 
     # Nạp lại và khởi động service
     systemctl --user daemon-reload
+    systemctl --user reset-failed agenthub 2>/dev/null || true
     systemctl --user restart agenthub
-    sleep 1
 
-    if systemctl --user is-active --quiet agenthub; then
+    # is-active vẫn báo active trong lúc systemd đang tự khởi động lại một daemon vừa chết: chờ /health.
+    if wait_health; then
       echo "  ✅ Dịch vụ AgentHub đang chạy nền thành công!"
       echo "  ► Kiểm tra trạng thái: systemctl --user status agenthub"
       echo "  ► Theo dõi log:         journalctl --user -u agenthub -f"
       echo ""
       print_dashboard_link
     else
-      echo "  ❌ Cảnh báo: Service chưa khởi động thành công. Xem log lỗi:"
+      echo "  ❌ Cảnh báo: Service chưa phản hồi /health sau 30 giây. Xem log lỗi:"
       systemctl --user status agenthub --no-pager || true
       journalctl --user -u agenthub -n 15 --no-pager || true
+      exit 1
     fi
   fi
   echo "=========================================================="

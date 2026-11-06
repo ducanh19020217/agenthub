@@ -4,6 +4,8 @@
 > Phạm vi: `src/api/*.ts`, `src/platform/*.ts`, `src/profiles/*.ts`, `src/projects/*.ts`, `src/claude-sessions/*.ts`, `src/tools/*.ts`  
 > Nhánh: `agenthub/review-api-profiles-projects`  
 > Mục tiêu: Phát hiện các vấn đề bảo mật, kiến trúc, race condition, input validation, phân trang, error handling, và test coverage thực tế.
+>
+> Tổng cộng: **24 phát hiện** (SEC-01–07, ARC-01–05, PRF-01–08, REL-01–02, CON-01, TST-01).
 
 ---
 
@@ -14,11 +16,12 @@
 | **SEC-01** | `src/api/server.ts:184-189` | XSS qua `${request.label}` và lỗi xác thực 401 khi submit secret form tại `/secrets/:id` | **Cao** | Bảo mật / Auth / XSS |
 | **SEC-02** | `src/api/server.ts:168-180` | Lỗ hổng đọc file tuỳ ý (Arbitrary File Read) qua tham số `body.file` tại `/api/setup/import` | **Cao** | Bảo mật / Path Traversal |
 | **SEC-03** | `src/projects/settings.ts:14-21`<br>`src/projects/knowledge-context.ts:19-29` | Đọc và inject file nhạy cảm tùy ý vào context qua `references.path` | **Cao** | Bảo mật / Data Leak |
-| **SEC-04** | `src/api/server.ts:151-154`<br>`src/setup-tools.ts:318-335`<br>`src/presets.ts:405-415` | Bỏ qua yêu cầu `confirm: true` khi gán quyền `permissions: full` qua API setup & presets | **Cao** | Bảo mật / Authorization Bypass |
+| **SEC-04** | `src/api/server.ts:159-161`<br>`src/setup-tools.ts:218-239` | `POST /api/setup/config-set` cho phép gán `brain.permissions: full` mà không yêu cầu `confirm: true` | **Cao** | Bảo mật / Authorization Bypass |
 | **SEC-05** | `src/profiles/index.ts:276` | Thiếu phân quyền `0700` khi tạo thư mục isolated home cho hồ sơ Antigravity | **Cao** | Bảo mật / File Permissions |
 | **ARC-01** | `src/tools/setup.ts:155-162`<br>`src/profiles/agyToken.ts:137-144`<br>`src/profiles/codexToken.ts:82-88` | Ghi đè file cấu hình và credential không nguyên tử (nguy cơ 0-byte file khi crash/mất điện) | **Cao** | Kiến trúc / Tính toàn vẹn dữ liệu |
 | **ARC-02** | `src/claude-sessions/scanner.ts:79` | Quét nhầm và rò rỉ transcript của các dự án ngoài phạm vi do kiểm tra tiền tố lỏng lẻo (`startsWith`) | **Cao** | Kiến trúc / Bảo mật dữ liệu |
 | **PRF-01** | `src/services/index.ts:3837-3849`<br>`src/claude-sessions/scanner.ts:412-438` | Quét `/proc` N+1 và N+1 database queries gây nghẽn Event Loop trong `listClaudeSessions` | **Cao** | Hiệu năng / Event Loop Blocking |
+| **PRF-08** | `src/api/server.ts:818-823`<br>`src/services/index.ts:1219-1221` | API liệt kê Claude sessions không có `limit` sẽ tải và decorate toàn bộ session, gây cạn kiệt tài nguyên | **Trung bình** | Hiệu năng / Resource Exhaustion |
 | **PRF-02** | `src/api/sse.ts:38`<br>`src/db/index.ts:1680-1684` | Query `eventRepo.getSince()` không có `LIMIT` gây tràn RAM (OOM) khi client reconnect với `Last-Event-ID` | **Cao** | Hiệu năng / Resource Exhaustion |
 | **ARC-03** | `src/claude-sessions/scanner.ts:114-118` | Lệch byte offset trong `ClaudeSessionScanner` khi gặp file transcript kết thúc bằng CRLF (`\r\n`) | **Trung bình** | Độ tin cậy / Data Corruption |
 | **ARC-04** | `src/claude-sessions/repo.ts:16-21` | Phân trang con trỏ (Cursor Pagination) bị so sánh từ điển thay vì số học trên các cột `messages`, `effectiveTokens` | **Trung bình** | Chức năng / Pagination |
@@ -93,16 +96,14 @@
 
 ---
 
-### SEC-04: Bỏ qua yêu cầu `confirm: true` khi gán quyền `permissions: full` qua API setup & presets
-- **Vị trí:** `src/api/server.ts:151-154`, `src/setup-tools.ts:318-335`, `src/presets.ts:405-415`
+### SEC-04: Bỏ qua yêu cầu `confirm: true` khi gán quyền `permissions: full` qua API setup config-set
+- **Vị trí:** `src/api/server.ts:159-161`, `src/setup-tools.ts:218-239`
 - **Mức độ ưu tiên:** **Cao (High)**
 - **Mô tả:**
-  Cơ chế bảo vệ tại `PATCH /api/projects/:id` và `PUT /api/config` yêu cầu `confirm: true` khi nâng quyền bộ não lên `full` (cho phép Claude chạy mọi lệnh bash không cần hỏi). Tuy nhiên:
-  - `POST /api/setup/project-settings/:id` gọi thẳng `service.updateProject()` mà không kiểm tra cờ confirm.
-  - `POST /api/presets/apply` và `POST /api/setup/preset-apply` khi áp dụng preset `auto` (vốn có `permissions: 'full'`) cũng gọi `updateConfig`/`updateProject` mà không yêu cầu confirm.
-  Điều này tạo ra lỗ hổng bỏ qua kiểm soát phân quyền (Authorization Bypass) đối với cài đặt nguy hiểm nhất hệ thống.
+  Cơ chế bảo vệ tại `PATCH /api/projects/:id` và `PUT /api/config` yêu cầu `confirm: true` khi nâng quyền bộ não lên `full` (cho phép Claude chạy mọi lệnh bash không cần hỏi). Tuy nhiên `POST /api/setup/config-set` nhận `path` và `value` tùy ý trong danh sách cho phép, rồi gọi `service.updateConfig(root)` mà không nhận hoặc kiểm tra cờ `confirm`. Vì vậy client có thể gửi `path: "brain.permissions", value: "full", dryRun: false` để bypass xác nhận.
+  Preset `auto` hiện đặt `brain.permissions: 'trusted'`, không phải `full`, nên không phải nguyên nhân của bypass này.
 - **Đề xuất cải tiến:**
-  Chuyển validation `confirm: true` xuống tầng service (`updateProject` và `updateConfig`) để mọi API gọi vào đều bị chặn nếu thiếu xác nhận rõ ràng từ người dùng.
+  Thêm `confirm: true` vào schema/request của `config-set` khi path là `brain.permissions` và value là `full`, đồng thời chuyển validation xuống tầng service (`updateConfig`) để mọi API gọi vào đều bị chặn nếu thiếu xác nhận rõ ràng từ người dùng.
 
 ---
 
@@ -155,6 +156,16 @@
 - **Đề xuất cải tiến:**
   1. Quét danh sách các tiến trình Claude đang chạy một lần duy nhất (`collectRunningClaudeCwds()`), đưa vào một `Set<string>` rồi kiểm tra O(1) cho từng session.
   2. Tối ưu gom nhóm truy vấn `topTasks` thành 1 query duy nhất dạng `IN (...)` hoặc join trực tiếp trong câu query chính.
+
+---
+
+### PRF-08: API Claude sessions không giới hạn phân trang mặc định
+- **Vị trí:** `src/api/server.ts:818-823`, `src/services/index.ts:1219-1221`
+- **Mức độ ưu tiên:** **Trung bình (P2 / Medium)**
+- **Mô tả:**
+  `GET /api/claude/sessions` gọi `service.listClaudeSessions(activeWithinMin)` khi query không có `limit`. Hàm này gọi `claudeSessionRepo.list()` để tải toàn bộ sessions rồi `decorateClaudeSessions()` xử lý từng bản ghi (kiểm tra process và truy vấn `topTasks`). Một client có thể bỏ qua `limit` hoặc gửi request lặp lại để buộc daemon đọc và xử lý toàn bộ lịch sử sessions, khiến thời gian phản hồi, I/O và bộ nhớ tăng theo dữ liệu tích lũy.
+- **Đề xuất cải tiến:**
+  Luôn áp dụng phân trang có giới hạn mặc định (ví dụ `limit=20`, tối đa 100), kể cả khi client không truyền `limit`; chỉ trả về tổng số/cursor cần thiết và tránh decorate các bản ghi ngoài trang hiện tại.
 
 ---
 
@@ -340,12 +351,12 @@
 1. **Giai đoạn 1 (Khẩn cấp - An ninh & Toàn vẹn dữ liệu):**
    - Khắc phục **SEC-01** (XSS & Auth form `/secrets/:id`).
    - Khắc phục **SEC-02** & **SEC-03** (Chặn Path Traversal và rò rỉ file nhạy cảm trong `/api/setup/import` và `references.path`).
-   - Khắc phục **SEC-04** (Bắt buộc `confirm: true` cho `permissions: full` trên toàn bộ API).
+   - Khắc phục **SEC-04** (Bắt buộc `confirm: true` cho `permissions: full`, bao gồm `POST /api/setup/config-set`, trên toàn bộ API).
    - Khắc phục **SEC-05** & **ARC-01** (Phân quyền `0700` cho home agy và áp dụng ghi file nguyên tử cho config & token).
    - Khắc phục **ARC-02** (Chặn quét nhầm transcript dự án ngoài phạm vi).
 
 2. **Giai đoạn 2 (Hiệu năng & Ổn định):**
-   - Khắc phục **PRF-01** (Gộp truy vấn quét `/proc` và loại bỏ N+1 query trong `listClaudeSessions`).
+   - Khắc phục **PRF-01** & **PRF-08** (Gộp truy vấn quét `/proc`, loại bỏ N+1 query và luôn phân trang `listClaudeSessions`).
    - Khắc phục **PRF-02** & **PRF-03** (Thêm `LIMIT` cho `eventRepo.getSince()` và dọn dẹp SSE interval).
    - Khắc phục **ARC-03** & **ARC-04** (Sửa lỗi CRLF offset và sửa so sánh con trỏ kiểu số).
    - Khắc phục **PRF-04**, **PRF-05**, **PRF-07** (Tối ưu I/O đọc file bounded và loại bỏ đọc dư thừa trong `listProcesses`).

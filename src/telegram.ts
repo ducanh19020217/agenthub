@@ -2559,6 +2559,27 @@ export class TelegramBotService {
             chatId,
             `📄 30 dòng cuối log của ${resolved.id}:\n\n<pre>${this.escapeHtml(logText)}</pre>`,
           );
+        } else if (action === 'publish') {
+          try {
+            await this.answerCallbackQuery(query.id, 'Đang đẩy lên git...');
+            const res = await this.service.publishTask(resolved.id, { manual: true });
+            if (res.ok && 'commit' in res) {
+              const successText = `🚀 Đã đẩy task <b>${this.escapeHtml(resolved.id)}</b> lên <code>${this.escapeHtml(res.remote)}/${this.escapeHtml(res.branch)}</code> (commit <code>${this.escapeHtml(res.commit.slice(0, 7))}</code>).`;
+              if (query.message) {
+                const prev = this.escapeHtml(query.message.text || '');
+                await this.editMessage(chatId, query.message.message_id, `${prev}\n\n${successText}`, { inline_keyboard: [] });
+              } else {
+                await this.sendMessage(chatId, successText);
+              }
+            } else if (!res.ok) {
+              const failText = `❌ Đẩy task <b>${this.escapeHtml(resolved.id)}</b> thất bại: ${this.escapeHtml(res.error)}`;
+              await this.sendMessage(chatId, failText);
+            }
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await this.answerCallbackQuery(query.id, 'Lỗi đẩy git.');
+            await this.sendMessage(chatId, `❌ Lỗi khi đẩy task: ${this.escapeHtml(errMsg)}`);
+          }
         }
         break;
       }
@@ -3828,6 +3849,8 @@ export class TelegramBotService {
         (type === 'task.waiting_quota' && p.reason === 'no_department_profile') ||
         // Người dùng muốn biết kết quả dù bộ não tự duyệt/merge.
         (type === 'task.done' && (this.config.telegram.notify.taskDone !== false || this.config.telegram.notify.projectIdle !== false)) ||
+        (type === 'task.pushed' && this.config.telegram.notify.taskDone !== false) ||
+        (type === 'task.push_failed' && this.config.telegram.notify.failed !== false) ||
         (TelegramBotService.INTERRUPT_EVENTS.has(type) && this.config.telegram.notify.interrupted !== false);
 
         if (!isAllowedInAuto) {
@@ -4140,6 +4163,69 @@ export class TelegramBotService {
           );
         }
         if (wantIdle && projectId) this.notifyProjectIdle(projectId, taskId);
+        break;
+      }
+
+      case 'task.pushed': {
+        if (notify.taskDone === false) return;
+        const branchStr = typeof p.branch === 'string' ? p.branch : '';
+        const commitStr = typeof p.commit === 'string' ? p.commit.slice(0, 7) : '';
+        const remoteStr = typeof p.remote === 'string' ? p.remote : '';
+        const compareUrl = typeof p.compareUrl === 'string' && p.compareUrl ? p.compareUrl : '';
+        const title = this.resolveTaskTitle(taskId, p);
+
+        const keyboard: InlineKeyboardButton[][] = [];
+        const actionsRow: InlineKeyboardButton[] = [];
+        if (taskId) {
+          actionsRow.push({ text: '🌐 Xem task', url: this.getDashboardUrl(`#/tasks/${toRouteId(taskId)}`) });
+        }
+        if (compareUrl) {
+          actionsRow.push({ text: '🔗 Xem commit', url: compareUrl });
+        }
+        if (actionsRow.length) {
+          keyboard.push(actionsRow);
+        }
+
+        let body = `${prefix}🚀 <b>Đã đẩy lên git</b>\nID: <code>${taskId}</code>`;
+        if (!minimal && title) {
+          body += `\nTiêu đề: <b>${this.escapeHtml(title)}</b>`;
+        }
+        if (remoteStr || branchStr) {
+          body += `\nNhánh: <code>${this.escapeHtml(remoteStr ? `${remoteStr}/${branchStr}` : branchStr)}</code>`;
+        }
+        if (commitStr) {
+          body += `\nCommit: <code>${this.escapeHtml(commitStr)}</code>`;
+        }
+
+        this.broadcastMessage(
+          body,
+          keyboard.length ? { inline_keyboard: keyboard } : undefined,
+        );
+        break;
+      }
+
+      case 'task.push_failed': {
+        if (notify.failed === false) return;
+        const errorMsg = typeof p.error === 'string' ? p.error : 'Lỗi không xác định';
+        const title = this.resolveTaskTitle(taskId, p);
+
+        const keyboard: InlineKeyboardButton[][] = [
+          [
+            { text: '🔄 Đẩy lại', callback_data: `task:publish:${taskId}` },
+            { text: '🌐 Xem task', url: this.getDashboardUrl(taskId ? `#/tasks/${toRouteId(taskId)}` : '') },
+          ],
+        ];
+
+        let body = `${prefix}❌ <b>Đẩy git thất bại</b>\nID: <code>${taskId}</code>`;
+        if (!minimal && title) {
+          body += `\nTiêu đề: <b>${this.escapeHtml(title)}</b>`;
+        }
+        body += `\nLý do: ${this.escapeHtml(errorMsg)}`;
+
+        this.broadcastMessage(
+          body,
+          { inline_keyboard: keyboard },
+        );
         break;
       }
 

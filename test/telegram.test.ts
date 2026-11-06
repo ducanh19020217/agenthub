@@ -2921,6 +2921,69 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
   });
 
+  it('thông báo task.pushed và task.push_failed trong auto mode, hỗ trợ callback retry publish', async () => {
+    ctx.projectRepo.insert({ id: 'pub-proj', name: 'Pub Proj', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'pub-proj/t-pushed', projectId: 'pub-proj', slug: 't-pushed', title: 'Task Pushed', body: '', level: 'easy', status: 'pushed' });
+    ctx.taskRepo.insert({ id: 'pub-proj/t-failed', projectId: 'pub-proj', slug: 't-failed', title: 'Task Push Fail', body: '', level: 'easy', status: 'done' });
+    const bot = createBot('auto');
+
+    // 1. task.pushed
+    bot.handleEvent('task.pushed', 'pub-proj/t-pushed', {
+      projectId: 'pub-proj',
+      remote: 'origin',
+      branch: 'main',
+      commit: '1234567890abcdef',
+      compareUrl: 'https://github.com/org/repo/commit/1234567890abcdef',
+    });
+    await bot.flushQueue(CHAT_ID);
+    let sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends.length).toBeGreaterThanOrEqual(1);
+    const lastSend = sends[sends.length - 1];
+    expect(lastSend.body?.text).toContain('Đã đẩy lên git');
+    expect(lastSend.body?.text).toContain('Task Pushed');
+    expect(lastSend.body?.text).toContain('origin/main');
+    expect(lastSend.body?.text).toContain('1234567');
+    const replyMarkup = lastSend.body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; url?: string; callback_data?: string }>> };
+    expect(replyMarkup.inline_keyboard[0].some((b) => b.text.includes('Xem commit'))).toBe(true);
+
+    // 2. task.push_failed
+    bot.handleEvent('task.push_failed', 'pub-proj/t-failed', {
+      projectId: 'pub-proj',
+      remote: 'origin',
+      branch: 'main',
+      error: 'Xung đột merge nhánh feature vào main',
+    });
+    await bot.flushQueue(CHAT_ID);
+    sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    const failSend = sends[sends.length - 1];
+    expect(failSend.body?.text).toContain('Đẩy git thất bại');
+    expect(failSend.body?.text).toContain('Task Push Fail');
+    expect(failSend.body?.text).toContain('Xung đột merge');
+    const failMarkup = failSend.body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; url?: string; callback_data?: string }>> };
+    expect(failMarkup.inline_keyboard[0].some((b) => b.callback_data === 'task:publish:pub-proj/t-failed')).toBe(true);
+
+    // 3. Callback query task:publish:pub-proj/t-failed
+    const publishSpy = vi.spyOn(ctx.service, 'publishTask').mockResolvedValueOnce({
+      ok: true,
+      remote: 'origin',
+      branch: 'main',
+      commit: 'abcdef1234567',
+      pushedIntegrationBranch: false,
+    });
+
+    await (bot as unknown as { handleCallbackQuery(q: unknown): Promise<void> }).handleCallbackQuery({
+      id: 'cb-pub-1',
+      from: { id: CHAT_ID, is_bot: false, first_name: 'Tester' },
+      message: { message_id: 123, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: 'Initial message' },
+      data: 'task:publish:pub-proj/t-failed',
+    });
+
+    expect(publishSpy).toHaveBeenCalledWith('pub-proj/t-failed', { manual: true });
+    const edits = recordedCalls.filter((c) => c.url.includes('/editMessageText'));
+    expect(edits.length).toBeGreaterThanOrEqual(1);
+    expect(edits[edits.length - 1].body?.text).toContain('Đã đẩy task');
+  });
+
   it('1. khi brain.mode = auto: chan cac thong bao tho theo tung task, chi gui hub_notify va su co he thong', async () => {
     const bot = createBot('auto');
 

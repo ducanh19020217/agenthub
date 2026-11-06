@@ -996,6 +996,10 @@ export const MIGRATIONS: string[] = [
     PRIMARY KEY (source_id, spent_on)
   );
   `,
+  // Migration 68: lý do task bị hủy, để người dùng xem lại vì sao.
+  `ALTER TABLE tasks ADD COLUMN cancelReason TEXT;`,
+  // Migration 69: ai/nguồn nào hủy task (dashboard, telegram:@user, mcp, system:*).
+  `ALTER TABLE tasks ADD COLUMN cancelledBy TEXT;`,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -1239,6 +1243,10 @@ export interface TaskRow {
   doneReport?: string | null;
   blockedReport?: string | null;
   diffStat?: string | null;
+  /** Lý do task bị hủy (người dùng nhập hoặc hệ thống ghi). */
+  cancelReason?: string | null;
+  /** Ai hủy: dashboard, telegram:<user>, mcp:<client>, system, batch… */
+  cancelledBy?: string | null;
   slot: number | null;
   batchId?: string | null;
   creationSessionId?: string | null;
@@ -1949,7 +1957,7 @@ export class TaskRepo {
 
   update(
     id: string,
-    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'blockedReport' | 'diffStat' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
+    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'blockedReport' | 'diffStat' | 'cancelReason' | 'cancelledBy' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
   ): void {
     const sets: string[] = ["updatedAt = datetime('now')"];
     const values: unknown[] = [];

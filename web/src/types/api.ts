@@ -385,6 +385,10 @@ export interface Task {
   autoMergeSkippedReason?: string | null;
   autoMergeSkippedChecks?: Array<{ name?: string; outputTail?: string }>;
   autoMergeSkippedRetried?: boolean;
+  /** Lý do task bị hủy, do người dùng nhập hoặc hệ thống ghi. */
+  cancelReason?: string | null;
+  /** Nguồn hủy: dashboard, telegram:@user, mcp, system:<what>, batch:discard. */
+  cancelledBy?: string | null;
   reviewStep?: number;
   reviewRound?: number;
   reviewMaxRounds?: number;

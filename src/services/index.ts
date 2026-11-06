@@ -690,6 +690,7 @@ export const UpdateConfigSchema = z.object({
       disk: z.boolean().optional(),
       taskDone: z.boolean().optional(),
       projectIdle: z.boolean().optional(),
+      interrupted: z.boolean().optional(),
     }).optional(),
   }).optional(),
   updates: z.object({
@@ -4328,7 +4329,7 @@ export class AppService {
     const tasks = this.taskRepo.getByBatch(id);
     for (const task of tasks) {
       if (task.status === 'draft') {
-        this.taskRepo.updateStatus(task.id, 'cancelled');
+        this.taskRepo.update(task.id, { status: 'cancelled', cancelReason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, cancelledBy: 'batch:discard' });
       }
     }
     this.taskBatchRepo.updateStatus(id, 'discarded');
@@ -4446,14 +4447,14 @@ export class AppService {
     return this.taskRepo.get(taskId)!;
   }
 
-  cancelTask(idParam: string): TaskRow {
+  cancelTask(idParam: string, info?: { reason?: string | null; by?: string | null }): TaskRow {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) {
       throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
     }
 
-    this.scheduler.cancelTask(taskId);
+    this.scheduler.cancelTask(taskId, info);
     return this.taskRepo.get(taskId)!;
   }
 
@@ -4479,7 +4480,7 @@ export class AppService {
     const source = this.config.integrations?.openproject?.sources?.find((s) => s.id === tracker.source_id);
     const splitConf = source?.split || { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true };
 
-    this.cancelTask(toRouteId(task.id));
+    this.cancelTask(toRouteId(task.id), { reason: `Chia việc: ticket ${task.externalRef} được tách thành task lập kế hoạch`, by: 'system:split' });
 
     const primary = this.projectRepo.getAll().find((p) => {
       const settings = projectSettings(p).openproject;
@@ -4931,9 +4932,11 @@ export class AppService {
         const current = this.taskRepo.get(derived.id);
         if (!current || !['draft', 'queued', 'waiting_quota'].includes(current.status) || current.attempt > 0 || commits.length > 0) continue;
 
-        this.taskRepo.updateStatus(current.id, 'cancelled');
+        this.taskRepo.update(current.id, { status: 'cancelled', cancelReason: reason, cancelledBy: 'system:orphaned_merge_fix' });
         this.scheduler.getEventBus().emit('task.cancelled', current.id, {
-          reason: 'orphaned_merge_fix',
+          reason,
+          by: 'system:orphaned_merge_fix',
+          code: 'orphaned_merge_fix',
           sourceTaskId: source.id,
           message: reason,
         });

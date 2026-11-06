@@ -2455,7 +2455,8 @@ export class TelegramBotService {
             return;
           }
           try {
-            this.service.cancelTask(resolved.id);
+            const who = query.from?.username ? `telegram:@${query.from.username}` : `telegram:${query.from?.id ?? chatId}`;
+            this.service.cancelTask(resolved.id, { reason: 'Hủy bằng nút trên Telegram', by: who });
             await this.answerCallbackQuery(query.id, 'Đã hủy task.');
             await this.sendMessage(chatId, `🛑 Đã hủy task ${resolved.id}.`);
           } catch (err: unknown) {
@@ -3826,7 +3827,8 @@ export class TelegramBotService {
         type === 'quota.exhausted' ||
         (type === 'task.waiting_quota' && p.reason === 'no_department_profile') ||
         // Người dùng muốn biết kết quả dù bộ não tự duyệt/merge.
-        (type === 'task.done' && (this.config.telegram.notify.taskDone !== false || this.config.telegram.notify.projectIdle !== false));
+        (type === 'task.done' && (this.config.telegram.notify.taskDone !== false || this.config.telegram.notify.projectIdle !== false)) ||
+        (TelegramBotService.INTERRUPT_EVENTS.has(type) && this.config.telegram.notify.interrupted !== false);
 
         if (!isAllowedInAuto) {
           return;
@@ -4057,6 +4059,61 @@ export class TelegramBotService {
         this.broadcastMessage(
           `${prefix}${header}\nID: <code>${taskId}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>`,
           { inline_keyboard: keyboard },
+        );
+        break;
+      }
+
+      case 'task.cancelled': {
+        if (notify.interrupted === false) return;
+        const title = this.resolveTaskTitle(taskId, p);
+        const reason = typeof p.reason === 'string' && p.reason ? p.reason : (typeof p.message === 'string' && p.message ? p.message : 'Không ghi lý do');
+        const by = typeof p.by === 'string' && p.by ? p.by : 'không rõ';
+        const prev = typeof p.previousStatus === 'string' && p.previousStatus ? `\nTrạng thái trước: <code>${this.escapeHtml(p.previousStatus)}</code>` : '';
+        const keyboard: InlineKeyboardButton[][] = taskId
+          ? [[{ text: '🔄 Chạy lại', callback_data: `task:retry:${taskId}` }, { text: '🌐 Xem task', url: this.getDashboardUrl(`#/tasks/${toRouteId(taskId)}`) }]]
+          : [];
+        this.broadcastMessage(
+          `${prefix}🛑 <b>Task bị hủy</b>\nID: <code>${taskId}</code>${minimal ? '' : `\nTiêu đề: <b>${this.escapeHtml(title)}</b>`}\nLý do: ${this.escapeHtml(reason)}\nBởi: <b>${this.escapeHtml(by)}</b>${prev}`,
+          keyboard.length ? { inline_keyboard: keyboard } : undefined,
+        );
+        break;
+      }
+
+      case 'task.timeout':
+      case 'task.no_commit':
+      case 'task.looping':
+      case 'task.overlap':
+      case 'task.failover':
+      case 'task.auto_closed': {
+        if (notify.interrupted === false) return;
+        const title = this.resolveTaskTitle(taskId, p);
+        const head = TelegramBotService.INTERRUPT_LABELS[type] || '⚠️ Task bị ngắt';
+        let detail = '';
+        if (type === 'task.no_commit') {
+          detail = `Đã chạy ${typeof p.minutes === 'number' ? Math.round(p.minutes) : '?'} phút mà chưa có commit mới.`;
+        } else if (type === 'task.looping') {
+          detail = `Lặp lệnh <code>${this.escapeHtml(String(p.command || ''))}</code> ${typeof p.count === 'number' ? p.count : '?'} lần.`;
+        } else if (type === 'task.failover') {
+          const from = p.from && typeof p.from === 'object' ? (p.from as { profile?: string; model?: string }) : {};
+          const to = p.to && typeof p.to === 'object' ? (p.to as { profile?: string; model?: string }) : null;
+          detail = `Từ <b>${this.escapeHtml(String(from.profile || '?'))}</b> (${this.escapeHtml(String(from.model || ''))}) sang ${to ? `<b>${this.escapeHtml(String(to.profile || '?'))}</b> (${this.escapeHtml(String(to.model || ''))})` : 'hàng chờ'}${typeof p.reason === 'string' ? `. Lý do: ${this.escapeHtml(p.reason)}` : ''}`;
+        } else if (type === 'task.auto_closed') {
+          detail = `Nhánh <code>${this.escapeHtml(String(p.branch || ''))}</code> đã được merge vào <code>${this.escapeHtml(String(p.targetBranch || ''))}</code> ở nơi khác, task tự đóng.`;
+        } else if (type === 'task.overlap') {
+          detail = `Sửa cùng file <code>${this.escapeHtml(String(p.file || ''))}</code> với task <code>${this.escapeHtml(String(p.otherTaskId || ''))}</code>, có thể xung đột khi merge.`;
+        } else if (type === 'task.timeout') {
+          detail = 'Worker chạy quá thời gian cho phép, task chuyển sang thất bại.';
+        } else if (typeof p.message === 'string') {
+          detail = this.escapeHtml(p.message);
+        } else if (typeof p.reason === 'string') {
+          detail = this.escapeHtml(p.reason);
+        }
+        const keyboard: InlineKeyboardButton[][] = taskId
+          ? [[{ text: '🌐 Xem task', url: this.getDashboardUrl(`#/tasks/${toRouteId(taskId)}`) }]]
+          : [];
+        this.broadcastMessage(
+          `${prefix}${head}\nID: <code>${taskId}</code>${minimal ? '' : `\nTiêu đề: <b>${this.escapeHtml(title)}</b>`}${detail ? `\n${detail}` : ''}`,
+          keyboard.length ? { inline_keyboard: keyboard } : undefined,
         );
         break;
       }
@@ -4846,6 +4903,17 @@ export class TelegramBotService {
     const last30 = lines.slice(-30).join('\n');
     return last30.length > 3500 ? last30.slice(0, 3500) + '\n... (đã cắt bớt)' : last30;
   }
+
+  /** Sự kiện làm task bị ngắt giữa chừng; báo Telegram khi notify.interrupted bật (kể cả brain auto). */
+  private static readonly INTERRUPT_EVENTS = new Set(['task.cancelled', 'task.timeout', 'task.no_commit', 'task.looping', 'task.overlap', 'task.failover', 'task.auto_closed']);
+  private static readonly INTERRUPT_LABELS: Record<string, string> = {
+    'task.timeout': '⏱ <b>Task quá thời gian</b>',
+    'task.no_commit': '⚠️ <b>Task lâu không commit</b>',
+    'task.looping': '🔁 <b>Task đang lặp lệnh</b>',
+    'task.overlap': '⚠️ <b>Task chồng lấn</b>',
+    'task.failover': '🔀 <b>Task chuyển tài khoản/model</b>',
+    'task.auto_closed': '📦 <b>Task tự đóng</b>',
+  };
 
   /** Trạng thái coi là "còn việc": task chưa kết thúc. */
   private static readonly PROJECT_ACTIVE_STATUSES = new Set(['queued', 'running', 'checking', 'review', 'waiting_quota']);

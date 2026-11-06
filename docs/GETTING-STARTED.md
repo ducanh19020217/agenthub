@@ -284,7 +284,7 @@ Nếu bạn quen làm việc trong VS Code hoặc terminal:
 | `hub_status`, `hub_tasks`, `hub_task`, `hub_task_log` | Xem tình trạng hub, danh sách task, chi tiết và log |
 | `hub_create_task`, `hub_update_task` | Tạo task (đề bài, nhánh gốc, model, phụ thuộc), sửa đề bài/phụ thuộc |
 | `hub_review` | Duyệt (`approved`, kèm merge nếu đã cấu hình) hoặc trả về (`changes_requested` + nhận xét) |
-| `hub_retry`, `hub_cancel` | Chạy lại task lỗi/bị chặn, huỷ task |
+| `hub_retry`, `hub_cancel` | Chạy lại task lỗi/bị chặn, huỷ task (`hub_cancel` bắt buộc có `reason`, hiện ở trang chi tiết task) |
 | `hub_wait` | Chờ đến khi có task cần review |
 | `hub_projects`, `hub_register_project`, `hub_profiles`, `hub_mark_quota` | Quản lý dự án, tài khoản, đánh dấu hết quota |
 | `hub_git`, `hub_savings`, `hub_claude_usage`, `hub_brain` | Xem git của task, thống kê tiết kiệm token, mức dùng Claude |

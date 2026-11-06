@@ -303,6 +303,13 @@ export interface SchedulerOptions {
   diskSpace?: (path: string) => DiskSpace;
 }
 
+export interface CancelInfo {
+  /** Lý do hủy do người/hệ thống đưa ra. */
+  reason?: string | null;
+  /** Nguồn hủy: dashboard, telegram:<user>, mcp:<client>, system:<what>. */
+  by?: string | null;
+}
+
 export class Scheduler {
   private running: Map<string, RunningTask> = new Map(); // taskId -> RunningTask
   /** Bumped by stop(); a start that began before it must not spawn afterwards. */
@@ -827,8 +834,21 @@ export class Scheduler {
 
   cancelAll(): void {
     for (const taskId of [...this.running.keys()]) {
+      this.pendingCancel.set(taskId, { reason: 'AgentHub dừng, task đang chạy bị hủy', by: 'system:shutdown' });
       this.killTask(taskId, 'cancelled');
     }
+  }
+
+  /** Lý do/người hủy chờ ghi khi run kết thúc với outcome "cancelled". */
+  private pendingCancel = new Map<string, CancelInfo>();
+
+  private recordCancel(taskId: string, info?: CancelInfo): CancelInfo {
+    const resolved: CancelInfo = {
+      reason: info?.reason?.trim() || null,
+      by: info?.by?.trim() || null,
+    };
+    this.taskRepo.update(taskId, { status: 'cancelled', cancelReason: resolved.reason, cancelledBy: resolved.by });
+    return resolved;
   }
 
   /** Persist a resumable state before the service manager terminates the daemon. */
@@ -3898,9 +3918,10 @@ export class Scheduler {
   /**
    * Cancel a running or pending/idle task
    */
-  cancelTask(taskId: string): void {
+  cancelTask(taskId: string, info?: CancelInfo): void {
     const rt = this.running.get(taskId);
     if (rt) {
+      this.pendingCancel.set(taskId, info || {});
       this.killTask(taskId, 'cancelled');
     } else {
       const task = this.taskRepo.get(taskId);
@@ -3932,8 +3953,8 @@ export class Scheduler {
       this.reviewerFallbackNotified.delete(taskId);
       this.reviewerErrorCounts.delete(taskId);
       this.resetReviewerEscalation(taskId);
-      this.taskRepo.updateStatus(taskId, 'cancelled');
-      this.eventBus.emit('task.cancelled', taskId);
+      const recorded = this.recordCancel(taskId, info);
+      this.eventBus.emit('task.cancelled', taskId, { reason: recorded.reason, by: recorded.by, previousStatus: task?.status ?? null });
     }
   }
 
@@ -4066,8 +4087,10 @@ export class Scheduler {
     }
 
     if (outcome === 'cancelled') {
-      this.taskRepo.updateStatus(taskId, 'cancelled');
-      this.eventBus.emit('task.cancelled', taskId);
+      const info = this.pendingCancel.get(taskId);
+      this.pendingCancel.delete(taskId);
+      const recorded = this.recordCancel(taskId, info);
+      this.eventBus.emit('task.cancelled', taskId, { reason: recorded.reason, by: recorded.by, previousStatus: 'running' });
     } else if (outcome === 'timeout') {
       this.taskRepo.updateStatus(taskId, 'failed');
       this.eventBus.emit('task.timeout', taskId);

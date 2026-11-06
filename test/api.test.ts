@@ -709,9 +709,14 @@ describe('AgentHub HTTP API Endpoints', () => {
       method: 'POST',
       url: '/api/tasks/myproj~task-abc/cancel',
       headers: authHeaders(),
+      payload: { reason: 'Trùng với task khác', by: 'dashboard' },
     });
     expect(cancelRes.statusCode).toBe(200);
     expect(JSON.parse(cancelRes.body).status).toBe('cancelled');
+    expect(JSON.parse(cancelRes.body).cancelReason).toBe('Trùng với task khác');
+    expect(JSON.parse(cancelRes.body).cancelledBy).toBe('dashboard');
+    const cancelledDetail = await server.inject({ method: 'GET', url: '/api/tasks/myproj~task-abc', headers: authHeaders() });
+    expect(JSON.parse(cancelledDetail.body).cancelReason).toBe('Trùng với task khác');
 
     // 4. Set to failed and retry task -> queued
     ctx.taskRepo.updateStatus('myproj/task-abc', 'failed');

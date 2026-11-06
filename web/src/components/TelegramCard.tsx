@@ -4,7 +4,7 @@ import { CheckCircle2, RefreshCw, Send, Trash2 } from 'lucide-react';
 import { attachTelegramProjectChat, createTelegramDepartmentTopic, createTelegramPairCode, createTelegramProjectTopic, getDepartments, getProjects, getTelegramPairingCode, getTelegramStatus, putTelegramToken, removeTelegramChat, testTelegram, updateTelegramConfig } from '../api/client';
 import { useLocale } from '../context/LocaleContext';
 
-const notifyKeys = ['reviewReady', 'taskDone', 'projectIdle', 'failed', 'blocked', 'quotaAllExhausted', 'fallback', 'disk'] as const;
+const notifyKeys = ['reviewReady', 'taskDone', 'projectIdle', 'interrupted', 'failed', 'blocked', 'quotaAllExhausted', 'fallback', 'disk'] as const;
 export interface TelegramCardProps { hasToken?: boolean; allowedChatsCount?: number; }
 
 export const TelegramCard: React.FC<TelegramCardProps> = () => {

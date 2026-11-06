@@ -636,7 +636,11 @@ export async function createServer(
 
   fastify.post('/api/tasks/:id/cancel', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
-    return service.cancelTask(id);
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as { reason?: unknown; by?: unknown };
+    return service.cancelTask(id, {
+      reason: typeof body.reason === 'string' ? body.reason.slice(0, 2000) : null,
+      by: typeof body.by === 'string' ? body.by.slice(0, 120) : 'api',
+    });
   });
 
   fastify.post('/api/tasks/:id/split', async (req: FastifyRequest) => {

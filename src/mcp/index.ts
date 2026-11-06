@@ -1201,15 +1201,16 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   // 11. hub_cancel
   server.tool(
     'hub_cancel',
-    'Hủy một task đang chạy hoặc trong hàng đợi',
+    'Hủy một task đang chạy hoặc trong hàng đợi. Bắt buộc ghi lý do để người dùng xem lại được vì sao task bị hủy.',
     {
       id: z.string().describe('ID của task'),
+      reason: z.string().min(3).describe('Lý do hủy, viết cho người dùng đọc (ví dụ: "Trùng với task T52 vừa tạo trong batch")'),
     },
     async (args) => {
       try {
         assertTaskId(args.id, 'Huỷ task');
         const routeId = toRouteId(args.id);
-        await callApi('POST', `/api/tasks/${routeId}/cancel`);
+        await callApi('POST', `/api/tasks/${routeId}/cancel`, { reason: args.reason, by: 'mcp' });
         return {
           content: [{ type: 'text', text: `✓ Đã hủy task "${args.id}"` }],
         };

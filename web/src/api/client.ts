@@ -733,9 +733,10 @@ export async function startTask(id: string): Promise<Task> {
   });
 }
 
-export async function cancelTask(id: string): Promise<Task> {
+export async function cancelTask(id: string, reason?: string): Promise<Task> {
   return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/cancel`, {
     method: 'POST',
+    body: JSON.stringify({ reason: reason?.trim() || null, by: 'dashboard' }),
   });
 }
 
@@ -986,6 +987,7 @@ export interface TelegramStatus {
     disk: boolean;
     taskDone: boolean;
     projectIdle: boolean;
+    interrupted: boolean;
   };
 }
 

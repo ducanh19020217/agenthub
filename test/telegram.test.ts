@@ -2885,6 +2885,31 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     expect(sends.filter((c) => String(c.body?.text).includes('đã hết task'))).toHaveLength(1);
   });
 
+  it('task.cancelled và các sự kiện ngắt task vẫn báo trong auto mode, kèm lý do và người hủy', async () => {
+    ctx.projectRepo.insert({ id: 'pc', name: 'PC', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'pc/t-1', projectId: 'pc', slug: 't-1', title: 'Việc bị hủy', body: '', level: 'easy', status: 'cancelled' });
+    ctx.taskRepo.insert({ id: 'pc/t-2', projectId: 'pc', slug: 't-2', title: 'Việc lặp', body: '', level: 'easy', status: 'running' });
+    const bot = createBot('auto');
+
+    bot.handleEvent('task.cancelled', 'pc/t-1', { reason: 'Trùng với T52', by: 'mcp', previousStatus: 'queued' });
+    bot.handleEvent('task.looping', 'pc/t-2', { command: 'npm test', count: 5 });
+    bot.handleEvent('task.timeout', 'pc/t-2', undefined);
+    await bot.flushQueue(CHAT_ID);
+    const sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends).toHaveLength(3);
+    expect(sends[0].body?.text).toContain('Task bị hủy');
+    expect(sends[0].body?.text).toContain('Trùng với T52');
+    expect(sends[0].body?.text).toContain('mcp');
+    expect(sends[1].body?.text).toContain('lặp lệnh');
+    expect(sends[1].body?.text).toContain('npm test');
+    expect(sends[2].body?.text).toContain('quá thời gian');
+
+    config.telegram.notify.interrupted = false;
+    bot.handleEvent('task.cancelled', 'pc/t-2', { reason: 'x', by: 'y' });
+    await bot.flushQueue(CHAT_ID);
+    expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(3);
+  });
+
   it('tắt notify.taskDone và notify.projectIdle thì task.done bị chặn trong auto mode như trước', async () => {
     ctx.projectRepo.insert({ id: 'pq', name: 'PQ', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
     ctx.taskRepo.insert({ id: 'pq/t-1', projectId: 'pq', slug: 't-1', title: 'Xong', body: '', level: 'easy', status: 'done' });

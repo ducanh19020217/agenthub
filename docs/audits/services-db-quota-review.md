@@ -18,7 +18,7 @@ Các phát hiện dưới đây được phân loại theo mức độ ưu tiên
 | STT | Vấn đề / Hạng mục | Vị trí (`file:dòng`) | Mức độ ưu tiên | Tóm tắt nguy cơ |
 |---|---|---|:---:|---|
 | 1 | Migrations chạy ngoài transaction | `src/db/index.ts:1021-1026` | **Cao** | Migration DDL nhiều câu lệnh bị lỗi dở dang sẽ làm hỏng DB, không thể khởi động lại |
-| 2 | Mất dữ liệu `runCount` và `consecutiveCrashes` ở Migration 62 | `src/db/index.ts:885-918` | **Cao** | Rebuild bảng `tasks` làm mất lịch sử crash và số lượt chạy của các task đã tồn tại |
+| 2 | Các migration rebuild `tasks` không bảo toàn `runCount` và `consecutiveCrashes` | `src/db/index.ts:754-778`, `780-816`, `818-841`, `882-918` | **Cao** | Rebuild bảng `tasks` ở các migration 55, 56, 57, 62 có thể làm mất lịch sử crash và số lượt chạy |
 | 3 | Mất index `idx_tasks_batch` và `idx_tasks_creation_session` | `src/db/index.ts:758-777`, `811-816`, `836-841`, `913-918` | **Cao** | Rebuild bảng `tasks` ở các migration 55, 56, 57, 62 không tạo lại index của migration 34 và 47 |
 | 4 | Thiếu `busy_timeout` trên kết nối SQLite | `src/db/index.ts:1001-1005` | **Cao** | Daemon, CLI và MCP truy cập đồng thời vào `hub.db` bị văng lỗi `database is locked` |
 | 5 | Thiếu khoá đồng bộ tiến trình khi chạy migration | `src/db/index.ts:1007-1026` | **Cao** | Nhiều tiến trình mở DB cùng lúc sẽ chạy migration trùng lặp, gây xung đột schema |
@@ -28,10 +28,8 @@ Các phát hiện dưới đây được phân loại theo mức độ ưu tiên
 | 9 | N+1 query lặp qua các profile Claude trong `getStatus()` | `src/services/index.ts:1584-1587`, `1328-1410` | **Cao** | Chạy 6 câu query DB và phân tích đường dẫn worktree cho mỗi profile Claude trên mỗi nhịp polling |
 | 10 | `QuotaMarkRepo.mark` ghi đè thời hạn ngắn lên thời hạn dài | `src/db/index.ts:1705-1709`, `src/quota/usage.ts:316-331` | **Cao** | Hạn mức tuần (hết hạn 5 ngày) bị cửa sổ 5 giờ (reset sau 2h) ghi đè làm mở khoá sớm sai quy định |
 | 11 | `bestRemaining` bỏ qua hoàn toàn hạn mức tuần (`week`) | `src/quota/usage.ts:354-361` | **Cao** | Tài khoản hết 100% quota tuần vẫn được báo còn 100% quota (do chỉ nhìn cửa sổ 5h) |
-| 12 | `runnableCapacity` bỏ sót hoàn toàn engine `claude` | `src/quota/index.ts:108-114`, `178-180` | **Cao** | `getModelEngine` chỉ hỗ trợ `codex` và `agy`, khiến các profile Claude không bao giờ xuất hiện trong dung lượng chạy |
 | 13 | Hoàn toàn không có cơ chế backup và restore cơ sở dữ liệu | `src/db/index.ts` | **Cao** | Không có snapshot tự động trước khi migration hay backup định kỳ; nguy cơ mất dữ liệu hoàn toàn khi crash |
 | 14 | Thao tác `ProjectRepo.purge` dễ tràn biến SQL (`SQLITE_MAX_VARIABLE_NUMBER`) | `src/db/index.ts:1404-1408`, `1374-1379` | **Cao** | Sinh chuỗi `IN (?,?,...)` với toàn bộ id task; crash với `too many SQL variables` nếu dự án có nhiều task |
-| 15 | Rebuild bảng `chat_sessions` khi có khoá ngoại cascade | `src/db/index.ts:922-939` | **Trung** | Tắt foreign keys rồi DROP bảng cha `chat_sessions` tiềm ẩn nguy cơ orphan dữ liệu con |
 | 16 | Thêm cột ngoài migration (`ensureSchedulerLimitColumns`) | `src/db/index.ts:1062-1080` | **Trung** | Chạy DDL kiểm tra và `ALTER TABLE` mỗi lần mở kết nối DB thay vì tích hợp trong hệ thống version |
 | 17 | Thiếu transaction nguyên tử trong `TaskRepo` (`insert`, `update`, `delete`) | `src/db/index.ts:1871-1907`, `1950-1981`, `1929-1933` | **Trung** | Bảng `tasks` và bảng liên kết `task_deps` bị lệch dữ liệu nếu có lỗi xảy ra giữa các câu lệnh |
 | 18 | Thiếu transaction trong `ProfileRepo.delete` và `softDelete` | `src/db/index.ts:1617-1627` | **Trung** | Dữ liệu `quota_marks` hoặc `quota_usage` bị xoá dở dang nếu tiến trình bị ngắt |
@@ -41,7 +39,7 @@ Các phát hiện dưới đây được phân loại theo mức độ ưu tiên
 | 22 | Quét toàn bộ bảng `events` không có index trong `hasTimesheetPosted` | `src/db/index.ts:2201-2205` | **Trung** | Full scan toàn bộ lịch sử sự kiện kết hợp `json_extract` trên từng bản ghi |
 | 23 | Quét toàn bộ `tracker_items` vào RAM (`listAll`) để tìm ticket | `src/scheduler/index.ts:3501`, `3726`, `src/db/index.ts:3316` | **Trung** | Không có index trên `display_id`, phải tải toàn bộ ticket từ DB lên để `.find()` trong JS |
 | 24 | N+1 query trong `AppService.listBatches` và `pageBatches` | `src/services/index.ts:4257-4275` | **Trung** | Chạy riêng `getByBatch` cho từng batch trong danh sách thay vì gom nhóm trong một query |
-| 25 | Thiếu index trên các cột khoá ngoại ở các bảng con | `src/db/index.ts:131`, `246`, `935` | **Trung** | Thiếu index trên `runs(profileName)`, `check_results(runId)`, `claude_task_usage(runId)`, `chat_sessions(projectId)` làm chậm thao tác DELETE/UPDATE bảng cha |
+| 25 | Thiếu index trên một số cột khoá ngoại ở bảng con | `src/db/index.ts:131`, `156`, `649`, `935` | **Trung** | `check_results(runId)` và `chat_sessions(projectId)` chưa có index dẫn đầu tương ứng, làm chậm thao tác DELETE/UPDATE bảng cha |
 | 26 | Quét toàn bộ bảng `claude_usage` không có điều kiện thời gian | `src/daily-usage.ts:381-385` | **Trung** | Tải toàn bộ lượt dùng Claude trong lịch sử lên bộ nhớ rồi mới lọc 7 ngày gần nhất bằng JS |
 | 27 | Lỗi tính sai múi giờ trong `parseResetTime` | `src/quota/claude-usage.ts:28-39`, `45-66` | **Trung** | Múi giờ viết tắt không chuẩn IANA (EST, PST, EDT) làm `Intl` văng lỗi, fallback về UTC gây lệch 4-8 giờ |
 | 28 | Lệnh đánh thức Codex CLI không chuyển hướng stdin | `src/quota/wakeup.ts:101`, `110-115` | **Trung** | Không cấp `/dev/null` cho stdin của `codex exec` vi phạm mục 2.2 của PLAN.md, có thể khiến tiến trình bị treo |
@@ -76,11 +74,11 @@ Các phát hiện dưới đây được phân loại theo mức độ ưu tiên
   }
   ```
 
-#### 2. Mất dữ liệu `runCount` và `consecutiveCrashes` ở Migration 62
-- **Vị trí**: `src/db/index.ts:885-918`
-- **Mô tả**: Khi chuyển đổi schema bảng `tasks` sang `tasks_new` ở Migration 62, định nghĩa bảng `tasks_new` và câu lệnh `INSERT INTO tasks_new (...) SELECT ... FROM tasks` không bao gồm hai cột `runCount` và `consecutiveCrashes` (hai cột này được thêm động qua hàm `ensureSchedulerLimitColumns` sau khi chạy migration). Hậu quả là khi `DROP TABLE tasks` và đổi tên `tasks_new` thành `tasks`, toàn bộ dữ liệu lịch sử số lượt chạy và số lần crash liên tiếp của tất cả các task hiện có đều bị xoá sạch về 0.
+#### 2. Các migration rebuild `tasks` không bảo toàn `runCount` và `consecutiveCrashes`
+- **Vị trí**: `src/db/index.ts:754-778`, `780-816`, `818-841`, `882-918`
+- **Mô tả**: Migration 55, 56, 57 và 62 đều tạo lại bảng `tasks` nhưng không khai báo/chuyển tiếp hai cột `runCount` và `consecutiveCrashes`. Hai cột này chỉ được thêm động bởi `ensureSchedulerLimitColumns` sau khi toàn bộ chuỗi migration hoàn tất. Vì vậy mọi đường nâng cấp/rebuild khi các cột đã tồn tại sẽ làm mất giá trị lịch sử và thay bằng mặc định 0; với DB mới chạy tuần tự, rủi ro thực tế phụ thuộc việc cột đã được thêm trước khi rebuild hay chưa.
 - **Mức độ ưu tiên**: **Cao**
-- **Đề xuất**: Trong các script migration rebuild bảng (`tasks`, `chat_sessions`), phải bảo toàn đầy đủ các cột bổ sung đã tồn tại trong schema thực tế, hoặc chính thức đưa các cột từ `ensureSchedulerLimitColumns` vào chuỗi migrations cố định.
+- **Đề xuất**: Trong các script migration rebuild bảng `tasks`, phải bảo toàn đầy đủ các cột bổ sung đã tồn tại trong schema thực tế, hoặc chính thức đưa các cột từ `ensureSchedulerLimitColumns` vào chuỗi migrations cố định.
 
 #### 3. Mất index `idx_tasks_batch` và `idx_tasks_creation_session` sau khi rebuild bảng `tasks`
 - **Vị trí**: `src/db/index.ts:758-777`, `811-816`, `836-841`, `913-918`
@@ -223,19 +221,16 @@ Các phát hiện dưới đây được phân loại theo mức độ ưu tiên
 - **Mức độ ưu tiên**: **Trung bình**
 - **Đề xuất**: Truy vấn một lần với điều kiện `WHERE batchId IN (...)` hoặc dùng câu lệnh SQL gom nhóm tiến độ theo `batchId`.
 
-#### 17. Thiếu index trên các cột khoá ngoại ở bảng con
-- **Vị trí**: `src/db/index.ts:131`, `246`, `935`
+#### 17. Thiếu index trên một số cột khoá ngoại ở bảng con
+- **Vị trí**: `src/db/index.ts:131`, `156`, `649`, `935`
 - **Mô tả**:
-  - `runs(profileName)` trỏ tới `profiles(name) ON DELETE SET NULL`
-  - `check_results(runId)` trỏ tới `runs(id)`
-  - `claude_task_usage(runId)` trỏ tới `runs(id)`
-  - `chat_sessions(projectId)` trỏ tới `projects(id)`
+  - `check_results(runId)` trỏ tới `runs(id)`, nhưng index hiện có là `(taskId, runId)` nên không có `runId` ở vị trí dẫn đầu.
+  - `chat_sessions(projectId)` trỏ tới `projects(id)` nhưng không có index riêng trên `projectId`.
+  - `claude_task_usage` không có cột `runId`; bảng này chỉ có `taskId`, `sessionId`, `turnId` và `effectiveTokens`, nên không thuộc phát hiện này.
   Trong SQLite, các cột foreign key không được tự động đánh index. Khi xoá hoặc cập nhật bản ghi ở bảng cha, SQLite buộc phải full scan các bảng con để kiểm tra ràng buộc khoá ngoại.
 - **Mức độ ưu tiên**: **Trung bình**
 - **Đề xuất**: Tạo index cho các cột khoá ngoại tham chiếu trên các bảng con:
-  - `CREATE INDEX IF NOT EXISTS idx_runs_profile ON runs(profileName);`
   - `CREATE INDEX IF NOT EXISTS idx_check_results_run ON check_results(runId);`
-  - `CREATE INDEX IF NOT EXISTS idx_claude_task_usage_run ON claude_task_usage(runId);`
   - `CREATE INDEX IF NOT EXISTS idx_chat_sessions_project ON chat_sessions(projectId);`
 
 #### 18. Quét toàn bộ bảng `claude_usage` không giới hạn khoảng ngày trong `getDailyUsageReport`
@@ -275,24 +270,6 @@ Các phát hiện dưới đây được phân loại theo mức độ ưu tiên
   Hàm chỉ lọc đúng `u.window === '5h'`. Nếu tài khoản đã sử dụng hết 100% hạn mức tuần (`u.window === 'week'` và `remainingPct = 0`), nhưng cửa sổ 5 giờ vừa reset về 100%, hàm vẫn trả về `100%`, khiến scheduler đánh giá sai rằng tài khoản còn dồi dào dung lượng.
 - **Mức độ ưu tiên**: **Cao**
 - **Đề xuất**: Lấy giá trị nhỏ nhất giữa các cửa sổ của cùng một tài khoản (`Math.min(5h_remaining, week_remaining)`) trước khi lấy giá trị tốt nhất giữa các tài khoản cùng email.
-
-#### 21. `runnableCapacity` bỏ sót hoàn toàn engine `claude`
-- **Vị trí**: `src/quota/index.ts:108-114`, `178-180`
-- **Mô tả**:
-  Trong `runnableCapacity`:
-  ```ts
-  const engine = getModelEngine(model);
-  return profiles.filter((profile) => profile.engine === engine && ...)
-  ```
-  Hàm `getModelEngine` chỉ trả về `'codex'` hoặc `'agy'`:
-  ```ts
-  export function getModelEngine(model: string): 'agy' | 'codex' {
-    return model.startsWith('codex:') ? 'codex' : 'agy';
-  }
-  ```
-  Các profile có `profile.engine === 'claude'` sẽ không bao giờ khớp với `engine`, dẫn đến việc các worker hoặc chat phiên Claude bị loại bỏ hoàn toàn khỏi danh sách dung lượng có thể chạy được (`runnableCapacity`), làm sai lệch các thông báo quota và status summary.
-- **Mức độ ưu tiên**: **Cao**
-- **Đề xuất**: Bổ sung nhận diện engine `'claude'` trong `getModelEngine` và đưa các model Claude tương ứng vào danh sách kiểm tra dung lượng khả dụng.
 
 #### 22. Lỗi tính sai múi giờ trong `parseResetTime`
 - **Vị trí**: `src/quota/claude-usage.ts:28-39`, `45-66`

@@ -292,6 +292,7 @@ export const TaskDag: React.FC<TaskDagProps> = ({
                 task.currentRun?.model ||
                 (task.modelChain && Array.isArray(task.modelChain) ? task.modelChain[0] : null);
               const runningProfile = task.currentRun?.profileName;
+              const runningEngine = task.currentRun?.engine;
 
               return (
                 <foreignObject
@@ -374,11 +375,11 @@ export const TaskDag: React.FC<TaskDagProps> = ({
                       {/* Running Model / Profile or Project */}
                       {task.status === 'running' && (runningModel || runningProfile) ? (
                         <div
-                          title={`${runningProfile ? `${runningProfile} • ` : ''}${runningModel || ''}`}
+                          title={`${runningEngine ? `${runningEngine} / ` : ''}${runningProfile ? `${runningProfile} / ` : ''}${runningModel || ''}`}
                           className="flex items-center gap-1 text-[var(--t-accent)] truncate max-w-[130px] font-medium"
                         >
                           <Cpu className="w-3 h-3 shrink-0 animate-pulse" />
-                          <span className="truncate">{runningModel || runningProfile}</span>
+                          <span className="truncate">{runningProfile && runningModel ? `${runningProfile} · ${runningModel}` : (runningModel || runningProfile)}</span>
                         </div>
                       ) : (
                         <span className="text-[var(--t-text-3)] truncate max-w-[100px]">

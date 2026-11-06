@@ -3,6 +3,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { getProjects, getStatus, getTaskGraph, getTasks, getTasksPage, resumeTask } from '../api/client';
 import { StatusBadge } from '../components/StatusBadge';
+import { ModelBadge } from '../components/ModelBadge';
 import { KANBAN_STATUSES } from '../utils/tasks';
 import { Task } from '../types/api';
 import { Plus, Filter, ArrowUpRight, Zap, Flame, LayoutGrid, Network, List, FolderKanban, Play } from 'lucide-react';
@@ -202,7 +203,16 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
                       </button>
                     </div>
                   ) : (
-                    <SilentRunIndicator lastActivityAt={task.currentRun?.lastActivityAt} paused={Boolean(task.paused || task.currentRun?.paused)} />
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <SilentRunIndicator lastActivityAt={task.currentRun?.lastActivityAt} paused={Boolean(task.paused || task.currentRun?.paused)} />
+                      {(task.currentRun?.model || task.currentRun?.profileName) && (
+                        <ModelBadge
+                          model={task.currentRun.model}
+                          engine={task.currentRun.engine}
+                          profileName={task.currentRun.profileName}
+                        />
+                      )}
+                    </div>
                   )}
                   {task.currentRun?.noCommitMinutes != null && task.currentRun.noCommitMinutes > 0 && (
                     <span className="inline-flex items-center rounded bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--t-warn)] border border-[color-mix(in_srgb,var(--t-warn)_30%,transparent)]">

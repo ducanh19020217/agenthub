@@ -528,8 +528,13 @@ export const TaskDetailPage: React.FC = () => {
             {task.reviewChain.map((step, index) => (
               <React.Fragment key={`${step.reviewer}-${index}`}>
                 {index > 0 ? <span className="text-[var(--t-text-3)]">→</span> : null}
-                <span className={`rounded-full px-2 py-1 border ${index < (task.reviewStep ?? 0) ? 'border-[var(--t-ok)] text-[var(--t-ok)]' : index === (task.reviewStep ?? 0) ? 'border-[var(--t-accent)] text-[var(--t-accent)]' : 'border-[var(--t-border)] text-[var(--t-text-3)]'}`}>
-                  {step.reviewer} · {step.mode}
+                <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 border ${index < (task.reviewStep ?? 0) ? 'border-[var(--t-ok)] text-[var(--t-ok)]' : index === (task.reviewStep ?? 0) ? 'border-[var(--t-accent)] text-[var(--t-accent)]' : 'border-[var(--t-border)] text-[var(--t-text-3)]'}`}>
+                  <ModelBadge
+                    model={step.reviewer}
+                    engine={step.engine}
+                    profileName={step.profileName}
+                  />
+                  <span>· {step.mode}</span>
                 </span>
               </React.Fragment>
             ))}
@@ -567,6 +572,13 @@ export const TaskDetailPage: React.FC = () => {
                 projectId={task.projectId}
                 size="sm"
               />
+              {task.status === 'running' && (task.currentRun?.model || task.currentRun?.profileName) && (
+                <ModelBadge
+                  model={task.currentRun.model}
+                  engine={task.currentRun.engine}
+                  profileName={task.currentRun.profileName}
+                />
+              )}
               {(task.status === 'review' || (task.reviews && task.reviews.length > 0) || task.reviewChain?.length) && (
                 <span
                   data-testid="reviewer-badge"
@@ -820,9 +832,15 @@ export const TaskDetailPage: React.FC = () => {
           <ul className="space-y-2">
             {task.reviews.map((review) => (
               <li key={review.id} className="flex items-center justify-between gap-3 flex-wrap text-sm">
-                <span className="font-medium text-[var(--t-text)]">
-                  {review.actor || t('taskDetail.unknownReviewer')}
-                  {review.model ? <span className="ml-2 text-xs font-mono text-[var(--t-text-3)]">({review.model})</span> : null}
+                <span className="font-medium text-[var(--t-text)] inline-flex items-center gap-2">
+                  <span>{review.actor || t('taskDetail.unknownReviewer')}</span>
+                  {(review.model || review.engine || review.profileName) ? (
+                    <ModelBadge
+                      model={review.model}
+                      engine={review.engine}
+                      profileName={review.profileName}
+                    />
+                  ) : null}
                 </span>
                 <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-full ${review.verdict === 'approved' ? 'text-[var(--t-ok)] bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)]' : 'text-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)]'}`}>
                   {review.verdict === 'approved' ? t('taskDetail.reviewApproved') : t('taskDetail.reviewChangesRequested')}
@@ -855,6 +873,13 @@ export const TaskDetailPage: React.FC = () => {
                   <span title={evt.type} className="font-mono font-semibold px-1.5 py-0.5 rounded bg-[var(--t-surface-2)] text-[var(--t-text)] border border-[var(--t-border)]">
                     {formatEventType(evt.type, locale)}
                   </span>
+                  {(evt.payload?.model || evt.payload?.engine || evt.payload?.profile) && (
+                    <ModelBadge
+                      model={evt.payload?.model ? String(evt.payload.model) : null}
+                      engine={evt.payload?.engine ? String(evt.payload.engine) : null}
+                      profileName={evt.payload?.profile ? String(evt.payload.profile) : (evt.payload?.profileName ? String(evt.payload.profileName) : null)}
+                    />
+                  )}
                   {evt.ts && (
                     <span className="text-[var(--t-text-3)] font-mono text-[11px]">
                       {Number.isFinite(parseApiTime(evt.ts))
@@ -1028,7 +1053,7 @@ export const TaskDetailPage: React.FC = () => {
                     <td className="px-6 py-3 font-mono text-xs">{r.id}</td>
                     <td className="px-6 py-3 font-medium uppercase text-xs">{r.engine}</td>
                     <td className="px-6 py-3 whitespace-nowrap">
-                      <ModelBadge model={r.model} engine={r.engine} />
+                      <ModelBadge model={r.model} engine={r.engine} profileName={r.profileName} />
                     </td>
                     <td className="px-6 py-3 font-medium">{r.profileName}</td>
                     <td className="px-6 py-3">
@@ -1410,7 +1435,10 @@ export const TaskDetailPage: React.FC = () => {
                         data-testid={`model-item-${idx}`}
                         className="flex items-center justify-between p-1.5 rounded bg-[var(--t-surface)] text-xs border border-[var(--t-border)]"
                       >
-                        <span className="font-mono text-[var(--t-text)] truncate">{model}</span>
+                        <div className="flex items-center gap-2 truncate">
+                          <ModelBadge model={model} />
+                          <span className="font-mono text-[var(--t-text)] truncate">{model}</span>
+                        </div>
                         <div className="flex items-center gap-1">
                           <button
                             type="button"

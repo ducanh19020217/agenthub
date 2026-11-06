@@ -8,7 +8,8 @@ export type TaskStatus =
   | 'blocked'
   | 'failed'
   | 'cancelled'
-  | 'waiting_quota';
+  | 'waiting_quota'
+  | 'pushed';
 
 export interface PerfGroup { cpuPercent: number; rssBytes: number; processes: number; }
 export interface PerfSample { at: string; cpuCount: number; groups: Record<string, PerfGroup>; }
@@ -402,6 +403,17 @@ export interface Task {
   reviewChain?: ReviewChainStep[];
   createdAt: string;
   updatedAt: string;
+  pushedAt?: string | null;
+  pushResult?: string | null | {
+    remote?: string;
+    branch?: string;
+    commit?: string;
+    url?: string | null;
+    compareUrl?: string | null;
+    error?: string | null;
+    reason?: string | null;
+    outputTail?: string | null;
+  };
   reviewer?: 'codex' | 'claude';
   currentRun?: {
     startedAt: string;

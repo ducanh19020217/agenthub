@@ -3743,7 +3743,7 @@ export class TelegramBotService {
     if (type === 'merge.failed') {
       if (p.autoFixCreated === true) return;
       if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
-        /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+        /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'pushed', 'cancelled', 'failed', 'blocked'].includes(t.status)
       )) {
         return;
       }
@@ -4320,7 +4320,7 @@ export class TelegramBotService {
       case 'merge.failed': {
         if (p.autoFixCreated === true) return;
         if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
-          /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+          /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'pushed', 'cancelled', 'failed', 'blocked'].includes(t.status)
         )) {
           return;
         }
@@ -4934,7 +4934,7 @@ export class TelegramBotService {
     this.projectIdleNotified.add(projectId);
     const project = this.projectRepo.get(projectId);
     const name = project?.name || projectId;
-    const doneCount = this.taskRepo.getByProject(projectId).filter((task) => task.status === 'done').length;
+    const doneCount = this.taskRepo.getByProject(projectId).filter((task) => task.status === 'done' || task.status === 'pushed').length;
     this.broadcastMessage(
       `🏁 <b>${this.escapeHtml(name)} đã hết task</b>\nKhông còn task nào đang chờ, chạy hay chờ duyệt. Tổng ${doneCount} task đã hoàn thành.`,
       { inline_keyboard: [[{ text: '🌐 Xem dashboard', url: this.getDashboardUrl(`#/tasks?project=${encodeURIComponent(projectId)}`) }]] },

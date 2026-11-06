@@ -209,7 +209,7 @@ export class NotificationService {
     if (type === 'merge.failed') {
       if (p.autoFixCreated === true) return;
       if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
-        /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+        /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'pushed', 'cancelled', 'failed', 'blocked'].includes(t.status)
       )) {
         return;
       }
@@ -526,7 +526,7 @@ export class NotificationService {
       case 'merge.failed': {
         if (p.autoFixCreated === true) break;
         if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
-          /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+          /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'pushed', 'cancelled', 'failed', 'blocked'].includes(t.status)
         )) {
           break;
         }

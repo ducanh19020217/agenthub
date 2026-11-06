@@ -171,4 +171,36 @@ describe('database migrations', () => {
     migrated.close();
     fresh.close();
   });
+
+  it('migration 72 adds pushedAt, pushResult, and allows status pushed', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-migration-72-test-'));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, 'hub.db');
+    const oldDb = new Database(dbPath);
+    for (let version = 0; version <= 71; version += 1) {
+      oldDb.exec(MIGRATIONS[version]);
+      oldDb.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(String(version));
+      if (version === 0) {
+        oldDb.prepare('INSERT INTO projects (id, name, path) VALUES (?, ?, ?)').run('p', 'Project', dir);
+      }
+    }
+    oldDb.prepare(`
+      INSERT INTO tasks (id, projectId, slug, title, body, status)
+      VALUES ('p/task', 'p', 'task', 'Title', 'body', 'done')
+    `).run();
+    oldDb.close();
+
+    const migrated = openDatabase(dbPath);
+    const cols = (migrated.prepare('PRAGMA table_info(tasks)').all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).toContain('pushedAt');
+    expect(cols).toContain('pushResult');
+
+    // Update existing task to pushed
+    migrated.prepare("UPDATE tasks SET status = 'pushed', pushedAt = '2026-11-07T00:00:00Z', pushResult = '{\"commit\":\"abc\"}' WHERE id = 'p/task'").run();
+    const task = migrated.prepare('SELECT status, pushedAt, pushResult FROM tasks WHERE id = ?').get('p/task') as { status: string; pushedAt: string; pushResult: string };
+    expect(task.status).toBe('pushed');
+    expect(task.pushedAt).toBe('2026-11-07T00:00:00Z');
+    expect(JSON.parse(task.pushResult)).toEqual({ commit: 'abc' });
+    migrated.close();
+  });
 });

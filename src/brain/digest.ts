@@ -376,7 +376,7 @@ export function generateDigest(opts: GenerateDigestOptions): DigestData {
   const dateStr = `${timeStr} ${String(nowDate.getDate()).padStart(2, '0')}/${String(nowDate.getMonth() + 1).padStart(2, '0')}/${nowDate.getFullYear()}`;
 
   // 1. Task counts
-  const doneTasks = opts.taskRepo.getByStatus('done');
+  const doneTasks = [...opts.taskRepo.getByStatus('done'), ...opts.taskRepo.getByStatus('pushed')];
   const runningTasks = opts.taskRepo.getByStatus('running');
   const failedTasks = opts.taskRepo.getByStatus('failed');
   const blockedTasks = opts.taskRepo.getByStatus('blocked');

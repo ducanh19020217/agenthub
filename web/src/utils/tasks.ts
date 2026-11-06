@@ -10,6 +10,7 @@ export const KANBAN_STATUSES: TaskStatus[] = [
   'blocked',
   'failed',
   'done',
+  'pushed',
 ];
 
 export function groupTasksByStatus(tasks: Task[]): Record<TaskStatus, Task[]> {
@@ -23,6 +24,7 @@ export function groupTasksByStatus(tasks: Task[]): Record<TaskStatus, Task[]> {
     blocked: [],
     failed: [],
     done: [],
+    pushed: [],
     cancelled: [],
   };
 

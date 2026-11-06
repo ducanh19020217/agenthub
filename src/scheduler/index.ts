@@ -949,7 +949,7 @@ export class Scheduler {
         this.runRepo.finish(run.id, 'crashed');
         // Terminal tasks must remain terminal even when an old worker row is
         // found during daemon recovery.
-        if (task.status === 'done' || task.status === 'cancelled') continue;
+        if (task.status === 'done' || task.status === 'pushed' || task.status === 'cancelled') continue;
         this.taskRepo.update(run.taskId, { status: 'queued', resume: 1 });
         this.eventBus.emit('run.crashed', run.taskId, {
           runId: run.id,
@@ -3306,7 +3306,7 @@ export class Scheduler {
     const deps: string[] = JSON.parse(task.dependsOn);
     for (const depId of deps) {
       const dep = this.taskRepo.get(depId);
-      if (!dep || dep.status !== 'done') return false;
+      if (!dep || (dep.status !== 'done' && dep.status !== 'pushed')) return false;
     }
     return true;
   }
@@ -4020,7 +4020,7 @@ export class Scheduler {
       this.killTask(taskId, 'cancelled');
     } else {
       const task = this.taskRepo.get(taskId);
-      if (task?.status === 'done' || task?.status === 'cancelled') return;
+      if (task?.status === 'done' || task?.status === 'pushed' || task?.status === 'cancelled') return;
 
       const reviewerRun = this.reviewerRuns.get(taskId);
       if (reviewerRun) {
@@ -4441,7 +4441,7 @@ export class Scheduler {
     const thresholdMs = effectiveAfterHours * 60 * 60 * 1000;
     const now = Date.now();
 
-    const completedTasks = this.taskRepo.getAll().filter((task) => task.status === 'done' || task.status === 'cancelled');
+    const completedTasks = this.taskRepo.getAll().filter((task) => task.status === 'done' || task.status === 'pushed' || task.status === 'cancelled');
     for (const task of completedTasks) {
       if (!task.worktreePath) continue;
 
@@ -4534,7 +4534,7 @@ export class Scheduler {
         if (referenced.has(path.resolve(candidate)) || !isDeletableWorktreePath(this.config.worktreesDir, candidate, [this.config.hubHome, project.path])) continue;
         const task = tasks.find((row) => row.projectId === project.id && row.slug === entry.name);
         if (task?.worktreePath) continue;
-        if (task && task.status !== 'done' && task.status !== 'cancelled') continue;
+        if (task && task.status !== 'done' && task.status !== 'pushed' && task.status !== 'cancelled') continue;
         let isGitWorktree = false;
         try {
           const listed = execFileSync('git', ['-C', project.path, 'worktree', 'list', '--porcelain'], { encoding: 'utf8' });

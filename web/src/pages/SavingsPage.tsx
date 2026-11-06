@@ -402,7 +402,7 @@ export const SavingsPage: React.FC = () => {
                           </div>
                         </td>
                         <td className="px-6 py-3.5 whitespace-nowrap">
-                          <ModelBadge model={task.model} engine={task.engine} />
+                          <ModelBadge model={task.model} engine={task.engine} profileName={task.profileName} />
                         </td>
                         <td className="px-6 py-3.5 text-right font-mono tabular-nums whitespace-nowrap">
                           {task.linesAdded === 0 && task.linesDeleted === 0 ? (

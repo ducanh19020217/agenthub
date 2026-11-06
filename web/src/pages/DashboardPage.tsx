@@ -575,7 +575,7 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <ModelBadge model={worker.model} engine={worker.engine} />
+                        <ModelBadge model={worker.model} engine={worker.engine} profileName={worker.profileName} />
                       </td>
                       <td className="px-6 py-4 font-medium text-[var(--t-text)]">{worker.profileName}</td>
                       <td className="px-6 py-4 text-[var(--t-text-2)]">
@@ -699,7 +699,22 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">
             <div className="font-semibold text-sm">Failover Claude: {claudeFailover.active ? t('dashboard.failoverOn') : t('dashboard.failoverOff')}</div>
-            {claudeFailover.active && claudeFailover.step && <div className="text-sm mt-1">{t('dashboard.failoverUsing')}: {claudeFailover.step.type === 'model' ? claudeFailover.step.model : claudeFailover.step.type === 'profile' ? t('dashboard.failoverUsingProfile', { name: claudeFailover.step.profile || t('common.unknown') }) : claudeFailover.step.type === 'apiKey' ? t('dashboard.failoverUsingApiKey', { used: claudeFailover.dailyCostUSD.toFixed(2), cap: claudeFailover.step.dailyCapUSD ?? 0 }) : claudeFailover.step.type === 'engine' ? claudeFailover.step.engine : t('dashboard.failoverWaitingReset')}</div>}
+            {claudeFailover.active && claudeFailover.step && (
+              <div className="text-sm mt-1 flex items-center gap-1.5 flex-wrap">
+                <span>{t('dashboard.failoverUsing')}:</span>
+                {claudeFailover.step.type === 'model' ? (
+                  <ModelBadge model={claudeFailover.step.model} engine="claude" />
+                ) : claudeFailover.step.type === 'profile' ? (
+                  <span>{t('dashboard.failoverUsingProfile', { name: claudeFailover.step.profile || t('common.unknown') })}</span>
+                ) : claudeFailover.step.type === 'apiKey' ? (
+                  <span>{t('dashboard.failoverUsingApiKey', { used: claudeFailover.dailyCostUSD.toFixed(2), cap: claudeFailover.step.dailyCapUSD ?? 0 })}</span>
+                ) : claudeFailover.step.type === 'engine' ? (
+                  <span>{claudeFailover.step.engine}</span>
+                ) : (
+                  <span>{t('dashboard.failoverWaitingReset')}</span>
+                )}
+              </div>
+            )}
             {claudeFailover.reason && <div className="text-xs mt-1">{t('dashboard.failoverReason')}: {formatReason(claudeFailover.reason, locale)}</div>}
             {claudeFailover.evidence && <div className="text-xs text-[var(--t-text-2)] mt-1 truncate">{t('dashboard.failoverEvidence')}: {claudeFailover.evidence.file}:{claudeFailover.evidence.line} · {new Date(claudeFailover.evidence.observedAt).toLocaleString(locale === 'vi' ? 'vi-VN' : 'en-US')}</div>}
           </div>

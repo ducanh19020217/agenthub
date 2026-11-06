@@ -25,6 +25,11 @@ export const ReviewChainStepSchema = z.object({
 export const ReviewChainSchema = z.array(ReviewChainStepSchema).max(10);
 export type ReviewChainStep = z.infer<typeof ReviewChainStepSchema>;
 
+export interface ReviewChainStepView extends ReviewChainStep {
+  engine?: string | null;
+  profileName?: string | null;
+}
+
 export function parseReviewChain(value: string | null | undefined): ReviewChainStep[] {
   if (!value) return [];
   try {

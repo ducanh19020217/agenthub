@@ -44,6 +44,7 @@ import {
 } from '../utils/models';
 import { useLocale } from '../context/LocaleContext';
 import { UI_Z_INDEX } from './ui/layers';
+import { ModelBadge } from './ModelBadge';
 import { InfoTooltip } from './tour/InfoTooltip';
 import { Department, Project, ProjectSettings, UpdateProjectInput, PresetLevel } from '../types/api';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -1660,8 +1661,11 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
               <div className="p-2.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] flex items-center justify-between">
                 <div>
                   <span className="text-[var(--t-text-3)] block">{t('projects.brainEngine')}</span>
-                  <span className="font-medium text-[var(--t-text)]">
-                    {effectiveConfig?.brain?.engine?.value || 'claude'} ({effectiveConfig?.brain?.model?.value || 'sonnet'})
+                  <span className="font-medium text-[var(--t-text)] inline-flex items-center gap-1.5 mt-0.5">
+                    <ModelBadge
+                      model={effectiveConfig?.brain?.model?.value || 'sonnet'}
+                      engine={effectiveConfig?.brain?.engine?.value || 'claude'}
+                    />
                   </span>
                 </div>
                 <span

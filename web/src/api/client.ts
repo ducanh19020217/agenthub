@@ -39,7 +39,7 @@ import {
   ApplyPresetInput,
   ApplyPresetResult,
   EffectiveConfigResponse,
-  OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto, OpenProjectTypeDto, OpenProjectSyncResult, GiteaStatus, RemoteDeployStatus,
+  OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto, OpenProjectTypeDto, OpenProjectSyncResult, GiteaStatus, RemoteDeployStatus, ProjectGitStatus,
 } from '../types/api';
 import { getActiveLocale, translateApiErrorMessage } from '../utils/apiError';
 
@@ -324,6 +324,9 @@ export async function getProjects(): Promise<Project[]> {
   return apiFetch<Project[]>('/api/projects');
 }
 
+export const getProjectGitStatus = (projectId: string) =>
+  apiFetch<ProjectGitStatus>(`/api/projects/${encodeURIComponent(projectId)}/git`);
+
 export const getOpenProjectSources = () => apiFetch<OpenProjectSource[]>('/api/integrations/openproject/sources');
 export const saveOpenProjectSource = (id: string, data: OpenProjectSourceInput) => apiFetch<OpenProjectSource>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) });
 export const deleteOpenProjectSource = (id: string) => apiFetch<{ ok: boolean }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}`, { method: 'DELETE' });
@@ -334,6 +337,14 @@ export const getOpenProjectStatuses = (id: string) => apiFetch<OpenProjectStatus
 export const getOpenProjectTypes = (id: string) => apiFetch<OpenProjectTypeDto[]>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/types`);
 export const createOpenProjectDailyReport = (id: string) => apiFetch<{ ok: boolean; path: string; content: string }>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/daily-report`, { method: 'POST' });
 export const getOpenProjectTimeEntryActivities = (id: string) => apiFetch<Array<{ id: number; name: string }>>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/time-entry-activities`);
+export interface TimesheetEntryDto { wpId: number; displayId: string; subject: string; hours: number; rawHours: number; estimateHours: number; comment: string; kind: 'commit' | 'manual' | 'mixed'; pinned: boolean; fixedHours?: number; manualIds?: string[]; writtenAt?: string; writeError?: string; }
+export interface TimesheetPreviewDto { sourceId: string; date: string; hours: number; entries: TimesheetEntryDto[]; overMinimum: boolean; fixedHours?: number; fixedOverHours?: boolean; missingFromDate?: number[]; }
+export const getTimesheet = (sourceId: string, date: string) => apiFetch<TimesheetPreviewDto>(`/api/timesheet?sourceId=${encodeURIComponent(sourceId)}&date=${encodeURIComponent(date)}`);
+export const searchOpenProjectWorkPackages = (sourceId: string, q: string) => apiFetch<Array<{ id: number; displayId: string; subject: string }>>(`/api/integrations/openproject/sources/${encodeURIComponent(sourceId)}/work-packages?q=${encodeURIComponent(q)}`);
+export const addTimesheetManual = (input: Record<string, unknown>) => apiFetch('/api/timesheet/manual', { method: 'POST', body: JSON.stringify(input) });
+export const updateTimesheetManual = (id: string, input: Record<string, unknown>) => apiFetch(`/api/timesheet/manual/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(input) });
+export const deleteTimesheetManual = (id: string) => apiFetch(`/api/timesheet/manual/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export const writeTimesheetDay = (input: { sourceId: string; date: string; hours: number }) => apiFetch('/api/timesheet/day', { method: 'PATCH', body: JSON.stringify(input) });
 export const previewOpenProjectTimesheet = (id: string) => apiFetch<unknown>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/timesheet`);
 export const runOpenProjectTimesheet = (id: string) => apiFetch<unknown>(`/api/integrations/openproject/sources/${encodeURIComponent(id)}/timesheet/run`, { method: 'POST', body: JSON.stringify({}) });
 export const saveGiteaToken = (projectId: string, token: string) => apiFetch<{ configured: boolean }>(`/api/projects/${encodeURIComponent(projectId)}/gitea/token`, { method: 'PUT', body: JSON.stringify({ token }) });
@@ -360,6 +371,7 @@ export async function getArchivedProjects(): Promise<Project[]> {
 }
 
 export const inspectProject = (path: string) => apiFetch<ProjectInspection>('/api/projects/inspect', { method: 'POST', body: JSON.stringify({ path }) });
+export const inspectProjectGit = (path: string) => apiFetch<ProjectGitStatus>('/api/projects/inspect-git', { method: 'POST', body: JSON.stringify({ path }) });
 export const createNewProject = (data: CreateNewProjectInput) => apiFetch<Project>('/api/projects/new', { method: 'POST', body: JSON.stringify(data) });
 export const writeProjectGuidance = (projectId: string, content: string) =>
   apiFetch<{ ok: boolean }>(`/api/projects/${encodeURIComponent(projectId)}/guidance`, {

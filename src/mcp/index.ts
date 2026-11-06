@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { getTokenPath, readExistingToken } from '../auth.js';
 import { toRouteId, toTaskId } from '../services/index.js';
 import { formatRunnableCapacity, QuotaCapacitySnapshot } from '../quota/index.js';
+import { formatYYYYMMDD } from '../integrations/openproject/daily-report.js';
 
 export class DaemonDownError extends Error {
   constructor(message = 'AgentHub daemon chưa chạy: `agenthub install-service` hoặc `agenthub daemon`') {
@@ -718,6 +719,22 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
       }
     },
   );
+
+  server.tool('hub_timesheet_get', 'Xem bảng giờ OpenProject đã hợp nhất theo ngày', { sourceId: z.string().optional(), date: z.string().optional() }, async ({ sourceId, date }) => {
+    try {
+      const query = new URLSearchParams(); if (sourceId) query.set('sourceId', sourceId); if (date) query.set('date', date);
+      return { content: [{ type: 'text', text: JSON.stringify(await callApi('GET', `/api/timesheet?${query}`)) }] };
+    } catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_timesheet_add', 'Thêm một việc thủ công vào bảng giờ OpenProject', {
+    sourceId: z.string().optional(), date: z.string().optional(), ticket: z.string().optional(),
+    createTicket: z.object({ subject: z.string(), parent: z.union([z.string(), z.number()]).optional() }).optional(),
+    description: z.string().min(1), activeHours: z.number().finite().min(0).max(24), waitHours: z.number().finite().min(0).max(24).optional(), level: z.enum(['easy', 'hard']).optional(), pinned: z.boolean().optional(),
+  }, async (args) => {
+    try {
+      return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/timesheet/manual', { ...args, sourceId: args.sourceId, date: args.date || formatYYYYMMDD(new Date()) })) }] };
+    } catch (err: unknown) { return handleError(err); }
+  });
 
   server.tool(
     'hub_create_task',

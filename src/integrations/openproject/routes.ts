@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { AgentHubConfig, OpenProjectSource } from '../../config.js';
 import { OpenProjectSourceSchema, saveConfig, updateConfigInMemory } from '../../config.js';
 import { HttpError } from '../../errors.js';
-import { OpenProjectClient } from './client.js';
+import { OpenProjectClient, OpenProjectError } from './client.js';
 import { readOpenProjectKey, saveOpenProjectKey } from './secrets.js';
 import type { OpenProjectSyncResult } from './intake.js';
 
@@ -67,6 +67,10 @@ export interface RegisterOpenProjectRoutesOptions {
   dailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
   timesheetPreview?: (sourceId: string, date?: string) => Promise<unknown>;
   timesheetRun?: (sourceId: string, date?: string, hours?: number) => Promise<unknown>;
+  timesheetDaySet?: (sourceId: string, date: string, hours: number) => Promise<unknown> | unknown;
+  timesheetManualAdd?: (input: unknown) => Promise<unknown>;
+  timesheetManualUpdate?: (id: string, input: unknown) => Promise<unknown>;
+  timesheetManualDelete?: (id: string) => Promise<unknown>;
   decision?: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>;
   triageInput?: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>;
   linkTicket?: (sourceId: string, wpId: number, displayId: string, taskId: string) => void;
@@ -185,16 +189,62 @@ export function registerOpenProjectRoutes(
   fastify.get('/api/integrations/openproject/sources/:id/time-entry-activities', async (req: FastifyRequest) => {
     const { id } = idParams.parse(req.params); const source = sourceOrThrow(config, id); const key = readOpenProjectKey(config.hubHome, id);
     if (!key) throw new HttpError(400, 'bad_request', 'Nguồn chưa có API key');
-    return new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: options.fetch }).listTimeEntryActivities();
+    const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: options.fetch });
+    try {
+      let workPackage: import('./client.js').OpenProjectWorkPackage | undefined;
+      try { workPackage = (await client.searchWorkPackages({}))[0]; } catch { /* project link is a valid form input too */ }
+      return await client.listTimeEntryActivities(workPackage?.id);
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new HttpError(error instanceof OpenProjectError ? error.status : 502, 'openproject_error', `Không thể lấy Activity OpenProject: ${message}`);
+    }
   });
 
   fastify.get('/api/integrations/openproject/sources/:id/timesheet', async (req: FastifyRequest) => {
     const { id } = idParams.parse(req.params); if (!options.timesheetPreview) throw new HttpError(503, 'unavailable', 'Timesheet chưa sẵn sàng');
     const query = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).parse(req.query); return options.timesheetPreview(id, query.date);
   });
+  fastify.get('/api/integrations/openproject/sources/:id/work-packages', async (req: FastifyRequest) => {
+    const { id } = idParams.parse(req.params);
+    const query = z.object({ q: z.string().trim().min(1).max(100) }).parse(req.query);
+    const source = config.integrations.openproject.sources.find((item) => item.id === id);
+    if (!source) throw new HttpError(404, 'not_found', 'Không tìm thấy nguồn OpenProject');
+    const key = readOpenProjectKey(config.hubHome, id);
+    if (!key) throw new HttpError(400, 'bad_request', 'Nguồn chưa có API key');
+    const client = new OpenProjectClient({ baseUrl: source.url, project: source.project, apiKey: key, fetch: options.fetch });
+    return (await client.searchWorkPackages({ query: query.q })).slice(0, 20).map((item) => ({ id: item.id, displayId: item.displayId || String(item.id), subject: item.subject || '' }));
+  });
   fastify.post('/api/integrations/openproject/sources/:id/timesheet/run', async (req: FastifyRequest) => {
     const { id } = idParams.parse(req.params); if (!options.timesheetRun) throw new HttpError(503, 'unavailable', 'Timesheet chưa sẵn sàng');
     const body = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), hours: z.number().min(8).refine((value) => Math.abs(value * 4 - Math.round(value * 4)) < 1e-8, 'hours must be a multiple of 0.25').optional() }).parse(req.body || {}); return options.timesheetRun(id, body.date, body.hours);
+  });
+  const manualBody = z.object({ sourceId: z.string().min(1).optional(), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), ticket: z.string().trim().min(1).optional(), wpId: z.number().int().positive().optional(), createTicket: z.object({ subject: z.string().trim().min(1), parent: z.union([z.string().trim().min(1), z.number().int().positive()]).optional() }).optional(), description: z.string().trim().min(1).max(255), activeHours: z.number().min(0).max(24), waitHours: z.number().min(0).max(24).optional(), level: z.enum(['easy', 'hard']).optional(), pinned: z.boolean().optional() }).strict().refine((body) => Boolean(body.ticket || body.wpId || body.createTicket), 'Cần chọn ticket hoặc tạo ticket mới').refine((body) => body.activeHours + (body.waitHours || 0) > 0 && body.activeHours + (body.waitHours || 0) <= 24, 'Tổng giờ phải lớn hơn 0 và không quá 24');
+  fastify.get('/api/timesheet', async (req: FastifyRequest) => {
+    if (!options.timesheetPreview) throw new HttpError(503, 'unavailable', 'Timesheet chưa sẵn sàng');
+    const query = z.object({ sourceId: z.string().min(1).optional(), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).parse(req.query);
+    const sourceId = query.sourceId || (config.integrations.openproject.sources.length === 1 ? config.integrations.openproject.sources[0].id : undefined);
+    if (!sourceId) throw new HttpError(400, 'bad_request', 'Cần sourceId khi có nhiều nguồn OpenProject');
+    return options.timesheetPreview(sourceId, query.date);
+  });
+  fastify.post('/api/timesheet/manual', async (req: FastifyRequest) => {
+    if (!options.timesheetManualAdd) throw new HttpError(503, 'unavailable', 'Timesheet thủ công chưa sẵn sàng');
+    const body = manualBody.parse(req.body || {}); return options.timesheetManualAdd(body);
+  });
+  fastify.patch('/api/timesheet/manual/:manualId', async (req: FastifyRequest) => {
+    if (!options.timesheetManualUpdate) throw new HttpError(503, 'unavailable', 'Timesheet thủ công chưa sẵn sàng');
+    const params = z.object({ manualId: z.string().min(1) }).parse(req.params);
+    const body = z.object({ sourceId: z.string().min(1).optional(), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), description: z.string().trim().min(1).max(255).optional(), activeHours: z.number().min(0).max(24).optional(), waitHours: z.number().min(0).max(24).optional(), level: z.enum(['easy', 'hard']).optional(), pinned: z.boolean().optional() }).strict().parse(req.body || {});
+    return options.timesheetManualUpdate(params.manualId, body);
+  });
+  fastify.delete('/api/timesheet/manual/:manualId', async (req: FastifyRequest) => {
+    if (!options.timesheetManualDelete) throw new HttpError(503, 'unavailable', 'Timesheet thủ công chưa sẵn sàng');
+    const params = z.object({ manualId: z.string().min(1) }).parse(req.params); return options.timesheetManualDelete(params.manualId);
+  });
+  fastify.patch('/api/timesheet/day', async (req: FastifyRequest) => {
+    if (!options.timesheetDaySet) throw new HttpError(503, 'unavailable', 'Timesheet chưa sẵn sàng');
+    const body = z.object({ sourceId: z.string().min(1), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), hours: z.number().min(8).refine((value) => Math.abs(value * 4 - Math.round(value * 4)) < 1e-8, 'hours must be a multiple of 0.25') }).parse(req.body || {});
+    return options.timesheetDaySet(body.sourceId, body.date, body.hours);
   });
 
   fastify.get('/api/integrations/openproject/sources/:id/work-packages/:wp', async (req: FastifyRequest) => {

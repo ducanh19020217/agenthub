@@ -128,6 +128,17 @@ export interface Project {
   afterMerge?: { steps: string[][]; timeoutSec: number; restartHub: boolean; push?: { remote: string; from: string; to: string; ffOnly: boolean } } | null;
 }
 
+export interface ProjectGitStatus {
+  path: string;
+  currentBranch: string | null;
+  defaultBranch: string;
+  dirty: { changed: boolean; files: number };
+  remote: string | null;
+  localBranches: string[];
+  remoteBranches: string[];
+  aheadBehind: { ahead: number; behind: number } | null;
+}
+
 export interface ProjectInspection {
   path: string;
   exists: boolean;
@@ -252,10 +263,10 @@ export interface OpenProjectSource {
   triage?: 'off' | 'approve' | 'auto'; triageModelChain?: string[]; feedbackStatusId?: number | null;
   split?: OpenProjectSplitConfig;
   dailyReport?: { enabled?: boolean; time: string; weekdaysOnly: boolean; dir?: string; maxItems: number; telegram: boolean };
-  timesheet?: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number };
+  timesheet?: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number; writeEstimate: boolean };
 }
 export interface OpenProjectSplitConfig { typeIds: number[]; keyword: string | null; workerMayRequest: boolean; maxParts: number; createChildTickets: boolean; }
-export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured' | 'split' | 'timesheet'> { split: OpenProjectSplitConfig; timesheet: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number }; key?: string; }
+export interface OpenProjectSourceInput extends Omit<OpenProjectSource, 'keyConfigured' | 'split' | 'timesheet'> { split: OpenProjectSplitConfig; timesheet: { enabled: boolean; time: string; weekdaysOnly: boolean; hours: number; activityId: number | null; minEntryHours: number; roundTo: number; writeEstimate: boolean }; key?: string; }
 export interface OpenProjectStatusDto {
   id: number;
   name: string;
@@ -360,6 +371,7 @@ export interface Task {
   waitReason?: WaitReason;
   blockingDisk?: BlockingDiskInfo | null;
   modelWarnings?: string[];
+  mergeWarning?: string | null;
   dependsOn: string | string[];
   attempt: number;
   resume: number;

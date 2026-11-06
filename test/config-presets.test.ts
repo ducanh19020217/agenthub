@@ -514,7 +514,7 @@ describe('Config Presets, Priority, and Effective Config', () => {
       return JSON.parse((await server.inject({ method: 'GET', url: `/api/projects/${id}/effective-config`, headers: authHeaders() })).body);
     }
 
-    it('áp preset toàn cục "auto" thì project đăng ký sau đó cũng tự merge, có nhánh integration', async () => {
+    it('áp preset toàn cục "auto" thì project đăng ký sau đó cũng tự merge (merge thẳng vào repo, không cần nhánh integration)', async () => {
       const apply = await server.inject({ method: 'POST', url: '/api/presets/apply', headers: authHeaders(), payload: { scope: 'global', preset: 'auto', dryRun: false } });
       expect(apply.statusCode).toBe(200);
       expect(ctx.service.config.defaultProjectPreset).toBe('auto');
@@ -523,7 +523,9 @@ describe('Config Presets, Priority, and Effective Config', () => {
       expect(eff.review.autoMerge.value).toBe(true);
       expect(eff.review.chain.value).toEqual([{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }]);
       const project = ctx.projectRepo.get('later-proj')!;
-      expect(JSON.parse(project.settings!).integration).toMatchObject({ enabled: true, branch: 'agenthub/integration', autoMerge: true });
+      // Project mới tự có merge mapping tới chính repo (upstream 0656299b), nên preset không bật integration.
+      expect(JSON.parse(project.merge!)).toMatchObject({ enabled: true, worktrees: { main: project.path } });
+      expect(JSON.parse(project.settings!).integration).toMatchObject({ enabled: false, autoMerge: true });
     });
 
     it('preset chọn trong wizard được áp thật, và chuỗi review truyền tay thì giữ nguyên', async () => {

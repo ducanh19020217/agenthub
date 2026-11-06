@@ -1,0 +1,80 @@
+# Hoàn thành task: t-check-order-flow – Khối "Kết quả kiểm tra" hiển thị thứ tự chạy và stepper flow
+
+## 1. Tóm tắt việc đã làm
+
+1. **Backend (`src/checks.ts`, `src/db/index.ts`, `web/src/types/api.ts`)**:
+   - Thêm migration idempotent `ensureCheckResultsColumns(db)` trong `src/db/index.ts` để bổ sung hai cột `seq INTEGER` và `startedAt TEXT` vào bảng `check_results`.
+   - Cập nhật `CheckRunner.run()` trong `src/checks.ts`:
+     - Gán và ghi `seq` tuần tự 1-based (1, 2, 3...) và timestamp `startedAt` (ISO string) vào DB cho mỗi check khi chạy.
+     - Giữ nguyên `seq` và `startedAt` khi tái sử dụng kết quả kiểm tra (`reuseSavedResults`).
+   - Cập nhật `getCheckResults(db, taskId)`:
+     - Sắp xếp kết quả trả về theo `ORDER BY c.seq, c.rowid` để đảm bảo đúng thứ tự thực thi của lần chạy gần nhất.
+     - Trả về `seq` và `startedAt` trong object `CheckResult`. Đối với bản ghi cũ chưa có `seq`, fallback theo `rowid`.
+   - Về logic check bị bỏ qua (`skipped`): trong `src/checks.ts`, vòng lặp `for (const check of checks)` chạy tuần tự tất cả các check mà không dừng sớm khi có check thất bại. Logic dừng sớm không tồn tại ở backend, do đó không sinh kết quả `skipped` trong runtime, nhưng interface `CheckResult` ở backend và frontend đã hỗ trợ sẵn trường `skipped?: boolean` để UI hiển thị node màu xám nếu có.
+   - Thêm unit test backend trong `test/checks.test.ts` kiểm tra: chạy 3 check giả trả về đúng thứ tự có `seq` 1..3, `startedAt`, và kiểm tra fallback `ORDER BY rowid` đối với bản ghi cũ không có `seq`.
+
+2. **Frontend (`web/src/components/CheckResults.tsx`, `web/src/locales/vi.ts`, `web/src/locales/en.ts`)**:
+   - **Số thứ tự trên từng dòng check**:
+     - Thêm badge tròn nhỏ (`w-5 h-5 rounded-full`) hiển thị số thứ tự `seq` (1-based, fallback theo vị trí mảng `index + 1`) ở đầu mỗi dòng check trong danh sách.
+     - Giữ nguyên các phần tử hiện có: icon ✓/✗, tên check định dạng qua `formatCheckName`, thời lượng chạy `(durationMs / 1000).toFixed(1)s`, toggle mở rộng `outputTail`, và nút `data-tour="task-capture"` tạo task sửa lỗi.
+   - **Stepper flow ngang**:
+     - Phía trên danh sách kiểm tra, vẽ một thanh stepper nằm ngang: mỗi bước là một node nhỏ hình viên thuốc/chip hiển thị badge số thứ tự và tên rút gọn của check.
+     - Tên rút gọn lấy từ dictionary đa ngữ (`checksShort`) trong locale (ví dụ: `typecheck` -> "Kiểu dữ liệu" / "Typecheck", `test` -> "Unit test", `build` -> "Build", `zero-byte` -> "File rỗng" / "Zero-byte", `uncommitted` -> "Chưa commit" / "Uncommitted", `conflict-markers` -> "Xung đột" / "Conflicts", `agenthub-files` -> "AgentHub", `lint` -> "Lint", `python-check` -> "Python", `dotnet-build` -> ".NET build").
+     - Các node được kết nối bằng icon mũi tên (`ArrowRight` từ `lucide-react`) theo chiều thứ tự chạy.
+     - Màu sắc node tuân thủ nghiêm ngặt design system tokens có sẵn trong `web/src/index.css`:
+       - Đạt (pass): viền và chữ xanh `--t-ok`, nền `--t-ok-bg`.
+       - Thất bại (fail): viền và chữ đỏ `--t-crit`, nền `--t-crit-bg`.
+       - Bỏ qua / chưa chạy (skipped): viền `--t-border`, chữ xám `--t-text-3`, nền `--t-surface-2`.
+     - Tương tác: bấm vào node sẽ mở rộng dòng check tương ứng và cuộn mượt (`scrollIntoView`) tới dòng đó.
+     - Khả năng co giãn: vùng chứa stepper có `overflow-x-auto` và thanh cuộn mảnh `scrollbar-thin`, cho phép cuộn ngang trên màn hình hẹp mà không vỡ layout.
+   - **Thông tin tổng hợp ở góc khối**:
+     - Ở góc khối (trong header bên cạnh nút Chạy lại kiểm tra), hiển thị:
+       - Tổng thời gian chạy toàn bộ chuỗi: ví dụ "Tổng: 4.5s" (định dạng qua `extra.checkTotalDuration`).
+       - Thời điểm bắt đầu `runStartedAt`: định dạng giờ địa phương (ví dụ "Bắt đầu: 14:30:00", định dạng qua `extra.checkStartedAt`), tooltip chứa timestamp gốc đầy đủ.
+   - **Đa ngữ và Tour attributes**:
+     - Tất cả các nhãn và chuỗi văn bản đều qua locale `web/src/locales/vi.ts` và `en.ts`, không hardcode tiếng Việt trong code, vượt qua kiểm tra `i18nAudit`.
+     - Giữ nguyên các thuộc tính `data-tour="task-review"` và `data-tour="task-capture"`.
+
+3. **Frontend Test (`web/src/test/checkResults.test.tsx`)**:
+   - Viết bộ test đầy đủ cho `CheckResults`:
+     - Kiểm tra hiển thị số thứ tự đúng theo thứ tự mảng và `seq`.
+     - Kiểm tra stepper render đúng số node với các màu/status tương ứng (passed, failed, skipped).
+     - Kiểm tra tương tác click node stepper mở đúng nội dung output của dòng kiểm tra tương ứng.
+     - Kiểm tra hiển thị tổng thời gian và mốc `runStartedAt` trong header.
+     - Kiểm tra trạng thái rỗng khi chưa có kết quả kiểm tra.
+
+## 2. Kết quả kiểm tra & nghiệm thu
+
+- `npm run lint`: Đạt (0 errors).
+- `npx tsc --noEmit -p .`: Đạt (0 errors).
+- `npx tsc --noEmit -p web`: Đạt (0 errors).
+- `npm run test -- --run`: Đạt 127/127 test files, 1561/1561 tests passed.
+  - Bao gồm `test/checks.test.ts` (8/8 tests passed) kiểm tra `seq` 1..3, `startedAt` và fallback legacy `rowid`.
+- `npm run test:web -- --run`: Đạt 66/66 test files, 549/549 tests passed.
+  - Bao gồm `web/src/test/checkResults.test.tsx` (5/5 tests passed).
+  - Bao gồm `web/src/test/taskDetailPage.test.tsx` (21/21 tests passed).
+  - Bao gồm `web/src/test/i18nAudit.test.tsx` (31/31 tests passed).
+- `npm run build:web`: Đạt (biên dịch Vite thành công, không phát sinh lỗi).
+
+**Tổng số test:** 2,110 tests passed (1,561 backend + 549 frontend).
+
+## 3. Việc chưa làm được và lý do
+
+- Không có việc tồn đọng.
+- Về trạng thái `skipped` khi check trước thất bại: backend hiện chạy toàn bộ check mà không fail-fast, do đó không sinh trạng thái skipped ở thời điểm này. Tuy nhiên UI và model đã chuẩn bị đầy đủ logic render node xám cho `skipped` khi backend kích hoạt cơ chế này trong tương lai.
+
+## 4. Danh sách commit
+
+1. `494dc907`: `feat(checks): record and return check execution order with seq and startedAt`
+2. `3e168107`: `feat(web): add sequential step numbers and visual stepper flow to CheckResults`
+
+## 5. Danh sách file đã sửa / tạo mới
+
+- `src/db/index.ts`: Bổ sung migration cột `seq` và `startedAt` cho bảng `check_results`.
+- `src/checks.ts`: Ghi `seq` và `startedAt` khi chạy check; cập nhật `getCheckResults` `ORDER BY seq, rowid`.
+- `test/checks.test.ts`: Test thứ tự check, seq 1..3, startedAt và fallback legacy.
+- `web/src/types/api.ts`: Bổ sung `seq`, `startedAt`, `skipped` vào interface `CheckResult`.
+- `web/src/components/CheckResults.tsx`: Thêm badge số thứ tự, thanh stepper flow với mũi tên, hiển thị tổng thời gian và thời điểm bắt đầu.
+- `web/src/locales/vi.ts`: Thêm các key `checkTotalDuration`, `checkStartedAt`, `checkFlow`, `checkSkipped`, `checkStep` và nhóm `checksShort`.
+- `web/src/locales/en.ts`: Thêm các key tương ứng tiếng Anh.
+- `web/src/test/checkResults.test.tsx`: Test chi tiết cho `CheckResults`.

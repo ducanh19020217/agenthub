@@ -28,6 +28,8 @@ export interface ReviewerHistoryItem {
   verdict: ReviewerVerdict;
   feedback: string | null;
   createdAt: string;
+  engine?: string | null;
+  profileName?: string | null;
 }
 
 const REVIEWER_SCHEMA = `{"verdict":"approved|changes_requested","feedback":"specific markdown feedback"}`;

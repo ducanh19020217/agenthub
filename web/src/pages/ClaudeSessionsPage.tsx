@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { apiFetch, getClaudeSessionsPage, rescanClaudeSessions, ClaudeSession } from '../api/client';
 import { Card, DataTable } from '../components/ui';
+import { ModelBadge } from '../components/ModelBadge';
 import { useLocale } from '../context/LocaleContext';
 import { formatNumber } from '../utils/format';
 
@@ -21,7 +22,7 @@ const SessionTable: React.FC<{ sessions: Session[]; page: number; pageSize: numb
       columns={[
         { key: 'title', title: t('extra.claudeSessions'), sortable: true, sortValue: (session) => session.title || session.sessionId, render: (session) => <div className="min-w-[260px]"><Link className="hover:text-[var(--t-accent)]" to={`/claude-sessions/${encodeURIComponent(session.sessionId)}`}><span className={`inline-block w-2 h-2 rounded-full mr-2 ${session.active ? 'bg-[var(--t-ok)]' : 'bg-[var(--t-text-3)]'}`} title={session.active ? t('claudeSessions.active') : ''} />{session.title || (session.sessionId.length > 8 ? session.sessionId.slice(0, 8) : session.sessionId)}</Link><div className="text-xs text-[var(--t-text-3)] truncate max-w-[320px]" title={session.cwd}>{session.cwd}</div></div> },
         { key: 'messages', title: t('extra.messages'), sortable: true, sortValue: (session) => session.messages, render: (session) => session.messages },
-        { key: 'model', title: t('extra.model'), render: (session) => session.model || t('extra.unknown') },
+        { key: 'model', title: t('extra.model'), render: (session) => session.model ? <ModelBadge model={session.model} engine="claude" /> : t('extra.unknown') },
         { key: 'tokens', title: t('extra.token'), render: (session) => formatTokens(session.effectiveTokens, locale) },
         { key: 'task', title: t('extra.task'), render: (session) => session.topTasks.length > 0 ? session.topTasks.map((task) => `${formatTaskId(task.taskId, t('claudeSessions.outsideTask'))} (${formatTokens(task.effectiveTokens, locale)})`).join(', ') : t('claudeSessions.outsideTask') },
         { key: 'lastAt', title: t('extra.lastActive'), sortable: true, sortValue: (session) => session.lastAt || '', render: (session) => session.lastAt ? new Date(session.lastAt).toLocaleString(locale === 'vi' ? 'vi-VN' : 'en-US') : '' },
@@ -67,7 +68,7 @@ const SessionDetail: React.FC<{ data: SessionDetail; sessionId: string }> = ({ d
             </span>
           )}
         </div>
-        <p className="text-sm text-[var(--t-text-3)] mt-1 break-all">{data.cwd} · {data.model || t('extra.unknown')}</p>
+        <p className="text-sm text-[var(--t-text-3)] mt-1 break-all flex items-center gap-1.5 flex-wrap"><span>{data.cwd}</span><span>·</span>{data.model ? <ModelBadge model={data.model} engine="claude" /> : <span>{t('extra.unknown')}</span>}</p>
         <label className="flex items-center gap-2 mt-4 text-sm cursor-pointer">
           <input
             type="checkbox"

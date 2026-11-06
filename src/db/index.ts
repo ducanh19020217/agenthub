@@ -1000,6 +1000,11 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE tasks ADD COLUMN cancelReason TEXT;`,
   // Migration 69: ai/nguồn nào hủy task (dashboard, telegram:@user, mcp, system:*).
   `ALTER TABLE tasks ADD COLUMN cancelledBy TEXT;`,
+  // Migration 70: engine and profileName for reviews
+  `
+  ALTER TABLE reviews ADD COLUMN engine TEXT;
+  ALTER TABLE reviews ADD COLUMN profileName TEXT;
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -1023,7 +1028,23 @@ export function openDatabase(dbPath: string): Database.Database {
   currentVersion = repairForkAvatarMigration(db, currentVersion);
 
   for (let i = currentVersion + 1; i < MIGRATIONS.length; i++) {
-    db.exec(MIGRATIONS[i]);
+    try {
+      db.exec(MIGRATIONS[i]);
+    } catch (error) {
+      if (String(error).includes('duplicate column name')) {
+        for (const stmt of MIGRATIONS[i].split(';')) {
+          const trimmed = stmt.trim();
+          if (!trimmed) continue;
+          try {
+            db.exec(trimmed);
+          } catch (inner) {
+            if (!String(inner).includes('duplicate column name')) throw inner;
+          }
+        }
+      } else {
+        throw error;
+      }
+    }
     db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(
       String(i),
     );
@@ -2240,6 +2261,8 @@ export interface ReviewRow {
   feedback: string | null;
   createdAt: string;
   actor: string;
+  engine: string | null;
+  profileName: string | null;
 }
 
 export class ReviewRepo {
@@ -2255,12 +2278,28 @@ export class ReviewRepo {
       .all(taskId) as ReviewRow[];
   }
 
-  insert(row: { id: string; taskId: string; verdict: string; feedback?: string | null; actor?: string }): void {
+  insert(row: {
+    id: string;
+    taskId: string;
+    verdict: string;
+    feedback?: string | null;
+    actor?: string;
+    engine?: string | null;
+    profileName?: string | null;
+  }): void {
     this.db
       .prepare(
-        'INSERT INTO reviews (id, taskId, verdict, feedback, actor) VALUES (?, ?, ?, ?, ?)',
+        'INSERT INTO reviews (id, taskId, verdict, feedback, actor, engine, profileName) VALUES (?, ?, ?, ?, ?, ?, ?)',
       )
-      .run(row.id, row.taskId, row.verdict, row.feedback || null, row.actor || 'claude');
+      .run(
+        row.id,
+        row.taskId,
+        row.verdict,
+        row.feedback || null,
+        row.actor || 'claude',
+        row.engine || null,
+        row.profileName || null,
+      );
   }
 }
 

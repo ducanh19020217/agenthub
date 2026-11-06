@@ -5,7 +5,7 @@
    - Khi task count > 0: Ô hiển thị vòng sáng pulse quanh viền bằng CSS keyframes `@keyframes flow-pulse` sử dụng biến màu CSS tương ứng (`var(--status-${status}-color, var(--t-accent))`), kèm thuộc tính `data-active="true"`.
    - Các icon trong ô chuyển động nhẹ theo nhịp đặc trưng: Play nhịp nhẹ (`flow-icon-play`), Flask lắc nhẹ (`flow-icon-flask`), ScanEye (Review) chớp mắt (`flow-icon-review`).
    - Khi count = 0: Ô giữ trạng thái tĩnh như ban đầu, không có vòng sáng và không có `data-active`.
-   - Đối với ô `review`: ghi nhận DEC-017 trong `docs/DECISIONS.md`, coi ô review đang hoạt động khi `total > 0` vì API REST hiện tại không phân biệt trạng thái chạy subprocess của reviewer ở cấp độ count status.
+   - Đối với ô `review`: ghi nhận DEC-018 trong `docs/DECISIONS.md`, coi ô review đang hoạt động khi `total > 0` vì API REST hiện tại không phân biệt trạng thái chạy subprocess của reviewer ở cấp độ count status.
 
 2. **Mũi tên dòng chảy chuyển động (marching ants)**:
    - Các cạnh dẫn vào/ra ô đang hoạt động được animate bằng `stroke-dasharray="6 5"` kết hợp `@keyframes flow-edge-flow` (chuyển động `stroke-dashoffset` theo hướng mũi tên, chu kỳ ~1.2s), gắn thuộc tính `data-animated="true"`.
@@ -42,7 +42,7 @@
 - `web/src/locales/vi.ts`: Key `tasks.flow.runningMore`.
 - `web/src/locales/en.ts`: Key `tasks.flow.runningMore`.
 - `web/src/components/TaskFlow.tsx`: Live animation, tách `<text>` cho count bounce, dynamic refetchInterval, running tasks preview và loading guard, `data-active`, và `data-animated`.
-- `docs/DECISIONS.md`: Thêm DEC-017 giải thích trạng thái active của ô review.
+- `docs/DECISIONS.md`: Thêm DEC-018 giải thích trạng thái active của ô review.
 - `web/src/test/taskFlow.test.tsx`: 10 unit test kiểm tra toàn bộ tiêu chí (a)-(f).
 
 ## Kết quả lint / typecheck / test / build

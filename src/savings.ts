@@ -255,6 +255,7 @@ export interface SavingsTaskItem {
   completedAt: string | null;
   claudeCostSource?: 'measured' | 'estimated';
   claudeEffectiveTokens?: number;
+  profileName?: string | null;
 }
 
 export interface SavingsDailyItem {
@@ -408,12 +409,14 @@ export class SavingsService {
       let taskDurationMs = 0;
       let lastModel = '';
       let lastEngine = '';
+      let lastProfile: string | null = null;
       let completedAt: string | null = null;
       const measured = this.claudeSessionRepo?.taskCost(task.id);
 
       for (const run of runs) {
         lastModel = run.model || lastModel;
         lastEngine = run.engine || lastEngine;
+        lastProfile = run.profileName || lastProfile;
         if (run.outcome === 'done' && run.endedAt) {
           completedAt = run.endedAt;
         }
@@ -508,6 +511,7 @@ export class SavingsService {
         claudeCostTokens += taskClaudeCost;
       }
 
+
       taskItems.push({
         taskId: task.id,
         slug: task.slug,
@@ -516,6 +520,7 @@ export class SavingsService {
         status: task.status,
         model: lastModel || (task.level === 'hard' ? 'gemini-3.8-flash-high' : 'gemini-3.8-flash-medium'),
         engine: lastEngine || 'agy',
+        profileName: lastProfile,
         linesAdded: taskLinesAdded,
         linesDeleted: taskLinesDeleted,
         filesChanged: taskFilesChanged,

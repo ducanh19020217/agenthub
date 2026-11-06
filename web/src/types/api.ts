@@ -92,7 +92,12 @@ export interface ProjectMerge {
   checks: string[];
   timeoutSec: number;
 }
-export interface ReviewChainStep { reviewer: string; mode: 'gate' | 'final'; }
+export interface ReviewChainStep {
+  reviewer: string;
+  mode: 'gate' | 'final';
+  engine?: string | null;
+  profileName?: string | null;
+}
 export interface ProjectReview { chain: ReviewChainStep[]; maxRounds: number; }
 export interface ReviewerOrderItem { engine: 'codex' | 'claude'; model: string; profiles: string[]; }
 export interface ReviewerFallback { onUnavailable: boolean; onBusyAfterMin: number; onError: boolean; }
@@ -330,6 +335,8 @@ export interface Review {
   createdAt: string;
   actor?: string;
   model?: string;
+  engine?: string | null;
+  profileName?: string | null;
 }
 
 export type WaitReason =
@@ -406,6 +413,7 @@ export interface Task {
     loopingCommand?: string | null;
     model?: string;
     profileName?: string;
+    engine?: string | null;
     paused?: boolean;
     pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
     rss?: number;
@@ -713,6 +721,7 @@ export interface SavingsTaskItem {
   completedAt: string | null;
   claudeCostSource?: 'measured' | 'estimated';
   claudeEffectiveTokens?: number;
+  profileName?: string | null;
 }
 
 export interface SavingsReport {
@@ -1083,6 +1092,7 @@ export interface TaskGraphNode {
   currentRun?: {
     model?: string;
     profileName?: string;
+    engine?: string | null;
   } | null;
   blockedCount: number;
   isCritical: boolean;

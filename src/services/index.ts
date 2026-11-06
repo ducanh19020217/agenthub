@@ -71,7 +71,7 @@ import { mergeTaskIntoBase, MergeError } from '../merge.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
-import { ReviewChainSchema, isAutomatedStep, parseReviewChain, type ReviewChainStep } from '../review-chain.js';
+import { ReviewChainSchema, isAutomatedStep, parseReviewChain, type ReviewChainStep, type ReviewChainStepView } from '../review-chain.js';
 import { isAutoReviewer } from '../reviewer.js';
 import { isKnownModel } from '../quota/index.js';
 import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, ReviewerOrderSchema, reviewerSettingsFromLegacy } from '../reviewer-config.js';
@@ -452,6 +452,8 @@ export const ReviewTaskSchema = z.object({
   source: z.enum(['content', 'operational']).optional().default('content'),
   /** Omitted: merge when the project has auto-merge on, so an approval from the brain/MCP never strands code. */
   merge: z.boolean().optional(),
+  engine: z.string().nullable().optional(),
+  profileName: z.string().nullable().optional(),
 }).refine(
   (d) => d.verdict !== 'changes_requested' || (typeof d.feedback === 'string' && d.feedback.trim().length > 0),
   { message: 'Feedback là bắt buộc khi changes_requested' },
@@ -3540,6 +3542,9 @@ export class AppService {
           noCommitMinutes: run.noCommitMinutes ?? null,
           isLooping: run.isLooping ?? false,
           loopingCommand: run.loopingCommand ?? null,
+          model: run.model,
+          profileName: run.profileName,
+          engine: run.engine?.id || null,
           paused: Boolean(run.paused),
           pauseReason: run.pauseReason ?? null,
           rss: run.rss ?? 0,
@@ -3659,13 +3664,21 @@ export class AppService {
     const reviewsWithModels = reviews.map((review) => {
       const event = completedReviewEvents.find((candidate) => {
         if (!candidate.payload || typeof candidate.payload !== 'object') return false;
-        const payload = candidate.payload as { actor?: string; verdict?: string; model?: string };
+        const payload = candidate.payload as { actor?: string; verdict?: string; model?: string; engine?: string; profile?: string };
         return payload.actor === review.actor && payload.verdict === review.verdict && typeof payload.model === 'string';
       });
-      const model = event && typeof event.payload === 'object' && event.payload
-        ? (event.payload as { model?: string }).model
+      const payload = event && typeof event.payload === 'object' && event.payload
+        ? (event.payload as { model?: string; engine?: string; profile?: string })
         : undefined;
-      return model ? { ...review, model } : review;
+      const model = payload?.model;
+      const engine = review.engine || payload?.engine || (review.actor === 'claude-reviewer' || review.actor === 'claude' ? 'claude' : review.actor === 'codex-reviewer' ? 'codex' : null);
+      const profileName = review.profileName || payload?.profile || null;
+      return {
+        ...review,
+        ...(model ? { model } : {}),
+        engine,
+        profileName,
+      };
     });
 
     const isFallback = events.some((e) => e.type === 'review.fallback');
@@ -3708,6 +3721,9 @@ export class AppService {
         noCommitMinutes: activeRun.noCommitMinutes ?? null,
         isLooping: activeRun.isLooping ?? false,
         loopingCommand: activeRun.loopingCommand ?? null,
+        model: activeRun.model,
+        profileName: activeRun.profileName,
+        engine: activeRun.engine?.id || null,
         paused: Boolean(activeRun.paused),
         pauseReason: activeRun.pauseReason ?? null,
         rss: activeRun.rss ?? 0,
@@ -3715,7 +3731,19 @@ export class AppService {
       } : null,
       runs: runs.map(apiRun),
       reviews: reviewsWithModels.map(apiReview),
-      reviewChain: reviewSettings?.chain || parseReviewChain(project?.reviewChain),
+      reviewChain: (() => {
+        const rawChain: ReviewChainStep[] = (Array.isArray(reviewSettings?.chain) ? reviewSettings.chain as ReviewChainStep[] : undefined) || parseReviewChain(project?.reviewChain);
+        return rawChain.map((step): ReviewChainStepView => {
+          const stepEngine = step.reviewer.startsWith('codex:')
+            ? 'codex'
+            : (step.reviewer === 'claude' ? 'claude' : null);
+          return {
+            ...step,
+            engine: stepEngine,
+            profileName: null,
+          };
+        });
+      })(),
       mergeAvailable: configuredMerge,
       mergeUnavailableReason: configuredMerge ? null : 'Project chưa cấu hình merge tự động. Mở Cài đặt dự án → Integration để bật.',
       reviewStep: task.reviewStep ?? 0,
@@ -4634,6 +4662,9 @@ export class AppService {
       }
     }
 
+    const fallbackEngine = parsed.by === 'claude-reviewer' || parsed.by === 'claude-review' ? 'claude' : parsed.by === 'codex-reviewer' ? 'codex' : null;
+    const reviewEngine = parsed.engine || fallbackEngine;
+    const reviewProfile = parsed.profileName || null;
     if (!['codex-reviewer', 'claude-reviewer', 'claude-review'].includes(parsed.by || '')) {
       this.reviewRepo.insert({
         id: crypto.randomUUID(),
@@ -4641,10 +4672,15 @@ export class AppService {
         verdict: parsed.verdict,
         feedback: parsed.feedback || null,
         actor: parsed.by || 'claude',
+        engine: reviewEngine,
+        profileName: reviewProfile,
       });
     }
 
-    this.scheduler.reviewTask(taskId, parsed.verdict, parsed.feedback, parsed.by, parsed.source);
+    this.scheduler.reviewTask(taskId, parsed.verdict, parsed.feedback, parsed.by, parsed.source, {
+      engine: reviewEngine,
+      profileName: reviewProfile,
+    });
     if (parsed.verdict === 'approved' && this.knowledgeRepo) {
       const completed = this.taskRepo.get(taskId);
       const donePath = completed?.worktreePath ? path.join(completed.worktreePath, '.agenthub', 'DONE') : null;

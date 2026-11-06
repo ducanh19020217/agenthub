@@ -48,15 +48,16 @@
 - `npm run lint`: Đạt (0 errors).
 - `npx tsc --noEmit -p .`: Đạt (0 errors).
 - `npx tsc --noEmit -p web`: Đạt (0 errors).
-- `npm run test -- --run`: Đạt 127/127 test files, 1561/1561 tests passed.
+- `npm run test -- --run`: Đạt 130/130 test files, 1595/1595 tests passed.
   - Bao gồm `test/checks.test.ts` (8/8 tests passed) kiểm tra `seq` 1..3, `startedAt` và fallback legacy `rowid`.
-- `npm run test:web -- --run`: Đạt 66/66 test files, 549/549 tests passed.
+  - Bao gồm `test/migrations-append-only.test.ts` (1/1 tests passed) bảo đảm migration lock hợp lệ sau merge.
+- `npm run test:web -- --run`: Đạt 68/68 test files, 585/585 tests passed.
   - Bao gồm `web/src/test/checkResults.test.tsx` (5/5 tests passed).
-  - Bao gồm `web/src/test/taskDetailPage.test.tsx` (21/21 tests passed).
+  - Bao gồm `web/src/test/taskDetailPage.test.tsx` (22/22 tests passed).
   - Bao gồm `web/src/test/i18nAudit.test.tsx` (31/31 tests passed).
 - `npm run build:web`: Đạt (biên dịch Vite thành công, không phát sinh lỗi).
 
-**Tổng số test:** 2,110 tests passed (1,561 backend + 549 frontend).
+**Tổng số test:** 2,180 tests passed (1,595 backend + 585 frontend).
 
 ## 3. Việc chưa làm được và lý do
 
@@ -67,10 +68,13 @@
 
 1. `494dc907`: `feat(checks): record and return check execution order with seq and startedAt`
 2. `3e168107`: `feat(web): add sequential step numbers and visual stepper flow to CheckResults`
+3. `29eecf40`: `docs(tasks): add completion report for t-check-order-flow`
+4. `27c1fa40`: `Merge branch 'agenthub/integration' into agenthub/t-check-order-flow`
 
 ## 5. Danh sách file đã sửa / tạo mới
 
-- `src/db/index.ts`: Bổ sung migration cột `seq` và `startedAt` cho bảng `check_results`.
+- `src/db/index.ts`: Bổ sung migration cột `seq` và `startedAt` cho bảng `check_results` (migration 71 sau khi resolve conflict với migration 65-70 trên integration).
+- `test/fixtures/migrations.lock`: Cập nhật hash cho migration 71.
 - `src/checks.ts`: Ghi `seq` và `startedAt` khi chạy check; cập nhật `getCheckResults` `ORDER BY seq, rowid`.
 - `test/checks.test.ts`: Test thứ tự check, seq 1..3, startedAt và fallback legacy.
 - `web/src/types/api.ts`: Bổ sung `seq`, `startedAt`, `skipped` vào interface `CheckResult`.

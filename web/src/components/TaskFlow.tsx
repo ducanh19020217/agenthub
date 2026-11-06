@@ -277,7 +277,7 @@ const FlowNodeView: React.FC<{
                 )}
               </text>
             </>
-          ) : total > 1 ? (
+          ) : runningTasks[0] && total > 1 ? (
             <text x={node.x + 28} y={node.y + 101} fontSize={10} fontWeight={600} style={{ fill: 'var(--t-accent)' }}>
               {t('tasks.flow.runningMore', { count: String(total - 1) })}
             </text>

@@ -361,6 +361,61 @@ export function registerOpenProjectRoutes(
     }
   });
 
+  fastify.post('/api/integrations/openproject/sources/:id/clone', async (req: FastifyRequest) => {
+    const { id } = idParams.parse(req.params);
+    const source = sourceOrThrow(config, id);
+    const body = z.object({ project: z.string().min(1), id: z.string().regex(/^[a-z0-9-]+$/).optional() }).parse(req.body || {});
+    const newId = body.id ?? `openproject-${Date.now()}`;
+    const newProject = body.project.trim();
+
+    // Validate: new ID must not already exist
+    const idExists = config.integrations.openproject.sources.some((s) => s.id === newId);
+    if (idExists) throw new HttpError(400, 'duplicate_id', `ID "${newId}" đã tồn tại`);
+
+    // Validate: project must not conflict with another source sharing the same url
+    const conflict = config.integrations.openproject.sources.find(
+      (s) => s.id !== id && s.url === source.url && s.project === newProject,
+    );
+    if (conflict) throw new HttpError(400, 'duplicate_project', `Project "${newProject}" đã tồn tại ở nguồn ${conflict.id}`);
+
+    // Clone config: copy all fields, override id and project, disable timesheet/dailyReport
+    const cloned = OpenProjectSourceSchema.parse({
+      ...source,
+      id: newId,
+      project: newProject,
+      timesheet: { ...source.timesheet, enabled: false },
+      dailyReport: source.dailyReport ? { ...source.dailyReport, enabled: false } : { enabled: false, time: '08:00', weekdaysOnly: true, maxItems: 10, telegram: false },
+    });
+
+    // Optionally filter type IDs that don't exist in the new project
+    const key = readOpenProjectKey(config.hubHome, id);
+    if (key) {
+      try {
+        const client = new OpenProjectClient({ baseUrl: source.url, project: newProject, apiKey: key, fetch: options.fetch });
+        const typesCollection = await client.listTypes();
+        // Always filter when we get a successful response (even if list is empty)
+        const validTypeIds = new Set((typesCollection._embedded?.elements || []).map((t) => t.id));
+        if (cloned.createTypeId !== null && !validTypeIds.has(cloned.createTypeId)) {
+          (cloned as { createTypeId: number | null }).createTypeId = null;
+        }
+        cloned.split.typeIds = cloned.split.typeIds.filter((tid) => validTypeIds.has(tid));
+      } catch {
+        // Network error - keep original type IDs, do not fail
+      }
+    }
+
+    // Copy API key (server-side only)
+    if (key) {
+      saveOpenProjectKey(config.hubHome, newId, key);
+    }
+
+    persist(config, [...config.integrations.openproject.sources, cloned]);
+    return {
+      ...cloned,
+      keyConfigured: readOpenProjectKey(config.hubHome, newId) !== null,
+    };
+  });
+
   fastify.post('/api/integrations/openproject/sources/:id/sync', async (req: FastifyRequest) => {
     const { id } = idParams.parse(req.params);
     sourceOrThrow(config, id);

@@ -946,6 +946,11 @@ export const MIGRATIONS: string[] = [
     PRIMARY KEY (source_id, spent_on, wp_id)
   );
   `,
+  // Migration 65: check execution sequence and startedAt timestamp.
+  `
+  ALTER TABLE check_results ADD COLUMN seq INTEGER;
+  ALTER TABLE check_results ADD COLUMN startedAt TEXT;
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -969,13 +974,18 @@ export function openDatabase(dbPath: string): Database.Database {
   currentVersion = repairForkAvatarMigration(db, currentVersion);
 
   for (let i = currentVersion + 1; i < MIGRATIONS.length; i++) {
-    db.exec(MIGRATIONS[i]);
+    try {
+      db.exec(MIGRATIONS[i]);
+    } catch (error) {
+      if (!String(error).includes('duplicate column name')) throw error;
+    }
     db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(
       String(i),
     );
   }
   ensureProfileAvatarColumn(db);
   ensureSchedulerLimitColumns(db);
+  ensureCheckResultsColumns(db);
   cleanExpiredClaudeLimits(db);
 
   return db;
@@ -1027,6 +1037,19 @@ function ensureSchedulerLimitColumns(db: Database.Database): void {
   add('profiles', 'consecutiveCrashes', 'INTEGER NOT NULL DEFAULT 0');
   add('profiles', 'lastCrashAt', 'INTEGER');
   add('profiles', 'coolingUntil', 'INTEGER');
+}
+
+function ensureCheckResultsColumns(db: Database.Database): void {
+  const add = (column: string, definition: string) => {
+    if (hasColumn(db, 'check_results', column)) return;
+    try {
+      db.exec(`ALTER TABLE check_results ADD COLUMN ${column} ${definition}`);
+    } catch (error) {
+      if (!String(error).includes('duplicate column name')) throw error;
+    }
+  };
+  add('seq', 'INTEGER');
+  add('startedAt', 'TEXT');
 }
 
 // Repository helpers

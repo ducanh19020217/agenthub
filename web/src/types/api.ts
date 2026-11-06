@@ -451,6 +451,10 @@ export interface CheckResult {
   exitCode: number | null;
   durationMs: number;
   outputTail: string;
+  runId?: string;
+  runStartedAt?: string;
+  seq?: number;
+  startedAt?: string;
 }
 
 export interface TaskDetail extends Task {

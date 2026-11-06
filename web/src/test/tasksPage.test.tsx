@@ -60,7 +60,7 @@ describe('TasksPage & Kanban Long Lists', () => {
     vi.restoreAllMocks();
   });
 
-  function renderPage(initialEntry = '/tasks') {
+  function renderPage(initialEntry = '/tasks?view=kanban') {
     return render(
       <QueryClientProvider client={queryClient}>
         <LocaleProvider initialLocale="vi">

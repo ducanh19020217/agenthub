@@ -23,7 +23,8 @@ describe('Git inspect API & service', () => {
     fs.mkdirSync(notGitDir, { recursive: true });
 
     // Initialize git repo with commits and branches
-    execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir, stdio: 'ignore' });
+    execFileSync('git', ['init'], { cwd: repoDir, stdio: 'ignore' });
+    execFileSync('git', ['checkout', '-b', 'main'], { cwd: repoDir, stdio: 'ignore' });
     execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir, stdio: 'ignore' });
     execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir, stdio: 'ignore' });
     fs.writeFileSync(path.join(repoDir, 'README.md'), '# Test Project');

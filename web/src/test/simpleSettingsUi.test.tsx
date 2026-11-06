@@ -206,11 +206,20 @@ describe('Simple Settings UI (f-simple-settings-ui)', () => {
       expect(screen.queryByTestId('preset-active-custom')).not.toBeInTheDocument();
     });
 
-    it('says when the config matches no preset', async () => {
-      vi.spyOn(client, 'getCurrentPreset').mockResolvedValue({ preset: 'custom' });
+    it('says when the config matches no preset and shows which preset it came from', async () => {
+      vi.spyOn(client, 'getCurrentPreset').mockResolvedValue({
+        preset: 'custom',
+        basePreset: 'balanced',
+        baseFromHistory: true,
+        mismatches: ['autoFixOnFail', 'reviewer.order'],
+      });
       renderWithProviders(<SettingsPage />);
       await waitFor(() => expect(screen.getByTestId('preset-active-custom')).toBeInTheDocument());
       expect(screen.queryByTestId('preset-active-balanced')).not.toBeInTheDocument();
+      expect(screen.getByTestId('preset-base-balanced')).toBeInTheDocument();
+      expect(screen.queryByTestId('preset-base-safe')).not.toBeInTheDocument();
+      expect(screen.getByTestId('preset-status-mismatches').textContent).toContain('Tự sửa khi check fail');
+      expect(screen.getByTestId('preset-status-mismatches').textContent).toContain('Chuỗi reviewer');
     });
 
     it('triggers dry-run on preset card click and displays diff table preview', async () => {

@@ -87,6 +87,7 @@ export const TaskDetailPage: React.FC = () => {
 
   // Modals
   const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
   const [showRetryModal, setShowRetryModal] = useState(false);
   const [retryNote, setRetryNote] = useState('');
   const [showChangesModal, setShowChangesModal] = useState(false);
@@ -248,7 +249,7 @@ export const TaskDetailPage: React.FC = () => {
   });
 
   const cancelMutation = useMutation({
-    mutationFn: () => cancelTask(id),
+    mutationFn: () => cancelTask(id, cancelReason),
     onSuccess: () => {
       setShowCancelModal(false);
       queryClient.invalidateQueries({ queryKey: ['task', id] });
@@ -815,6 +816,19 @@ export const TaskDetailPage: React.FC = () => {
         </div>
       </div>
 
+      {task.status === 'cancelled' && (
+        <section data-testid="task-cancelled-banner" className="rounded-xl border border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_8%,transparent)] p-4 text-sm space-y-1">
+          <div className="font-semibold text-[var(--t-text)] inline-flex items-center gap-1.5"><XCircle className="w-4 h-4 text-[var(--t-crit)]" />{t('taskDetail.cancelledTitle')}</div>
+          <div className="text-[var(--t-text-2)]">
+            <span className="font-medium">{t('taskDetail.cancelledReason')}:</span>{' '}
+            {task.cancelReason?.trim() ? task.cancelReason : <span className="italic text-[var(--t-text-3)]">{t('taskDetail.cancelledNoReason')}</span>}
+          </div>
+          <div className="text-xs text-[var(--t-text-3)]">
+            {t('taskDetail.cancelledBy')}: <code className="font-mono">{task.cancelledBy || t('taskDetail.cancelledByUnknown')}</code> · {new Date(parseApiTime(task.updatedAt)).toLocaleString()}
+          </div>
+        </section>
+      )}
+
       {task.modelWarnings?.length ? (
         <div className="rounded-xl border border-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_12%,transparent)] px-4 py-3 text-sm text-[var(--t-text)]">
           <strong>{t('taskDetail.modelWarningTitle')}</strong>
@@ -1244,6 +1258,17 @@ export const TaskDetailPage: React.FC = () => {
             <p className="text-sm text-[var(--t-text-3)]">
               {t('taskDetail.cancelDesc')}
             </p>
+            <label className="block space-y-1">
+              <span className="text-xs font-semibold text-[var(--t-text)]">{t('taskDetail.cancelReasonLabel')}</span>
+              <textarea
+                data-testid="cancel-reason-input"
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                placeholder={t('taskDetail.cancelReasonPlaceholder')}
+                rows={3}
+                className="w-full text-sm rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-[var(--t-text)] focus:outline-none focus:ring-2 focus:ring-[var(--t-accent)]"
+              />
+            </label>
             <div className="flex justify-end gap-3 pt-2">
               <button
                 type="button"

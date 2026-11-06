@@ -176,30 +176,88 @@ export function detectPresetMatch(
   return true;
 }
 
+export type GlobalPresetField =
+  | 'brain.mode'
+  | 'brain.permissions'
+  | 'autoFixOnFail'
+  | 'planning.requireApproval'
+  | 'planning.approvalMinTasks'
+  | 'reviewer.maxChangesRequested'
+  | 'reviewer.order';
+
+export interface GlobalPresetStatus {
+  /** Preset the global config matches exactly, or 'custom'. */
+  preset: PresetLevel | 'custom';
+  /**
+   * Preset the config was derived from: the last one applied globally if
+   * known, else the closest one. Equals `preset` when not custom.
+   */
+  basePreset: PresetLevel;
+  /** True when `basePreset` is the last preset applied, not just a best guess. */
+  baseFromHistory: boolean;
+  /** Fields where the config diverges from `basePreset` (empty when not custom). */
+  mismatches: GlobalPresetField[];
+}
+
 /**
- * Which preset the global config currently matches, or 'custom'. Mirrors what
+ * Fields of the global config that differ from a preset. Mirrors what
  * applyPreset(scope=global) writes; reviewer models are not compared so a
  * different Codex/Claude model still counts as the same preset.
  */
-export function detectGlobalPreset(config: AgentHubConfig): PresetLevel | 'custom' {
+export function globalPresetMismatches(config: AgentHubConfig, level: PresetLevel): GlobalPresetField[] {
   const engines = (config.reviewer?.order || []).map((item) => item.engine);
   const expectedEngines: Record<PresetLevel, string[]> = {
     safe: [],
     balanced: ['codex', 'claude'],
     auto: ['codex'],
   };
+  const def = PRESET_DEFINITIONS[level].config;
+  const mismatches: GlobalPresetField[] = [];
+  if (config.brain.mode !== def.brain.mode) mismatches.push('brain.mode');
+  if (config.brain.permissions !== def.brain.permissions) mismatches.push('brain.permissions');
+  if (Boolean(config.autoFixOnFail) !== def.autoFixOnFail) mismatches.push('autoFixOnFail');
+  if (Boolean(config.planning?.requireApproval) !== def.planning.requireApproval) mismatches.push('planning.requireApproval');
+  if ((config.planning?.approvalMinTasks ?? 0) !== def.planning.approvalMinTasks) mismatches.push('planning.approvalMinTasks');
+  if ((config.reviewer?.maxChangesRequested ?? 2) !== def.review.maxRounds) mismatches.push('reviewer.maxChangesRequested');
+  if (engines.join(',') !== expectedEngines[level].join(',')) mismatches.push('reviewer.order');
+  return mismatches;
+}
+
+/**
+ * Which preset the global config currently matches, or 'custom'.
+ */
+export function detectGlobalPreset(config: AgentHubConfig): PresetLevel | 'custom' {
   for (const level of ['safe', 'balanced', 'auto'] as const) {
-    const def = PRESET_DEFINITIONS[level].config;
-    if (config.brain.mode !== def.brain.mode) continue;
-    if (config.brain.permissions !== def.brain.permissions) continue;
-    if (Boolean(config.autoFixOnFail) !== def.autoFixOnFail) continue;
-    if (Boolean(config.planning?.requireApproval) !== def.planning.requireApproval) continue;
-    if ((config.planning?.approvalMinTasks ?? 0) !== def.planning.approvalMinTasks) continue;
-    if ((config.reviewer?.maxChangesRequested ?? 2) !== def.review.maxRounds) continue;
-    if (engines.join(',') !== expectedEngines[level].join(',')) continue;
-    return level;
+    if (globalPresetMismatches(config, level).length === 0) return level;
   }
   return 'custom';
+}
+
+/**
+ * Current preset plus, when the config was hand-edited, which preset it came
+ * from and which fields were changed, so the UI can show "custom (based on
+ * balanced, differs in autoFixOnFail)" instead of a bare "custom".
+ */
+export function describeGlobalPreset(config: AgentHubConfig): GlobalPresetStatus {
+  const preset = detectGlobalPreset(config);
+  if (preset !== 'custom') {
+    return { preset, basePreset: preset, baseFromHistory: true, mismatches: [] };
+  }
+  const lastApplied = config.defaultProjectPreset;
+  if (lastApplied) {
+    return {
+      preset,
+      basePreset: lastApplied,
+      baseFromHistory: true,
+      mismatches: globalPresetMismatches(config, lastApplied),
+    };
+  }
+  let best: { level: PresetLevel; mismatches: GlobalPresetField[] } | null = null;
+  for (const level of ['safe', 'balanced', 'auto'] as const) {
+    const mismatches = globalPresetMismatches(config, level);
+    if (!best || mismatches.length < best.mismatches.length) best = { level, mismatches };
+  }
+  return { preset, basePreset: best!.level, baseFromHistory: false, mismatches: best!.mismatches };
 }
 
 export function detectProjectPreset(

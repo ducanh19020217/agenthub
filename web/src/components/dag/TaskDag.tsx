@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Task } from '../../types/api';
 import { layoutTaskDag, normalizeTaskId, DagNodeData, DagEdgeData } from './dagUtils';
 import { StatusBadge } from '../StatusBadge';
+import { ProjectTag } from '../ProjectTag';
 import { useLocale } from '../../context/LocaleContext';
 import {
   ZoomIn,
@@ -382,9 +383,7 @@ export const TaskDag: React.FC<TaskDagProps> = ({
                           <span className="truncate">{runningProfile && runningModel ? `${runningProfile} · ${runningModel}` : (runningModel || runningProfile)}</span>
                         </div>
                       ) : (
-                        <span className="text-[var(--t-text-3)] truncate max-w-[100px]">
-                          {task.projectId}
-                        </span>
+                        <ProjectTag projectId={task.projectId} className="max-w-[120px]" />
                       )}
 
                       {/* Blocker badge if any */}

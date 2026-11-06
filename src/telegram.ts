@@ -26,6 +26,17 @@ import { NotificationDeduper } from './notification-dedupe.js';
 import { reviewerSettingsFromLegacy } from './reviewer-config.js';
 import { QuotaService, QuotaCapacitySnapshot } from './quota/index.js';
 import { autoMergeReasonLabel, firstCheckError } from './auto-merge-notify.js';
+import { formatYYYYMMDD } from './integrations/openproject/daily-report.js';
+
+export interface TelegramTimesheetCommand { ticket: string | 'new'; activeHours: number; waitHours: number; pinned: boolean; description: string; }
+export function parseTimesheetCommand(text: string): TelegramTimesheetCommand {
+  const match = text.trim().match(/^(new|[A-Za-z0-9_-]+)\s+(\d+(?:\.\d+)?)h(?:\s+cho\s+(\d+(?:\.\d+)?)h)?(?:\s+(co-dinh))?\s+(.+)$/i);
+  if (!match) throw new Error('Cú pháp: /gio <mã ticket|new> <giờ>h [cho <giờ>h] [co-dinh] <mô tả>');
+  const activeHours = Number(match[2]); const waitHours = Number(match[3] || 0);
+  if (activeHours < 0 || waitHours < 0 || activeHours + waitHours <= 0 || activeHours + waitHours > 24) throw new Error('Tổng giờ phải lớn hơn 0 và không quá 24 giờ');
+  return { ticket: match[1].toLowerCase() === 'new' ? 'new' : match[1], activeHours, waitHours, pinned: Boolean(match[4]), description: match[5].trim() };
+}
+
 
 const WAITING_QUOTA_BATCH_DELAY_MS = 100;
 
@@ -219,6 +230,7 @@ export function readTelegramToken(tokenPath: string): string | null {
 
 /** Shown by Telegram when the user types "/" (registered with setMyCommands on start). */
 export const TELEGRAM_BOT_COMMANDS: Array<{ command: string; description: string }> = [
+  { command: 'gio', description: 'Thêm/xem bảng giờ: /gio <ticket|new> <giờ>h [cho <giờ>h] [co-dinh] <mô tả>' },
   { command: 'use', description: 'Chọn dự án: /use <dự án> · xem dự án đang chọn: /use' },
   { command: 'brain', description: 'Bộ não: /brain · /brain trust [dự án] standard|trusted|full|inherit' },
   { command: 'digest', description: 'Tóm tắt tình hình hệ thống và quota' },
@@ -330,6 +342,8 @@ export class TelegramBotService {
   }>>();
   private chatSessions = new Map<number, string>();
   private pendingAutoTasks = new Map<string, { chatId: number; projectId: string; description: string; externalRef?: string }>();
+  /** Project đã được báo "hết task"; xoá khi project lại có task đang chạy. */
+  private projectIdleNotified = new Set<string>();
   /** Per-chat selected project (persisted in config.telegram.chats). */
   private selectedProject = new Map<number, string>();
   private selectedDepartment = new Map<number, string>();
@@ -1362,6 +1376,25 @@ export class TelegramBotService {
       case '/status':
         await this.handleStatusCommand(chatId);
         break;
+
+      case '/gio': {
+        const timesheet = this.service.timesheetService;
+        const sourceId = this.config.integrations.openproject.sources.length === 1 ? this.config.integrations.openproject.sources[0].id : undefined;
+        if (!timesheet || !sourceId) { await this.sendMessage(chatId, '❌ Cần bật timesheet và cấu hình đúng một nguồn OpenProject.'); break; }
+        if (!argStr) {
+          const preview = await timesheet.preview(sourceId);
+          await this.sendMessage(chatId, `🕒 Hôm nay: ${formatHours(preview.hours)}h\n${preview.entries.map((entry) => `[${entry.displayId}] ${formatHours(entry.hours)}h`).join('\n') || 'Chưa có việc.'}`);
+          break;
+        }
+        try {
+          const parsed = parseTimesheetCommand(argStr);
+          const date = formatYYYYMMDD(new Date());
+          const result = await timesheet.addManual({ sourceId, date, ...(parsed.ticket === 'new' ? { createTicket: { subject: parsed.description } } : { ticket: parsed.ticket }), description: parsed.description, activeHours: parsed.activeHours, waitHours: parsed.waitHours, pinned: parsed.pinned }) as { display_id?: string };
+          const preview = await timesheet.preview(sourceId, date);
+          await this.sendMessage(chatId, `✅ Đã thêm ${this.escapeHtml(String(result.display_id || parsed.ticket))}: ${this.escapeHtml(parsed.description)} (${formatHours(parsed.activeHours + parsed.waitHours)}h)\nTổng hiện tại: ${formatHours(preview.entries.reduce((sum, entry) => sum + entry.hours, 0))}h/${formatHours(preview.hours)}h${preview.fixedOverHours ? '\n⚠️ Giờ cố định đã vượt tổng ngày.' : ''}`);
+        } catch (error) { await this.sendMessage(chatId, `❌ ${this.escapeHtml(error instanceof Error ? error.message : String(error))}`); }
+        break;
+      }
 
       case '/focus':
         await this.handleFocusCommand(chatId, argStr);
@@ -2422,7 +2455,8 @@ export class TelegramBotService {
             return;
           }
           try {
-            this.service.cancelTask(resolved.id);
+            const who = query.from?.username ? `telegram:@${query.from.username}` : `telegram:${query.from?.id ?? chatId}`;
+            this.service.cancelTask(resolved.id, { reason: 'Hủy bằng nút trên Telegram', by: who });
             await this.answerCallbackQuery(query.id, 'Đã hủy task.');
             await this.sendMessage(chatId, `🛑 Đã hủy task ${resolved.id}.`);
           } catch (err: unknown) {
@@ -3791,7 +3825,10 @@ export class TelegramBotService {
         type === 'merge.failed' ||
         type === 'review.fallback' ||
         type === 'quota.exhausted' ||
-        (type === 'task.waiting_quota' && p.reason === 'no_department_profile');
+        (type === 'task.waiting_quota' && p.reason === 'no_department_profile') ||
+        // Người dùng muốn biết kết quả dù bộ não tự duyệt/merge.
+        (type === 'task.done' && (this.config.telegram.notify.taskDone !== false || this.config.telegram.notify.projectIdle !== false)) ||
+        (TelegramBotService.INTERRUPT_EVENTS.has(type) && this.config.telegram.notify.interrupted !== false);
 
         if (!isAllowedInAuto) {
           return;
@@ -4026,6 +4063,86 @@ export class TelegramBotService {
         break;
       }
 
+      case 'task.cancelled': {
+        if (notify.interrupted === false) return;
+        const title = this.resolveTaskTitle(taskId, p);
+        const reason = typeof p.reason === 'string' && p.reason ? p.reason : (typeof p.message === 'string' && p.message ? p.message : 'Không ghi lý do');
+        const by = typeof p.by === 'string' && p.by ? p.by : 'không rõ';
+        const prev = typeof p.previousStatus === 'string' && p.previousStatus ? `\nTrạng thái trước: <code>${this.escapeHtml(p.previousStatus)}</code>` : '';
+        const keyboard: InlineKeyboardButton[][] = taskId
+          ? [[{ text: '🔄 Chạy lại', callback_data: `task:retry:${taskId}` }, { text: '🌐 Xem task', url: this.getDashboardUrl(`#/tasks/${toRouteId(taskId)}`) }]]
+          : [];
+        this.broadcastMessage(
+          `${prefix}🛑 <b>Task bị hủy</b>\nID: <code>${taskId}</code>${minimal ? '' : `\nTiêu đề: <b>${this.escapeHtml(title)}</b>`}\nLý do: ${this.escapeHtml(reason)}\nBởi: <b>${this.escapeHtml(by)}</b>${prev}`,
+          keyboard.length ? { inline_keyboard: keyboard } : undefined,
+        );
+        break;
+      }
+
+      case 'task.timeout':
+      case 'task.no_commit':
+      case 'task.looping':
+      case 'task.overlap':
+      case 'task.failover':
+      case 'task.auto_closed': {
+        if (notify.interrupted === false) return;
+        const title = this.resolveTaskTitle(taskId, p);
+        const head = TelegramBotService.INTERRUPT_LABELS[type] || '⚠️ Task bị ngắt';
+        let detail = '';
+        if (type === 'task.no_commit') {
+          detail = `Đã chạy ${typeof p.minutes === 'number' ? Math.round(p.minutes) : '?'} phút mà chưa có commit mới.`;
+        } else if (type === 'task.looping') {
+          detail = `Lặp lệnh <code>${this.escapeHtml(String(p.command || ''))}</code> ${typeof p.count === 'number' ? p.count : '?'} lần.`;
+        } else if (type === 'task.failover') {
+          const from = p.from && typeof p.from === 'object' ? (p.from as { profile?: string; model?: string }) : {};
+          const to = p.to && typeof p.to === 'object' ? (p.to as { profile?: string; model?: string }) : null;
+          detail = `Từ <b>${this.escapeHtml(String(from.profile || '?'))}</b> (${this.escapeHtml(String(from.model || ''))}) sang ${to ? `<b>${this.escapeHtml(String(to.profile || '?'))}</b> (${this.escapeHtml(String(to.model || ''))})` : 'hàng chờ'}${typeof p.reason === 'string' ? `. Lý do: ${this.escapeHtml(p.reason)}` : ''}`;
+        } else if (type === 'task.auto_closed') {
+          detail = `Nhánh <code>${this.escapeHtml(String(p.branch || ''))}</code> đã được merge vào <code>${this.escapeHtml(String(p.targetBranch || ''))}</code> ở nơi khác, task tự đóng.`;
+        } else if (type === 'task.overlap') {
+          detail = `Sửa cùng file <code>${this.escapeHtml(String(p.file || ''))}</code> với task <code>${this.escapeHtml(String(p.otherTaskId || ''))}</code>, có thể xung đột khi merge.`;
+        } else if (type === 'task.timeout') {
+          detail = 'Worker chạy quá thời gian cho phép, task chuyển sang thất bại.';
+        } else if (typeof p.message === 'string') {
+          detail = this.escapeHtml(p.message);
+        } else if (typeof p.reason === 'string') {
+          detail = this.escapeHtml(p.reason);
+        }
+        const keyboard: InlineKeyboardButton[][] = taskId
+          ? [[{ text: '🌐 Xem task', url: this.getDashboardUrl(`#/tasks/${toRouteId(taskId)}`) }]]
+          : [];
+        this.broadcastMessage(
+          `${prefix}${head}\nID: <code>${taskId}</code>${minimal ? '' : `\nTiêu đề: <b>${this.escapeHtml(title)}</b>`}${detail ? `\n${detail}` : ''}`,
+          keyboard.length ? { inline_keyboard: keyboard } : undefined,
+        );
+        break;
+      }
+
+      case 'task.done': {
+        const wantDone = notify.taskDone !== false;
+        const wantIdle = notify.projectIdle !== false;
+        if (!wantDone && !wantIdle) return;
+        if (wantDone && taskId) {
+          const title = this.resolveTaskTitle(taskId, p);
+          const how = p.reason === 'merged_elsewhere'
+            ? '\nĐã merge ở nơi khác, tự đóng.'
+            : typeof p.by === 'string' && p.by
+              ? `\nDuyệt bởi: <b>${this.escapeHtml(p.by)}</b>`
+              : '';
+          const keyboard: InlineKeyboardButton[][] = [
+            [{ text: '🌐 Xem task', url: this.getDashboardUrl(`#/tasks/${toRouteId(taskId)}`) }],
+          ];
+          this.broadcastMessage(
+            minimal
+              ? `${prefix}✅ <b>Task hoàn thành</b>\nID: <code>${taskId}</code>`
+              : `${prefix}✅ <b>Task hoàn thành</b>\nID: <code>${taskId}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>${how}`,
+            { inline_keyboard: keyboard },
+          );
+        }
+        if (wantIdle && projectId) this.notifyProjectIdle(projectId, taskId);
+        break;
+      }
+
       case 'task.failed': {
         if (!notify.failed) return;
         if (minimal) {
@@ -4096,18 +4213,20 @@ export class TelegramBotService {
         break;
       }
       case 'tracker.timesheet.posted': {
-        const rows = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; subject?: string; hours?: number }> : [];
+        const rows = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; subject?: string; hours?: number; rawHours?: number; estimateHours?: number }> : [];
+        const skipped = Array.isArray(p.estimateSkipped) && p.estimateSkipped.length ? `\nBỏ qua estimate: ${p.estimateSkipped.map((item: { displayId?: string; reason?: string }) => `[${this.escapeHtml(String(item.displayId || '?'))}] ${this.escapeHtml(String(item.reason || ''))}`).join(', ')}` : '';
         const missing = Array.isArray(p.withoutTicket) && p.withoutTicket.length ? `\nChưa có ticket: ${p.withoutTicket.map((item: { taskId?: string; subject?: string }) => `${this.escapeHtml(String(item.taskId || '?'))} ${this.escapeHtml(String(item.subject || ''))}`).join(', ')}` : '';
         const stale = Array.isArray(p.missingFromDate) && p.missingFromDate.length ? `\nTicket không còn trong ngày: ${p.missingFromDate.join(', ')}` : '';
         const minimum = p.overMinimum ? '\nTổng vượt giờ do mức tối thiểu.' : '';
-        this.broadcastMessage(`${prefix}🕒 <b>Đã ghi bảng giờ</b> (${this.escapeHtml(String(p.hours || 0))}h)\n${rows.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${this.escapeHtml(String(row.subject || ''))} — ${row.hours || 0}h`).join('\n')}${missing}${stale}${minimum}`);
+        this.broadcastMessage(`${prefix}🕒 <b>Đã ghi bảng giờ</b> (${this.escapeHtml(formatHours(p.hours))}h)\n${rows.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${this.escapeHtml(String(row.subject || ''))} — thực tế ${formatHours(row.hours)}h · estimate ${formatHours(row.estimateHours ?? row.rawHours ?? row.hours)}h`).join('\n')}${skipped}${missing}${stale}${minimum}`);
         break;
       }
       case 'tracker.timesheet.failed':
         {
           const posted = Array.isArray(p.entries) ? p.entries as Array<{ displayId?: string; hours?: number }> : [];
-          const partial = posted.length ? `\nĐã ghi được: ${posted.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${row.hours || 0}h`).join(', ')}` : '';
-          this.broadcastMessage(`${prefix}❌ <b>Ghi bảng giờ thất bại</b>: ${this.escapeHtml(String(p.error || ''))}${partial}`);
+          const partial = posted.length ? `\nĐã ghi được: ${posted.map((row) => `[${this.escapeHtml(String(row.displayId || '?'))}] ${formatHours(row.hours)}h`).join(', ')}` : '';
+          const skipped = Array.isArray(p.estimateSkipped) && p.estimateSkipped.length ? `\nBỏ qua estimate: ${p.estimateSkipped.map((item: { displayId?: string; reason?: string }) => `[${this.escapeHtml(String(item.displayId || '?'))}] ${this.escapeHtml(String(item.reason || ''))}`).join(', ')}` : '';
+          this.broadcastMessage(`${prefix}❌ <b>Ghi bảng giờ thất bại</b>: ${this.escapeHtml(String(p.error || ''))}${partial}${skipped}`);
         }
         break;
       case 'tracker.triage_ready': {
@@ -4785,6 +4904,44 @@ export class TelegramBotService {
     return last30.length > 3500 ? last30.slice(0, 3500) + '\n... (đã cắt bớt)' : last30;
   }
 
+  /** Sự kiện làm task bị ngắt giữa chừng; báo Telegram khi notify.interrupted bật (kể cả brain auto). */
+  private static readonly INTERRUPT_EVENTS = new Set(['task.cancelled', 'task.timeout', 'task.no_commit', 'task.looping', 'task.overlap', 'task.failover', 'task.auto_closed']);
+  private static readonly INTERRUPT_LABELS: Record<string, string> = {
+    'task.timeout': '⏱ <b>Task quá thời gian</b>',
+    'task.no_commit': '⚠️ <b>Task lâu không commit</b>',
+    'task.looping': '🔁 <b>Task đang lặp lệnh</b>',
+    'task.overlap': '⚠️ <b>Task chồng lấn</b>',
+    'task.failover': '🔀 <b>Task chuyển tài khoản/model</b>',
+    'task.auto_closed': '📦 <b>Task tự đóng</b>',
+  };
+
+  /** Trạng thái coi là "còn việc": task chưa kết thúc. */
+  private static readonly PROJECT_ACTIVE_STATUSES = new Set(['queued', 'running', 'checking', 'review', 'waiting_quota']);
+
+  /**
+   * Khi task vừa xong mà project không còn task nào đang chờ/chạy/duyệt thì báo
+   * "project đã hết task". Mỗi lần project rỗng chỉ báo một lần; có task mới
+   * rồi lại rỗng thì báo lại.
+   */
+  private notifyProjectIdle(projectId: string, justFinishedTaskId?: string): void {
+    const remaining = this.taskRepo.getByProject(projectId).filter((task) =>
+      task.id !== justFinishedTaskId && TelegramBotService.PROJECT_ACTIVE_STATUSES.has(task.status));
+    if (remaining.length > 0) {
+      this.projectIdleNotified.delete(projectId);
+      return;
+    }
+    if (this.projectIdleNotified.has(projectId)) return;
+    this.projectIdleNotified.add(projectId);
+    const project = this.projectRepo.get(projectId);
+    const name = project?.name || projectId;
+    const doneCount = this.taskRepo.getByProject(projectId).filter((task) => task.status === 'done').length;
+    this.broadcastMessage(
+      `🏁 <b>${this.escapeHtml(name)} đã hết task</b>\nKhông còn task nào đang chờ, chạy hay chờ duyệt. Tổng ${doneCount} task đã hoàn thành.`,
+      { inline_keyboard: [[{ text: '🌐 Xem dashboard', url: this.getDashboardUrl(`#/tasks?project=${encodeURIComponent(projectId)}`) }]] },
+      projectId,
+    );
+  }
+
   private resolveTaskTitle(taskId?: string, payload?: Record<string, unknown>, taskObj?: TaskRow | null): string {
     if (payload?.title && typeof payload.title === 'string') return payload.title;
     if (taskObj?.title) return taskObj.title;
@@ -4918,4 +5075,11 @@ export class TelegramBotService {
 
 <i>Lưu ý: Task ID có thể dùng dạng đầy đủ 'project/slug' hoặc chỉ 'slug' nếu không trùng.</i>`;
   }
+}
+
+function formatHours(h: unknown): string {
+  const num = typeof h === 'number' ? h : Number(h || 0);
+  if (Number.isNaN(num)) return '0';
+  const rounded = Math.round(num * 100) / 100;
+  return String(rounded).replace('.', ',');
 }

@@ -119,13 +119,14 @@ describe('TaskDetailPage', () => {
 
     // Mở lại modal và bấm Xác nhận hủy
     fireEvent.click(cancelBtn);
+    fireEvent.change(screen.getByTestId('cancel-reason-input'), { target: { value: 'Trùng việc' } });
     const confirmCancelBtn = screen.getByRole('button', { name: /Xác nhận hủy/i });
     await act(async () => {
       fireEvent.click(confirmCancelBtn);
       await Promise.resolve();
     });
 
-    expect(cancelSpy).toHaveBeenCalledWith('proj-1~t1');
+    expect(cancelSpy).toHaveBeenCalledWith('proj-1~t1', 'Trùng việc');
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['task', 'proj-1~t1'] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['tasks'] });
     expect(screen.queryByRole('heading', { name: /Xác nhận hủy task/i })).not.toBeInTheDocument();

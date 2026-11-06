@@ -177,6 +177,12 @@ export interface TelegramNotifyConfig {
   fallback: boolean;
   brainWaiting?: boolean;
   disk?: boolean;
+  /** Báo khi một task hoàn thành (kể cả khi bộ não ở chế độ auto). */
+  taskDone?: boolean;
+  /** Báo khi một project không còn task nào đang chờ/chạy. */
+  projectIdle?: boolean;
+  /** Báo khi task bị ngắt: hủy, quá thời gian, lặp lệnh, không commit, chuyển tài khoản, tự đóng. */
+  interrupted?: boolean;
 }
 
 export interface TelegramChat {
@@ -234,6 +240,9 @@ export const DEFAULT_TELEGRAM_NOTIFY: TelegramNotifyConfig = {
   fallback: true,
   brainWaiting: true,
   disk: true,
+  taskDone: true,
+  projectIdle: true,
+  interrupted: true,
 };
 
 export const DEFAULT_STALL_CONFIG: StallConfig = {
@@ -343,6 +352,7 @@ export const TimesheetConfigSchema = z.object({
   activityId: z.number().int().positive().nullable().default(null),
   minEntryHours: z.number().positive().refine((value) => Math.abs(value * 4 - Math.round(value * 4)) < 1e-8, 'minEntryHours must be a multiple of 0.25').default(0.5),
   roundTo: z.number().positive().refine((value) => Math.abs(value * 4 - Math.round(value * 4)) < 1e-8, 'roundTo must be a multiple of 0.25').default(0.25),
+  writeEstimate: z.boolean().default(true),
 }).superRefine((value, ctx) => {
   if (value.enabled && value.activityId == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['activityId'], message: 'activityId is required when timesheet is enabled' });
   if (Math.abs(value.hours * 4 - Math.round(value.hours * 4)) > 1e-8) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['hours'], message: 'hours must be a multiple of 0.25' });
@@ -997,8 +1007,33 @@ export function updateConfigInMemory(
   }
 }
 
+export interface ConfigPaths {
+  hubHome: string;
+  agyHomesDir: string;
+}
+
+export function resolveConfigPaths(options: {
+  overrideHome?: string;
+  userConfig?: Record<string, unknown>;
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+} = {}): ConfigPaths {
+  const env = options.env || process.env;
+  const home = options.home || os.homedir();
+  const hubHome = options.overrideHome || env.AGENTHUB_HOME || path.join(home, '.agenthub');
+  const testAgyHomesDir = env.AGENTHUB_TEST_MODE === '1'
+    ? path.join(path.dirname(hubHome), 'agy-homes')
+    : undefined;
+  const agyHomesDir =
+    (options.userConfig?.agyHomesDir as string) ||
+    env.AGENTHUB_AGY_HOMES ||
+    testAgyHomesDir ||
+    path.join(home, '.agy-homes');
+  return { hubHome, agyHomesDir };
+}
+
 export function loadConfig(overrideHome?: string): AgentHubConfig {
-  const hubHome = overrideHome || process.env.AGENTHUB_HOME || path.join(os.homedir(), '.agenthub');
+  const hubHome = resolveConfigPaths({ overrideHome }).hubHome;
 
   // Ensure directory exists with proper permissions
   if (!fs.existsSync(hubHome)) {
@@ -1026,14 +1061,7 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
   if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
   if (!fs.existsSync(worktreesDir)) fs.mkdirSync(worktreesDir, { recursive: true });
 
-  const testAgyHomesDir = process.env.AGENTHUB_TEST_MODE === '1'
-    ? path.join(path.dirname(hubHome), 'agy-homes')
-    : undefined;
-  const agyHomesDir =
-    (userConfig.agyHomesDir as string) ||
-    process.env.AGENTHUB_AGY_HOMES ||
-    testAgyHomesDir ||
-    path.join(os.homedir(), '.agy-homes');
+  const { agyHomesDir } = resolveConfigPaths({ overrideHome, userConfig });
 
   const defaultLogDir =
     (userConfig.defaultLogDir as string) ||
@@ -1188,6 +1216,9 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
       fallback: rawTelegramNotify.fallback !== false,
       brainWaiting: rawTelegramNotify.brainWaiting !== false,
       disk: rawTelegramNotify.disk !== false,
+      taskDone: rawTelegramNotify.taskDone !== false,
+      projectIdle: rawTelegramNotify.projectIdle !== false,
+      interrupted: rawTelegramNotify.interrupted !== false,
     },
   };
 

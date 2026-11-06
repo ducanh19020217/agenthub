@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { getTokenPath, readExistingToken } from '../auth.js';
 import { toRouteId, toTaskId } from '../services/index.js';
 import { formatRunnableCapacity, QuotaCapacitySnapshot } from '../quota/index.js';
+import { formatYYYYMMDD } from '../integrations/openproject/daily-report.js';
 
 export class DaemonDownError extends Error {
   constructor(message = 'AgentHub daemon chưa chạy: `agenthub install-service` hoặc `agenthub daemon`') {
@@ -720,6 +721,51 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   );
 
   server.tool(
+    'hub_openproject_clone_source',
+    'Nhân bản nguồn OpenProject: sao chép toàn bộ cấu hình và API key, đổi project. timesheet tự tắt để tránh ghi trùng giờ.',
+    {
+      sourceId: z.string().min(1).describe('ID của nguồn gốc cần nhân bản'),
+      project: z.string().min(1).describe('Mã dự án OP mới (project identifier)'),
+      id: z.string().regex(/^[a-z0-9-]+$/).optional().describe('ID cho nguồn mới (mặc định openproject-<timestamp>)'),
+    },
+    async (args) => {
+      try {
+        const result = await callApi<Record<string, unknown>>(
+          'POST',
+          `/api/integrations/openproject/sources/${encodeURIComponent(args.sourceId)}/clone`,
+          { project: args.project, ...(args.id ? { id: args.id } : {}) },
+        );
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `✓ Đã nhân bản nguồn ${args.sourceId} → ${result['id']} (project: ${result['project']}). timesheet đã tắt. API key đã sao chép.`,
+            },
+          ],
+        };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
+  server.tool('hub_timesheet_get', 'Xem bảng giờ OpenProject đã hợp nhất theo ngày', { sourceId: z.string().optional(), date: z.string().optional() }, async ({ sourceId, date }) => {
+    try {
+      const query = new URLSearchParams(); if (sourceId) query.set('sourceId', sourceId); if (date) query.set('date', date);
+      return { content: [{ type: 'text', text: JSON.stringify(await callApi('GET', `/api/timesheet?${query}`)) }] };
+    } catch (err: unknown) { return handleError(err); }
+  });
+  server.tool('hub_timesheet_add', 'Thêm một việc thủ công vào bảng giờ OpenProject', {
+    sourceId: z.string().optional(), date: z.string().optional(), ticket: z.string().optional(),
+    createTicket: z.object({ subject: z.string(), parent: z.union([z.string(), z.number()]).optional() }).optional(),
+    description: z.string().min(1), activeHours: z.number().finite().min(0).max(24), waitHours: z.number().finite().min(0).max(24).optional(), level: z.enum(['easy', 'hard']).optional(), pinned: z.boolean().optional(),
+  }, async (args) => {
+    try {
+      return { content: [{ type: 'text', text: JSON.stringify(await callApi('POST', '/api/timesheet/manual', { ...args, sourceId: args.sourceId, date: args.date || formatYYYYMMDD(new Date()) })) }] };
+    } catch (err: unknown) { return handleError(err); }
+  });
+
+  server.tool(
     'hub_create_task',
     'Tạo task mới trong AgentHub. Nếu start=true thì đưa thẳng vào hàng đợi (queued). Hỗ trợ createTicket: { sourceId } để tạo ticket OpenProject đi kèm task (nếu client MCP hiển thị schema cũ chưa thấy createTicket thì server vẫn nhận bình thường).',
     {
@@ -1184,15 +1230,16 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   // 11. hub_cancel
   server.tool(
     'hub_cancel',
-    'Hủy một task đang chạy hoặc trong hàng đợi',
+    'Hủy một task đang chạy hoặc trong hàng đợi. Bắt buộc ghi lý do để người dùng xem lại được vì sao task bị hủy.',
     {
       id: z.string().describe('ID của task'),
+      reason: z.string().min(3).describe('Lý do hủy, viết cho người dùng đọc (ví dụ: "Trùng với task T52 vừa tạo trong batch")'),
     },
     async (args) => {
       try {
         assertTaskId(args.id, 'Huỷ task');
         const routeId = toRouteId(args.id);
-        await callApi('POST', `/api/tasks/${routeId}/cancel`);
+        await callApi('POST', `/api/tasks/${routeId}/cancel`, { reason: args.reason, by: 'mcp' });
         return {
           content: [{ type: 'text', text: `✓ Đã hủy task "${args.id}"` }],
         };

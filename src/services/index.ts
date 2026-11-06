@@ -77,10 +77,11 @@ import { isKnownModel } from '../quota/index.js';
 import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, ReviewerOrderSchema, reviewerSettingsFromLegacy } from '../reviewer-config.js';
 import { SetupManager } from '../tools/setup.js';
 import { createNewGitProject, inspectProject, readClaudeSessionExcerpt } from '../projects/inspect.js';
+import { inspectGitProject } from '../projects/git.js';
 import type { DeployService } from '../deploy.js';
 import type { RemoteDeployService, RemoteDeployStatus } from '../remote-deploy.js';
 import type { PerfCollector } from '../perf.js';
-import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset, detectGlobalPreset, presetProjectPatch, type PresetLevel } from '../presets.js';
+import { PRESET_DEFINITIONS, ApplyPresetInputSchema, applyPreset, describeGlobalPreset, presetProjectPatch, type PresetLevel } from '../presets.js';
 import type { SetupTools } from '../setup-tools.js';
 import { computeEffectiveConfig } from '../effective-config.js';
 import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
@@ -189,6 +190,34 @@ function hasConfiguredMerge(project: ProjectRow, baseRef: string): boolean {
       && !!merge.worktrees
       && typeof merge.worktrees[baseRef] === 'string'
       && path.isAbsolute(merge.worktrees[baseRef]);
+  } catch {
+    return false;
+  }
+}
+
+function mergeWarning(project: ProjectRow, baseRef: string): string | null {
+  const settings = projectSettings(project);
+  if (settings.integration.enabled || hasConfiguredMerge(project, baseRef)) return null;
+  return `Task sẽ không merge được vì project chưa có worktree tích hợp cho nhánh "${baseRef}". Mở Cài đặt dự án → Git để cấu hình.`;
+}
+
+function parseProjectMerge(value: string | null | undefined): ProjectMerge | null {
+  if (!value) return null;
+  try {
+    const parsed = ProjectMergeSchema.safeParse(JSON.parse(value));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultProjectMerge(projectPath: string, defaultBranch: string): ProjectMerge {
+  return { enabled: true, worktrees: { [defaultBranch]: projectPath }, checks: [], timeoutSec: 600 };
+}
+
+function isGitRepository(projectPath: string): boolean {
+  try {
+    return Boolean(execFileSync('git', ['-C', projectPath, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
   } catch {
     return false;
   }
@@ -661,6 +690,9 @@ export const UpdateConfigSchema = z.object({
       fallback: z.boolean().optional(),
       brainWaiting: z.boolean().optional(),
       disk: z.boolean().optional(),
+      taskDone: z.boolean().optional(),
+      projectIdle: z.boolean().optional(),
+      interrupted: z.boolean().optional(),
     }).optional(),
   }).optional(),
   updates: z.object({
@@ -1016,7 +1048,23 @@ export class AppService {
     public directiveRepo?: BrainDirectiveRepo,
     public departmentRepo?: DepartmentRepo,
     public setupTools?: SetupTools,
-  ) {}
+  ) {
+    this.migrateProjectMergeMappings();
+  }
+
+  /** Backfill the legacy merge column for projects registered before automatic mapping existed. */
+  private migrateProjectMergeMappings(): void {
+    for (const project of this.projectRepo.getAll()) {
+      if (projectSettings(project).integration.enabled || project.merge || !isGitRepository(project.path)) continue;
+      const merge = defaultProjectMerge(project.path, project.defaultBranch);
+      this.projectRepo.update(project.id, { merge: JSON.stringify(merge) });
+      this.eventRepo.insert('project.merge_migrated', undefined, {
+        projectId: project.id,
+        defaultBranch: project.defaultBranch,
+        path: project.path,
+      });
+    }
+  }
 
   setSetupTools(tools: SetupTools): void { this.setupTools = tools; }
   setTrackerRepo(repo: TrackerItemRepo): void { this.trackerRepo = repo; }
@@ -1659,6 +1707,26 @@ export class AppService {
     return inspectProject(input.path);
   }
 
+  async inspectProjectGit(raw: unknown) {
+    const input = z.object({ path: z.string().min(1) }).parse(raw);
+    if (!path.isAbsolute(input.path)) throw new HttpError(400, 'bad_request', 'Đường dẫn phải là đường dẫn tuyệt đối');
+    try {
+      return await inspectGitProject(input.path, 'main');
+    } catch (error) {
+      throw new HttpError(400, 'bad_request', error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async getProjectGitStatus(id: string) {
+    const project = this.projectRepo.get(id);
+    if (!project) throw new HttpError(404, 'not_found', `Project "${id}" không tồn tại`);
+    try {
+      return await inspectGitProject(project.path, project.defaultBranch);
+    } catch (error) {
+      throw new HttpError(400, 'bad_request', error instanceof Error ? error.message : String(error));
+    }
+  }
+
   writeProjectGuidance(id: string, raw: unknown) {
     const input = z.object({ content: z.string().min(1).max(32_000), confirm: z.literal(true) }).parse(raw);
     const project = this.projectRepo.get(id);
@@ -2114,6 +2182,9 @@ export class AppService {
       throw new HttpError(400, 'bad_request', `Nhánh mặc định "${parsed.defaultBranch}" không tồn tại trong repository`);
     }
 
+    const merge = !effectiveSettings.integration.enabled && !parsed.merge
+      ? defaultProjectMerge(resolvedPath, parsed.defaultBranch)
+      : parsed.merge;
     const archived = this.projectRepo.getAllIncludingArchived().find(
       (project) => project.archivedAt && path.resolve(project.path) === resolvedPath,
     );
@@ -2128,6 +2199,7 @@ export class AppService {
         envTemplate: parsed.envTemplate || null,
         maxParallel: parsed.maxParallel,
         departmentId: parsed.departmentId,
+        merge: merge ? JSON.stringify(merge) : null,
       });
       this.invalidateOutOfScopeClaudeScanStates();
       return this.getProject(archived.id);
@@ -2142,7 +2214,7 @@ export class AppService {
       maxParallel: parsed.maxParallel,
       checks: parsed.checks ? JSON.stringify(parsed.checks) : null,
       hooks: parsed.hooks ? JSON.stringify(parsed.hooks) : null,
-      merge: parsed.merge ? JSON.stringify(parsed.merge) : null,
+      merge: merge ? JSON.stringify(merge) : null,
       reviewChain: parsed.reviewChain ? JSON.stringify(parsed.reviewChain) : null,
       review: parsed.review ? JSON.stringify(parsed.review) : null,
       settings: parsed.settings ? JSON.stringify(effectiveSettings) : null,
@@ -2203,13 +2275,27 @@ export class AppService {
       validateIntegrationBranch(mergedSettings.integration.branch || 'agenthub/integration', effectiveDefaultBranch);
     }
 
+    let mergeUpdate = parsed.merge === undefined ? undefined : parsed.merge ? JSON.stringify(parsed.merge) : null;
+    if (parsed.defaultBranch !== undefined && !mergedSettings.integration.enabled && parsed.merge === undefined) {
+      const currentMerge = parseProjectMerge(current.merge);
+      const oldBranch = current.defaultBranch;
+      const oldPath = currentMerge?.worktrees[oldBranch];
+      const newPath = currentMerge?.worktrees[effectiveDefaultBranch];
+      if (currentMerge && oldPath === current.path && (newPath === undefined || newPath === current.path)) {
+        const worktrees = { ...currentMerge.worktrees };
+        delete worktrees[oldBranch];
+        worktrees[effectiveDefaultBranch] = current.path;
+        mergeUpdate = JSON.stringify({ ...currentMerge, worktrees });
+      }
+    }
+
     this.projectRepo.update(id, {
       ...parsed,
       // Partial settings merge over what is stored, so callers can change one switch at a time.
       settings: parsed.settings === undefined ? undefined : JSON.stringify(mergedSettings),
       checks: parsed.checks === undefined ? undefined : parsed.checks ? JSON.stringify(parsed.checks) : null,
       hooks: parsed.hooks === undefined ? undefined : parsed.hooks ? JSON.stringify(parsed.hooks) : null,
-      merge: parsed.merge === undefined ? undefined : parsed.merge ? JSON.stringify(parsed.merge) : null,
+      merge: mergeUpdate,
       reviewChain: parsed.reviewChain === undefined ? undefined : parsed.reviewChain ? JSON.stringify(parsed.reviewChain) : null,
       review: parsed.review === undefined ? undefined : parsed.review ? JSON.stringify(parsed.review) : null,
     });
@@ -3872,7 +3958,9 @@ export class AppService {
       this.scheduler.triggerTick();
     }
 
-    return this.taskRepo.get(taskId)!;
+    const task = this.taskRepo.get(taskId)!;
+    const warning = mergeWarning(project, parsed.baseRef || project.defaultBranch);
+    return warning ? { ...task, mergeWarning: warning } as TaskRow : task;
   }
 
   async createTaskWithTicket(raw: unknown): Promise<TaskRow> {
@@ -4269,7 +4357,7 @@ export class AppService {
     const tasks = this.taskRepo.getByBatch(id);
     for (const task of tasks) {
       if (task.status === 'draft') {
-        this.taskRepo.updateStatus(task.id, 'cancelled');
+        this.taskRepo.update(task.id, { status: 'cancelled', cancelReason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, cancelledBy: 'batch:discard' });
       }
     }
     this.taskBatchRepo.updateStatus(id, 'discarded');
@@ -4387,14 +4475,14 @@ export class AppService {
     return this.taskRepo.get(taskId)!;
   }
 
-  cancelTask(idParam: string): TaskRow {
+  cancelTask(idParam: string, info?: { reason?: string | null; by?: string | null }): TaskRow {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) {
       throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
     }
 
-    this.scheduler.cancelTask(taskId);
+    this.scheduler.cancelTask(taskId, info);
     return this.taskRepo.get(taskId)!;
   }
 
@@ -4420,7 +4508,7 @@ export class AppService {
     const source = this.config.integrations?.openproject?.sources?.find((s) => s.id === tracker.source_id);
     const splitConf = source?.split || { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true };
 
-    this.cancelTask(toRouteId(task.id));
+    this.cancelTask(toRouteId(task.id), { reason: `Chia việc: ticket ${task.externalRef} được tách thành task lập kế hoạch`, by: 'system:split' });
 
     const primary = this.projectRepo.getAll().find((p) => {
       const settings = projectSettings(p).openproject;
@@ -4880,9 +4968,11 @@ export class AppService {
         const current = this.taskRepo.get(derived.id);
         if (!current || !['draft', 'queued', 'waiting_quota'].includes(current.status) || current.attempt > 0 || commits.length > 0) continue;
 
-        this.taskRepo.updateStatus(current.id, 'cancelled');
+        this.taskRepo.update(current.id, { status: 'cancelled', cancelReason: reason, cancelledBy: 'system:orphaned_merge_fix' });
         this.scheduler.getEventBus().emit('task.cancelled', current.id, {
-          reason: 'orphaned_merge_fix',
+          reason,
+          by: 'system:orphaned_merge_fix',
+          code: 'orphaned_merge_fix',
           sourceTaskId: source.id,
           message: reason,
         });
@@ -5476,7 +5566,7 @@ export class AppService {
   }
 
   getCurrentGlobalPreset() {
-    return { preset: detectGlobalPreset(this.config) };
+    return describeGlobalPreset(this.config);
   }
 
   applyPreset(raw: unknown) {

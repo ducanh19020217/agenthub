@@ -946,7 +946,61 @@ export const MIGRATIONS: string[] = [
     PRIMARY KEY (source_id, spent_on, wp_id)
   );
   `,
-  // Migration 65: engine and profileName for reviews
+  // Migration 65: rawHours per day and written_estimate tracking for Estimated Time writeback.
+  `
+  PRAGMA foreign_keys = OFF;
+  CREATE TABLE IF NOT EXISTS timesheet_entries_new (
+    source_id TEXT NOT NULL,
+    spent_on TEXT NOT NULL,
+    wp_id INTEGER NOT NULL,
+    entry_id INTEGER NOT NULL,
+    hours REAL NOT NULL,
+    raw_hours REAL,
+    written_estimate REAL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source_id, spent_on, wp_id)
+  );
+  INSERT OR REPLACE INTO timesheet_entries_new (source_id, spent_on, wp_id, entry_id, hours, updated_at)
+    SELECT source_id, spent_on, wp_id, entry_id, hours, updated_at FROM timesheet_entries;
+  DROP TABLE timesheet_entries;
+  ALTER TABLE timesheet_entries_new RENAME TO timesheet_entries;
+  PRAGMA foreign_keys = ON;
+  `,
+  // Migration 66: manually entered OpenProject timesheet work.
+  `
+  CREATE TABLE IF NOT EXISTS timesheet_manual_entries (
+    id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    spent_on TEXT NOT NULL,
+    wp_id INTEGER NOT NULL,
+    display_id TEXT NOT NULL,
+    description TEXT NOT NULL,
+    active_hours REAL NOT NULL CHECK(active_hours >= 0),
+    wait_hours REAL NOT NULL CHECK(wait_hours >= 0),
+    level TEXT NOT NULL DEFAULT 'easy' CHECK(level IN ('easy', 'hard')),
+    pinned INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK(active_hours + wait_hours > 0),
+    CHECK(active_hours + wait_hours <= 24)
+  );
+  CREATE INDEX IF NOT EXISTS idx_timesheet_manual_date ON timesheet_manual_entries(source_id, spent_on);
+  `,
+  // Migration 67: per-day total-hour overrides for timesheet preview/writeback.
+  `
+  CREATE TABLE IF NOT EXISTS timesheet_day_overrides (
+    source_id TEXT NOT NULL,
+    spent_on TEXT NOT NULL,
+    hours REAL NOT NULL CHECK(hours >= 8),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source_id, spent_on)
+  );
+  `,
+  // Migration 68: lý do task bị hủy, để người dùng xem lại vì sao.
+  `ALTER TABLE tasks ADD COLUMN cancelReason TEXT;`,
+  // Migration 69: ai/nguồn nào hủy task (dashboard, telegram:@user, mcp, system:*).
+  `ALTER TABLE tasks ADD COLUMN cancelledBy TEXT;`,
+  // Migration 70: engine and profileName for reviews
   `
   ALTER TABLE reviews ADD COLUMN engine TEXT;
   ALTER TABLE reviews ADD COLUMN profileName TEXT;
@@ -1210,6 +1264,10 @@ export interface TaskRow {
   doneReport?: string | null;
   blockedReport?: string | null;
   diffStat?: string | null;
+  /** Lý do task bị hủy (người dùng nhập hoặc hệ thống ghi). */
+  cancelReason?: string | null;
+  /** Ai hủy: dashboard, telegram:<user>, mcp:<client>, system, batch… */
+  cancelledBy?: string | null;
   slot: number | null;
   batchId?: string | null;
   creationSessionId?: string | null;
@@ -1920,7 +1978,7 @@ export class TaskRepo {
 
   update(
     id: string,
-    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'blockedReport' | 'diffStat' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
+    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'blockedReport' | 'diffStat' | 'cancelReason' | 'cancelledBy' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
   ): void {
     const sets: string[] = ["updatedAt = datetime('now')"];
     const values: unknown[] = [];
@@ -3308,7 +3366,7 @@ export class TrackerItemRepo {
   }
 }
 
-export interface TimesheetEntryRow { source_id: string; spent_on: string; wp_id: number; entry_id: number; hours: number; updated_at: string; }
+export interface TimesheetEntryRow { source_id: string; spent_on: string; wp_id: number; entry_id: number; hours: number; raw_hours: number | null; written_estimate: number | null; updated_at: string; }
 export class TimesheetEntryRepo {
   constructor(private db: Database.Database) {}
   get(sourceId: string, date: string, wpId: number): TimesheetEntryRow | undefined {
@@ -3317,10 +3375,64 @@ export class TimesheetEntryRepo {
   listForDate(sourceId: string, date: string): TimesheetEntryRow[] {
     return this.db.prepare('SELECT * FROM timesheet_entries WHERE source_id = ? AND spent_on = ? ORDER BY wp_id').all(sourceId, date) as TimesheetEntryRow[];
   }
+  /** Tổng raw_hours qua mọi ngày đã ghi cho (source_id, wp_id). Không tính ngày excludeDate. */
+  sumRawHours(sourceId: string, wpId: number, excludeDate: string): number {
+    const row = this.db.prepare('SELECT COALESCE(SUM(raw_hours),0) AS total FROM timesheet_entries WHERE source_id = ? AND wp_id = ? AND spent_on != ?').get(sourceId, wpId, excludeDate) as { total: number };
+    return row.total;
+  }
+  /** Giá trị written_estimate gần nhất hub đã ghi lên OP cho (source_id, wp_id), hoặc null nếu chưa ghi. */
+  lastWrittenEstimate(sourceId: string, wpId: number): number | null {
+    const row = this.db.prepare('SELECT written_estimate FROM timesheet_entries WHERE source_id = ? AND wp_id = ? AND written_estimate IS NOT NULL ORDER BY spent_on DESC LIMIT 1').get(sourceId, wpId) as { written_estimate: number } | undefined;
+    return row?.written_estimate ?? null;
+  }
   upsert(row: Omit<TimesheetEntryRow, 'updated_at'>): void {
-    this.db.prepare(`INSERT INTO timesheet_entries (source_id, spent_on, wp_id, entry_id, hours) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(source_id, spent_on, wp_id) DO UPDATE SET entry_id=excluded.entry_id, hours=excluded.hours, updated_at=datetime('now')`)
-      .run(row.source_id, row.spent_on, row.wp_id, row.entry_id, row.hours);
+    this.db.prepare(`INSERT INTO timesheet_entries (source_id, spent_on, wp_id, entry_id, hours, raw_hours, written_estimate) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(source_id, spent_on, wp_id) DO UPDATE SET entry_id=excluded.entry_id, hours=excluded.hours, raw_hours=excluded.raw_hours, written_estimate=excluded.written_estimate, updated_at=datetime('now')`)
+      .run(row.source_id, row.spent_on, row.wp_id, row.entry_id, row.hours, row.raw_hours ?? null, row.written_estimate ?? null);
+  }
+}
+
+export interface TimesheetManualEntryRow {
+  id: string; source_id: string; spent_on: string; wp_id: number; display_id: string;
+  description: string; active_hours: number; wait_hours: number; level: 'easy' | 'hard';
+  pinned: number; created_at: string; updated_at: string;
+}
+
+export class TimesheetManualEntryRepo {
+  constructor(private db: Database.Database) {}
+  get(id: string): TimesheetManualEntryRow | undefined {
+    return this.db.prepare('SELECT * FROM timesheet_manual_entries WHERE id = ?').get(id) as TimesheetManualEntryRow | undefined;
+  }
+  listForDate(sourceId: string, date: string): TimesheetManualEntryRow[] {
+    return this.db.prepare('SELECT * FROM timesheet_manual_entries WHERE source_id = ? AND spent_on = ? ORDER BY created_at, id').all(sourceId, date) as TimesheetManualEntryRow[];
+  }
+  insert(row: Omit<TimesheetManualEntryRow, 'created_at' | 'updated_at'>): TimesheetManualEntryRow {
+    this.db.prepare(`INSERT INTO timesheet_manual_entries
+      (id, source_id, spent_on, wp_id, display_id, description, active_hours, wait_hours, level, pinned)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(row.id, row.source_id, row.spent_on, row.wp_id, row.display_id, row.description, row.active_hours, row.wait_hours, row.level, row.pinned ? 1 : 0);
+    return this.get(row.id)!;
+  }
+  update(id: string, patch: Partial<Omit<TimesheetManualEntryRow, 'id' | 'created_at' | 'updated_at'>>): TimesheetManualEntryRow {
+    const current = this.get(id);
+    if (!current) throw new Error('Mục thủ công không tồn tại');
+    const next = { ...current, ...patch };
+    this.db.prepare(`UPDATE timesheet_manual_entries SET source_id=?, spent_on=?, wp_id=?, display_id=?, description=?, active_hours=?, wait_hours=?, level=?, pinned=?, updated_at=datetime('now') WHERE id=?`)
+      .run(next.source_id, next.spent_on, next.wp_id, next.display_id, next.description, next.active_hours, next.wait_hours, next.level, next.pinned ? 1 : 0, id);
+    return this.get(id)!;
+  }
+  delete(id: string): void { this.db.prepare('DELETE FROM timesheet_manual_entries WHERE id = ?').run(id); }
+}
+
+export interface TimesheetDayOverrideRow { source_id: string; spent_on: string; hours: number; updated_at: string; }
+export class TimesheetDayOverrideRepo {
+  constructor(private db: Database.Database) {}
+  get(sourceId: string, date: string): TimesheetDayOverrideRow | undefined {
+    return this.db.prepare('SELECT * FROM timesheet_day_overrides WHERE source_id = ? AND spent_on = ?').get(sourceId, date) as TimesheetDayOverrideRow | undefined;
+  }
+  upsert(sourceId: string, date: string, hours: number): TimesheetDayOverrideRow {
+    this.db.prepare(`INSERT INTO timesheet_day_overrides (source_id, spent_on, hours) VALUES (?, ?, ?)
+      ON CONFLICT(source_id, spent_on) DO UPDATE SET hours=excluded.hours, updated_at=datetime('now')`).run(sourceId, date, hours);
+    return this.get(sourceId, date)!;
   }
 }
 

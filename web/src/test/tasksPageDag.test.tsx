@@ -99,10 +99,11 @@ describe('TasksPage - DAG View and Filters', () => {
 
     renderWithProviders(<TasksPage />);
 
-    // Initially in Kanban mode
+    // Mặc định mở ở view Quy trình (TaskFlow)
     await waitFor(() => {
-      expect(screen.getByTestId('kanban-column-running')).toBeInTheDocument();
+      expect(screen.getByTestId('flow-view-wrapper')).toBeInTheDocument();
     });
+    expect(screen.queryByTestId('kanban-column-running')).not.toBeInTheDocument();
 
     // Check view toggle buttons
     const dagToggleBtn = screen.getByTestId('view-toggle-dag');

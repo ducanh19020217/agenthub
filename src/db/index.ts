@@ -974,7 +974,23 @@ export function openDatabase(dbPath: string): Database.Database {
   currentVersion = repairForkAvatarMigration(db, currentVersion);
 
   for (let i = currentVersion + 1; i < MIGRATIONS.length; i++) {
-    db.exec(MIGRATIONS[i]);
+    try {
+      db.exec(MIGRATIONS[i]);
+    } catch (error) {
+      if (String(error).includes('duplicate column name')) {
+        for (const stmt of MIGRATIONS[i].split(';')) {
+          const trimmed = stmt.trim();
+          if (!trimmed) continue;
+          try {
+            db.exec(trimmed);
+          } catch (inner) {
+            if (!String(inner).includes('duplicate column name')) throw inner;
+          }
+        }
+      } else {
+        throw error;
+      }
+    }
     db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(
       String(i),
     );

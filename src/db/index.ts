@@ -946,6 +946,11 @@ export const MIGRATIONS: string[] = [
     PRIMARY KEY (source_id, spent_on, wp_id)
   );
   `,
+  // Migration 65: engine and profileName for reviews
+  `
+  ALTER TABLE reviews ADD COLUMN engine TEXT;
+  ALTER TABLE reviews ADD COLUMN profileName TEXT;
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -2182,6 +2187,8 @@ export interface ReviewRow {
   feedback: string | null;
   createdAt: string;
   actor: string;
+  engine: string | null;
+  profileName: string | null;
 }
 
 export class ReviewRepo {
@@ -2197,12 +2204,28 @@ export class ReviewRepo {
       .all(taskId) as ReviewRow[];
   }
 
-  insert(row: { id: string; taskId: string; verdict: string; feedback?: string | null; actor?: string }): void {
+  insert(row: {
+    id: string;
+    taskId: string;
+    verdict: string;
+    feedback?: string | null;
+    actor?: string;
+    engine?: string | null;
+    profileName?: string | null;
+  }): void {
     this.db
       .prepare(
-        'INSERT INTO reviews (id, taskId, verdict, feedback, actor) VALUES (?, ?, ?, ?, ?)',
+        'INSERT INTO reviews (id, taskId, verdict, feedback, actor, engine, profileName) VALUES (?, ?, ?, ?, ?, ?, ?)',
       )
-      .run(row.id, row.taskId, row.verdict, row.feedback || null, row.actor || 'claude');
+      .run(
+        row.id,
+        row.taskId,
+        row.verdict,
+        row.feedback || null,
+        row.actor || 'claude',
+        row.engine || null,
+        row.profileName || null,
+      );
   }
 }
 

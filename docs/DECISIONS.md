@@ -206,3 +206,11 @@
 - **Bối cảnh**: Yêu cầu task t-flow-live-animation quy định ô trạng thái "đang hoạt động" gồm `running`, `checking`, và "review khi reviewer đang chạy". Tuy nhiên, view Quy trình (`TaskFlow.tsx`) truy vấn số đếm task theo trạng thái (`useStatusTotal`) và API REST hiện tại không trả về tín hiệu phân biệt liệu một task ở trạng thái `review` có tiến trình reviewer nền đang thực thi hay đang ở hàng chờ / chờ người dùng duyệt qua UI.
 - **Quyết định**: Coi ô `review` là "đang hoạt động" (`data-active="true"`, có viền sáng pulse, icon review chớp nhẹ, cạnh luồng animated) mỗi khi tổng số task ở trạng thái `review` > 0 (`total > 0`), đồng bộ với cách xử lý của `running` và `checking`.
 - **Hệ quả**: Giữ logic frontend đơn giản, không phát sinh thêm truy vấn kiểm tra subprocess nền của reviewer làm tăng tải API, đảm bảo trải nghiệm người dùng trực quan khi có task ở bước duyệt.
+
+## DEC-019: Cấu hình publish thuộc phạm vi project thay vì hệ thống
+
+- **Bối cảnh**: Tính năng tự động push sau khi hoàn thành task (`t-auto-push-after-done`) cần cấu hình bật/tắt, remote (`origin`), nhánh đích, và tùy chọn push cả nhánh integration.
+- **Quyết định**: `publish` được đặt ở cấp độ project (`projects.settings.publish`, tương tự `integration`, `worktree`, `gitea`, `remoteDeploy`) thay vì cấu hình toàn hệ thống (`AgentHubConfig`):
+  1. Mỗi git repository có cấu hình remote (`origin`, `upstream`...) và chính sách phân nhánh (default branch, target branch) riêng biệt.
+  2. Các preset (`safe`, `balanced`, `auto`) cấu hình cờ `publish.enabled` khi áp dụng cho project: `auto` bật `true`, `safe` và `balanced` để `false`.
+  3. Tránh việc một cấu hình remote/nhánh toàn cục gây ảnh hưởng ngoài ý muốn lên các repo khác nhau trong cùng một hub.

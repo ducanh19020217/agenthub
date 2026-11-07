@@ -501,7 +501,7 @@ export class SavingsService {
       totalWorkerTokens += taskTokens;
 
       // Only done tasks contribute to savings & cost
-      if (task.status === 'done') {
+      if (task.status === 'done' || task.status === 'pushed') {
         tasksApprovedCount += 1;
         totalReviewRoundsForDoneTasks += reviewRounds;
         claudeSavedTokens += Math.round(taskTokens * claudeFactor);

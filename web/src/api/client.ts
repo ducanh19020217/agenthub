@@ -324,6 +324,8 @@ export async function getProjects(): Promise<Project[]> {
   return apiFetch<Project[]>('/api/projects');
 }
 
+export const getProject = (id: string) => apiFetch<Project>(`/api/projects/${encodeURIComponent(id)}`);
+
 export const getProjectGitStatus = (projectId: string) =>
   apiFetch<ProjectGitStatus>(`/api/projects/${encodeURIComponent(projectId)}/git`);
 
@@ -848,6 +850,12 @@ export async function retryTask(id: string, data?: RetryTaskInput): Promise<Task
 
 export async function retryReviewer(id: string): Promise<Task> {
   return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/review/retry-reviewer`, {
+    method: 'POST',
+  });
+}
+
+export async function publishTask(id: string): Promise<{ ok: boolean; error?: string; remote?: string; branch?: string; commit?: string; compareUrl?: string; skipped?: boolean; reason?: string }> {
+  return apiFetch<{ ok: boolean; error?: string; remote?: string; branch?: string; commit?: string; compareUrl?: string; skipped?: boolean; reason?: string }>(`/api/tasks/${encodeURIComponent(id)}/publish`, {
     method: 'POST',
   });
 }

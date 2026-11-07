@@ -989,7 +989,7 @@ exec /usr/bin/git "$@"
       process.env.PATH = savedPath;
     }
 
-    // 2. Static check across all files in src/ to ensure no git push command exists
+    // 2. Static check across all files in src/ to ensure no git push command exists (except publish.ts which handles intentional post-done publish)
     const srcDir = path.join(process.cwd(), 'src');
     const readAllFiles = (dir: string): string[] => {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -1006,6 +1006,7 @@ exec /usr/bin/git "$@"
     const gitPushUsages: { file: string; line: number; text: string }[] = [];
 
     for (const file of allSrcFiles) {
+      if (file.endsWith('publish.ts')) continue;
       const content = fs.readFileSync(file, 'utf8');
       const lines = content.split('\n');
       lines.forEach((line, idx) => {

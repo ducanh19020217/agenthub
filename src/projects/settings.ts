@@ -65,6 +65,14 @@ export const RemoteDeploySettingsSchema = z.object({
 });
 export type RemoteDeploySettings = z.infer<typeof RemoteDeploySettingsSchema>;
 
+export const PublishSettingsSchema = z.object({
+  enabled: z.boolean().default(false),
+  remote: z.string().trim().min(1).default('origin'),
+  branch: z.string().trim().min(1, 'Tên nhánh không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
+  pushIntegrationBranch: z.boolean().default(true),
+});
+export type PublishSettings = z.infer<typeof PublishSettingsSchema>;
+
 export const ProjectSettingsSchema = z.object({
   remoteDeploy: RemoteDeploySettingsSchema.default({}),
   openproject: z.object({
@@ -143,6 +151,7 @@ export const ProjectSettingsSchema = z.object({
     /** full: task titles and summaries in Telegram; minimal: only counts and links, no content. */
     telegramContent: z.enum(['full', 'minimal']).default('full'),
   }).default({}),
+  publish: PublishSettingsSchema.default({}),
 });
 
 export type ProjectSettings = z.infer<typeof ProjectSettingsSchema>;
@@ -158,6 +167,7 @@ export const ProjectSettingsInputSchema = z.object({
   integration: ProjectSettingsSchema.shape.integration.removeDefault().partial().optional(),
   review: ProjectSettingsSchema.shape.review.removeDefault().partial().optional(),
   ci: ProjectSettingsSchema.shape.ci.removeDefault().partial().optional(),
+  publish: ProjectSettingsSchema.shape.publish.removeDefault().partial().optional(),
   references: z.array(ReferenceSchema).max(20).optional(),
   reviewChecklist: z.array(z.string().min(1).max(500).refine(isSafeProjectRelativePath, 'phải là đường dẫn tương đối trong project, không được chứa ..')).max(5).optional(),
   notifications: ProjectSettingsSchema.shape.notifications.removeDefault().partial().optional(),
@@ -275,6 +285,7 @@ export function mergeProjectSettings(current: ProjectSettings, input: ProjectSet
       ...(nextReviewFallback ? { fallback: nextReviewFallback } : {}),
     },
     ci: { ...current.ci, ...input.ci },
+    publish: { ...(current.publish || DEFAULT_PROJECT_SETTINGS.publish), ...input.publish },
     references: input.references ?? current.references,
     reviewChecklist: input.reviewChecklist ?? current.reviewChecklist,
     notifications: { ...current.notifications, ...input.notifications },

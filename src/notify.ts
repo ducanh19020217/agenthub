@@ -209,7 +209,7 @@ export class NotificationService {
     if (type === 'merge.failed') {
       if (p.autoFixCreated === true) return;
       if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
-        /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+        /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'pushed', 'cancelled', 'failed', 'blocked'].includes(t.status)
       )) {
         return;
       }
@@ -283,6 +283,8 @@ export class NotificationService {
         type === 'ci.passed' ||
         type === 'merge.conflict' ||
         type === 'merge.failed' ||
+        type === 'task.pushed' ||
+        type === 'task.push_failed' ||
         type.startsWith('remote_deploy.') ||
         type.startsWith('tracker.') ||
         type === 'quota.exhausted' ||
@@ -526,7 +528,7 @@ export class NotificationService {
       case 'merge.failed': {
         if (p.autoFixCreated === true) break;
         if (taskId && this.taskRepo?.getDerivedFrom(taskId).some((t) =>
-          /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+          /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'pushed', 'cancelled', 'failed', 'blocked'].includes(t.status)
         )) {
           break;
         }
@@ -759,6 +761,20 @@ export class NotificationService {
       case 'remote_deploy.health_timeout': {
         const proj = typeof p.projectId === 'string' ? p.projectId : 'dự án';
         this.notify(`${this.appName}: Remote deploy hết thời gian chờ health check cho ${proj}`, 'critical');
+        break;
+      }
+
+      case 'task.pushed': {
+        const branchStr = typeof p.branch === 'string' ? ` vào ${p.branch}` : '';
+        const title = this.resolveTaskTitle(taskId, p);
+        this.notify(`🚀 Đã đẩy lên git${branchStr}: ${title}`, 'normal');
+        break;
+      }
+
+      case 'task.push_failed': {
+        const err = typeof p.error === 'string' ? `: ${p.error}` : '';
+        const title = this.resolveTaskTitle(taskId, p);
+        this.notify(`❌ Đẩy git thất bại: ${title}${err}`, 'critical');
         break;
       }
     }

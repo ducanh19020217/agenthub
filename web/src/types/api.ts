@@ -8,7 +8,8 @@ export type TaskStatus =
   | 'blocked'
   | 'failed'
   | 'cancelled'
-  | 'waiting_quota';
+  | 'waiting_quota'
+  | 'pushed';
 
 export interface PerfGroup { cpuPercent: number; rssBytes: number; processes: number; }
 export interface PerfSample { at: string; cpuCount: number; groups: Record<string, PerfGroup>; }
@@ -233,6 +234,13 @@ export interface DeployStatus {
   logPath?: string;
 }
 
+export interface PublishSettings {
+  enabled: boolean;
+  remote: string;
+  branch?: string;
+  pushIntegrationBranch: boolean;
+}
+
 /** Mirrors src/projects/settings.ts. */
 export interface ProjectSettings {
   preset?: 'safe' | 'balanced' | 'auto' | 'custom' | string;
@@ -251,6 +259,7 @@ export interface ProjectSettings {
   integration: { enabled: boolean; branch?: string; baseRef?: string; autoMerge?: boolean };
   review?: { autoMerge?: boolean; order?: ReviewerOrderItem[]; fallback?: Partial<ReviewerFallback> };
   ci: { enabled?: boolean; branch?: string };
+  publish?: PublishSettings;
   references: Array<{ name: string; path: string; inject: boolean }>;
   reviewChecklist?: string[];
   notifications: { telegramContent: 'full' | 'minimal' };
@@ -402,6 +411,17 @@ export interface Task {
   reviewChain?: ReviewChainStep[];
   createdAt: string;
   updatedAt: string;
+  pushedAt?: string | null;
+  pushResult?: string | null | {
+    remote?: string;
+    branch?: string;
+    commit?: string;
+    url?: string | null;
+    compareUrl?: string | null;
+    error?: string | null;
+    reason?: string | null;
+    outputTail?: string | null;
+  };
   reviewer?: 'codex' | 'claude';
   currentRun?: {
     startedAt: string;

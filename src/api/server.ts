@@ -674,6 +674,11 @@ export async function createServer(
     return service.retryReviewer(id);
   });
 
+  fastify.post('/api/tasks/:id/publish', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.publishTask(id, { manual: true });
+  });
+
   fastify.delete('/api/tasks/:id/worktree', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
     return service.deleteWorktree(id);

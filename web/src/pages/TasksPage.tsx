@@ -47,7 +47,7 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
     refetchInterval: 10_000,
   });
 
-  const pageSize = statusKey === 'done' || statusKey === 'cancelled' ? 10 : 20;
+  const pageSize = statusKey === 'done' || statusKey === 'pushed' || statusKey === 'cancelled' ? 10 : 20;
   const { data, isLoading } = useQuery({
     queryKey: ['tasks-kanban', project, statusKey, search, pageSize],
     queryFn: () => getTasksPage({ project, status: statusKey, search, limit: pageSize, sort: 'createdAt', order: 'desc' }),
@@ -343,7 +343,17 @@ export const TasksPage: React.FC = () => {
   });
   const { data: completedTasks = [] } = useQuery({
     queryKey: ['tasks-triage-pending'],
-    queryFn: () => getTasks({ status: 'done' }),
+    queryFn: async () => {
+      const [doneTasks, pushedTasks] = await Promise.all([
+        getTasks({ status: 'done' }),
+        getTasks({ status: 'pushed' }),
+      ]);
+      const taskMap = new Map<string, Task>();
+      for (const t of [...doneTasks, ...pushedTasks]) {
+        taskMap.set(t.id, t);
+      }
+      return Array.from(taskMap.values());
+    },
     refetchInterval: 5000,
   });
   const pendingTriageTasks = completedTasks.filter((task) => task.triage?.analysis && !task.triage.decision);

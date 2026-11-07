@@ -1,0 +1,87 @@
+# Hoàn thành task: t-auto-push-after-done
+
+## 1. Tóm tắt việc đã làm
+1. **Cấu hình publish**:
+   - Mở rộng `ProjectSettingsSchema` (`src/projects/settings.ts`) với trường `publish`: `{ enabled: boolean, remote: string, branch?: string, pushIntegrationBranch: boolean }`.
+   - Cập nhật preset `auto` (`src/presets.ts`) bật `publish.enabled = true`, các preset `safe`/`balanced` giữ `false`.
+   - Cập nhật `ProjectSettingsDrawer.tsx`: thêm nhóm cấu hình "Đẩy lên git sau khi hoàn thành" gồm công tắc bật/tắt, ô nhập remote, ô nhập nhánh đích kèm kiểm tra cú pháp nhánh, công tắc đẩy kèm nhánh integration.
+2. **Trạng thái mới `pushed` & CSDL**:
+   - Tạo Migration 72 (`src/db/index.ts`): nới lỏng CHECK constraint của cột `status` trong bảng `tasks` để cho phép `'pushed'`. Thêm 2 cột mới `pushedAt TEXT` và `pushResult TEXT` lưu JSON metadata (remote, branch, commit, compareUrl, reason, outputTail, error).
+   - Thêm trạng thái `pushed` vào kiểu `TaskStatus` backend và frontend.
+3. **Luồng tự động backend & Services**:
+   - Tạo module `src/publish.ts` với hàm `publishTask(taskId, options)`.
+   - Sau khi task hoàn thành (`done`) và được merge vào nhánh integration hoặc defaultBranch trong `AgentHubService.reviewTask`, nếu `publish.enabled` được bật:
+     - Phát sự kiện `task.publishing`.
+     - Trong worktree riêng biệt an toàn (`~/.agenthub/integration/<project>-publish` hoặc integration worktree), fetch remote, checkout và merge fast-forward nhánh đích, rồi merge nhánh task/integration vào nhánh đích (`--no-ff`).
+     - Push nhánh đích lên remote; nếu `pushIntegrationBranch` bật thì push cả `agenthub/integration`.
+     - Khóa tuần tự theo từng `projectId` (Publish Lock) để tránh push đồng thời bị xung đột.
+     - Thành công: cập nhật `status = 'pushed'`, `pushedAt`, `pushResult`; phát sự kiện `task.pushed`.
+     - Thất bại: giữ nguyên trạng thái `done`, lưu lỗi chi tiết vào `pushResult`, phát sự kiện `task.push_failed`.
+   - Thêm API endpoint `POST /api/tasks/:id/publish` hỗ trợ đẩy tay / thử lại khi lỗi.
+   - Thêm MCP tool `hub_publish { id }` và cập nhật `hub_wait` nhận diện sự kiện `task.pushed`.
+4. **Giao diện Web**:
+   - `web/src/utils/tasks.ts`: Thêm cột `pushed` ("Đã đẩy git") vào Kanban.
+   - `web/src/index.css`: Thêm CSS variables `--status-pushed-*` (màu cyan/teal nổi bật hơn done).
+   - `web/src/components/TaskFlow.tsx`: Thêm bước `pushed` sau `Hoàn thành` với nhãn "Tự merge + push".
+   - `web/src/pages/TaskDetailPage.tsx`:
+     - Thêm khối "Đẩy lên git" hiển thị remote, branch, commit, compare link, timestamp; khi lỗi hiển thị banner lỗi, outputTail và nút "Đẩy lại"; thêm nút "Đẩy lên git" trên header cho task `done`.
+     - Ẩn nút Hủy (Cancel) khi task ở trạng thái `pushed` (`task.status !== 'done' && task.status !== 'pushed' && task.status !== 'cancelled'`).
+   - `web/src/pages/TasksPage.tsx`: Gộp query `getTasks({ status: 'done' })` và `getTasks({ status: 'pushed' })` (deduplicate theo ID) trong danh sách chờ triage.
+   - `web/src/pages/PlansPage.tsx`: Fallback `progress.done` tính cả task `done` và `pushed`.
+   - `web/src/pages/DashboardPage.tsx`: Thêm metric card cho `pushed` (icon Rocket, nhãn "Đã đẩy git", CSS `--status-pushed-*`), mở rộng grid 6 cột; thẻ tóm tắt task theo dự án hiển thị số lượng task `pushed` khi > 0.
+   - `web/src/components/dag/dagUtils.ts` & `src/services/dag.ts`: Coi `pushed` tương đương `done` cho hoàn thành/critical path.
+   - Cập nhật đa ngôn ngữ `vi` và `en` đầy đủ.
+5. **Thông báo Telegram & Desktop**:
+   - `src/telegram.ts`:
+     - Bổ sung xử lý sự kiện `task.pushed` ("🚀 Đã đẩy lên git" kèm ID, tiêu đề, remote/branch, commit ngắn, link so sánh) và `task.push_failed` ("❌ Đẩy git thất bại" kèm lý do và nút callback "Đẩy lại").
+     - Tuân thủ cấu hình thông báo não auto (`notify.taskDone` cho `task.pushed`, `notify.failed` cho `task.push_failed`).
+     - Lệnh `/status`: Dòng Tasks tính tổng hoàn thành bằng `(tasks.done + tasks.pushed)` và kèm số lượng `(X đã đẩy git)`.
+     - Cập nhật `notifyProjectIdle` đếm cả `done` và `pushed`.
+   - `src/brain/digest.ts`: Bổ sung `pushed` và `pushedTotal` trong `DigestData.tasks`, tính số lượng 24h và tổng số, hiển thị ghi chú số task đã đẩy git trong dòng tổng cộng.
+   - `src/notify.ts`: Thêm desktop notification cho `task.pushed` và `task.push_failed`.
+
+## 2. Rà soát các vị trí coi `pushed` tương đương `done`
+- **Backend Services & Lifecycle**:
+  - `src/services/index.ts`:
+    - `reviewTask`: Kiểm tra điều kiện merge và kích hoạt auto-publish.
+    - `deleteWorktree` & `cleanupTaskWorktree`: Cho phép xóa worktree khi task ở trạng thái `pushed` tương tự `done`; cập nhật thông báo lỗi HTTP 409 nhắc đủ `done, pushed hoặc cancelled`.
+    - `getCompletedTasksCount`, `PROJECT_ACTIVE_STATUSES`, savings calculation: Coi `pushed` là task hoàn thành.
+    - `notifyProjectIdle`: Đếm các task hoàn thành gồm cả `done` và `pushed`.
+    - `byStatus` bucket & `tasksByProject`: Bổ sung bucket `pushed` riêng biệt.
+  - `src/scheduler/index.ts`: Bỏ qua các task đã kết thúc (`done`, `pushed`, `cancelled`, `failed`, `blocked`), giải phóng quota và slot điều phối.
+  - `src/services/dag.ts`: Coi `pushed` là trạng thái hoàn thành khi tính toán task chưa xong (`status !== 'done' && status !== 'pushed'`) và đường găng (critical path).
+  - `src/bulletin.ts`: Thống kê hoàn thành task bao gồm cả `done` và `pushed`.
+  - `src/mcp/index.ts`: `hub_wait` ánh xạ `task.pushed` → `pushed`.
+  - `src/brain/digest.ts`: Gộp `done` và `pushed` trong `doneTasks`, đồng thời thống kê chi tiết `pushed` và `pushedTotal`.
+  - `src/telegram.ts`: Lệnh `/status` cộng `tasks.done + tasks.pushed` thành tổng số hoàn thành và hiển thị chi tiết số task đã đẩy git; `notifyProjectIdle` tính cả `done` và `pushed`.
+- **Frontend Web & UI**:
+  - `web/src/pages/TaskDetailPage.tsx`: Nút Hủy ẩn khi task là `done`, `pushed`, hoặc `cancelled`; hiển thị khối Đẩy lên git khi task `pushed` hoặc khi task `done` có cấu hình publish; nút Xóa worktree cho phép khi task `pushed`.
+  - `web/src/pages/TasksPage.tsx`: Query triage chờ quyết định lấy cả `done` và `pushed`; bộ lọc trạng thái và cột Kanban có cột/lựa chọn `pushed`; ProjectTaskGroup hiển thị StatusBadge `pushed`.
+  - `web/src/pages/PlansPage.tsx`: Fallback `progress.done` tính cả task `done` và `pushed`.
+  - `web/src/pages/DashboardPage.tsx`: Metric card `pushed` hiển thị số task đã đẩy git; thẻ tóm tắt task theo dự án hiển thị số lượng task `pushed`; bảng worktree hiển thị usage theo trạng thái `pushed`.
+  - `web/src/components/dag/dagUtils.ts`: Coi `pushed` tương đương `done` cho các hàm tính task chưa xong và critical path.
+  - `web/src/components/TaskFlow.tsx`: Bước `pushed` nằm sau `Hoàn thành` trong luồng vòng đời task.
+- **Tương thích ngược**:
+  - Các task cũ đã ở `done` trước đây được giữ nguyên không tự động đổi sang `pushed`. Người dùng có thể đẩy git thủ công qua nút "Đẩy lên git" trên UI hoặc gọi MCP tool `hub_publish`.
+
+## 3. Kết quả kiểm tra
+- `npm run lint`: PASSED (0 errors, 80 existing warnings trong test unaffected)
+- `npx tsc --noEmit -p . && npx tsc --noEmit -p web`: PASSED (exit code 0)
+- `npm run test -- --run`: PASSED (131 test files, 1608 tests passed)
+- `npm run test:web -- --run`: PASSED (68 test files, 593 tests passed)
+- `npm run build:web`: PASSED (built in 4.42s)
+
+## 4. Việc chưa làm được và lý do
+- Không có. Toàn bộ yêu cầu task và các điểm feedback review đã được hoàn thành và kiểm tra đầy đủ.
+
+## 5. Danh sách commits
+- `42aaab10`: `feat(db): add pushed status and push tracking columns in migration 72`
+- `ef2f5a0b`: `feat(config): add publish settings and preset auto integration`
+- `fd7905ee`: `feat(services): implement git publishing after task completion`
+- `21bfb5ee`: `feat(telegram): support task pushed and push_failed notifications`
+- `e1200f65`: `feat(web): add publish settings drawer, task detail publish block, and tests`
+- `421d5267`: `fix(web): exclude pushed status from cancel button in task detail`
+- `d987ff5d`: `fix(web): include pushed tasks in triage pending query and plans progress`
+- `8198868a`: `fix(web): add pushed task count metrics and project summary to dashboard`
+- `0fe33ca6`: `fix(services): update deleteWorktree error message to include pushed status`
+- `6d94f842`: `fix(telegram): count pushed tasks in status overview and digest summary`

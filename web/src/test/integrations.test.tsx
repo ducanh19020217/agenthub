@@ -710,6 +710,69 @@ describe('Integrations UI Suite', () => {
         expect(msg).toHaveClass('text-[var(--t-crit)]');
       });
     });
+
+    it('configures git publish settings: toggles publish, edits remote and branch, and saves correctly', async () => {
+      const updateSpy = vi.spyOn(client, 'updateProject').mockResolvedValue(mockProject);
+      renderWithProviders(<ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />);
+
+      const publishSection = await screen.findByTestId('project-publish-section');
+      expect(publishSection).toBeInTheDocument();
+
+      const publishToggle = within(publishSection).getByTestId('publish-toggle');
+      expect(publishToggle).not.toBeChecked();
+
+      // Enable publish
+      fireEvent.click(publishToggle);
+      expect(publishToggle).toBeChecked();
+
+      // Remote input
+      const remoteInput = within(publishSection).getByTestId('publish-remote-input');
+      expect(remoteInput).toHaveValue('origin');
+      fireEvent.change(remoteInput, { target: { value: 'upstream' } });
+
+      // Save changes
+      const saveBtn = screen.getByTestId('save-changes-button');
+      fireEvent.click(saveBtn);
+
+      await waitFor(() => {
+        expect(updateSpy).toHaveBeenCalledWith(
+          'proj-1',
+          expect.objectContaining({
+            settings: expect.objectContaining({
+              publish: expect.objectContaining({
+                enabled: true,
+                remote: 'upstream',
+              }),
+            }),
+          }),
+        );
+      });
+    });
+
+    it('validates publish target branch name syntax and displays error', async () => {
+      renderWithProviders(<ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />);
+
+      const publishSection = await screen.findByTestId('project-publish-section');
+      const publishToggle = within(publishSection).getByTestId('publish-toggle');
+
+      fireEvent.click(publishToggle);
+
+      // Select custom option to reveal text input
+      const branchSelect = within(publishSection).getByLabelText('Nhánh đích');
+      fireEvent.change(branchSelect, { target: { value: '__custom__' } });
+
+      // Custom branch with invalid syntax
+      const branchInput = within(publishSection).getByPlaceholderText(mockProject.defaultBranch || 'main');
+      fireEvent.change(branchInput, { target: { value: 'bad..branch' } });
+
+      const saveBtn = screen.getByTestId('save-changes-button');
+      fireEvent.click(saveBtn);
+
+      await waitFor(() => {
+        const errorMsg = within(publishSection).getByTestId('publish-error-msg');
+        expect(errorMsg).toBeInTheDocument();
+      });
+    });
   });
 
   describe('3. OpenProjectSettings Global Settings', () => {

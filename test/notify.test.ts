@@ -1264,4 +1264,35 @@ describe('NotificationService (Desktop Notifications)', () => {
 
     notifier.stop();
   });
+
+  it('notifies on task.pushed and task.push_failed', () => {
+    const notifier = new NotificationService({
+      eventBus,
+      config,
+      taskRepo,
+      profileRepo,
+      quotaMarkRepo,
+      projectRepo,
+      exec: fakeExec,
+    });
+    notifier.start();
+
+    eventBus.emit('task.pushed', 'proj/t-pushed', {
+      projectId: 'proj',
+      title: 'Task Pushed',
+      branch: 'main',
+    });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('Đã đẩy lên git vào main');
+
+    eventBus.emit('task.push_failed', 'proj/t-failed', {
+      projectId: 'proj',
+      title: 'Task Push Failed',
+      error: 'rejected',
+    });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('Đẩy git thất bại');
+    expect(execCalls[1].args.at(-1)).toContain('rejected');
+    notifier.stop();
+  });
 });

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { ArrowUpRight, CircleCheck, CircleX, Clock, FilePen, Flame, FlaskConical, Hourglass, OctagonAlert, Play, ScanEye, Zap, type LucideIcon } from 'lucide-react';
+import { ArrowUpRight, CircleCheck, CircleX, Clock, FilePen, Flame, FlaskConical, Hourglass, OctagonAlert, Play, Rocket, ScanEye, Zap, type LucideIcon } from 'lucide-react';
 import { getProjects, getTasksPage, type PageResponse } from '../api/client';
 import { useLocale } from '../context/LocaleContext';
 import type { Task, TaskStatus } from '../types/api';
@@ -25,7 +25,7 @@ const NODE_H = 80;
 const TOP_Y = 64;
 const BOTTOM_Y = 248;
 const LANE_Y = 372;
-const VIEW_W = 1240;
+const VIEW_W = 1440;
 const VIEW_H = 400;
 const EDGE_STYLE = { stroke: 'var(--t-text-3)', strokeOpacity: 0.6 } as const;
 
@@ -39,9 +39,10 @@ const STATUS_ICON: Record<TaskStatus, LucideIcon> = {
   blocked: OctagonAlert,
   failed: CircleX,
   done: CircleCheck,
+  pushed: Rocket,
   cancelled: CircleX,
 };
-const COL_X = [20, 224, 428, 632, 836, 1040];
+const COL_X = [20, 224, 428, 632, 836, 1040, 1244];
 
 interface FlowNode { status: TaskStatus; x: number; y: number }
 
@@ -52,6 +53,7 @@ const NODES: FlowNode[] = [
   { status: 'checking', x: COL_X[3], y: TOP_Y },
   { status: 'review', x: COL_X[4], y: TOP_Y },
   { status: 'done', x: COL_X[5], y: TOP_Y },
+  { status: 'pushed', x: COL_X[6], y: TOP_Y },
   { status: 'waiting_quota', x: COL_X[2], y: BOTTOM_Y },
   { status: 'failed', x: COL_X[3], y: BOTTOM_Y },
   { status: 'blocked', x: COL_X[4], y: BOTTOM_Y },
@@ -332,6 +334,7 @@ const FlowEdges: React.FC<{ counts: Record<TaskStatus, number> }> = ({ counts })
     ['running', 'checking'],
     ['checking', 'review'],
     ['review', 'done'],
+    ['done', 'pushed'],
   ];
 
   const runningH = (counts.running ?? 0) > 0 ? 116 : NODE_H;
@@ -352,11 +355,15 @@ const FlowEdges: React.FC<{ counts: Record<TaskStatus, number> }> = ({ counts })
     <g data-testid="flow-edges">
       {main.map(([from, to]) => {
         const animated = isStatusActive(from) || isStatusActive(to);
+        const isDoneToPushed = from === 'done' && to === 'pushed';
         return (
           <Edge
             key={`${from}-${to}`}
             d={`M ${right(from) + 2} ${midY} L ${left(to) - 6} ${midY}`}
             animated={animated}
+            label={isDoneToPushed ? t('tasks.flow.edgeAutoMergePush') : undefined}
+            lx={isDoneToPushed ? (right(from) + left(to)) / 2 : undefined}
+            ly={isDoneToPushed ? midY - 10 : undefined}
           />
         );
       })}
@@ -499,6 +506,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
   const qChecking = useStatusTotal(project, 'checking', search);
   const qReview = useStatusTotal(project, 'review', search);
   const qDone = useStatusTotal(project, 'done', search);
+  const qPushed = useStatusTotal(project, 'pushed', search);
   const qWaitingQuota = useStatusTotal(project, 'waiting_quota', search);
   const qFailed = useStatusTotal(project, 'failed', search);
   const qBlocked = useStatusTotal(project, 'blocked', search);
@@ -516,6 +524,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
     checking: checkingCount,
     review: reviewCount,
     done: qDone.data?.total ?? 0,
+    pushed: qPushed.data?.total ?? 0,
     waiting_quota: qWaitingQuota.data?.total ?? 0,
     failed: qFailed.data?.total ?? 0,
     blocked: qBlocked.data?.total ?? 0,
@@ -529,6 +538,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
     checking: qChecking.isLoading,
     review: qReview.isLoading,
     done: qDone.isLoading,
+    pushed: qPushed.isLoading,
     waiting_quota: qWaitingQuota.isLoading,
     failed: qFailed.isLoading,
     blocked: qBlocked.isLoading,

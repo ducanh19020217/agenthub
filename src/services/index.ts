@@ -68,6 +68,7 @@ import type { PageResult } from '../pagination.js';
 import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
 import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
+import { publishTask as executePublishTask, type PublishResult } from '../publish.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
@@ -251,7 +252,7 @@ export interface BatchProgress {
 }
 
 function batchProgress(tasks: TaskRow[]): BatchProgress {
-  const done = tasks.filter((task) => task.status === 'done').length;
+  const done = tasks.filter((task) => task.status === 'done' || task.status === 'pushed').length;
   const running = tasks.filter((task) => ['running', 'checking', 'review'].includes(task.status)).length;
   const failed = tasks.filter((task) => ['failed', 'blocked', 'cancelled'].includes(task.status)).length;
   const waiting = tasks.filter((task) => ['waiting_quota', 'draft'].includes(task.status)).length;
@@ -1474,6 +1475,7 @@ export class AppService {
       queued: 0,
       draft: 0,
       done: 0,
+      pushed: 0,
       blocked: 0,
       cancelled: 0,
       focusWaiting: 0,
@@ -1488,6 +1490,7 @@ export class AppService {
         checking: 0,
         review: 0,
         done: 0,
+        pushed: 0,
         blocked: 0,
         failed: 0,
         cancelled: 0,
@@ -1512,6 +1515,7 @@ export class AppService {
           checking: 0,
           review: 0,
           done: 0,
+          pushed: 0,
           blocked: 0,
           failed: 0,
           cancelled: 0,
@@ -1782,7 +1786,7 @@ export class AppService {
     const taskId = `${project.id}/summarize-previous-context`;
     const existing = this.taskRepo.get(taskId);
     if (existing) {
-      if (existing.status === 'done') {
+      if (existing.status === 'done' || existing.status === 'pushed') {
         const summary = existing.doneReport?.trim() || null;
         return { taskId: existing.id, status: existing.status, summary };
       }
@@ -4013,7 +4017,7 @@ export class AppService {
       '',
       toMarkdownCodeBlock(excerpt),
     ].join('\n');
-    const baseRef = source.status === 'done' ? (source.baseRef || project.defaultBranch) : (source.branch || source.baseRef || project.defaultBranch);
+    const baseRef = (source.status === 'done' || source.status === 'pushed') ? (source.baseRef || project.defaultBranch) : (source.branch || source.baseRef || project.defaultBranch);
     return this.createTask({
       project: source.projectId,
       slug: parsed.slug,
@@ -4691,6 +4695,12 @@ export class AppService {
     if (mergeResult) {
       this.exportKnowledgeFile(task.projectId);
       this.scheduler.getEventBus().emit('task.merged', taskId, mergeResult);
+      const proj = this.projectRepo.get(task.projectId);
+      if (proj && projectSettings(proj).publish?.enabled) {
+        void this.publishTask(taskId).catch((err) => {
+          console.error(`[publish] Auto-publish failed for task ${taskId}:`, err);
+        });
+      }
     }
     return this.taskRepo.get(taskId)!;
     } finally {
@@ -4853,7 +4863,7 @@ export class AppService {
 
       const fixTask = !isConflict
         ? this.taskRepo.getDerivedFrom(taskId).find((t) =>
-            /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+            /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'pushed', 'cancelled', 'failed', 'blocked'].includes(t.status)
           )
         : null;
       const autoFixCreated = Boolean(fixTask);
@@ -4910,7 +4920,7 @@ export class AppService {
   private createMergeFailureDraft(source: TaskRow, output: string): TaskRow | null {
     const existing = this.taskRepo.getDerivedFrom(source.id).find((task) =>
       task.sourceRef
-      && !['done', 'cancelled', 'failed', 'blocked'].includes(task.status)
+      && !['done', 'pushed', 'cancelled', 'failed', 'blocked'].includes(task.status)
       && (() => {
         try {
           const sourceRef = JSON.parse(task.sourceRef) as { checkName?: unknown };
@@ -4942,12 +4952,12 @@ export class AppService {
   async cleanupOrphanedMergeFixTasks(sourceTaskId?: string): Promise<number> {
     const sources = sourceTaskId
       ? [this.taskRepo.get(sourceTaskId)].filter((task): task is TaskRow => Boolean(task))
-      : this.taskRepo.getByStatus('done');
+      : this.taskRepo.getByStatus('done').concat(this.taskRepo.getByStatus('pushed'));
     let cancelled = 0;
     const reason = 'Task gốc đã merge thành công qua đường khác, tự đóng task fix-merge liên quan';
 
     for (const source of sources) {
-      if (source.status !== 'done') continue;
+      if (source.status !== 'done' && source.status !== 'pushed') continue;
       const project = this.projectRepo.getIncludingArchived(source.projectId);
       if (!project) continue;
 
@@ -5060,11 +5070,11 @@ export class AppService {
     if (!task) {
       throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
     }
-    if (task.status !== 'done' && task.status !== 'cancelled') {
+    if (task.status !== 'done' && task.status !== 'pushed' && task.status !== 'cancelled') {
       throw new HttpError(
         409,
         'conflict',
-        `Chỉ có thể xóa worktree của task đã done hoặc cancelled (hiện tại: ${task.status})`,
+        `Chỉ có thể xóa worktree của task đã done, pushed hoặc cancelled (hiện tại: ${task.status})`,
       );
     }
 
@@ -5102,6 +5112,20 @@ export class AppService {
     }
 
     return { ok: true };
+  }
+
+  async publishTask(idParam: string, options?: { manual?: boolean }): Promise<PublishResult> {
+    const taskId = toTaskId(idParam);
+    return executePublishTask(
+      taskId,
+      {
+        taskRepo: this.taskRepo,
+        projectRepo: this.projectRepo,
+        eventBus: this.scheduler.getEventBus(),
+        hubHome: this.config.hubHome,
+      },
+      options,
+    );
   }
 
   getTaskLog(idParam: string, query?: { run?: string; tail?: string | number }): string {

@@ -884,7 +884,7 @@ export async function cmdClean(
     }
 
     for (const task of ctx.taskRepo.getAll()) {
-      if (task.status !== 'done' && task.status !== 'cancelled') continue;
+      if (task.status !== 'done' && task.status !== 'pushed' && task.status !== 'cancelled') continue;
       if (!task.worktreePath || !fs.existsSync(task.worktreePath)) continue;
       tasks++;
 

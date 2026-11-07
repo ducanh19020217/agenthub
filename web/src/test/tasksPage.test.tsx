@@ -425,4 +425,22 @@ describe('TasksPage & Kanban Long Lists', () => {
     expect(screen.getByText('OP-42')).toBeInTheDocument();
     expect(screen.getByText('lỗi · vừa')).toBeInTheDocument();
   });
+
+  it('hiển thị task triage có trạng thái pushed trong khu vực Chờ bạn quyết định', async () => {
+    const pushedTriageTask: Task = {
+      id: 'p1~op-op-43-triage', projectId: 'p1', slug: 'op-op-43-triage', title: '[OP-43] Cập nhật webhook',
+      status: 'pushed', level: 'easy', dependsOn: [], attempt: 1, resume: 0,
+      createdAt: '2026-10-15T00:00:00Z', updatedAt: '2026-10-15T00:00:00Z',
+      triage: { sourceId: 'demo', wpId: 43, displayId: 'OP-43', analysis: { conclusion: 'tính năng', size: 'nhỏ', summary: 'Tóm tắt webhook' }, decision: null },
+    };
+    vi.spyOn(client, 'getTasks').mockImplementation(async (params) => {
+      if (params?.status === 'pushed') return [pushedTriageTask];
+      return [];
+    });
+    vi.spyOn(client, 'getTasksPage').mockResolvedValue({ items: [], total: 0, nextCursor: null });
+    renderPage();
+    expect(await screen.findByTestId('triage-pending-section')).toBeInTheDocument();
+    expect(screen.getByText('OP-43')).toBeInTheDocument();
+    expect(screen.getByText('tính năng · nhỏ')).toBeInTheDocument();
+  });
 });

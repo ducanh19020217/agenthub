@@ -243,6 +243,12 @@
   --status-done-border: color-mix(in srgb, var(--t-ok) 25%, transparent);
   --status-done-dot: var(--t-ok);
 
+  --status-pushed-color: #0f766e;
+  --status-pushed-bg: color-mix(in srgb, #0f766e 15%, transparent);
+  --status-pushed-text: #0f766e;
+  --status-pushed-border: color-mix(in srgb, #0f766e 25%, transparent);
+  --status-pushed-dot: #0f766e;
+
   --status-blocked-color: var(--t-warn);
   --status-blocked-bg: color-mix(in srgb, var(--t-warn) 15%, transparent);
   --status-blocked-text: var(--t-warn);
@@ -447,6 +453,12 @@
   --status-done-text: var(--t-ok);
   --status-done-border: color-mix(in srgb, var(--t-ok) 25%, transparent);
   --status-done-dot: var(--t-ok);
+
+  --status-pushed-color: #2dd4bf;
+  --status-pushed-bg: color-mix(in srgb, #2dd4bf 15%, transparent);
+  --status-pushed-text: #2dd4bf;
+  --status-pushed-border: color-mix(in srgb, #2dd4bf 25%, transparent);
+  --status-pushed-dot: #2dd4bf;
 
   --status-blocked-color: var(--t-warn);
   --status-blocked-bg: color-mix(in srgb, var(--t-warn) 15%, transparent);

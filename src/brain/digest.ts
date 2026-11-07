@@ -334,6 +334,8 @@ export interface DigestData {
   tasks: {
     done: number;
     doneTotal?: number;
+    pushed?: number;
+    pushedTotal?: number;
     running: number;
     failed: number;
     blocked: number;
@@ -377,6 +379,7 @@ export function generateDigest(opts: GenerateDigestOptions): DigestData {
 
   // 1. Task counts
   const doneTasks = [...opts.taskRepo.getByStatus('done'), ...opts.taskRepo.getByStatus('pushed')];
+  const pushedTasks = opts.taskRepo.getByStatus('pushed');
   const runningTasks = opts.taskRepo.getByStatus('running');
   const failedTasks = opts.taskRepo.getByStatus('failed');
   const blockedTasks = opts.taskRepo.getByStatus('blocked');
@@ -398,10 +401,17 @@ export function generateDigest(opts: GenerateDigestOptions): DigestData {
     const ut = new Date(t.updatedAt.includes('T') ? t.updatedAt : t.updatedAt.replace(' ', 'T') + 'Z').getTime();
     return isNaN(ut) || ut >= dayAgoMs;
   });
+  const pushed24hTasks = pushedTasks.filter((t) => {
+    if (!t.updatedAt) return true;
+    const ut = new Date(t.updatedAt.includes('T') ? t.updatedAt : t.updatedAt.replace(' ', 'T') + 'Z').getTime();
+    return isNaN(ut) || ut >= dayAgoMs;
+  });
 
   const tasksSummary = {
     done: done24hTasks.length,
     doneTotal: doneTasks.length,
+    pushed: pushed24hTasks.length,
+    pushedTotal: pushedTasks.length,
     running: runningTasks.length,
     failed: failedTasks.length,
     blocked: blockedTasks.length,
@@ -546,13 +556,14 @@ export function generateDigest(opts: GenerateDigestOptions): DigestData {
     }
   }
 
-  const totalLine = `• <b>Tổng cộng</b>: Hoàn thành: <b>${tasksSummary.done}</b> (tổng: ${tasksSummary.doneTotal ?? tasksSummary.done}) · Đang chạy: <b>${tasksSummary.running}</b> · Lỗi: <b>${tasksSummary.failed}</b>${tasksSummary.blocked ? ` · Bị chặn: <b>${tasksSummary.blocked}</b>` : ''}${tasksSummary.review ? ` · Chờ review: <b>${tasksSummary.review}</b>` : ''}`;
-  const totalMarkdownLine = `- **Tổng cộng**: Hoàn thành: **${tasksSummary.done}** (tổng: ${tasksSummary.doneTotal ?? tasksSummary.done}) · Đang chạy: **${tasksSummary.running}** · Lỗi: **${tasksSummary.failed}**${tasksSummary.blocked ? ` · Bị chặn: **${tasksSummary.blocked}**` : ''}${tasksSummary.review ? ` · Chờ review: **${tasksSummary.review}**` : ''}`;
+  const pushedNote = tasksSummary.pushedTotal ? ` (${tasksSummary.pushedTotal} đã đẩy git)` : '';
+  const totalLine = `• <b>Tổng cộng</b>: Hoàn thành: <b>${tasksSummary.done}</b> (tổng: ${tasksSummary.doneTotal ?? tasksSummary.done}${pushedNote}) · Đang chạy: <b>${tasksSummary.running}</b> · Lỗi: <b>${tasksSummary.failed}</b>${tasksSummary.blocked ? ` · Bị chặn: <b>${tasksSummary.blocked}</b>` : ''}${tasksSummary.review ? ` · Chờ review: <b>${tasksSummary.review}</b>` : ''}`;
+  const totalMarkdownLine = `- **Tổng cộng**: Hoàn thành: **${tasksSummary.done}** (tổng: ${tasksSummary.doneTotal ?? tasksSummary.done}${pushedNote}) · Đang chạy: **${tasksSummary.running}** · Lỗi: **${tasksSummary.failed}**${tasksSummary.blocked ? ` · Bị chặn: **${tasksSummary.blocked}**` : ''}${tasksSummary.review ? ` · Chờ review: **${tasksSummary.review}**` : ''}`;
 
   const taskLines = projects.length > 0
     ? [...projectLines, totalLine]
     : [
-        `• Hoàn thành: <b>${tasksSummary.done}</b> (tổng: ${tasksSummary.doneTotal ?? tasksSummary.done})`,
+        `• Hoàn thành: <b>${tasksSummary.done}</b> (tổng: ${tasksSummary.doneTotal ?? tasksSummary.done}${pushedNote})`,
         `• Đang chạy: <b>${tasksSummary.running}</b>`,
         `• Lỗi: <b>${tasksSummary.failed}</b>${tasksSummary.blocked ? ` (Bị chặn: <b>${tasksSummary.blocked}</b>)` : ''}${tasksSummary.review ? ` (Chờ review: <b>${tasksSummary.review}</b>)` : ''}`,
       ];
@@ -560,7 +571,7 @@ export function generateDigest(opts: GenerateDigestOptions): DigestData {
   const markdownTaskLines = projects.length > 0
     ? [...projectMarkdownLines, totalMarkdownLine].join('\n')
     : [
-        `- Hoàn thành: **${tasksSummary.done}** (tổng: ${tasksSummary.doneTotal ?? tasksSummary.done})`,
+        `- Hoàn thành: **${tasksSummary.done}** (tổng: ${tasksSummary.doneTotal ?? tasksSummary.done}${pushedNote})`,
         `- Đang chạy: **${tasksSummary.running}**`,
         `- Lỗi: **${tasksSummary.failed}**`,
         `- Chờ review: **${tasksSummary.review}**`,

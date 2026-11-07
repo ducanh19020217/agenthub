@@ -585,6 +585,9 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
     });
 
     it('/status returns task overview and scheduler state', async () => {
+      ctx.taskRepo.insert({ id: 'p1/t-done', projectId: 'p1', slug: 't-done', title: 'Task Done', status: 'done', level: 'easy' });
+      ctx.taskRepo.insert({ id: 'p1/t-pushed', projectId: 'p1', slug: 't-pushed', title: 'Task Pushed', status: 'pushed', level: 'easy' });
+
       await bot.handleUpdate({
         update_id: 11,
         message: {
@@ -601,6 +604,7 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(text).toContain('Tổng quan trạng thái AgentHub');
       expect(text).toContain('Điều phối');
       expect(text).toContain('Tasks:');
+      expect(text).toContain('2</b> hoàn thành (1 đã đẩy git)');
     });
 
     it('/brain renders transcript session status, request, and last tool', async () => {

@@ -2871,7 +2871,9 @@ export class TelegramBotService {
       }
     }
 
-    text = text + `• Tasks: <b>${tasks.running}</b> đang chạy, <b>${tasks.review}</b> chờ review, <b>${tasks.queued}</b> hàng đợi, ${waitingSummaryHtml}, <b>${tasks.failed}</b> lỗi, <b>${tasks.blocked}</b> bị chặn, <b>${tasks.done}</b> hoàn thành\n`;
+    const completedTasksCount = (tasks.done || 0) + (tasks.pushed || 0);
+    const pushedPart = tasks.pushed ? ` (${tasks.pushed} đã đẩy git)` : '';
+    text = text + `• Tasks: <b>${tasks.running}</b> đang chạy, <b>${tasks.review}</b> chờ review, <b>${tasks.queued}</b> hàng đợi, ${waitingSummaryHtml}, <b>${tasks.failed}</b> lỗi, <b>${tasks.blocked}</b> bị chặn, <b>${completedTasksCount}</b> hoàn thành${pushedPart}\n`;
 
     if (running.length > 0) {
       text = text + '\n🏃 <b>Đang chạy:</b>\n';

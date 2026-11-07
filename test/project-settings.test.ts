@@ -37,6 +37,11 @@ describe('project settings parsing', () => {
       references: [],
       reviewChecklist: [],
       notifications: { telegramContent: 'full' },
+      publish: {
+        enabled: false,
+        remote: 'origin',
+        pushIntegrationBranch: true,
+      },
     });
     expect(projectSettings(undefined)).toEqual(DEFAULT_PROJECT_SETTINGS);
     expect(projectSettings({ settings: null })).toEqual(DEFAULT_PROJECT_SETTINGS);

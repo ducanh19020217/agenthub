@@ -1381,6 +1381,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             'task.failed': 'failed',
             'task.waiting_quota': 'waiting_quota',
             'task.done': 'done',
+            'task.pushed': 'pushed',
           };
 
           const url = `${getBaseUrl()}/api/events?token=${token}`;

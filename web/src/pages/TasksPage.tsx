@@ -47,7 +47,7 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
     refetchInterval: 10_000,
   });
 
-  const pageSize = statusKey === 'done' || statusKey === 'cancelled' ? 10 : 20;
+  const pageSize = statusKey === 'done' || statusKey === 'pushed' || statusKey === 'cancelled' ? 10 : 20;
   const { data, isLoading } = useQuery({
     queryKey: ['tasks-kanban', project, statusKey, search, pageSize],
     queryFn: () => getTasksPage({ project, status: statusKey, search, limit: pageSize, sort: 'createdAt', order: 'desc' }),

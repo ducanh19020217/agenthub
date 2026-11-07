@@ -420,4 +420,105 @@ describe('Publish Service (t-auto-push-after-done)', () => {
     expect(ctx.taskRepo.get(task1.id)?.status).toBe('pushed');
     expect(ctx.taskRepo.get(task2.id)?.status).toBe('pushed');
   });
+
+  it('publish tắt: tự động bỏ qua, status giữ nguyên done và không phát task.pushed', async () => {
+    const repoPath = path.join(tmpDir, 'local-repo-disabled');
+    fs.mkdirSync(repoPath, { recursive: true });
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repoPath, env: testEnv });
+    fs.writeFileSync(path.join(repoPath, 'README.md'), '# Disabled\n');
+    execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+    execFileSync('git', ['commit', '-m', 'chore: initial'], { cwd: repoPath, env: testEnv });
+
+    ctx.service.createProject({
+      id: 'proj-disabled',
+      name: 'Project Disabled',
+      path: repoPath,
+      defaultBranch: 'main',
+      settings: {
+        publish: { enabled: false },
+      },
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj-disabled/t-off',
+      projectId: 'proj-disabled',
+      slug: 't-off',
+      title: 'Task Off',
+      status: 'done',
+    });
+    const task = ctx.taskRepo.get('proj-disabled/t-off')!;
+
+    let pushedFired = false;
+    ctx.scheduler.getEventBus().on('task.pushed', () => {
+      pushedFired = true;
+    });
+
+    const res = await ctx.service.publishTask(task.id);
+    expect(res.ok).toBe(true);
+    if ('skipped' in res) {
+      expect(res.skipped).toBe(true);
+      expect(res.reason).toBe('publish_disabled');
+    }
+    expect(pushedFired).toBe(false);
+    expect(ctx.taskRepo.get(task.id)?.status).toBe('done');
+  });
+
+  it('xử lý khi remote từ chối do xung đột (non-fast-forward/diverged remote): giữ nguyên status done và phát task.push_failed', async () => {
+    const remotePath = path.join(tmpDir, 'remote-conflict.git');
+    initBareRemote(remotePath);
+
+    const repoPath = path.join(tmpDir, 'local-repo-conflict');
+    initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+    ctx.service.createProject({
+      id: 'proj-conflict',
+      name: 'Project Conflict',
+      path: repoPath,
+      defaultBranch: 'main',
+      settings: {
+        publish: { enabled: true, remote: 'origin', branch: 'main' },
+      },
+    });
+
+    // Make local task branch
+    execFileSync('git', ['checkout', '-b', 'agenthub/conflicting-task'], { cwd: repoPath, env: testEnv });
+    fs.writeFileSync(path.join(repoPath, 'conflict.txt'), 'Local change\n');
+    execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+    execFileSync('git', ['commit', '-m', 'feat: local change'], { cwd: repoPath, env: testEnv });
+
+    // Push conflicting commit directly to bare remote main from a separate clone
+    const otherClone = path.join(tmpDir, 'other-clone');
+    execFileSync('git', ['clone', '-b', 'main', remotePath, otherClone], { env: testEnv });
+    execFileSync('git', ['config', 'user.name', 'Other Tester'], { cwd: otherClone, env: testEnv });
+    execFileSync('git', ['config', 'user.email', 'other@example.com'], { cwd: otherClone, env: testEnv });
+    fs.writeFileSync(path.join(otherClone, 'conflict.txt'), 'Remote change diverged\n');
+    execFileSync('git', ['add', '.'], { cwd: otherClone, env: testEnv });
+    execFileSync('git', ['commit', '-m', 'feat: remote diverged change'], { cwd: otherClone, env: testEnv });
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: otherClone, env: testEnv });
+
+    ctx.taskRepo.insert({
+      id: 'proj-conflict/t-diverged',
+      projectId: 'proj-conflict',
+      slug: 'conflicting-task',
+      title: 'Conflicting Task',
+      status: 'done',
+      branch: 'agenthub/conflicting-task',
+    });
+    const task = ctx.taskRepo.get('proj-conflict/t-diverged')!;
+
+    let failedEvent: unknown = null;
+    ctx.scheduler.getEventBus().on('task.push_failed', (_id, p) => {
+      failedEvent = p;
+    });
+
+    const res = await ctx.service.publishTask(task.id);
+    expect(res.ok).toBe(false);
+
+    const updated = ctx.taskRepo.get(task.id);
+    expect(updated?.status).toBe('done');
+    expect(failedEvent).toBeDefined();
+    expect(updated?.pushResult).toBeDefined();
+    const pushResult = JSON.parse(updated!.pushResult!);
+    expect(pushResult.error).toBeDefined();
+  });
 });

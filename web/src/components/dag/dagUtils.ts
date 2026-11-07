@@ -116,7 +116,7 @@ export function filterTasksForDag(
     }
   }
 
-  const unfinishedIds = new Set(list.filter((t) => t.status !== 'done').map((t) => t.id));
+  const unfinishedIds = new Set(list.filter((t) => t.status !== 'done' && t.status !== 'pushed').map((t) => t.id));
 
   const hasUnfinishedDescendant = (taskId: string, visited = new Set<string>()): boolean => {
     if (visited.has(taskId)) return false;
@@ -132,7 +132,7 @@ export function filterTasksForDag(
   const now = Date.now();
 
   return list.filter((t) => {
-    if (t.status !== 'done') return true;
+    if (t.status !== 'done' && t.status !== 'pushed') return true;
 
     // Active chain: prerequisite for remaining unfinished work
     if (hasUnfinishedDescendant(t.id)) return true;
@@ -165,7 +165,7 @@ export function calculateBlockedCounts(
   maxCount: number;
   maxTaskId: string | null;
 } {
-  const unfinishedIds = new Set(tasks.filter((t) => t.status !== 'done').map((t) => t.id));
+  const unfinishedIds = new Set(tasks.filter((t) => t.status !== 'done' && t.status !== 'pushed').map((t) => t.id));
   const adj = new Map<string, string[]>();
   for (const e of edges) {
     const arr = adj.get(e.from) || [];
@@ -178,7 +178,7 @@ export function calculateBlockedCounts(
   let maxTaskId: string | null = null;
 
   for (const task of tasks) {
-    if (task.status === 'done') {
+    if (task.status === 'done' || task.status === 'pushed') {
       counts.set(task.id, 0);
       continue;
     }
@@ -218,7 +218,7 @@ export function calculateCriticalPath(
   tasks: Task[],
   edges: Array<{ from: string; to: string }>
 ): string[] {
-  const unfinishedIds = new Set(tasks.filter((t) => t.status !== 'done').map((t) => t.id));
+  const unfinishedIds = new Set(tasks.filter((t) => t.status !== 'done' && t.status !== 'pushed').map((t) => t.id));
   if (unfinishedIds.size === 0) return [];
 
   // Edges between unfinished tasks

@@ -234,6 +234,13 @@ export interface DeployStatus {
   logPath?: string;
 }
 
+export interface PublishSettings {
+  enabled: boolean;
+  remote: string;
+  branch?: string;
+  pushIntegrationBranch: boolean;
+}
+
 /** Mirrors src/projects/settings.ts. */
 export interface ProjectSettings {
   preset?: 'safe' | 'balanced' | 'auto' | 'custom' | string;
@@ -252,6 +259,7 @@ export interface ProjectSettings {
   integration: { enabled: boolean; branch?: string; baseRef?: string; autoMerge?: boolean };
   review?: { autoMerge?: boolean; order?: ReviewerOrderItem[]; fallback?: Partial<ReviewerFallback> };
   ci: { enabled?: boolean; branch?: string };
+  publish?: PublishSettings;
   references: Array<{ name: string; path: string; inject: boolean }>;
   reviewChecklist?: string[];
   notifications: { telegramContent: 'full' | 'minimal' };

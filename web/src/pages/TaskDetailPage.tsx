@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Markdown from 'react-markdown';
@@ -25,6 +25,8 @@ import {
   pauseTask,
   resumeTask,
   splitTask,
+  publishTask,
+  getProject,
 } from '../api/client';
 import { TaskLevel, EventItem } from '../types/api';
 import { subscribeToRunOutput, subscribeToEvents } from '../api/sse';
@@ -61,6 +63,7 @@ import {
   Bell,
   ExternalLink,
   GitFork,
+  UploadCloud,
 } from 'lucide-react';
 
 const VALID_MODELS = [
@@ -144,6 +147,22 @@ export const TaskDetailPage: React.FC = () => {
     enabled: task?.status === 'waiting_quota' && task?.waitReason === 'disk',
     refetchInterval: 10_000,
   });
+
+  const { data: project } = useQuery({
+    queryKey: ['project', task?.projectId],
+    queryFn: () => getProject(task!.projectId),
+    enabled: Boolean(task?.projectId),
+  });
+
+  const parsedPushResult = useMemo(() => {
+    if (!task?.pushResult) return null;
+    if (typeof task.pushResult === 'object') return task.pushResult as Record<string, any>;
+    try {
+      return JSON.parse(task.pushResult) as Record<string, any>;
+    } catch {
+      return null;
+    }
+  }, [task?.pushResult]);
 
   const { data: projectNotes = [], refetch: refetchNotes } = useQuery({
     queryKey: ['projectNotes', task?.projectId],
@@ -327,6 +346,18 @@ export const TaskDetailPage: React.FC = () => {
     mutationFn: () => deleteWorktree(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task', id] });
+    },
+  });
+
+  const publishMutation = useMutation({
+    mutationFn: () => publishTask(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['task', id] });
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['status'] });
+    },
+    onError: (err: any) => {
+      setFeedbackError(err?.message || t('taskDetail.publishError'));
     },
   });
 
@@ -797,8 +828,22 @@ export const TaskDetailPage: React.FC = () => {
             </>
           )}
 
-          {/* Delete worktree (if done or cancelled and has worktreePath) */}
-          {(task.status === 'done' || task.status === 'cancelled') && task.worktreePath && (
+          {/* Publish action button (if done and not pushed, or failed) */}
+          {(task.status === 'done' || (task.status === 'pushed' && parsedPushResult?.error)) && (
+            <button
+              type="button"
+              data-testid="header-btn-publish"
+              onClick={() => publishMutation.mutate()}
+              disabled={publishMutation.isPending}
+              className="px-3.5 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
+            >
+              {parsedPushResult?.error ? <RotateCcw className="w-4 h-4" /> : <UploadCloud className="w-4 h-4" />}
+              <span>{publishMutation.isPending ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
+            </button>
+          )}
+
+          {/* Delete worktree (if done, pushed or cancelled and has worktreePath) */}
+          {(task.status === 'done' || task.status === 'pushed' || task.status === 'cancelled') && task.worktreePath && (
             <button
               type="button"
               onClick={() => {
@@ -837,6 +882,84 @@ export const TaskDetailPage: React.FC = () => {
           </ul>
         </div>
       ) : null}
+
+      {/* Khối Đẩy lên git */}
+      {(task.status === 'pushed' || parsedPushResult || (task.status === 'done' && project?.settings?.publish?.enabled)) && (
+        <section data-testid="task-publish-section" className="bg-[var(--t-surface)] rounded-xl border border-[var(--t-border)] p-5 shadow-xs space-y-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <UploadCloud className="w-5 h-5 text-[var(--t-accent)]" />
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-[var(--t-text-3)]">{t('taskDetail.publishTitle')}</h2>
+              {task.status === 'pushed' && (
+                <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-[color-mix(in_srgb,var(--status-pushed-color)_15%,transparent)] text-[var(--status-pushed-color)]">
+                  {t('status.pushed')}
+                </span>
+              )}
+            </div>
+            {(parsedPushResult?.error || task.status === 'done') && (
+              <button
+                type="button"
+                data-testid="btn-publish-task"
+                onClick={() => publishMutation.mutate()}
+                disabled={publishMutation.isPending}
+                className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                {parsedPushResult?.error ? <RotateCcw className="w-3.5 h-3.5" /> : <UploadCloud className="w-3.5 h-3.5" />}
+                <span>{publishMutation.isPending ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
+              </button>
+            )}
+          </div>
+
+          {parsedPushResult?.error ? (
+            <div data-testid="publish-error-banner" className="rounded-lg p-3 bg-[color-mix(in_srgb,var(--t-crit)_12%,transparent)] border border-[var(--t-crit)] text-xs text-[var(--t-crit)] space-y-1">
+              <div className="font-semibold flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{t('taskDetail.publishFailed')}: {parsedPushResult.error}</span>
+              </div>
+              {parsedPushResult.outputTail && (
+                <pre className="font-mono text-[11px] bg-[var(--t-surface)] p-2 rounded overflow-x-auto text-[var(--t-text-2)] max-h-32">
+                  {parsedPushResult.outputTail}
+                </pre>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+              <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+                <span className="text-[var(--t-text-3)] block">{t('taskDetail.publishRemote')}</span>
+                <span className="font-mono font-medium text-[var(--t-text)]">{parsedPushResult?.remote || project?.settings?.publish?.remote || 'origin'}</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+                <span className="text-[var(--t-text-3)] block">{t('taskDetail.publishBranch')}</span>
+                <span className="font-mono font-medium text-[var(--t-text)]">{parsedPushResult?.branch || project?.settings?.publish?.branch || project?.defaultBranch || task.baseRef || 'main'}</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+                <span className="text-[var(--t-text-3)] block">{t('taskDetail.publishCommit')}</span>
+                <span className="font-mono font-medium text-[var(--t-text)]">
+                  {parsedPushResult?.commit ? parsedPushResult.commit.slice(0, 7) : '—'}
+                </span>
+                {(parsedPushResult?.compareUrl || parsedPushResult?.url) && (
+                  <a
+                    href={parsedPushResult.compareUrl || parsedPushResult.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-[var(--t-accent)] hover:underline ml-1.5"
+                    data-testid="publish-compare-link"
+                  >
+                    <span>{t('taskDetail.viewCommit')}</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+              </div>
+              <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+                <span className="text-[var(--t-text-3)] block">{t('taskDetail.publishTime')}</span>
+                <span className="font-medium text-[var(--t-text)]">
+                  {task.pushedAt ? new Date(task.pushedAt).toLocaleString() : '—'}
+                </span>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       <CheckResults checks={task.checks} onRerun={() => rerunChecksMutation.mutate()} rerunning={rerunChecksMutation.isPending} onCreateTask={(check) => openCapture(check.outputTail, check.name)} />
 

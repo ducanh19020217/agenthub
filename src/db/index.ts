@@ -1835,7 +1835,8 @@ export class TaskRepo {
   list(filter?: { project?: string; status?: string }): TaskRow[] {
     const conditions: string[] = [];
     const values: string[] = [];
-    if (filter?.project) {
+    // The dashboard sends project=all for "every project"; page() below treats it the same way.
+    if (filter?.project && filter.project !== 'all') {
       conditions.push('projectId = ?');
       values.push(filter.project);
     }

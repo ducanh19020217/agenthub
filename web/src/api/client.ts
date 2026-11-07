@@ -687,7 +687,7 @@ export async function getTaskGraph(params?: {
   includeDone?: string | boolean;
 }): Promise<TaskGraphResponse> {
   const query = new URLSearchParams();
-  if (params?.project) query.set('project', params.project);
+  if (params?.project && params.project !== 'all') query.set('project', params.project);
   if (params?.includeDone !== undefined) query.set('includeDone', String(params.includeDone));
   const qStr = query.toString();
   return apiFetch<TaskGraphResponse>(`/api/tasks/graph${qStr ? `?${qStr}` : ''}`);

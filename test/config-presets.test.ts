@@ -325,6 +325,13 @@ describe('Config Presets, Priority, and Effective Config', () => {
       expect(autoPreset.config.brain.permissions).toBe('trusted'); // KHÔNG full
       expect(autoPreset.config.review.autoMerge).toBe(true);
       expect(autoPreset.config.review.maxRounds).toBe(3);
+      expect(autoPreset.config.publish.enabled).toBe(true);
+
+      const safePreset = presets.find((p: { id: string }) => p.id === 'safe');
+      expect(safePreset.config.publish.enabled).toBe(false);
+
+      const balancedPreset = presets.find((p: { id: string }) => p.id === 'balanced');
+      expect(balancedPreset.config.publish.enabled).toBe(false);
     });
 
     it('dryRun=true tính toán diff nhưng không ghi xuống dữ liệu', async () => {
@@ -416,6 +423,7 @@ describe('Config Presets, Priority, and Effective Config', () => {
       expect(proj.settings.brain.mode).toBe('auto');
       expect(proj.settings.review.autoMerge).toBe(true);
       expect(proj.settings.integration.autoMerge).toBe(true);
+      expect(proj.settings.publish.enabled).toBe(true);
       expect(proj.review.chain).toHaveLength(1);
       expect(proj.review.maxRounds).toBe(3);
 

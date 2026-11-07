@@ -1,0 +1,60 @@
+# Hoàn thành task: t-telegram-ask-brain – Lệnh `/ask <câu hỏi>` trên Telegram để hỏi/trao đổi với bộ não
+
+## 1. Tóm tắt việc đã làm
+1. **Lệnh `/ask <câu hỏi>` trong Telegram bot (`src/telegram.ts`)**:
+   - Thêm xử lý `case '/ask': await this.handleAskCommand(chatId, argStr);` vào bot.
+   - Khi không có đối số: hiển thị hướng dẫn ngắn kèm dự án đang chọn (hoặc phòng ban đang chọn), hoặc gợi ý dùng `/use <dự án>` nếu chưa chọn dự án.
+   - Khi có đối số: gửi câu hỏi trực tiếp vào phiên brain của dự án đang chọn (`brain:<projectId>`), hoặc brain phòng ban/director nếu đang chọn phòng ban, hoặc brain toàn cục (`brain`) nếu chưa chọn dự án.
+   - Thêm tham số tùy chọn `forceSessionId` vào `startChatTurn` để ép buộc phiên brain, không bị ghi đè sang phiên `assistant` kể cả khi `config.assistant.enabled = true`.
+   - Hiển thị placeholder `🧠 Bộ não đang suy nghĩ…` và sửa tin thành câu trả lời (stream/edit, phân đoạn tin dài khi vượt giới hạn Telegram).
+   - Nếu brain đang bận xử lý sự kiện (hàng đợi runner): xếp tin nhắn vào hàng đợi và cập nhật tin nhắn báo "đang chờ bộ não rảnh" thay vì ném lỗi.
+   - Nếu Chat Claude chưa bật (`!this.chatService`): báo lỗi rõ ràng.
+
+2. **Trả lời tiếp trong luồng (reply)**:
+   - Thêm map bộ nhớ `askReplySessions` lưu `messageId → sessionId`, giới hạn tối đa 200 mục (FIFO/LRU eviction).
+   - Lưu `messageId` của tin nhắn bot gửi (placeholder và các chunk nối tiếp) vào `askReplySessions`.
+   - Khi người dùng reply vào tin trả lời của bot, tin nhắn thường tiếp tục cuộc trao đổi trong cùng phiên brain đó mà không cần gõ lại `/ask`.
+
+3. **Đăng ký lệnh**:
+   - Thêm `{ command: 'ask', description: 'Hỏi/trao đổi với bộ não: /ask <câu hỏi>' }` vào `TELEGRAM_BOT_COMMANDS`.
+   - Bổ sung lệnh `/ask` vào nội dung trợ giúp `renderHelp()` (/help).
+
+4. **Ghi vết**:
+   - Lượt chat `/ask` và reply được ghi nhận đầy đủ vào DB chat sessions/messages của brain, dashboard xem được lịch sử và không tạo phiên mới mỗi lần.
+
+## 2. Cách chọn phiên (Session Resolution)
+- **Khi gọi `/ask`**: hàm `brainSessionIdForChat(chatId)` xác định phiên:
+  1. Nếu đang chọn phòng ban (`selectedDepartment`):
+     - Phòng `chung` và `config.brain.director.enabled = true` → `brain:director`.
+     - Phòng ban khác → `brain:department:<selectedDeptId>`.
+  2. Nếu đang chọn dự án (`selectedProject`):
+     - Luôn dùng `brain:<selectedProjectId>`.
+  3. Nếu chưa chọn dự án:
+     - Dùng `brain` (bộ não toàn cục).
+- **Khi người dùng reply tin nhắn của bot**:
+  - Tra cứu `msg.reply_to_message.message_id` trong `askReplySessions`. Nếu tồn tại, dùng lại đúng `sessionId` đó (ví dụ `brain:my-project` hoặc `brain`).
+
+## 3. Danh sách file đã sửa
+- `src/telegram.ts`: Thêm lệnh `/ask`, hỗ trợ `forceSessionId` trong `startChatTurn`, map `askReplySessions`, logic reply luồng và đăng ký lệnh.
+- `test/telegram.test.ts`: Thêm suite test đầy đủ cho lệnh `/ask`, bao gồm:
+  - (a) `/ask` không đối số trả về tin hướng dẫn (chưa chọn dự án & đã chọn dự án).
+  - (b) `/ask câu hỏi` với dự án đã chọn và assistant bật gọi `brain:<project>` (không phải assistant), gửi placeholder và sửa thành câu trả lời.
+  - (c) Không chọn dự án thì `/ask` dùng brain toàn cục (`brain`).
+  - (d) Reply vào tin trả lời của `/ask` tiếp tục cùng phiên brain không cần gõ lại `/ask`.
+  - (e) `chatService` tắt báo lỗi rõ khi gọi `/ask`.
+  - (f) Khi brain bận xử lý sự kiện, xếp hàng tin nhắn và báo "đang chờ bộ não rảnh".
+  - (g) Giới hạn `askReplySessions` tối đa 200 mục.
+
+## 4. Kết quả kiểm tra
+- `npm run lint`: Đạt (0 errors, 80 pre-existing warnings in other tests).
+- `npx tsc --noEmit -p .`: Đạt (0 errors).
+- `npm run test -- --run test/telegram.test.ts`: Đạt 131/131 tests.
+- `npm run test -- --run`: Đạt 130/130 test files, 1602/1602 tests.
+- `npm run build`: Đạt.
+
+## 5. Việc còn thiếu
+- Không có.
+
+## 6. Danh sách commit
+- `e718100c` feat: add /ask command and reply thread tracking in Telegram bot
+- `38971220` test: add tests for /ask command and reply continuation

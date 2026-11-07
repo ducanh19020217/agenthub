@@ -124,7 +124,8 @@ describe('release packaging and installation', () => {
       }
       expect(listing.some((entry) => /(^|\/)(\.agenthub|\.env)(\/|$)/.test(entry))).toBe(false);
       expect(listing).toContain('./node_modules/');
-      const expected = fs.readFileSync(path.join(releaseDir, 'SHA256SUMS'), 'utf8').split(/\s+/)[0];
+      // release/ may hold archives of older versions; compare against this version's entry only.
+      const expected = checksumEntry?.[0];
       const actual = crypto.createHash('sha256').update(fs.readFileSync(archivePath)).digest('hex');
       expect(expected).toBe(actual);
     } finally {

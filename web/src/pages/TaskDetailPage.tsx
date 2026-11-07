@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Markdown from 'react-markdown';
@@ -25,6 +25,8 @@ import {
   pauseTask,
   resumeTask,
   splitTask,
+  publishTask,
+  getProject,
 } from '../api/client';
 import { TaskLevel, EventItem } from '../types/api';
 import { subscribeToRunOutput, subscribeToEvents } from '../api/sse';
@@ -61,6 +63,7 @@ import {
   Bell,
   ExternalLink,
   GitFork,
+  UploadCloud,
 } from 'lucide-react';
 
 const VALID_MODELS = [
@@ -87,6 +90,7 @@ export const TaskDetailPage: React.FC = () => {
 
   // Modals
   const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
   const [showRetryModal, setShowRetryModal] = useState(false);
   const [retryNote, setRetryNote] = useState('');
   const [showChangesModal, setShowChangesModal] = useState(false);
@@ -143,6 +147,22 @@ export const TaskDetailPage: React.FC = () => {
     enabled: task?.status === 'waiting_quota' && task?.waitReason === 'disk',
     refetchInterval: 10_000,
   });
+
+  const { data: project } = useQuery({
+    queryKey: ['project', task?.projectId],
+    queryFn: () => getProject(task!.projectId),
+    enabled: Boolean(task?.projectId),
+  });
+
+  const parsedPushResult = useMemo(() => {
+    if (!task?.pushResult) return null;
+    if (typeof task.pushResult === 'object') return task.pushResult as Record<string, any>;
+    try {
+      return JSON.parse(task.pushResult) as Record<string, any>;
+    } catch {
+      return null;
+    }
+  }, [task?.pushResult]);
 
   const { data: projectNotes = [], refetch: refetchNotes } = useQuery({
     queryKey: ['projectNotes', task?.projectId],
@@ -248,7 +268,7 @@ export const TaskDetailPage: React.FC = () => {
   });
 
   const cancelMutation = useMutation({
-    mutationFn: () => cancelTask(id),
+    mutationFn: () => cancelTask(id, cancelReason),
     onSuccess: () => {
       setShowCancelModal(false);
       queryClient.invalidateQueries({ queryKey: ['task', id] });
@@ -326,6 +346,18 @@ export const TaskDetailPage: React.FC = () => {
     mutationFn: () => deleteWorktree(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task', id] });
+    },
+  });
+
+  const publishMutation = useMutation({
+    mutationFn: () => publishTask(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['task', id] });
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['status'] });
+    },
+    onError: (err: any) => {
+      setFeedbackError(err?.message || t('taskDetail.publishError'));
     },
   });
 
@@ -528,8 +560,13 @@ export const TaskDetailPage: React.FC = () => {
             {task.reviewChain.map((step, index) => (
               <React.Fragment key={`${step.reviewer}-${index}`}>
                 {index > 0 ? <span className="text-[var(--t-text-3)]">→</span> : null}
-                <span className={`rounded-full px-2 py-1 border ${index < (task.reviewStep ?? 0) ? 'border-[var(--t-ok)] text-[var(--t-ok)]' : index === (task.reviewStep ?? 0) ? 'border-[var(--t-accent)] text-[var(--t-accent)]' : 'border-[var(--t-border)] text-[var(--t-text-3)]'}`}>
-                  {step.reviewer} · {step.mode}
+                <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 border ${index < (task.reviewStep ?? 0) ? 'border-[var(--t-ok)] text-[var(--t-ok)]' : index === (task.reviewStep ?? 0) ? 'border-[var(--t-accent)] text-[var(--t-accent)]' : 'border-[var(--t-border)] text-[var(--t-text-3)]'}`}>
+                  <ModelBadge
+                    model={step.reviewer}
+                    engine={step.engine}
+                    profileName={step.profileName}
+                  />
+                  <span>· {step.mode}</span>
                 </span>
               </React.Fragment>
             ))}
@@ -567,6 +604,13 @@ export const TaskDetailPage: React.FC = () => {
                 projectId={task.projectId}
                 size="sm"
               />
+              {task.status === 'running' && (task.currentRun?.model || task.currentRun?.profileName) && (
+                <ModelBadge
+                  model={task.currentRun.model}
+                  engine={task.currentRun.engine}
+                  profileName={task.currentRun.profileName}
+                />
+              )}
               {(task.status === 'review' || (task.reviews && task.reviews.length > 0) || task.reviewChain?.length) && (
                 <span
                   data-testid="reviewer-badge"
@@ -673,8 +717,8 @@ export const TaskDetailPage: React.FC = () => {
             )
           )}
 
-          {/* Cancel (if not done or cancelled) */}
-          {task.status !== 'done' && task.status !== 'cancelled' && (
+          {/* Cancel (if not done, pushed, or cancelled) */}
+          {task.status !== 'done' && task.status !== 'pushed' && task.status !== 'cancelled' && (
             <button
               type="button"
               onClick={() => setShowCancelModal(true)}
@@ -784,8 +828,22 @@ export const TaskDetailPage: React.FC = () => {
             </>
           )}
 
-          {/* Delete worktree (if done or cancelled and has worktreePath) */}
-          {(task.status === 'done' || task.status === 'cancelled') && task.worktreePath && (
+          {/* Publish action button (if done and not pushed, or failed) */}
+          {(task.status === 'done' || (task.status === 'pushed' && parsedPushResult?.error)) && (
+            <button
+              type="button"
+              data-testid="header-btn-publish"
+              onClick={() => publishMutation.mutate()}
+              disabled={publishMutation.isPending}
+              className="px-3.5 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
+            >
+              {parsedPushResult?.error ? <RotateCcw className="w-4 h-4" /> : <UploadCloud className="w-4 h-4" />}
+              <span>{publishMutation.isPending ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
+            </button>
+          )}
+
+          {/* Delete worktree (if done, pushed or cancelled and has worktreePath) */}
+          {(task.status === 'done' || task.status === 'pushed' || task.status === 'cancelled') && task.worktreePath && (
             <button
               type="button"
               onClick={() => {
@@ -803,6 +861,19 @@ export const TaskDetailPage: React.FC = () => {
         </div>
       </div>
 
+      {task.status === 'cancelled' && (
+        <section data-testid="task-cancelled-banner" className="rounded-xl border border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_8%,transparent)] p-4 text-sm space-y-1">
+          <div className="font-semibold text-[var(--t-text)] inline-flex items-center gap-1.5"><XCircle className="w-4 h-4 text-[var(--t-crit)]" />{t('taskDetail.cancelledTitle')}</div>
+          <div className="text-[var(--t-text-2)]">
+            <span className="font-medium">{t('taskDetail.cancelledReason')}:</span>{' '}
+            {task.cancelReason?.trim() ? task.cancelReason : <span className="italic text-[var(--t-text-3)]">{t('taskDetail.cancelledNoReason')}</span>}
+          </div>
+          <div className="text-xs text-[var(--t-text-3)]">
+            {t('taskDetail.cancelledBy')}: <code className="font-mono">{task.cancelledBy || t('taskDetail.cancelledByUnknown')}</code> · {new Date(parseApiTime(task.updatedAt)).toLocaleString()}
+          </div>
+        </section>
+      )}
+
       {task.modelWarnings?.length ? (
         <div className="rounded-xl border border-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_12%,transparent)] px-4 py-3 text-sm text-[var(--t-text)]">
           <strong>{t('taskDetail.modelWarningTitle')}</strong>
@@ -812,6 +883,84 @@ export const TaskDetailPage: React.FC = () => {
         </div>
       ) : null}
 
+      {/* Khối Đẩy lên git */}
+      {(task.status === 'pushed' || parsedPushResult || (task.status === 'done' && project?.settings?.publish?.enabled)) && (
+        <section data-testid="task-publish-section" className="bg-[var(--t-surface)] rounded-xl border border-[var(--t-border)] p-5 shadow-xs space-y-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <UploadCloud className="w-5 h-5 text-[var(--t-accent)]" />
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-[var(--t-text-3)]">{t('taskDetail.publishTitle')}</h2>
+              {task.status === 'pushed' && (
+                <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-[color-mix(in_srgb,var(--status-pushed-color)_15%,transparent)] text-[var(--status-pushed-color)]">
+                  {t('status.pushed')}
+                </span>
+              )}
+            </div>
+            {(parsedPushResult?.error || task.status === 'done') && (
+              <button
+                type="button"
+                data-testid="btn-publish-task"
+                onClick={() => publishMutation.mutate()}
+                disabled={publishMutation.isPending}
+                className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                {parsedPushResult?.error ? <RotateCcw className="w-3.5 h-3.5" /> : <UploadCloud className="w-3.5 h-3.5" />}
+                <span>{publishMutation.isPending ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
+              </button>
+            )}
+          </div>
+
+          {parsedPushResult?.error ? (
+            <div data-testid="publish-error-banner" className="rounded-lg p-3 bg-[color-mix(in_srgb,var(--t-crit)_12%,transparent)] border border-[var(--t-crit)] text-xs text-[var(--t-crit)] space-y-1">
+              <div className="font-semibold flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{t('taskDetail.publishFailed')}: {parsedPushResult.error}</span>
+              </div>
+              {parsedPushResult.outputTail && (
+                <pre className="font-mono text-[11px] bg-[var(--t-surface)] p-2 rounded overflow-x-auto text-[var(--t-text-2)] max-h-32">
+                  {parsedPushResult.outputTail}
+                </pre>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+              <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+                <span className="text-[var(--t-text-3)] block">{t('taskDetail.publishRemote')}</span>
+                <span className="font-mono font-medium text-[var(--t-text)]">{parsedPushResult?.remote || project?.settings?.publish?.remote || 'origin'}</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+                <span className="text-[var(--t-text-3)] block">{t('taskDetail.publishBranch')}</span>
+                <span className="font-mono font-medium text-[var(--t-text)]">{parsedPushResult?.branch || project?.settings?.publish?.branch || project?.defaultBranch || task.baseRef || 'main'}</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+                <span className="text-[var(--t-text-3)] block">{t('taskDetail.publishCommit')}</span>
+                <span className="font-mono font-medium text-[var(--t-text)]">
+                  {parsedPushResult?.commit ? parsedPushResult.commit.slice(0, 7) : '—'}
+                </span>
+                {(parsedPushResult?.compareUrl || parsedPushResult?.url) && (
+                  <a
+                    href={parsedPushResult.compareUrl || parsedPushResult.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-[var(--t-accent)] hover:underline ml-1.5"
+                    data-testid="publish-compare-link"
+                  >
+                    <span>{t('taskDetail.viewCommit')}</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+              </div>
+              <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+                <span className="text-[var(--t-text-3)] block">{t('taskDetail.publishTime')}</span>
+                <span className="font-medium text-[var(--t-text)]">
+                  {task.pushedAt ? new Date(task.pushedAt).toLocaleString() : '—'}
+                </span>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
       <CheckResults checks={task.checks} onRerun={() => rerunChecksMutation.mutate()} rerunning={rerunChecksMutation.isPending} onCreateTask={(check) => openCapture(check.outputTail, check.name)} />
 
       {task.reviews.length > 0 && (
@@ -820,9 +969,15 @@ export const TaskDetailPage: React.FC = () => {
           <ul className="space-y-2">
             {task.reviews.map((review) => (
               <li key={review.id} className="flex items-center justify-between gap-3 flex-wrap text-sm">
-                <span className="font-medium text-[var(--t-text)]">
-                  {review.actor || t('taskDetail.unknownReviewer')}
-                  {review.model ? <span className="ml-2 text-xs font-mono text-[var(--t-text-3)]">({review.model})</span> : null}
+                <span className="font-medium text-[var(--t-text)] inline-flex items-center gap-2">
+                  <span>{review.actor || t('taskDetail.unknownReviewer')}</span>
+                  {(review.model || review.engine || review.profileName) ? (
+                    <ModelBadge
+                      model={review.model}
+                      engine={review.engine}
+                      profileName={review.profileName}
+                    />
+                  ) : null}
                 </span>
                 <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-full ${review.verdict === 'approved' ? 'text-[var(--t-ok)] bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)]' : 'text-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)]'}`}>
                   {review.verdict === 'approved' ? t('taskDetail.reviewApproved') : t('taskDetail.reviewChangesRequested')}
@@ -855,6 +1010,13 @@ export const TaskDetailPage: React.FC = () => {
                   <span title={evt.type} className="font-mono font-semibold px-1.5 py-0.5 rounded bg-[var(--t-surface-2)] text-[var(--t-text)] border border-[var(--t-border)]">
                     {formatEventType(evt.type, locale)}
                   </span>
+                  {(evt.payload?.model || evt.payload?.engine || evt.payload?.profile) && (
+                    <ModelBadge
+                      model={evt.payload?.model ? String(evt.payload.model) : null}
+                      engine={evt.payload?.engine ? String(evt.payload.engine) : null}
+                      profileName={evt.payload?.profile ? String(evt.payload.profile) : (evt.payload?.profileName ? String(evt.payload.profileName) : null)}
+                    />
+                  )}
                   {evt.ts && (
                     <span className="text-[var(--t-text-3)] font-mono text-[11px]">
                       {Number.isFinite(parseApiTime(evt.ts))
@@ -1028,7 +1190,7 @@ export const TaskDetailPage: React.FC = () => {
                     <td className="px-6 py-3 font-mono text-xs">{r.id}</td>
                     <td className="px-6 py-3 font-medium uppercase text-xs">{r.engine}</td>
                     <td className="px-6 py-3 whitespace-nowrap">
-                      <ModelBadge model={r.model} engine={r.engine} />
+                      <ModelBadge model={r.model} engine={r.engine} profileName={r.profileName} />
                     </td>
                     <td className="px-6 py-3 font-medium">{r.profileName}</td>
                     <td className="px-6 py-3">
@@ -1219,6 +1381,17 @@ export const TaskDetailPage: React.FC = () => {
             <p className="text-sm text-[var(--t-text-3)]">
               {t('taskDetail.cancelDesc')}
             </p>
+            <label className="block space-y-1">
+              <span className="text-xs font-semibold text-[var(--t-text)]">{t('taskDetail.cancelReasonLabel')}</span>
+              <textarea
+                data-testid="cancel-reason-input"
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                placeholder={t('taskDetail.cancelReasonPlaceholder')}
+                rows={3}
+                className="w-full text-sm rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-[var(--t-text)] focus:outline-none focus:ring-2 focus:ring-[var(--t-accent)]"
+              />
+            </label>
             <div className="flex justify-end gap-3 pt-2">
               <button
                 type="button"
@@ -1410,7 +1583,10 @@ export const TaskDetailPage: React.FC = () => {
                         data-testid={`model-item-${idx}`}
                         className="flex items-center justify-between p-1.5 rounded bg-[var(--t-surface)] text-xs border border-[var(--t-border)]"
                       >
-                        <span className="font-mono text-[var(--t-text)] truncate">{model}</span>
+                        <div className="flex items-center gap-2 truncate">
+                          <ModelBadge model={model} />
+                          <span className="font-mono text-[var(--t-text)] truncate">{model}</span>
+                        </div>
                         <div className="flex items-center gap-1">
                           <button
                             type="button"

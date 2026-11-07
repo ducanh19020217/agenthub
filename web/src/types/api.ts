@@ -8,7 +8,8 @@ export type TaskStatus =
   | 'blocked'
   | 'failed'
   | 'cancelled'
-  | 'waiting_quota';
+  | 'waiting_quota'
+  | 'pushed';
 
 export interface PerfGroup { cpuPercent: number; rssBytes: number; processes: number; }
 export interface PerfSample { at: string; cpuCount: number; groups: Record<string, PerfGroup>; }
@@ -92,7 +93,12 @@ export interface ProjectMerge {
   checks: string[];
   timeoutSec: number;
 }
-export interface ReviewChainStep { reviewer: string; mode: 'gate' | 'final'; }
+export interface ReviewChainStep {
+  reviewer: string;
+  mode: 'gate' | 'final';
+  engine?: string | null;
+  profileName?: string | null;
+}
 export interface ProjectReview { chain: ReviewChainStep[]; maxRounds: number; }
 export interface ReviewerOrderItem { engine: 'codex' | 'claude'; model: string; profiles: string[]; }
 export interface ReviewerFallback { onUnavailable: boolean; onBusyAfterMin: number; onError: boolean; }
@@ -228,6 +234,13 @@ export interface DeployStatus {
   logPath?: string;
 }
 
+export interface PublishSettings {
+  enabled: boolean;
+  remote: string;
+  branch?: string;
+  pushIntegrationBranch: boolean;
+}
+
 /** Mirrors src/projects/settings.ts. */
 export interface ProjectSettings {
   preset?: 'safe' | 'balanced' | 'auto' | 'custom' | string;
@@ -246,6 +259,7 @@ export interface ProjectSettings {
   integration: { enabled: boolean; branch?: string; baseRef?: string; autoMerge?: boolean };
   review?: { autoMerge?: boolean; order?: ReviewerOrderItem[]; fallback?: Partial<ReviewerFallback> };
   ci: { enabled?: boolean; branch?: string };
+  publish?: PublishSettings;
   references: Array<{ name: string; path: string; inject: boolean }>;
   reviewChecklist?: string[];
   notifications: { telegramContent: 'full' | 'minimal' };
@@ -330,6 +344,8 @@ export interface Review {
   createdAt: string;
   actor?: string;
   model?: string;
+  engine?: string | null;
+  profileName?: string | null;
 }
 
 export type WaitReason =
@@ -385,12 +401,27 @@ export interface Task {
   autoMergeSkippedReason?: string | null;
   autoMergeSkippedChecks?: Array<{ name?: string; outputTail?: string }>;
   autoMergeSkippedRetried?: boolean;
+  /** Lý do task bị hủy, do người dùng nhập hoặc hệ thống ghi. */
+  cancelReason?: string | null;
+  /** Nguồn hủy: dashboard, telegram:@user, mcp, system:<what>, batch:discard. */
+  cancelledBy?: string | null;
   reviewStep?: number;
   reviewRound?: number;
   reviewMaxRounds?: number;
   reviewChain?: ReviewChainStep[];
   createdAt: string;
   updatedAt: string;
+  pushedAt?: string | null;
+  pushResult?: string | null | {
+    remote?: string;
+    branch?: string;
+    commit?: string;
+    url?: string | null;
+    compareUrl?: string | null;
+    error?: string | null;
+    reason?: string | null;
+    outputTail?: string | null;
+  };
   reviewer?: 'codex' | 'claude';
   currentRun?: {
     startedAt: string;
@@ -402,6 +433,7 @@ export interface Task {
     loopingCommand?: string | null;
     model?: string;
     profileName?: string;
+    engine?: string | null;
     paused?: boolean;
     pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
     rss?: number;
@@ -463,6 +495,11 @@ export interface CheckResult {
   exitCode: number | null;
   durationMs: number;
   outputTail: string;
+  runId?: string;
+  runStartedAt?: string;
+  seq?: number;
+  startedAt?: string;
+  skipped?: boolean;
 }
 
 export interface TaskDetail extends Task {
@@ -709,6 +746,7 @@ export interface SavingsTaskItem {
   completedAt: string | null;
   claudeCostSource?: 'measured' | 'estimated';
   claudeEffectiveTokens?: number;
+  profileName?: string | null;
 }
 
 export interface SavingsReport {
@@ -1079,6 +1117,7 @@ export interface TaskGraphNode {
   currentRun?: {
     model?: string;
     profileName?: string;
+    engine?: string | null;
   } | null;
   blockedCount: number;
   isCritical: boolean;

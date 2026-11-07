@@ -68,10 +68,11 @@ import type { PageResult } from '../pagination.js';
 import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
 import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
+import { publishTask as executePublishTask, type PublishResult } from '../publish.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
-import { ReviewChainSchema, isAutomatedStep, parseReviewChain, type ReviewChainStep } from '../review-chain.js';
+import { ReviewChainSchema, isAutomatedStep, parseReviewChain, type ReviewChainStep, type ReviewChainStepView } from '../review-chain.js';
 import { isAutoReviewer } from '../reviewer.js';
 import { isKnownModel } from '../quota/index.js';
 import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, ReviewerOrderSchema, reviewerSettingsFromLegacy } from '../reviewer-config.js';
@@ -251,7 +252,7 @@ export interface BatchProgress {
 }
 
 function batchProgress(tasks: TaskRow[]): BatchProgress {
-  const done = tasks.filter((task) => task.status === 'done').length;
+  const done = tasks.filter((task) => task.status === 'done' || task.status === 'pushed').length;
   const running = tasks.filter((task) => ['running', 'checking', 'review'].includes(task.status)).length;
   const failed = tasks.filter((task) => ['failed', 'blocked', 'cancelled'].includes(task.status)).length;
   const waiting = tasks.filter((task) => ['waiting_quota', 'draft'].includes(task.status)).length;
@@ -452,6 +453,8 @@ export const ReviewTaskSchema = z.object({
   source: z.enum(['content', 'operational']).optional().default('content'),
   /** Omitted: merge when the project has auto-merge on, so an approval from the brain/MCP never strands code. */
   merge: z.boolean().optional(),
+  engine: z.string().nullable().optional(),
+  profileName: z.string().nullable().optional(),
 }).refine(
   (d) => d.verdict !== 'changes_requested' || (typeof d.feedback === 'string' && d.feedback.trim().length > 0),
   { message: 'Feedback là bắt buộc khi changes_requested' },
@@ -688,6 +691,9 @@ export const UpdateConfigSchema = z.object({
       fallback: z.boolean().optional(),
       brainWaiting: z.boolean().optional(),
       disk: z.boolean().optional(),
+      taskDone: z.boolean().optional(),
+      projectIdle: z.boolean().optional(),
+      interrupted: z.boolean().optional(),
     }).optional(),
   }).optional(),
   updates: z.object({
@@ -1469,6 +1475,7 @@ export class AppService {
       queued: 0,
       draft: 0,
       done: 0,
+      pushed: 0,
       blocked: 0,
       cancelled: 0,
       focusWaiting: 0,
@@ -1483,6 +1490,7 @@ export class AppService {
         checking: 0,
         review: 0,
         done: 0,
+        pushed: 0,
         blocked: 0,
         failed: 0,
         cancelled: 0,
@@ -1507,6 +1515,7 @@ export class AppService {
           checking: 0,
           review: 0,
           done: 0,
+          pushed: 0,
           blocked: 0,
           failed: 0,
           cancelled: 0,
@@ -1777,7 +1786,7 @@ export class AppService {
     const taskId = `${project.id}/summarize-previous-context`;
     const existing = this.taskRepo.get(taskId);
     if (existing) {
-      if (existing.status === 'done') {
+      if (existing.status === 'done' || existing.status === 'pushed') {
         const summary = existing.doneReport?.trim() || null;
         return { taskId: existing.id, status: existing.status, summary };
       }
@@ -3537,6 +3546,9 @@ export class AppService {
           noCommitMinutes: run.noCommitMinutes ?? null,
           isLooping: run.isLooping ?? false,
           loopingCommand: run.loopingCommand ?? null,
+          model: run.model,
+          profileName: run.profileName,
+          engine: run.engine?.id || null,
           paused: Boolean(run.paused),
           pauseReason: run.pauseReason ?? null,
           rss: run.rss ?? 0,
@@ -3656,13 +3668,21 @@ export class AppService {
     const reviewsWithModels = reviews.map((review) => {
       const event = completedReviewEvents.find((candidate) => {
         if (!candidate.payload || typeof candidate.payload !== 'object') return false;
-        const payload = candidate.payload as { actor?: string; verdict?: string; model?: string };
+        const payload = candidate.payload as { actor?: string; verdict?: string; model?: string; engine?: string; profile?: string };
         return payload.actor === review.actor && payload.verdict === review.verdict && typeof payload.model === 'string';
       });
-      const model = event && typeof event.payload === 'object' && event.payload
-        ? (event.payload as { model?: string }).model
+      const payload = event && typeof event.payload === 'object' && event.payload
+        ? (event.payload as { model?: string; engine?: string; profile?: string })
         : undefined;
-      return model ? { ...review, model } : review;
+      const model = payload?.model;
+      const engine = review.engine || payload?.engine || (review.actor === 'claude-reviewer' || review.actor === 'claude' ? 'claude' : review.actor === 'codex-reviewer' ? 'codex' : null);
+      const profileName = review.profileName || payload?.profile || null;
+      return {
+        ...review,
+        ...(model ? { model } : {}),
+        engine,
+        profileName,
+      };
     });
 
     const isFallback = events.some((e) => e.type === 'review.fallback');
@@ -3705,6 +3725,9 @@ export class AppService {
         noCommitMinutes: activeRun.noCommitMinutes ?? null,
         isLooping: activeRun.isLooping ?? false,
         loopingCommand: activeRun.loopingCommand ?? null,
+        model: activeRun.model,
+        profileName: activeRun.profileName,
+        engine: activeRun.engine?.id || null,
         paused: Boolean(activeRun.paused),
         pauseReason: activeRun.pauseReason ?? null,
         rss: activeRun.rss ?? 0,
@@ -3712,7 +3735,19 @@ export class AppService {
       } : null,
       runs: runs.map(apiRun),
       reviews: reviewsWithModels.map(apiReview),
-      reviewChain: reviewSettings?.chain || parseReviewChain(project?.reviewChain),
+      reviewChain: (() => {
+        const rawChain: ReviewChainStep[] = (Array.isArray(reviewSettings?.chain) ? reviewSettings.chain as ReviewChainStep[] : undefined) || parseReviewChain(project?.reviewChain);
+        return rawChain.map((step): ReviewChainStepView => {
+          const stepEngine = step.reviewer.startsWith('codex:')
+            ? 'codex'
+            : (step.reviewer === 'claude' ? 'claude' : null);
+          return {
+            ...step,
+            engine: stepEngine,
+            profileName: null,
+          };
+        });
+      })(),
       mergeAvailable: configuredMerge,
       mergeUnavailableReason: configuredMerge ? null : 'Project chưa cấu hình merge tự động. Mở Cài đặt dự án → Integration để bật.',
       reviewStep: task.reviewStep ?? 0,
@@ -3982,7 +4017,7 @@ export class AppService {
       '',
       toMarkdownCodeBlock(excerpt),
     ].join('\n');
-    const baseRef = source.status === 'done' ? (source.baseRef || project.defaultBranch) : (source.branch || source.baseRef || project.defaultBranch);
+    const baseRef = (source.status === 'done' || source.status === 'pushed') ? (source.baseRef || project.defaultBranch) : (source.branch || source.baseRef || project.defaultBranch);
     return this.createTask({
       project: source.projectId,
       slug: parsed.slug,
@@ -4326,7 +4361,7 @@ export class AppService {
     const tasks = this.taskRepo.getByBatch(id);
     for (const task of tasks) {
       if (task.status === 'draft') {
-        this.taskRepo.updateStatus(task.id, 'cancelled');
+        this.taskRepo.update(task.id, { status: 'cancelled', cancelReason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, cancelledBy: 'batch:discard' });
       }
     }
     this.taskBatchRepo.updateStatus(id, 'discarded');
@@ -4444,14 +4479,14 @@ export class AppService {
     return this.taskRepo.get(taskId)!;
   }
 
-  cancelTask(idParam: string): TaskRow {
+  cancelTask(idParam: string, info?: { reason?: string | null; by?: string | null }): TaskRow {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) {
       throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
     }
 
-    this.scheduler.cancelTask(taskId);
+    this.scheduler.cancelTask(taskId, info);
     return this.taskRepo.get(taskId)!;
   }
 
@@ -4477,7 +4512,7 @@ export class AppService {
     const source = this.config.integrations?.openproject?.sources?.find((s) => s.id === tracker.source_id);
     const splitConf = source?.split || { typeIds: [], keyword: '[chia]', workerMayRequest: true, maxParts: 5, createChildTickets: true };
 
-    this.cancelTask(toRouteId(task.id));
+    this.cancelTask(toRouteId(task.id), { reason: `Chia việc: ticket ${task.externalRef} được tách thành task lập kế hoạch`, by: 'system:split' });
 
     const primary = this.projectRepo.getAll().find((p) => {
       const settings = projectSettings(p).openproject;
@@ -4631,6 +4666,9 @@ export class AppService {
       }
     }
 
+    const fallbackEngine = parsed.by === 'claude-reviewer' || parsed.by === 'claude-review' ? 'claude' : parsed.by === 'codex-reviewer' ? 'codex' : null;
+    const reviewEngine = parsed.engine || fallbackEngine;
+    const reviewProfile = parsed.profileName || null;
     if (!['codex-reviewer', 'claude-reviewer', 'claude-review'].includes(parsed.by || '')) {
       this.reviewRepo.insert({
         id: crypto.randomUUID(),
@@ -4638,10 +4676,15 @@ export class AppService {
         verdict: parsed.verdict,
         feedback: parsed.feedback || null,
         actor: parsed.by || 'claude',
+        engine: reviewEngine,
+        profileName: reviewProfile,
       });
     }
 
-    this.scheduler.reviewTask(taskId, parsed.verdict, parsed.feedback, parsed.by, parsed.source);
+    this.scheduler.reviewTask(taskId, parsed.verdict, parsed.feedback, parsed.by, parsed.source, {
+      engine: reviewEngine,
+      profileName: reviewProfile,
+    });
     if (parsed.verdict === 'approved' && this.knowledgeRepo) {
       const completed = this.taskRepo.get(taskId);
       const donePath = completed?.worktreePath ? path.join(completed.worktreePath, '.agenthub', 'DONE') : null;
@@ -4652,6 +4695,12 @@ export class AppService {
     if (mergeResult) {
       this.exportKnowledgeFile(task.projectId);
       this.scheduler.getEventBus().emit('task.merged', taskId, mergeResult);
+      const proj = this.projectRepo.get(task.projectId);
+      if (proj && projectSettings(proj).publish?.enabled) {
+        void this.publishTask(taskId).catch((err) => {
+          console.error(`[publish] Auto-publish failed for task ${taskId}:`, err);
+        });
+      }
     }
     return this.taskRepo.get(taskId)!;
     } finally {
@@ -4814,7 +4863,7 @@ export class AppService {
 
       const fixTask = !isConflict
         ? this.taskRepo.getDerivedFrom(taskId).find((t) =>
-            /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status)
+            /-fix-merge(?:-\d+)?$/.test(t.slug) && !['done', 'pushed', 'cancelled', 'failed', 'blocked'].includes(t.status)
           )
         : null;
       const autoFixCreated = Boolean(fixTask);
@@ -4871,7 +4920,7 @@ export class AppService {
   private createMergeFailureDraft(source: TaskRow, output: string): TaskRow | null {
     const existing = this.taskRepo.getDerivedFrom(source.id).find((task) =>
       task.sourceRef
-      && !['done', 'cancelled', 'failed', 'blocked'].includes(task.status)
+      && !['done', 'pushed', 'cancelled', 'failed', 'blocked'].includes(task.status)
       && (() => {
         try {
           const sourceRef = JSON.parse(task.sourceRef) as { checkName?: unknown };
@@ -4903,12 +4952,12 @@ export class AppService {
   async cleanupOrphanedMergeFixTasks(sourceTaskId?: string): Promise<number> {
     const sources = sourceTaskId
       ? [this.taskRepo.get(sourceTaskId)].filter((task): task is TaskRow => Boolean(task))
-      : this.taskRepo.getByStatus('done');
+      : this.taskRepo.getByStatus('done').concat(this.taskRepo.getByStatus('pushed'));
     let cancelled = 0;
     const reason = 'Task gốc đã merge thành công qua đường khác, tự đóng task fix-merge liên quan';
 
     for (const source of sources) {
-      if (source.status !== 'done') continue;
+      if (source.status !== 'done' && source.status !== 'pushed') continue;
       const project = this.projectRepo.getIncludingArchived(source.projectId);
       if (!project) continue;
 
@@ -4929,9 +4978,11 @@ export class AppService {
         const current = this.taskRepo.get(derived.id);
         if (!current || !['draft', 'queued', 'waiting_quota'].includes(current.status) || current.attempt > 0 || commits.length > 0) continue;
 
-        this.taskRepo.updateStatus(current.id, 'cancelled');
+        this.taskRepo.update(current.id, { status: 'cancelled', cancelReason: reason, cancelledBy: 'system:orphaned_merge_fix' });
         this.scheduler.getEventBus().emit('task.cancelled', current.id, {
-          reason: 'orphaned_merge_fix',
+          reason,
+          by: 'system:orphaned_merge_fix',
+          code: 'orphaned_merge_fix',
           sourceTaskId: source.id,
           message: reason,
         });
@@ -5019,11 +5070,11 @@ export class AppService {
     if (!task) {
       throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
     }
-    if (task.status !== 'done' && task.status !== 'cancelled') {
+    if (task.status !== 'done' && task.status !== 'pushed' && task.status !== 'cancelled') {
       throw new HttpError(
         409,
         'conflict',
-        `Chỉ có thể xóa worktree của task đã done hoặc cancelled (hiện tại: ${task.status})`,
+        `Chỉ có thể xóa worktree của task đã done, pushed hoặc cancelled (hiện tại: ${task.status})`,
       );
     }
 
@@ -5061,6 +5112,20 @@ export class AppService {
     }
 
     return { ok: true };
+  }
+
+  async publishTask(idParam: string, options?: { manual?: boolean }): Promise<PublishResult> {
+    const taskId = toTaskId(idParam);
+    return executePublishTask(
+      taskId,
+      {
+        taskRepo: this.taskRepo,
+        projectRepo: this.projectRepo,
+        eventBus: this.scheduler.getEventBus(),
+        hubHome: this.config.hubHome,
+      },
+      options,
+    );
   }
 
   getTaskLog(idParam: string, query?: { run?: string; tail?: string | number }): string {

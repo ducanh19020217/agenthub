@@ -289,7 +289,7 @@ If you prefer working within your IDE or terminal:
 | `hub_create_task`, `hub_update_task` | Create tasks (prompt, base branch, model, dependencies) or edit draft tasks |
 | `hub_create_batch`, `hub_dispatch_batch` | Create multi-task batches with dependency graphs and dispatch them |
 | `hub_review` | Approve (`approved`, with auto-merge if configured) or request changes (`changes_requested` + comments) |
-| `hub_retry`, `hub_cancel` | Retry failed/blocked tasks or cancel running tasks |
+| `hub_retry`, `hub_cancel` | Retry failed/blocked tasks or cancel tasks (`hub_cancel` requires a `reason`, shown on the task detail page) |
 | `hub_wait` | Block and wait until tasks require review |
 | `hub_projects`, `hub_register_project`, `hub_profiles`, `hub_mark_quota` | Manage projects, worker profiles, and record quota limits |
 | `hub_git`, `hub_savings`, `hub_claude_usage`, `hub_brain` | Inspect git diffs, review token savings analytics, and monitor Claude usage |

@@ -1,0 +1,73 @@
+# DONE: t-flow-live-animation – View "Quy trình" ở trang Task sinh động khi có task đang chạy
+
+## Tóm tắt công việc đã thực hiện
+1. **Ô trạng thái "đang hoạt động" (`running`, `checking`, `review`)**:
+   - Khi task count > 0: Ô hiển thị vòng sáng pulse quanh viền bằng CSS keyframes `@keyframes flow-pulse` sử dụng biến màu CSS tương ứng (`var(--status-${status}-color, var(--t-accent))`), kèm thuộc tính `data-active="true"`.
+   - Các icon trong ô chuyển động nhẹ theo nhịp đặc trưng: Play nhịp nhẹ (`flow-icon-play`), Flask lắc nhẹ (`flow-icon-flask`), ScanEye (Review) chớp mắt (`flow-icon-review`).
+   - Khi count = 0: Ô giữ trạng thái tĩnh như ban đầu, không có vòng sáng và không có `data-active`.
+   - Đối với ô `review`: ghi nhận DEC-018 trong `docs/DECISIONS.md`, coi ô review đang hoạt động khi `total > 0` vì API REST hiện tại không phân biệt trạng thái chạy subprocess của reviewer ở cấp độ count status.
+
+2. **Mũi tên dòng chảy chuyển động (marching ants)**:
+   - Các cạnh dẫn vào/ra ô đang hoạt động được animate bằng `stroke-dasharray="6 5"` kết hợp `@keyframes flow-edge-flow` (chuyển động `stroke-dashoffset` theo hướng mũi tên, chu kỳ ~1.2s), gắn thuộc tính `data-animated="true"`.
+   - Cạnh không liên quan giữ nét liền tĩnh (không có `data-animated`).
+   - Nhánh quay lại (nét đứt: "Reviewer yêu cầu sửa" từ Review về Running; làn "Chạy lại / tiếp tục" từ Waiting Quota / Failed / Blocked về Queued) chỉ kích hoạt chuyển động khi ô nguồn tương ứng có task.
+
+3. **Hiệu ứng số đếm nảy khi đổi giá trị giữa các lần fetch**:
+   - Tách số đếm thành phần tử SVG `<text>` riêng biệt (và nhãn đơn vị ở `<text>` kế tiếp), áp dụng `.flow-count-bounce` với `transform-box: fill-box` và `transform-origin: center` để hiệu ứng phóng to `transform: scale(1.25)` chạy chuẩn xác trong SVG graphics container.
+   - Bỏ `display: inline-block` không cần thiết trong `.flow-count-bounce`.
+   - Dùng `useEffect` kết hợp `prevTotalRef` và `isInitialLoadRef` để phát hiện giá trị thay đổi giữa 2 lần fetch (bỏ qua lần mount đầu tiên). Kích hoạt bounce trong 400ms và tự gỡ class.
+
+4. **Nhịp refetch tự động**:
+   - Khi tổng số task ở các trạng thái active (`running`, `checking`, `review`) > 0: `refetchInterval = 5_000` (5s).
+   - Khi không có task active: `refetchInterval = 30_000` (30s).
+   - Luôn đặt `refetchIntervalInBackground: false` để dừng polling khi tab ở chế độ nền.
+   - Expose hằng số `FLOW_ACTIVE_REFETCH_INTERVAL`, `FLOW_IDLE_REFETCH_INTERVAL` và hàm helper `getFlowRefetchInterval`.
+
+5. **Chi tiết task đang chạy trong ô Đang chạy**:
+   - Khi ô `running` có task, chiều cao ô mở rộng phù hợp (116px) và hiển thị tối đa 2 dòng preview lấy từ `getTasksPage` (`limit: 3`, `status=running`):
+     - Mỗi dòng có dấu chấm xanh nhấp nháy (`flow-dot-pulse`, màu `--t-ok`), tên dự án và slug của task.
+     - Khi số lượng task running > 2, hiển thị thêm nhãn tóm tắt `+{count} nữa` (en: `+{count} more`) qua i18n `tasks.flow.runningMore`.
+     - Ẩn nhãn `+N nữa` khi `runningTasks` đang tải, chỉ hiển thị sau khi đã tải xong dữ liệu để tránh nháy "+{total-1} nữa".
+   - Bấm vào ô vẫn mở popup danh sách đầy đủ có phân trang như trước.
+
+6. **Tôn trọng reduced-motion**:
+   - Toàn bộ animation (`flow-pulse`, `flow-edge-flow`, `flow-count-bounce`, `flow-dot-pulse`, `flow-icon-*`) được tắt hoàn toàn trong `@media (prefers-reduced-motion: reduce)`, giữ viền sáng tĩnh và không di chuyển.
+
+7. **CSS tokens & i18n**:
+   - Toàn bộ màu sắc dùng token CSS chuẩn: `--t-accent`, `--t-ok`, `--t-text`, `--t-text-2`, `--t-text-3`, `--status-*-color`.
+   - Thêm bản dịch `runningMore` vào cả `web/src/locales/vi.ts` và `web/src/locales/en.ts`.
+
+## Danh sách file đã sửa
+- `web/src/index.css`: Keyframes và classes cho flow-pulse, flow-edge-flow, flow-count-bounce (fill-box, center), flow-dot-pulse, flow-icon-*, và khối reduced-motion.
+- `web/src/locales/vi.ts`: Key `tasks.flow.runningMore`.
+- `web/src/locales/en.ts`: Key `tasks.flow.runningMore`.
+- `web/src/components/TaskFlow.tsx`: Live animation, tách `<text>` cho count bounce, dynamic refetchInterval, running tasks preview và loading guard, `data-active`, và `data-animated`.
+- `docs/DECISIONS.md`: Thêm DEC-018 giải thích trạng thái active của ô review (đồng thời bảo toàn DEC-017 từ agenthub/integration).
+- `src/db/index.ts`: Bảo toàn migrations 65-69 từ main và chuyển migration reviews từ integration thành Migration 70.
+- `test/fixtures/migrations.lock`: Cập nhật hash cho migrations 68, 69 và 70.
+- `web/src/test/taskFlow.test.tsx`: 10 unit test kiểm tra toàn bộ tiêu chí (a)-(f).
+
+## Kết quả lint / typecheck / test / build
+- **Lint**: `npm run lint` pass (0 errors, 80 existing warnings in test files).
+- **Typecheck**: `npx tsc --noEmit -p web` và `npx tsc --noEmit -p .` pass (0 errors).
+- **Web Tests**: `npm run test:web -- --run` pass:
+  - 67/67 test files passed
+  - 580/580 tests passed
+  - Trong đó `web/src/test/taskFlow.test.tsx` có 10/10 tests passed (4 test cũ + 6 test mới cho live animation và review feedback).
+- **Backend Tests**: `test/review-agent-api.test.ts`, `test/review-agent-db.test.ts`, `test/departments.test.ts`, `test/migrations-append-only.test.ts` pass (100%).
+- **Build**: `npm run build` và `npm run build:web` pass (tsc & vite production build thành công trong 4.69s).
+
+## Việc chưa làm được / còn thiếu
+- Không có (toàn bộ các yêu cầu trong task.md, feedback review P2/P3, giải quyết xung đột merge lần 1 và tiêu chí nghiệm thu (a)-(f) đều đã hoàn thành và kiểm tra đầy đủ).
+
+## Danh sách commit
+- `344008b2` feat(flow): add pulse and icon animations for active flow nodes and reduced motion styles
+- `485920a9` feat(flow): animate active status nodes, flow edges, and running task preview
+- `9b6e57de` test(flow): add unit tests for live animation, active edges, count bounce, and refetch interval
+- `e1827e41` docs(tasks): add completion report for t-flow-live-animation
+- `d6dbfd5a` fix(flow): separate task count into text element for scale bounce animation
+- `d4249dd4` fix(flow): avoid showing more label when running tasks data is still loading
+- `0460e063` docs(decisions): record active condition decision for review node in TaskFlow
+- `2202d779` test(flow): assert text element on count bounce and guard loading state of preview
+- `e5f92e94` docs(tasks): update completion report with review feedback resolutions
+- `06b8b594` Merge branch 'agenthub/integration' into agenthub/t-flow-live-animation

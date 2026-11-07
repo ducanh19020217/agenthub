@@ -58,6 +58,83 @@ describe('checks and worktree excludes', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
+  it('runs checks and records execution order with seq 1..3 and startedAt, getCheckResults returns in order', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'checks-seq-test-'));
+    const db = openDatabase(path.join(tmp, 'hub.db'));
+    db.prepare('INSERT INTO projects (id, name, path, defaultBranch, maxParallel) VALUES (?, ?, ?, ?, ?)').run('p1', 'P1', tmp, 'main', 1);
+    db.prepare('INSERT INTO tasks (id, projectId, slug, title, status) VALUES (?, ?, ?, ?, ?)').run('p1/t1', 'p1', 't1', 'T1', 'review');
+    db.prepare('INSERT INTO runs (id, taskId, engine, model, profileName, startedAt) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('run-seq', 'p1/t1', 'agy', 'model', 'p1', '2026-10-15 12:00:00');
+
+    const project = {
+      id: 'p1',
+      name: 'P1',
+      path: tmp,
+      defaultBranch: 'main',
+      maxParallel: 1,
+      checks: JSON.stringify([
+        { name: 'mock-first', cmd: [process.execPath, '-e', 'process.exit(0)'] },
+        { name: 'mock-second', cmd: [process.execPath, '-e', 'process.exit(0)'] },
+        { name: 'mock-third', cmd: [process.execPath, '-e', 'process.exit(1)'] },
+      ]),
+    } as ProjectRow;
+
+    const task = {
+      id: 'p1/t1',
+      projectId: 'p1',
+      slug: 't1',
+      title: 'T1',
+      body: '',
+      level: 'easy',
+      modelChain: null,
+      baseRef: 'main',
+      branch: 'main',
+      worktreePath: tmp,
+      status: 'review',
+      dependsOn: '[]',
+      attempt: 0,
+      resume: 0,
+      createdAt: '',
+      updatedAt: '',
+      checkFixAttempts: 0,
+    } as TaskRow;
+
+    const runner = new CheckRunner(db);
+    const runResult = await runner.run(task, project, 'run-seq');
+
+    expect(runResult.results.slice(0, 3)).toMatchObject([
+      { name: 'mock-first', seq: 1, ok: true },
+      { name: 'mock-second', seq: 2, ok: true },
+      { name: 'mock-third', seq: 3, ok: false },
+    ]);
+    expect(runResult.results[0].startedAt).toBeTruthy();
+
+    const retrieved = getCheckResults(db, 'p1/t1');
+    const firstThree = retrieved.filter((r) => ['mock-first', 'mock-second', 'mock-third'].includes(r.name));
+    expect(firstThree.map((r) => ({ name: r.name, seq: r.seq, ok: r.ok }))).toEqual([
+      { name: 'mock-first', seq: 1, ok: true },
+      { name: 'mock-second', seq: 2, ok: true },
+      { name: 'mock-third', seq: 3, ok: false },
+    ]);
+    expect(firstThree[0].runStartedAt).toBe('2026-10-15 12:00:00');
+    expect(firstThree[0].startedAt).toBeTruthy();
+
+    // Verify fallback to rowid for legacy records without seq
+    db.prepare('INSERT INTO runs (id, taskId, engine, model, profileName, startedAt) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('run-legacy', 'p1/t1', 'agy', 'model', 'p1', '2026-10-15 13:00:00');
+    const legacyInsert = db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+    legacyInsert.run('p1/t1', 'run-legacy', 'check-a', 1, 0, 10, 'ok', null);
+    legacyInsert.run('p1/t1', 'run-legacy', 'check-b', 1, 0, 10, 'ok', null);
+    legacyInsert.run('p1/t1', 'run-legacy', 'check-c', 0, 1, 10, 'fail', null);
+
+    const legacyResults = getCheckResults(db, 'p1/t1');
+    expect(legacyResults.map((r) => r.name)).toEqual(['check-a', 'check-b', 'check-c']);
+    expect(legacyResults[0].seq).toBeUndefined();
+
+    db.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
   it('uncommitted check ignores untracked symlinks and .agenthub files', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'checks-test-'));
     const repo = path.join(tmp, 'repo');

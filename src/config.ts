@@ -177,6 +177,12 @@ export interface TelegramNotifyConfig {
   fallback: boolean;
   brainWaiting?: boolean;
   disk?: boolean;
+  /** Báo khi một task hoàn thành (kể cả khi bộ não ở chế độ auto). */
+  taskDone?: boolean;
+  /** Báo khi một project không còn task nào đang chờ/chạy. */
+  projectIdle?: boolean;
+  /** Báo khi task bị ngắt: hủy, quá thời gian, lặp lệnh, không commit, chuyển tài khoản, tự đóng. */
+  interrupted?: boolean;
 }
 
 export interface TelegramChat {
@@ -234,6 +240,9 @@ export const DEFAULT_TELEGRAM_NOTIFY: TelegramNotifyConfig = {
   fallback: true,
   brainWaiting: true,
   disk: true,
+  taskDone: true,
+  projectIdle: true,
+  interrupted: true,
 };
 
 export const DEFAULT_STALL_CONFIG: StallConfig = {
@@ -1207,6 +1216,9 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
       fallback: rawTelegramNotify.fallback !== false,
       brainWaiting: rawTelegramNotify.brainWaiting !== false,
       disk: rawTelegramNotify.disk !== false,
+      taskDone: rawTelegramNotify.taskDone !== false,
+      projectIdle: rawTelegramNotify.projectIdle !== false,
+      interrupted: rawTelegramNotify.interrupted !== false,
     },
   };
 

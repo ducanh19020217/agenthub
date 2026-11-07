@@ -585,6 +585,9 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
     });
 
     it('/status returns task overview and scheduler state', async () => {
+      ctx.taskRepo.insert({ id: 'p1/t-done', projectId: 'p1', slug: 't-done', title: 'Task Done', status: 'done', level: 'easy' });
+      ctx.taskRepo.insert({ id: 'p1/t-pushed', projectId: 'p1', slug: 't-pushed', title: 'Task Pushed', status: 'pushed', level: 'easy' });
+
       await bot.handleUpdate({
         update_id: 11,
         message: {
@@ -601,6 +604,7 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(text).toContain('Tổng quan trạng thái AgentHub');
       expect(text).toContain('Điều phối');
       expect(text).toContain('Tasks:');
+      expect(text).toContain('2</b> hoàn thành (1 đã đẩy git)');
     });
 
     it('/brain renders transcript session status, request, and last tool', async () => {
@@ -1867,6 +1871,164 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
     });
   });
 
+  describe('Lệnh /ask trao đổi với bộ não (t-telegram-ask-brain)', () => {
+    it('(a) /ask không đối số trả về tin hướng dẫn', async () => {
+      const bot = createTestBotService({ allowedChatIds: [321], chatService: ctx.chatService });
+
+      // Chưa chọn dự án
+      await bot.handleUpdate({ update_id: 2001, message: {
+        message_id: 2001, date: 1, chat: { id: 321, type: 'private' }, text: '/ask',
+      } });
+      const callsNoProj = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(callsNoProj.some((c) => typeof c.body?.text === 'string' && (c.body.text as string).includes('Chưa chọn dự án') && (c.body.text as string).includes('/ask'))).toBe(true);
+
+      // Đã chọn dự án
+      ctx.projectRepo.insert({ id: 'p-ask-guide', name: 'Project Ask Guide', path: tmpDir, defaultBranch: 'main', maxParallel: 1 });
+      await bot.handleUpdate({ update_id: 2002, message: {
+        message_id: 2002, date: 1, chat: { id: 321, type: 'private' }, text: '/use p-ask-guide',
+      } });
+      recordedCalls.length = 0;
+
+      await bot.handleUpdate({ update_id: 2003, message: {
+        message_id: 2003, date: 1, chat: { id: 321, type: 'private' }, text: '/ask',
+      } });
+      const callsWithProj = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(callsWithProj.some((c) => typeof c.body?.text === 'string' && (c.body.text as string).includes('p-ask-guide') && (c.body.text as string).includes('/ask'))).toBe(true);
+    });
+
+    it('(b) /ask câu hỏi với dự án đã chọn và assistant bật gọi brain:<project>, gửi placeholder và sửa thành câu trả lời', async () => {
+      ctx.chatService.setClaudeBinOverride(fakeClaudeBin);
+      config.assistant.enabled = true;
+      ctx.projectRepo.insert({ id: 'p-ask-turn', name: 'Project Ask Turn', path: tmpDir, defaultBranch: 'main', maxParallel: 1 });
+      const bot = createTestBotService({ allowedChatIds: [321], chatService: ctx.chatService });
+
+      await bot.handleUpdate({ update_id: 2010, message: {
+        message_id: 2010, date: 1, chat: { id: 321, type: 'private' }, text: '/use p-ask-turn',
+      } });
+      recordedCalls.length = 0;
+
+      await bot.handleUpdate({ update_id: 2011, message: {
+        message_id: 2011, date: 1, chat: { id: 321, type: 'private' }, text: '/ask Kiến trúc dự án này ra sao?',
+      } });
+
+      // Bot gửi placeholder "🧠 Bộ não đang suy nghĩ…"
+      expect(recordedCalls.some((c) => typeof c.body?.text === 'string' && (c.body.text as string).includes('🧠 Bộ não đang suy nghĩ…'))).toBe(true);
+
+      // ChatService được gọi với sessionId brain:p-ask-turn (không phải assistant:p-ask-turn)
+      await vi.waitFor(() => expect(ctx.chatSessionRepo.get('brain:p-ask-turn')?.busy).toBe(0), { timeout: 10_000 });
+      expect(ctx.chatSessionRepo.get('assistant:p-ask-turn')).toBeUndefined();
+      expect(ctx.chatMessageRepo.getBySession('brain:p-ask-turn', 10).some((m) => m.content === 'Kiến trúc dự án này ra sao?')).toBe(true);
+
+      // Bot sửa tin placeholder thành câu trả lời
+      await vi.waitFor(() => expect(recordedCalls.some((c) => c.url.includes('/editMessageText'))).toBe(true), { timeout: 5_000 });
+    });
+
+    it('(c) không chọn dự án thì /ask dùng brain toàn cục', async () => {
+      ctx.chatService.setClaudeBinOverride(fakeClaudeBin);
+      const bot = createTestBotService({ allowedChatIds: [321], chatService: ctx.chatService });
+
+      await bot.handleUpdate({ update_id: 2020, message: {
+        message_id: 2020, date: 1, chat: { id: 321, type: 'private' }, text: '/use none',
+      } });
+      recordedCalls.length = 0;
+
+      await bot.handleUpdate({ update_id: 2021, message: {
+        message_id: 2021, date: 1, chat: { id: 321, type: 'private' }, text: '/ask Tình hình hệ thống chung thế nào?',
+      } });
+
+      expect(recordedCalls.some((c) => typeof c.body?.text === 'string' && (c.body.text as string).includes('🧠 Bộ não đang suy nghĩ…'))).toBe(true);
+
+      await vi.waitFor(() => expect(ctx.chatSessionRepo.get('brain')?.busy).toBe(0), { timeout: 10_000 });
+      expect(ctx.chatMessageRepo.getBySession('brain', 10).some((m) => m.content === 'Tình hình hệ thống chung thế nào?')).toBe(true);
+    });
+
+    it('(d) reply vào tin trả lời của /ask tiếp tục cùng phiên brain không cần gõ /ask lại', async () => {
+      ctx.chatService.setClaudeBinOverride(fakeClaudeBin);
+      ctx.projectRepo.insert({ id: 'p-ask-reply', name: 'Project Ask Reply', path: tmpDir, defaultBranch: 'main', maxParallel: 1 });
+      const bot = createTestBotService({ allowedChatIds: [321], chatService: ctx.chatService });
+
+      await bot.handleUpdate({ update_id: 2030, message: {
+        message_id: 2030, date: 1, chat: { id: 321, type: 'private' }, text: '/use p-ask-reply',
+      } });
+
+      await bot.handleUpdate({ update_id: 2031, message: {
+        message_id: 2031, date: 1, chat: { id: 321, type: 'private' }, text: '/ask Câu hỏi đầu tiên?',
+      } });
+
+      await vi.waitFor(() => expect(ctx.chatSessionRepo.get('brain:p-ask-reply')?.busy).toBe(0), { timeout: 10_000 });
+      const placeholderCall = recordedCalls.find((c) => typeof c.body?.text === 'string' && (c.body.text as string).includes('🧠 Bộ não đang suy nghĩ…'));
+      expect(placeholderCall).toBeDefined();
+
+      // Giả lập bot trả về message_id khi gửi placeholder
+      const askReplyMessageId = (bot as unknown as { askReplySessions: Map<number, string> }).askReplySessions.keys().next().value;
+      expect(askReplyMessageId).toBeDefined();
+      expect((bot as unknown as { askReplySessions: Map<number, string> }).askReplySessions.get(askReplyMessageId)).toBe('brain:p-ask-reply');
+
+      // Người dùng reply vào tin của bot bằng tin nhắn thường (không gõ /ask)
+      await bot.handleUpdate({ update_id: 2032, message: {
+        message_id: 2032, date: 1, chat: { id: 321, type: 'private' }, text: 'Nói rõ hơn ý này',
+        reply_to_message: { message_id: askReplyMessageId },
+      } });
+
+      await vi.waitFor(() => expect(ctx.chatSessionRepo.get('brain:p-ask-reply')?.busy).toBe(0), { timeout: 10_000 });
+      const messages = ctx.chatMessageRepo.getBySession('brain:p-ask-reply', 10);
+      expect(messages.some((m) => m.content === 'Nói rõ hơn ý này')).toBe(true);
+    });
+
+    it('(e) chatService tắt báo lỗi rõ khi gọi /ask', async () => {
+      const bot = createTestBotService({ allowedChatIds: [321], chatService: undefined });
+      recordedCalls.length = 0;
+
+      await bot.handleUpdate({ update_id: 2040, message: {
+        message_id: 2040, date: 1, chat: { id: 321, type: 'private' }, text: '/ask Xin chào bộ não',
+      } });
+
+      expect(recordedCalls.some((c) => typeof c.body?.text === 'string' && (c.body.text as string).includes('Chat Claude chưa được bật'))).toBe(true);
+    });
+
+    it('khi brain bận xử lý sự kiện, /ask xếp câu hỏi vào và báo đang chờ bộ não rảnh', async () => {
+      ctx.chatService.setClaudeBinOverride(fakeClaudeBin);
+      ctx.projectRepo.insert({ id: 'p-ask-busy', name: 'Project Ask Busy', path: tmpDir, defaultBranch: 'main', maxParallel: 1 });
+      const bot = createTestBotService({ allowedChatIds: [321], chatService: ctx.chatService });
+
+      await bot.handleUpdate({ update_id: 2050, message: {
+        message_id: 2050, date: 1, chat: { id: 321, type: 'private' }, text: '/use p-ask-busy',
+      } });
+
+      // Start long turn to make brain:p-ask-busy busy
+      await bot.handleUpdate({ update_id: 2051, message: {
+        message_id: 2051, date: 1, chat: { id: 321, type: 'private' }, text: '/ask sleep',
+      } });
+      await vi.waitFor(() => expect(ctx.chatSessionRepo.get('brain:p-ask-busy')?.busy).toBe(1), { timeout: 5_000 });
+
+      // Gửi câu hỏi tiếp theo vào brain đang bận
+      await bot.handleUpdate({ update_id: 2052, message: {
+        message_id: 2052, date: 1, chat: { id: 321, type: 'private' }, text: '/ask Câu hỏi khi bận',
+      } });
+
+      await vi.waitFor(() => expect(recordedCalls.some((call) => typeof call.body?.text === 'string'
+        && (call.body.text as string).includes('Đang chờ bộ não rảnh')
+        && (call.body.text as string).includes('xếp hàng'))).toBe(true), { timeout: 5_000 });
+
+      ctx.chatService.cancelSession('brain:p-ask-busy');
+    });
+
+    it('giới hạn map askReplySessions tối đa 200 mục', async () => {
+      const bot = createTestBotService({ allowedChatIds: [321], chatService: ctx.chatService });
+      const botAny = bot as unknown as { recordAskReply(id: number, s: string): void; askReplySessions: Map<number, string> };
+
+      for (let i = 1; i <= 250; i++) {
+        botAny.recordAskReply(i, `brain:p-${i}`);
+      }
+
+      expect(botAny.askReplySessions.size).toBe(200);
+      expect(botAny.askReplySessions.has(1)).toBe(false);
+      expect(botAny.askReplySessions.has(50)).toBe(false);
+      expect(botAny.askReplySessions.has(51)).toBe(true);
+      expect(botAny.askReplySessions.has(250)).toBe(true);
+    });
+  });
+
   describe('7. HTTP API Endpoints for Telegram', () => {
     it('GET /api/telegram/pairing-code returns active code and remaining seconds', async () => {
       const res = await server.inject({
@@ -2853,6 +3015,136 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
       chatService: ctx.chatService,
     });
   }
+
+  it('task.done vẫn báo khi brain.mode = auto, và báo "hết task" khi project không còn task đang chạy', async () => {
+    ctx.projectRepo.insert({ id: 'pd', name: 'Dự án D', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'pd/t-1', projectId: 'pd', slug: 't-1', title: 'Việc một', body: '', level: 'easy', status: 'done' });
+    ctx.taskRepo.insert({ id: 'pd/t-2', projectId: 'pd', slug: 't-2', title: 'Việc hai', body: '', level: 'easy', status: 'running' });
+    const bot = createBot('auto');
+
+    bot.handleEvent('task.done', 'pd/t-1', { by: 'codex', verdict: 'approved' });
+    await bot.flushQueue(CHAT_ID);
+    let sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends).toHaveLength(1);
+    expect(sends[0].body?.text).toContain('Task hoàn thành');
+    expect(sends[0].body?.text).toContain('Việc một');
+    expect(sends[0].body?.text).toContain('codex');
+
+    ctx.taskRepo.update('pd/t-2', { status: 'done' });
+    bot.handleEvent('task.done', 'pd/t-2', undefined);
+    await bot.flushQueue(CHAT_ID);
+    sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends).toHaveLength(3);
+    expect(sends[1].body?.text).toContain('Việc hai');
+    expect(sends[2].body?.text).toContain('Dự án D đã hết task');
+    expect(sends[2].body?.text).toContain('2 task đã hoàn thành');
+
+    // Project rỗng rồi lại rỗng: không báo "hết task" lặp lại nếu chưa có task mới chạy
+    currentTime += 60_000;
+    bot.handleEvent('task.done', 'pd/t-1', { again: true });
+    await bot.flushQueue(CHAT_ID);
+    sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends.filter((c) => String(c.body?.text).includes('đã hết task'))).toHaveLength(1);
+  });
+
+  it('task.cancelled và các sự kiện ngắt task vẫn báo trong auto mode, kèm lý do và người hủy', async () => {
+    ctx.projectRepo.insert({ id: 'pc', name: 'PC', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'pc/t-1', projectId: 'pc', slug: 't-1', title: 'Việc bị hủy', body: '', level: 'easy', status: 'cancelled' });
+    ctx.taskRepo.insert({ id: 'pc/t-2', projectId: 'pc', slug: 't-2', title: 'Việc lặp', body: '', level: 'easy', status: 'running' });
+    const bot = createBot('auto');
+
+    bot.handleEvent('task.cancelled', 'pc/t-1', { reason: 'Trùng với T52', by: 'mcp', previousStatus: 'queued' });
+    bot.handleEvent('task.looping', 'pc/t-2', { command: 'npm test', count: 5 });
+    bot.handleEvent('task.timeout', 'pc/t-2', undefined);
+    await bot.flushQueue(CHAT_ID);
+    const sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends).toHaveLength(3);
+    expect(sends[0].body?.text).toContain('Task bị hủy');
+    expect(sends[0].body?.text).toContain('Trùng với T52');
+    expect(sends[0].body?.text).toContain('mcp');
+    expect(sends[1].body?.text).toContain('lặp lệnh');
+    expect(sends[1].body?.text).toContain('npm test');
+    expect(sends[2].body?.text).toContain('quá thời gian');
+
+    config.telegram.notify.interrupted = false;
+    bot.handleEvent('task.cancelled', 'pc/t-2', { reason: 'x', by: 'y' });
+    await bot.flushQueue(CHAT_ID);
+    expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(3);
+  });
+
+  it('tắt notify.taskDone và notify.projectIdle thì task.done bị chặn trong auto mode như trước', async () => {
+    ctx.projectRepo.insert({ id: 'pq', name: 'PQ', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'pq/t-1', projectId: 'pq', slug: 't-1', title: 'Xong', body: '', level: 'easy', status: 'done' });
+    config.telegram.notify.taskDone = false;
+    config.telegram.notify.projectIdle = false;
+    const bot = createBot('auto');
+    bot.handleEvent('task.done', 'pq/t-1', undefined);
+    await bot.flushQueue(CHAT_ID);
+    expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(0);
+  });
+
+  it('thông báo task.pushed và task.push_failed trong auto mode, hỗ trợ callback retry publish', async () => {
+    ctx.projectRepo.insert({ id: 'pub-proj', name: 'Pub Proj', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'pub-proj/t-pushed', projectId: 'pub-proj', slug: 't-pushed', title: 'Task Pushed', body: '', level: 'easy', status: 'pushed' });
+    ctx.taskRepo.insert({ id: 'pub-proj/t-failed', projectId: 'pub-proj', slug: 't-failed', title: 'Task Push Fail', body: '', level: 'easy', status: 'done' });
+    const bot = createBot('auto');
+
+    // 1. task.pushed
+    bot.handleEvent('task.pushed', 'pub-proj/t-pushed', {
+      projectId: 'pub-proj',
+      remote: 'origin',
+      branch: 'main',
+      commit: '1234567890abcdef',
+      compareUrl: 'https://github.com/org/repo/commit/1234567890abcdef',
+    });
+    await bot.flushQueue(CHAT_ID);
+    let sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends.length).toBeGreaterThanOrEqual(1);
+    const lastSend = sends[sends.length - 1];
+    expect(lastSend.body?.text).toContain('Đã đẩy lên git');
+    expect(lastSend.body?.text).toContain('Task Pushed');
+    expect(lastSend.body?.text).toContain('origin/main');
+    expect(lastSend.body?.text).toContain('1234567');
+    const replyMarkup = lastSend.body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; url?: string; callback_data?: string }>> };
+    expect(replyMarkup.inline_keyboard[0].some((b) => b.text.includes('Xem commit'))).toBe(true);
+
+    // 2. task.push_failed
+    bot.handleEvent('task.push_failed', 'pub-proj/t-failed', {
+      projectId: 'pub-proj',
+      remote: 'origin',
+      branch: 'main',
+      error: 'Xung đột merge nhánh feature vào main',
+    });
+    await bot.flushQueue(CHAT_ID);
+    sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    const failSend = sends[sends.length - 1];
+    expect(failSend.body?.text).toContain('Đẩy git thất bại');
+    expect(failSend.body?.text).toContain('Task Push Fail');
+    expect(failSend.body?.text).toContain('Xung đột merge');
+    const failMarkup = failSend.body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; url?: string; callback_data?: string }>> };
+    expect(failMarkup.inline_keyboard[0].some((b) => b.callback_data === 'task:publish:pub-proj/t-failed')).toBe(true);
+
+    // 3. Callback query task:publish:pub-proj/t-failed
+    const publishSpy = vi.spyOn(ctx.service, 'publishTask').mockResolvedValueOnce({
+      ok: true,
+      remote: 'origin',
+      branch: 'main',
+      commit: 'abcdef1234567',
+      pushedIntegrationBranch: false,
+    });
+
+    await (bot as unknown as { handleCallbackQuery(q: unknown): Promise<void> }).handleCallbackQuery({
+      id: 'cb-pub-1',
+      from: { id: CHAT_ID, is_bot: false, first_name: 'Tester' },
+      message: { message_id: 123, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: 'Initial message' },
+      data: 'task:publish:pub-proj/t-failed',
+    });
+
+    expect(publishSpy).toHaveBeenCalledWith('pub-proj/t-failed', { manual: true });
+    const edits = recordedCalls.filter((c) => c.url.includes('/editMessageText'));
+    expect(edits.length).toBeGreaterThanOrEqual(1);
+    expect(edits[edits.length - 1].body?.text).toContain('Đã đẩy task');
+  });
 
   it('1. khi brain.mode = auto: chan cac thong bao tho theo tung task, chi gui hub_notify va su co he thong', async () => {
     const bot = createBot('auto');

@@ -158,7 +158,7 @@ export class OpenProjectWritebackService {
   private readonly retryAttempts = new Map<string, number>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly bound = (type: string, taskId?: string, payload?: unknown) => {
-    if (type === 'task.running' || type === 'task.done' || type === 'task.merged' || type === 'task.blocked') void this.handleTaskEvent(type, taskId, payload);
+    if (type === 'task.running' || type === 'task.done' || type === 'task.pushed' || type === 'task.merged' || type === 'task.blocked') void this.handleTaskEvent(type, taskId, payload);
     if (type === 'batch.dispatched') void this.handleBatchDispatched(payload);
     if (type === 'batch.discarded') void this.handleBatchDiscarded(payload);
     if (type === 'deploy.succeeded' || type === 'gitea.sync.succeeded') void this.handlePushEvent(type, payload);

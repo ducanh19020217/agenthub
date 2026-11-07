@@ -101,13 +101,13 @@ describe('SavingsPage', () => {
 
     // First task: codex:gpt-5.6-luna -> Codex Luna
     expect(badges[0]).toHaveTextContent('Codex Luna');
-    expect(badges[0]).toHaveAttribute('title', 'codex:gpt-5.6-luna');
+    expect(badges[0]).toHaveAttribute('title', 'Codex / codex:gpt-5.6-luna');
     expect(badges[0]).toHaveClass('badge-model-codex');
     expect(badges[0]).toHaveClass('whitespace-nowrap');
 
     // Second task: gemini-3.8-flash-high -> Gemini Flash · high
     expect(badges[1]).toHaveTextContent('Gemini Flash · high');
-    expect(badges[1]).toHaveAttribute('title', 'gemini-3.8-flash-high');
+    expect(badges[1]).toHaveAttribute('title', 'Gemini / gemini-3.8-flash-high');
     expect(badges[1]).toHaveClass('badge-model-gemini');
     expect(badges[1]).toHaveClass('whitespace-nowrap');
   });

@@ -21,6 +21,7 @@ import {
   ExternalLink,
   CheckCircle2,
   AlertCircle,
+  Rocket,
 } from 'lucide-react';
 import { BrainCard } from '../components/BrainCard';
 import { ReviewQueue } from '../components/ReviewQueue';
@@ -189,6 +190,7 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
   const reviewCount = taskCounts.review || 0;
   const waitingQuotaCount = taskCounts.waiting_quota || 0;
   const errorCount = (taskCounts.failed || 0) + (taskCounts.blocked || 0);
+  const pushedCount = taskCounts.pushed || 0;
   const workers = status.running || status.runningWorkers || [];
   const events = liveEvents.length > 0 ? liveEvents : eventPage?.items || status.recentEvents || [];
 
@@ -223,6 +225,12 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
       icon: XCircle,
       statusKey: 'failed',
     },
+    {
+      label: t('status.pushed'),
+      value: pushedCount,
+      icon: Rocket,
+      statusKey: 'pushed',
+    },
   ];
 
   const projectTaskSummary = projects.map((project) => {
@@ -232,6 +240,7 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
       running: projectTasks.running || 0,
       waiting: (projectTasks.queued || 0) + (projectTasks.waiting_quota || 0),
       attention: (projectTasks.blocked || 0) + (projectTasks.failed || 0),
+      pushed: projectTasks.pushed || 0,
     };
   });
 
@@ -442,7 +451,7 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
       </div>
 
       {/* Metric Cards */}
-      <div data-testid="dashboard-metrics" className="order-1 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+      <div data-testid="dashboard-metrics" className="order-1 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
         {metrics.map((m) => {
           const Icon = m.icon;
           return (
@@ -475,10 +484,15 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
           <Link to="/projects" className="text-xs text-[var(--t-accent)] hover:underline">{t('common.view')}</Link>
         </div>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {projectTaskSummary.map(({ project, running, waiting, attention }) => (
+          {projectTaskSummary.map(({ project, running, waiting, attention, pushed }) => (
             <Link key={project.id} to={`/tasks?project=${encodeURIComponent(project.id)}`} className="rounded-lg border border-[var(--t-border)] p-3 hover:border-[var(--t-accent)] transition-colors" data-testid={`dashboard-project-${project.id}`}>
               <div className="mb-2 truncate text-sm font-semibold">{project.name}</div>
-              <div className="flex flex-wrap gap-2 text-xs"><span className="text-[var(--t-ok)]">{t('dashboard.projectRunning')}: {running}</span><span className="text-[var(--t-text-2)]">{t('dashboard.projectWaiting')}: {waiting}</span><span className="text-[var(--t-crit)]">{t('tasks.attention')}: {attention}</span></div>
+              <div className="flex flex-wrap gap-2 text-xs">
+                <span className="text-[var(--t-ok)]">{t('dashboard.projectRunning')}: {running}</span>
+                <span className="text-[var(--t-text-2)]">{t('dashboard.projectWaiting')}: {waiting}</span>
+                <span className="text-[var(--t-crit)]">{t('tasks.attention')}: {attention}</span>
+                {pushed > 0 && <span className="text-[var(--status-pushed-text)]">{t('status.pushed')}: {pushed}</span>}
+              </div>
             </Link>
           ))}
         </div>
@@ -575,7 +589,7 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <ModelBadge model={worker.model} engine={worker.engine} />
+                        <ModelBadge model={worker.model} engine={worker.engine} profileName={worker.profileName} />
                       </td>
                       <td className="px-6 py-4 font-medium text-[var(--t-text)]">{worker.profileName}</td>
                       <td className="px-6 py-4 text-[var(--t-text-2)]">
@@ -699,7 +713,22 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">
             <div className="font-semibold text-sm">Failover Claude: {claudeFailover.active ? t('dashboard.failoverOn') : t('dashboard.failoverOff')}</div>
-            {claudeFailover.active && claudeFailover.step && <div className="text-sm mt-1">{t('dashboard.failoverUsing')}: {claudeFailover.step.type === 'model' ? claudeFailover.step.model : claudeFailover.step.type === 'profile' ? t('dashboard.failoverUsingProfile', { name: claudeFailover.step.profile || t('common.unknown') }) : claudeFailover.step.type === 'apiKey' ? t('dashboard.failoverUsingApiKey', { used: claudeFailover.dailyCostUSD.toFixed(2), cap: claudeFailover.step.dailyCapUSD ?? 0 }) : claudeFailover.step.type === 'engine' ? claudeFailover.step.engine : t('dashboard.failoverWaitingReset')}</div>}
+            {claudeFailover.active && claudeFailover.step && (
+              <div className="text-sm mt-1 flex items-center gap-1.5 flex-wrap">
+                <span>{t('dashboard.failoverUsing')}:</span>
+                {claudeFailover.step.type === 'model' ? (
+                  <ModelBadge model={claudeFailover.step.model} engine="claude" />
+                ) : claudeFailover.step.type === 'profile' ? (
+                  <span>{t('dashboard.failoverUsingProfile', { name: claudeFailover.step.profile || t('common.unknown') })}</span>
+                ) : claudeFailover.step.type === 'apiKey' ? (
+                  <span>{t('dashboard.failoverUsingApiKey', { used: claudeFailover.dailyCostUSD.toFixed(2), cap: claudeFailover.step.dailyCapUSD ?? 0 })}</span>
+                ) : claudeFailover.step.type === 'engine' ? (
+                  <span>{claudeFailover.step.engine}</span>
+                ) : (
+                  <span>{t('dashboard.failoverWaitingReset')}</span>
+                )}
+              </div>
+            )}
             {claudeFailover.reason && <div className="text-xs mt-1">{t('dashboard.failoverReason')}: {formatReason(claudeFailover.reason, locale)}</div>}
             {claudeFailover.evidence && <div className="text-xs text-[var(--t-text-2)] mt-1 truncate">{t('dashboard.failoverEvidence')}: {claudeFailover.evidence.file}:{claudeFailover.evidence.line} · {new Date(claudeFailover.evidence.observedAt).toLocaleString(locale === 'vi' ? 'vi-VN' : 'en-US')}</div>}
           </div>

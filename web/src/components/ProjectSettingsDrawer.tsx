@@ -45,6 +45,7 @@ import {
 } from '../utils/models';
 import { useLocale } from '../context/LocaleContext';
 import { UI_Z_INDEX } from './ui/layers';
+import { ModelBadge } from './ModelBadge';
 import { InfoTooltip } from './tour/InfoTooltip';
 import { Department, Project, ProjectMerge, ProjectSettings, UpdateProjectInput, PresetLevel } from '../types/api';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -182,6 +183,7 @@ export const defaultProjectSettings = (): NonNullable<Project['settings']> => ({
   brain: { mode: 'inherit' },
   worktree: { install: 'auto', gitHooks: 'run' },
   integration: { enabled: false },
+  publish: { enabled: false, remote: 'origin', branch: '', pushIntegrationBranch: true },
   ci: {},
   references: [],
   reviewChecklist: [],
@@ -206,6 +208,12 @@ function normalizeProjectSettings(settings?: Partial<NonNullable<Project['settin
     brain: { ...defaults.brain, ...settings?.brain },
     worktree: { ...defaults.worktree, ...settings?.worktree },
     integration: { ...defaults.integration, ...settings?.integration },
+    publish: {
+      enabled: settings?.publish?.enabled ?? defaults.publish!.enabled,
+      remote: settings?.publish?.remote || defaults.publish!.remote,
+      branch: settings?.publish?.branch || defaults.publish!.branch,
+      pushIntegrationBranch: settings?.publish?.pushIntegrationBranch ?? defaults.publish!.pushIntegrationBranch,
+    },
     openproject: { ...defaults.openproject, ...settings?.openproject, enabled: settings?.openproject?.enabled ?? false, sourceId: settings?.openproject?.sourceId ?? null, role: settings?.openproject?.role ?? 'primary' },
     gitea: { ...defaults.gitea, ...settings?.gitea, enabled: settings?.gitea?.enabled ?? false, schedule: settings?.gitea?.schedule ?? defaults.gitea!.schedule, weekdaysOnly: settings?.gitea?.weekdaysOnly ?? false, checks: settings?.gitea?.checks ?? [], unionMergeGlobs: settings?.gitea?.unionMergeGlobs ?? [] },
     remoteDeploy: { ...defaults.remoteDeploy, ...settings?.remoteDeploy, enabled: settings?.remoteDeploy?.enabled ?? false, trigger: settings?.remoteDeploy?.trigger ?? 'manual', steps: settings?.remoteDeploy?.steps ?? [], healthChecks: settings?.remoteDeploy?.healthChecks ?? [], waitMinutes: settings?.remoteDeploy?.waitMinutes ?? 15 },
@@ -254,6 +262,7 @@ export function changedSettings(
     'brain',
     'worktree',
     'integration',
+    'publish',
     'openproject',
     'gitea',
     'remoteDeploy',
@@ -752,6 +761,12 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
         preset,
         review: { ...prev.review, autoMerge: preset === 'auto' },
         integration: { ...prev.integration, autoMerge: preset === 'auto' },
+        publish: {
+          enabled: preset === 'auto',
+          remote: prev.publish?.remote || 'origin',
+          branch: prev.publish?.branch || '',
+          pushIntegrationBranch: prev.publish?.pushIntegrationBranch ?? true,
+        },
         autoFixOnFail: preset !== 'safe',
       }));
       if (preset === 'safe') {
@@ -938,6 +953,12 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       JSON.stringify(origSettings.integration),
     [draftSettings.integration, origSettings.integration],
   );
+  const publishChanged = useMemo(
+    () =>
+      JSON.stringify(draftSettings.publish) !==
+      JSON.stringify(origSettings.publish),
+    [draftSettings.publish, origSettings.publish],
+  );
   const openprojectChanged = useMemo(
     () =>
       JSON.stringify(draftSettings.openproject) !==
@@ -1032,6 +1053,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     if (JSON.stringify(draftSettings.commitConvention) !== JSON.stringify(origSettings.commitConvention)) count++;
     if (worktreeChanged) count++;
     if (integrationChanged) count++;
+    if (publishChanged) count++;
     if (openprojectChanged) count++;
     if (giteaChanged) count++;
     if (remoteDeployChanged) count++;
@@ -1054,6 +1076,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     origSettings.commitConvention,
     worktreeChanged,
     integrationChanged,
+    publishChanged,
     openprojectChanged,
     giteaChanged,
     remoteDeployChanged,
@@ -1214,6 +1237,14 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
           setSectionErrors((prev) => ({ ...prev, integration: `${t('projects.integrationBaseRef')}: ${err}` }));
           return;
         }
+      }
+    }
+
+    if (draftSettings.publish?.enabled && draftSettings.publish.branch) {
+      const err = validateBranchSyntax(draftSettings.publish.branch, t);
+      if (err) {
+        setSectionErrors((prev) => ({ ...prev, publish: `${t('projects.publishBranch')}: ${err}` }));
+        return;
       }
     }
 
@@ -1746,8 +1777,11 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
               <div className="p-2.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] flex items-center justify-between">
                 <div>
                   <span className="text-[var(--t-text-3)] block">{t('projects.brainEngine')}</span>
-                  <span className="font-medium text-[var(--t-text)]">
-                    {effectiveConfig?.brain?.engine?.value || 'claude'} ({effectiveConfig?.brain?.model?.value || 'sonnet'})
+                  <span className="font-medium text-[var(--t-text)] inline-flex items-center gap-1.5 mt-0.5">
+                    <ModelBadge
+                      model={effectiveConfig?.brain?.model?.value || 'sonnet'}
+                      engine={effectiveConfig?.brain?.engine?.value || 'claude'}
+                    />
                   </span>
                 </div>
                 <span
@@ -2603,6 +2637,136 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 </div>
               )}
             </div>
+          </Card>
+
+          <Card className="p-5 space-y-4" data-testid="project-publish-section">
+            <div className="space-y-1">
+              <h3 className="text-sm font-bold text-[var(--t-text)]">
+                {t('projects.sectionPublishTitle')}
+              </h3>
+              <p className="text-xs text-[var(--t-text-3)]">
+                {t('projects.sectionPublishDesc')}
+              </p>
+            </div>
+
+            {sectionErrors.publish && (
+              <div
+                data-testid="publish-error-msg"
+                className="p-2.5 rounded-lg bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)] text-xs flex items-center gap-1.5"
+              >
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                <span>{sectionErrors.publish}</span>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2">
+              <input
+                id="publish-toggle"
+                data-testid="publish-toggle"
+                type="checkbox"
+                checked={draftSettings.publish?.enabled ?? false}
+                onChange={(e) => {
+                  setSectionErrors((prev) => ({ ...prev, publish: null }));
+                  setApiError(null);
+                  setDraftSettings((prev) => ({
+                    ...prev,
+                    publish: {
+                      enabled: e.target.checked,
+                      remote: prev.publish?.remote || 'origin',
+                      branch: prev.publish?.branch || '',
+                      pushIntegrationBranch: prev.publish?.pushIntegrationBranch ?? true,
+                    },
+                  }));
+                }}
+                className="w-4 h-4 text-[var(--t-accent)] rounded border-[var(--t-border)]"
+              />
+              <label
+                htmlFor="publish-toggle"
+                className="text-xs font-semibold text-[var(--t-text)] cursor-pointer"
+              >
+                {t('projects.publishEnabled')}
+              </label>
+            </div>
+
+            {draftSettings.publish?.enabled && (
+              <div className="space-y-3 pt-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-[var(--t-text)] mb-1">
+                      {t('projects.publishRemote')}
+                    </label>
+                    <input
+                      type="text"
+                      data-testid="publish-remote-input"
+                      value={draftSettings.publish?.remote ?? 'origin'}
+                      placeholder={t('projects.publishRemotePlaceholder')}
+                      onChange={(e) => {
+                        setSectionErrors((prev) => ({ ...prev, publish: null }));
+                        setApiError(null);
+                        setDraftSettings((prev) => ({
+                          ...prev,
+                          publish: {
+                            ...prev.publish!,
+                            remote: e.target.value,
+                          },
+                        }));
+                      }}
+                      className="w-full text-xs font-mono px-3 py-1.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] text-[var(--t-text)] focus:outline-none focus:border-[var(--t-accent)]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-[var(--t-text)] mb-1">
+                      {t('projects.publishBranch')}
+                    </label>
+                    <SelectOrCustomInput
+                      placeholder={project.defaultBranch || 'main'}
+                      value={draftSettings.publish?.branch ?? ''}
+                      onChange={(val) => {
+                        setSectionErrors((prev) => ({ ...prev, publish: null }));
+                        setApiError(null);
+                        setDraftSettings((prev) => ({
+                          ...prev,
+                          publish: {
+                            ...prev.publish!,
+                            branch: val || undefined,
+                          },
+                        }));
+                      }}
+                      options={DEFAULT_COMMON_BRANCHES}
+                      validate={(val) => validateBranchSyntax(val, t)}
+                      ariaLabel={t('projects.publishBranch')}
+                      allowEmpty={true}
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    id="publish-push-integration"
+                    data-testid="publish-push-integration"
+                    type="checkbox"
+                    checked={draftSettings.publish?.pushIntegrationBranch !== false}
+                    onChange={(e) => {
+                      setApiError(null);
+                      setDraftSettings((prev) => ({
+                        ...prev,
+                        publish: {
+                          ...prev.publish!,
+                          pushIntegrationBranch: e.target.checked,
+                        },
+                      }));
+                    }}
+                    className="w-4 h-4 text-[var(--t-accent)] rounded border-[var(--t-border)]"
+                  />
+                  <label
+                    htmlFor="publish-push-integration"
+                    className="text-xs text-[var(--t-text)] cursor-pointer"
+                  >
+                    {t('projects.publishPushIntegration')}
+                  </label>
+                </div>
+              </div>
+            )}
           </Card>
 
           <Card className="p-5 space-y-4" data-testid="project-openproject-section">

@@ -82,6 +82,8 @@ export const getSetupLog = (tool: string) => apiFetch<string>(`/api/setup/log/${
 
 const TOKEN_STORAGE_KEY = 'agenthub_token';
 export const API_REQUEST_TIMEOUT_MS = 15_000;
+/** Claude usage is read by driving the CLI's /usage screen, which the server allows up to 45s. */
+export const USAGE_REFRESH_TIMEOUT_MS = 60_000;
 
 let unauthorizedListeners: Array<() => void> = [];
 
@@ -144,7 +146,7 @@ export function initTokenFromHash(): string | null {
   return getToken();
 }
 
-export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+export async function apiFetch<T>(path: string, { timeoutMs = API_REQUEST_TIMEOUT_MS, ...options }: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
   const token = getToken();
   if (!token) {
     notifyUnauthorized();
@@ -168,7 +170,7 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
   } else {
     options.signal?.addEventListener('abort', onAbort, { once: true });
   }
-  const timeout = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(path, {
@@ -323,6 +325,8 @@ export async function cleanResetClaudeSessions(): Promise<{ ok: boolean; cleared
 export async function getProjects(): Promise<Project[]> {
   return apiFetch<Project[]>('/api/projects');
 }
+
+export const getProject = (id: string) => apiFetch<Project>(`/api/projects/${encodeURIComponent(id)}`);
 
 export const getProjectGitStatus = (projectId: string) =>
   apiFetch<ProjectGitStatus>(`/api/projects/${encodeURIComponent(projectId)}/git`);
@@ -507,6 +511,7 @@ export async function getProfiles(): Promise<Profile[]> {
 export async function refreshProfileUsage(name: string): Promise<Profile> {
   return apiFetch<Profile>(`/api/profiles/${encodeURIComponent(name)}/usage/refresh`, {
     method: 'POST',
+    timeoutMs: USAGE_REFRESH_TIMEOUT_MS,
   });
 }
 
@@ -684,7 +689,7 @@ export async function getTaskGraph(params?: {
   includeDone?: string | boolean;
 }): Promise<TaskGraphResponse> {
   const query = new URLSearchParams();
-  if (params?.project) query.set('project', params.project);
+  if (params?.project && params.project !== 'all') query.set('project', params.project);
   if (params?.includeDone !== undefined) query.set('includeDone', String(params.includeDone));
   const qStr = query.toString();
   return apiFetch<TaskGraphResponse>(`/api/tasks/graph${qStr ? `?${qStr}` : ''}`);
@@ -734,9 +739,10 @@ export async function startTask(id: string): Promise<Task> {
   });
 }
 
-export async function cancelTask(id: string): Promise<Task> {
+export async function cancelTask(id: string, reason?: string): Promise<Task> {
   return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/cancel`, {
     method: 'POST',
+    body: JSON.stringify({ reason: reason?.trim() || null, by: 'dashboard' }),
   });
 }
 
@@ -847,6 +853,12 @@ export async function retryTask(id: string, data?: RetryTaskInput): Promise<Task
 
 export async function retryReviewer(id: string): Promise<Task> {
   return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/review/retry-reviewer`, {
+    method: 'POST',
+  });
+}
+
+export async function publishTask(id: string): Promise<{ ok: boolean; error?: string; remote?: string; branch?: string; commit?: string; compareUrl?: string; skipped?: boolean; reason?: string }> {
+  return apiFetch<{ ok: boolean; error?: string; remote?: string; branch?: string; commit?: string; compareUrl?: string; skipped?: boolean; reason?: string }>(`/api/tasks/${encodeURIComponent(id)}/publish`, {
     method: 'POST',
   });
 }
@@ -985,6 +997,9 @@ export interface TelegramStatus {
     quotaAllExhausted: boolean;
     fallback: boolean;
     disk: boolean;
+    taskDone: boolean;
+    projectIdle: boolean;
+    interrupted: boolean;
   };
 }
 

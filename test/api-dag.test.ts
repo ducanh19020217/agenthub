@@ -235,4 +235,19 @@ describe('GET /api/tasks/graph API endpoint', () => {
     expect(body.criticalPath).toHaveLength(3);
     expect(body.maxBlockedCount).toBe(2); // task-a blocks task-b and task-c
   });
+
+  it('treats project=all as no project filter (the dashboard default)', async () => {
+    const res = await server.inject({
+      method: 'GET',
+      url: '/api/tasks/graph?project=all&includeDone=false',
+      headers: {
+        host: '127.0.0.1:7789',
+        authorization: `Bearer ${token}`,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.nodes).toHaveLength(3);
+    expect(body.edges).toHaveLength(2);
+  });
 });

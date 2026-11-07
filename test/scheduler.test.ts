@@ -753,6 +753,17 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
+  it('does not mark quota when a valid verdict mentions 429 or rate limit', async () => {
+    const { scheduler, reviewRepo } = makeReviewer('reviewer-mentions-limit');
+    scheduler.tick();
+    await vi.waitFor(() => {
+      expect(reviewRepo.getByTask('test-project/review')[0]?.verdict).toBe('approved');
+    });
+    expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).not.toBe('quota');
+    expect(new QuotaService(quotaMarkRepo, profileRepo).isExhausted('codex-1', 'codex')).toBe(false);
+    scheduler.stop();
+  });
+
   it('escalates read-only reviewer feedback once without requeueing', async () => {
     const { scheduler } = makeReviewer('reviewer-erofs');
     scheduler.tick();

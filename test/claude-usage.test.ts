@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { parseClaudeUsage, parseResetTime } from '../src/quota/claude-usage.js';
+import { parseClaudeUsage, parseResetTime, runClaudeUsage } from '../src/quota/claude-usage.js';
 
 // 2026-10-20 18:00 in Asia/Ho_Chi_Minh (UTC+7)
 const NOW = new Date(Date.UTC(2026, 9, 20, 11, 0));
@@ -29,4 +30,14 @@ describe('Claude /usage', () => {
     expect(rows.map((r) => [r.group, r.usedPercent])).toEqual([['Claude', 40], ['Claude (Opus)', 90]]);
     expect(rows[1].resetAt).toBe(Date.UTC(2026, 9, 22, 13, 30) / 1000);
   });
+
+  it('vượt qua theme picker, Security notes và trust folder rồi mới gõ /usage', async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-claude-usage-'));
+    try {
+      const raw = await runClaudeUsage({ claudeBin: path.join(__dirname, 'fixtures', 'fake-claude-usage.mjs'), cwd, timeoutMs: 20_000 });
+      expect(parseClaudeUsage(raw, NOW).map((r) => [r.window, r.usedPercent])).toEqual([['5h', 84], ['week', 77]]);
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

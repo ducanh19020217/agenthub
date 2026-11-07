@@ -232,6 +232,7 @@ export function readTelegramToken(tokenPath: string): string | null {
 export const TELEGRAM_BOT_COMMANDS: Array<{ command: string; description: string }> = [
   { command: 'gio', description: 'Thêm/xem bảng giờ: /gio <ticket|new> <giờ>h [cho <giờ>h] [co-dinh] <mô tả>' },
   { command: 'use', description: 'Chọn dự án: /use <dự án> · xem dự án đang chọn: /use' },
+  { command: 'ask', description: 'Hỏi/trao đổi với bộ não: /ask <câu hỏi>' },
   { command: 'brain', description: 'Bộ não: /brain · /brain trust [dự án] standard|trusted|full|inherit' },
   { command: 'digest', description: 'Tóm tắt tình hình hệ thống và quota' },
   { command: 'plans', description: '5 kế hoạch gần nhất và tiến độ' },
@@ -352,6 +353,8 @@ export class TelegramBotService {
   private notificationProjectId: string | null = null;
   /** Keeps same-text system events from different projects independently deduplicated. */
   private notificationDedupProjectId: string | null = null;
+  /** Maps bot reply message ID to brain session ID for continuing conversation on reply (max 200 items). */
+  private askReplySessions = new Map<number, string>();
 
   constructor(opts: TelegramServiceOptions) {
     this.config = opts.config;
@@ -735,6 +738,7 @@ export class TelegramBotService {
       if (reply.editTimer) clearTimeout(reply.editTimer);
     }
     this.chatReplies.clear();
+    this.askReplySessions.clear();
 
     if (this.pollPromise) {
       try {
@@ -1286,6 +1290,20 @@ export class TelegramBotService {
         }
         return;
       }
+      const replyMsgId = msg.reply_to_message?.message_id;
+      const askSessionId = replyMsgId ? this.askReplySessions.get(replyMsgId) : undefined;
+      if (askSessionId) {
+        if (!this.chatService) {
+          await this.sendMessage(chatId, 'ℹ️ Chat Claude chưa được bật.');
+          return;
+        }
+        try {
+          await this.startChatTurn(chatId, '🧠 Bộ não đang suy nghĩ…', rawText, askSessionId);
+        } catch (err: unknown) {
+          await this.sendMessage(chatId, `❌ ${this.escapeHtml(err instanceof Error ? err.message : String(err))}`);
+        }
+        return;
+      }
       await this.handleChatMessage(chatId, rawText);
       return;
     }
@@ -1414,6 +1432,10 @@ export class TelegramBotService {
 
       case '/brain':
         await this.handleBrainCommand(chatId, argStr);
+        break;
+
+      case '/ask':
+        await this.handleAskCommand(chatId, argStr);
         break;
 
       case '/review':
@@ -1914,6 +1936,73 @@ export class TelegramBotService {
     return sessionId;
   }
 
+  private recordAskReply(messageId: number, sessionId: string): void {
+    if (this.askReplySessions.has(messageId)) {
+      this.askReplySessions.delete(messageId);
+    }
+    while (this.askReplySessions.size >= 200) {
+      const oldestKey = this.askReplySessions.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.askReplySessions.delete(oldestKey);
+    }
+    this.askReplySessions.set(messageId, sessionId);
+  }
+
+  private brainSessionIdForChat(chatId: number): string {
+    const selectedDeptId = this.selectedDepartment.get(chatId);
+    if (selectedDeptId) {
+      if (selectedDeptId === 'chung' && this.config.brain.director?.enabled) {
+        return 'brain:director';
+      }
+      return `brain:department:${selectedDeptId}`;
+    }
+    const selectedProjectId = this.selectedProject.get(chatId);
+    if (selectedProjectId) {
+      return `brain:${selectedProjectId}`;
+    }
+    return 'brain';
+  }
+
+  private async handleAskCommand(chatId: number, argStr: string): Promise<void> {
+    if (!this.chatService) {
+      await this.sendMessage(chatId, 'ℹ️ Chat Claude chưa được bật.');
+      return;
+    }
+    const question = argStr.trim();
+    if (!question) {
+      const selectedDeptId = this.selectedDepartment.get(chatId);
+      const current = this.selectedProject.get(chatId);
+      if (selectedDeptId) {
+        const deptName = selectedDeptId === 'chung' ? 'Chung (Giám đốc)' : (this.departmentRepo?.get(selectedDeptId)?.name || selectedDeptId);
+        await this.sendMessage(
+          chatId,
+          `💡 Cú pháp: <code>/ask &lt;câu hỏi&gt;</code> để hỏi hoặc trao đổi với bộ não.\nPhòng ban đang chọn: <b>${this.escapeHtml(deptName)}</b>.`,
+        );
+        return;
+      }
+      if (current) {
+        const proj = this.projectRepo.get(current);
+        const name = proj?.name ? `${proj.name} (${current})` : current;
+        await this.sendMessage(
+          chatId,
+          `💡 Cú pháp: <code>/ask &lt;câu hỏi&gt;</code> để hỏi hoặc trao đổi với bộ não.\nDự án đang chọn: <b>${this.escapeHtml(name)}</b>.`,
+        );
+        return;
+      }
+      await this.sendMessage(
+        chatId,
+        '💡 Cú pháp: <code>/ask &lt;câu hỏi&gt;</code> để hỏi hoặc trao đổi với bộ não.\nChưa chọn dự án (sẽ dùng bộ não toàn cục). Gợi ý: dùng <code>/use &lt;dự án&gt;</code> để chọn dự án.',
+      );
+      return;
+    }
+    const sessionId = this.brainSessionIdForChat(chatId);
+    try {
+      await this.startChatTurn(chatId, '🧠 Bộ não đang suy nghĩ…', question, sessionId);
+    } catch (err: unknown) {
+      await this.sendMessage(chatId, `❌ ${this.escapeHtml(err instanceof Error ? err.message : String(err))}`);
+    }
+  }
+
   private async handleChatMessage(chatId: number, text: string): Promise<void> {
     if (!this.chatService) {
       await this.sendMessage(chatId, 'ℹ️ Tin nhắn thường chỉ được dùng để chat khi Chat Claude đã bật.');
@@ -1927,9 +2016,9 @@ export class TelegramBotService {
     }
   }
 
-  private async startChatTurn(chatId: number, placeholder: string, text: string): Promise<void> {
+  private async startChatTurn(chatId: number, placeholder: string, text: string, forceSessionId?: string): Promise<void> {
     if (!this.chatService) throw new Error('Chat Claude chưa được bật.');
-    const sessionId = this.sessionIdForChat(chatId);
+    const sessionId = forceSessionId || this.sessionIdForChat(chatId);
     const isBrain = sessionId === 'brain' || sessionId.startsWith('brain:');
     const isAssistant = sessionId === 'assistant' || sessionId.startsWith('assistant:');
     const selectedProjId = this.selectedProject.get(chatId);
@@ -1939,7 +2028,7 @@ export class TelegramBotService {
     const deptId = isDeptBrain ? sessionId.slice('brain:department:'.length) : undefined;
     const dept = deptId ? this.departmentRepo?.get(deptId) : undefined;
 
-    const projectId = isDeptBrain || isDirector
+    const projectId = isDeptBrain || isDirector || sessionId === 'brain' || sessionId === 'assistant'
       ? null
       : sessionId.startsWith('brain:') || sessionId.startsWith('assistant:')
         ? sessionId.slice(sessionId.startsWith('assistant:') ? 'assistant:'.length : 'brain:'.length) === 'global'
@@ -1972,9 +2061,11 @@ export class TelegramBotService {
       ? dept?.brainModel || this.config.brain.model
       : isDirector
         ? this.config.brain.director?.model || this.config.brain.model
-        : isAssistant
-          ? this.config.assistant.model
-          : undefined;
+        : isBrain
+          ? this.config.brain.model
+          : isAssistant
+            ? this.config.assistant.model
+            : undefined;
 
     this.chatService.getOrCreateSession(sessionId, {
       title,
@@ -1988,6 +2079,9 @@ export class TelegramBotService {
       initial = await this.sendMessage(chatId, placeholder, undefined, threadId);
       const messageId = this.telegramMessageId(initial);
       if (messageId === null) throw new Error('Telegram không trả về message_id');
+      if (isBrain) {
+        this.recordAskReply(messageId, sessionId);
+      }
       const result = this.chatService.sendMessage(sessionId, text, { queueIfBusy: true, ...(isAssistant ? { telegramChatId: chatId } : {}) });
       if (result?.queued) {
         // The session (usually a brain busy with an event turn) answers this message right after the
@@ -1995,7 +2089,9 @@ export class TelegramBotService {
         const queued = this.queuedChatTurns.get(sessionId) ?? [];
         queued.push({ chatId, messageId, ...(threadId !== undefined ? { threadId } : {}) });
         this.queuedChatTurns.set(sessionId, queued);
-        await this.editMessage(chatId, messageId, `📥 Đang bận một việc khác. Tin nhắn đã xếp hàng (thứ ${result.position ?? queued.length}), sẽ trả lời ngay sau.`);
+        await this.editMessage(chatId, messageId, isBrain
+          ? `📥 Đang chờ bộ não rảnh. Tin nhắn đã xếp hàng (thứ ${result.position ?? queued.length}), sẽ trả lời ngay sau.`
+          : `📥 Đang bận một việc khác. Tin nhắn đã xếp hàng (thứ ${result.position ?? queued.length}), sẽ trả lời ngay sau.`);
         return;
       }
       this.chatReplies.set(sessionId, { chatId, messageId, ...(threadId !== undefined ? { threadId } : {}), text: placeholder, lastEditAt: this.now(), editing: false });
@@ -2048,7 +2144,8 @@ export class TelegramBotService {
       const next = this.queuedChatTurns.get(sessionId)?.shift();
       if (next) {
         if (this.queuedChatTurns.get(sessionId)?.length === 0) this.queuedChatTurns.delete(sessionId);
-        this.chatReplies.set(sessionId, { chatId: next.chatId, messageId: next.messageId, ...(next.threadId !== undefined ? { threadId: next.threadId } : {}), text: '⏳ Đang xử lý…', lastEditAt: 0, editing: false });
+        const isBrain = sessionId === 'brain' || sessionId.startsWith('brain:');
+        this.chatReplies.set(sessionId, { chatId: next.chatId, messageId: next.messageId, ...(next.threadId !== undefined ? { threadId: next.threadId } : {}), text: isBrain ? '🧠 Bộ não đang suy nghĩ…' : '⏳ Đang xử lý…', lastEditAt: 0, editing: false });
         this.scheduleChatEdit(sessionId);
       }
       return;
@@ -2163,7 +2260,13 @@ export class TelegramBotService {
     }
     const chunks = this.splitTelegramText(text || '');
     await this.editMessage(reply.chatId, reply.messageId, chunks.shift() || '');
-    for (const chunk of chunks) await this.sendMessage(reply.chatId, chunk, undefined, reply.threadId);
+    for (const chunk of chunks) {
+      const extra = await this.sendMessage(reply.chatId, chunk, undefined, reply.threadId);
+      const extraId = this.telegramMessageId(extra);
+      if (extraId !== null && (sessionId === 'brain' || sessionId.startsWith('brain:'))) {
+        this.recordAskReply(extraId, sessionId);
+      }
+    }
   }
 
   private async sendPermissionRequest(chatId: number, data: Record<string, unknown>): Promise<void> {
@@ -5048,6 +5151,7 @@ export class TelegramBotService {
     return `🤖 <b>Danh sách lệnh ${this.escapeHtml(this.appName)} Telegram Bot:</b>
 
 /use &lt;dự án&gt; - Chọn dự án hiện tại cho chat (/use để xem, /use none để bỏ chọn)
+/ask &lt;câu hỏi&gt; - Hỏi/trao đổi với bộ não: /ask &lt;câu hỏi&gt;
 /status - Xem tổng quan hệ thống (task, hồ sơ, quota, ổ đĩa)
 /focus &lt;dự án&gt; - Tập trung tài nguyên cho dự án; /focus off để tắt
 /shutdown - Tắt AgentHub; bật lại từ máy bằng <code>agenthub start</code>

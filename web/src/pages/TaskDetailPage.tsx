@@ -717,8 +717,8 @@ export const TaskDetailPage: React.FC = () => {
             )
           )}
 
-          {/* Cancel (if not done or cancelled) */}
-          {task.status !== 'done' && task.status !== 'cancelled' && (
+          {/* Cancel (if not done, pushed, or cancelled) */}
+          {task.status !== 'done' && task.status !== 'pushed' && task.status !== 'cancelled' && (
             <button
               type="button"
               onClick={() => setShowCancelModal(true)}

@@ -145,7 +145,7 @@ describe('TaskDetailPage', () => {
       unmount();
     }
 
-    const statusesToHide = ['done', 'cancelled'] as const;
+    const statusesToHide = ['done', 'pushed', 'cancelled'] as const;
     for (const status of statusesToHide) {
       queryClient.clear();
       vi.spyOn(client, 'getTask').mockResolvedValue({

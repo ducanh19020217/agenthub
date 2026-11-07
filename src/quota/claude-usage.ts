@@ -105,6 +105,7 @@ export function runClaudeUsage(opts: ClaudeUsageRunOptions): Promise<string> {
     let out = '';
     let sent = false;
     let trusted = false;
+    let continued = 0;
     let done = false;
     let promptTimer: ReturnType<typeof setTimeout> | undefined;
     const proc = pty.spawn(opts.claudeBin, [], { name: 'xterm-256color', cols: 120, rows: 50, cwd: path.resolve(opts.cwd), env });
@@ -146,6 +147,14 @@ export function runClaudeUsage(opts: ClaudeUsageRunOptions): Promise<string> {
         trusted = true;
         setTimeout(() => { try { proc.write('\x1b[B'); } catch { /* exited */ } }, 1500);
         setTimeout(() => { try { proc.write('\r'); } catch { /* exited */ } }, 2700);
+        return;
+      }
+      // Newer CLI versions start with onboarding screens (theme picker, "Security notes") that wait
+      // for Enter before the prompt appears. Count occurrences so each new screen is answered once.
+      const continues = (text.match(/Syntax\s*theme:|Press\s*Enter\s*to\s*continue/gi) || []).length;
+      if (!sent && continues > continued) {
+        continued = continues;
+        setTimeout(() => { try { proc.write('\r'); } catch { /* exited */ } }, 1500);
         return;
       }
       if (sent && /Current\s*(?:session|week)[\s\S]*?%\s*used[\s\S]*?Resets[^\n]*\)/i.test(text)) {

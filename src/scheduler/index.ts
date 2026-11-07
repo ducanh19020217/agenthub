@@ -3183,7 +3183,9 @@ export class Scheduler {
     }
     try { output = fs.readFileSync(active.outputPath, 'utf8'); } catch { output = ''; }
     // The Claude CLI prints its limit notice on stdout, which lands in the output file, not the log.
-    const quota = active.engine.detectQuota(`${logOutput}\n${output}`).exhausted;
+    // A valid verdict means the model answered, so a "429"/"rate limit" inside its feedback is review
+    // content, not a limit notice (it locked every Claude reviewer on a task about HTTP 429 handling).
+    const quota = !parseReviewerOutput(output) && active.engine.detectQuota(`${logOutput}\n${output}`).exhausted;
     const duration = Date.now() - active.startedAt;
     const isLockBusy = duration < 3000 && logOutput.trim() === '' && Boolean(active.lockFile) && exitCode === 1;
     if (isLockBusy) {

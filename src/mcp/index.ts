@@ -1227,6 +1227,38 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     },
   );
 
+  // 10b. hub_publish
+  server.tool(
+    'hub_publish',
+    'Đẩy task đã hoàn thành (done/pushed) lên git remote',
+    {
+      id: z.string().describe('ID của task'),
+    },
+    async (args) => {
+      try {
+        assertTaskId(args.id, 'Publish task');
+        const routeId = toRouteId(args.id);
+        const res = (await callApi('POST', `/api/tasks/${routeId}/publish`)) as {
+          ok: boolean;
+          error?: string;
+          commit?: string;
+          remote?: string;
+          branch?: string;
+        };
+        if (res && res.ok) {
+          return {
+            content: [{ type: 'text', text: `✓ Đã đẩy task "${args.id}" lên ${res.remote}/${res.branch} (commit ${res.commit})` }],
+          };
+        }
+        return {
+          content: [{ type: 'text', text: `✗ Đẩy task "${args.id}" thất bại: ${res?.error || 'Lỗi không xác định'}` }],
+        };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
   // 11. hub_cancel
   server.tool(
     'hub_cancel',
@@ -1292,7 +1324,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         const targetIds = args.ids && args.ids.length > 0 ? args.ids.map(toTaskId) : undefined;
 
         // 1. Check if any target task is ALREADY in an actionable/terminal status
-        const terminalStatuses = new Set(['review', 'blocked', 'failed', 'waiting_quota', 'done']);
+        const terminalStatuses = new Set(['review', 'blocked', 'failed', 'waiting_quota', 'done', 'pushed']);
         const isWaitable = (task: Record<string, unknown>): boolean => {
           if (String(task.status) !== 'review') return terminalStatuses.has(String(task.status));
           const chain = Array.isArray(task.reviewChain) ? task.reviewChain as Array<{ mode?: string }> : [];
@@ -1349,6 +1381,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             'task.failed': 'failed',
             'task.waiting_quota': 'waiting_quota',
             'task.done': 'done',
+            'task.pushed': 'pushed',
           };
 
           const url = `${getBaseUrl()}/api/events?token=${token}`;

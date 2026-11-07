@@ -145,4 +145,34 @@ describe('DashboardPage - Worker display fallback', () => {
       expect(resumeSpy).toHaveBeenCalledWith('AgentHub/t-paused');
     });
   });
+
+  it('hiển thị số task pushed trong metric cards và tóm tắt theo dự án', async () => {
+    vi.spyOn(client, 'getProjects').mockResolvedValue([
+      { id: 'proj-1', name: 'Dự án Alpha', path: '/tmp/alpha', defaultBranch: 'main', maxParallel: 2 } as any,
+    ]);
+    vi.spyOn(client, 'getStatus').mockResolvedValue({
+      tasks: { running: 1, pushed: 4 },
+      tasksByProject: {
+        'proj-1': { running: 1, pushed: 4, queued: 0, waiting_quota: 0, blocked: 0, failed: 0 },
+      },
+      running: [],
+    } as any);
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <DashboardPage />
+        </BrowserRouter>
+      </QueryClientProvider>
+    );
+
+    const metricsContainer = await screen.findByTestId('dashboard-metrics');
+    expect(metricsContainer).toBeInTheDocument();
+    expect(screen.getByText('Đã đẩy git')).toBeInTheDocument();
+    expect(screen.getByText('4')).toBeInTheDocument();
+
+    const projSummary = await screen.findByTestId('dashboard-project-proj-1');
+    expect(projSummary).toBeInTheDocument();
+    expect(projSummary).toHaveTextContent(/Đã đẩy git: 4/);
+  });
 });

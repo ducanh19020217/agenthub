@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TaskDetailPage } from '../pages/TaskDetailPage';
@@ -145,7 +145,7 @@ describe('TaskDetailPage', () => {
       unmount();
     }
 
-    const statusesToHide = ['done', 'cancelled'] as const;
+    const statusesToHide = ['done', 'pushed', 'cancelled'] as const;
     for (const status of statusesToHide) {
       queryClient.clear();
       vi.spyOn(client, 'getTask').mockResolvedValue({
@@ -831,6 +831,112 @@ describe('TaskDetailPage', () => {
     const runsTabBtn = screen.getByRole('button', { name: /Runs/i });
     fireEvent.click(runsTabBtn);
     expect(screen.getAllByText('gemini-fast').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('23. Task với trạng thái pushed: hiển thị khối Đẩy lên git với remote, nhánh, commit, link so sánh và thời điểm', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'pushed',
+      pushedAt: '2026-11-07T03:30:00Z',
+      pushResult: JSON.stringify({
+        remote: 'origin',
+        branch: 'main',
+        commit: 'abcdef1234567890',
+        compareUrl: 'https://github.com/org/repo/commit/abcdef1234567890',
+      }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const publishSection = await screen.findByTestId('task-publish-section');
+    expect(publishSection).toBeInTheDocument();
+    expect(within(publishSection).getByText('origin')).toBeInTheDocument();
+    expect(within(publishSection).getByText('main')).toBeInTheDocument();
+    expect(within(publishSection).getByText('abcdef1')).toBeInTheDocument();
+    const compareLink = within(publishSection).getByTestId('publish-compare-link');
+    expect(compareLink).toHaveAttribute('href', 'https://github.com/org/repo/commit/abcdef1234567890');
+  });
+
+  it('24. Task đẩy git thất bại: hiển thị banner lỗi, lý do, outputTail và nút Đẩy lại gọi publishTask', async () => {
+    const publishSpy = vi.spyOn(client, 'publishTask').mockResolvedValue({
+      ok: true,
+      remote: 'origin',
+      branch: 'main',
+      commit: '1234567',
+    });
+
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      pushResult: JSON.stringify({
+        remote: 'origin',
+        branch: 'main',
+        error: 'Remote rejected push due to protected branch',
+        reason: 'publish_failed',
+        outputTail: 'error: failed to push some refs to remote',
+      }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const publishSection = await screen.findByTestId('task-publish-section');
+    expect(publishSection).toBeInTheDocument();
+
+    const errorBanner = within(publishSection).getByTestId('publish-error-banner');
+    expect(errorBanner).toHaveTextContent(/Remote rejected push due to protected branch/i);
+    expect(errorBanner).toHaveTextContent(/error: failed to push some refs to remote/i);
+
+    const retryBtn = within(publishSection).getByTestId('btn-publish-task');
+    expect(retryBtn).toHaveTextContent(/Đẩy lại/i);
+
+    await act(async () => {
+      fireEvent.click(retryBtn);
+    });
+    await waitFor(() => {
+      expect(publishSpy).toHaveBeenCalledWith('proj-1~t1');
+    });
+  });
+
+  it('25. Task done khi project bật publish: hiển thị nút Đẩy lên git và click gọi publishTask', async () => {
+    const publishSpy = vi.spyOn(client, 'publishTask').mockResolvedValue({
+      ok: true,
+      remote: 'origin',
+      branch: 'main',
+      commit: '7654321',
+    });
+
+    vi.spyOn(client, 'getProject').mockResolvedValue({
+      id: 'proj-1',
+      name: 'Project 1',
+      path: '/tmp/proj-1',
+      defaultBranch: 'main',
+      settings: {
+        publish: { enabled: true, remote: 'origin', branch: 'main', pushIntegrationBranch: true },
+      },
+    } as any);
+
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      pushResult: null,
+      pushedAt: null,
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const headerPublishBtn = await screen.findByTestId('header-btn-publish');
+    expect(headerPublishBtn).toBeInTheDocument();
+    expect(headerPublishBtn).toHaveTextContent(/Đẩy lên git/i);
+
+    await act(async () => {
+      fireEvent.click(headerPublishBtn);
+    });
+    await waitFor(() => {
+      expect(publishSpy).toHaveBeenCalledWith('proj-1~t1');
+    });
   });
 });
 

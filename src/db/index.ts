@@ -1010,6 +1010,46 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE check_results ADD COLUMN seq INTEGER;
   ALTER TABLE check_results ADD COLUMN startedAt TEXT;
   `,
+  // Migration 72: allow pushed task status and add pushedAt, pushResult columns.
+  `
+  PRAGMA foreign_keys = OFF;
+  CREATE TABLE tasks_new (
+    id TEXT PRIMARY KEY, projectId TEXT NOT NULL, slug TEXT NOT NULL, title TEXT NOT NULL, body TEXT,
+    level TEXT NOT NULL DEFAULT 'easy' CHECK(level IN ('easy','hard')), modelChain TEXT, baseRef TEXT,
+    branch TEXT, worktreePath TEXT,
+    status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','queued','running','checking','review','done','blocked','failed','cancelled','waiting_quota','paused','pushed')),
+    dependsOn TEXT NOT NULL DEFAULT '[]', attempt INTEGER NOT NULL DEFAULT 0, resume INTEGER NOT NULL DEFAULT 0,
+    createdAt TEXT NOT NULL DEFAULT (datetime('now')), updatedAt TEXT NOT NULL DEFAULT (datetime('now')),
+    notBefore INTEGER, transientRetries INTEGER NOT NULL DEFAULT 0, slot INTEGER, checkFixAttempts INTEGER NOT NULL DEFAULT 0,
+    reviewerChangesRequested INTEGER NOT NULL DEFAULT 0, reviewerEscalated INTEGER NOT NULL DEFAULT 0,
+    reviewerEscalatedAt TEXT, reviewerEscalationReason TEXT,
+    waitReason TEXT CHECK(waitReason IS NULL OR waitReason IN ('disk','quota','no_department_profile','no_matching_profile','parallel','department_parallel','profile_busy','project_unavailable','focus','slot','load','dependency')),
+    doneReport TEXT, blockedReport TEXT, diffStat TEXT, sourceRef TEXT, reviewStep INTEGER NOT NULL DEFAULT 0, batchId TEXT,
+    creationSessionId TEXT, creationGoal TEXT, externalRef TEXT,
+    cancelReason TEXT, cancelledBy TEXT,
+    pushedAt TEXT, pushResult TEXT,
+    FOREIGN KEY (projectId) REFERENCES projects(id)
+  );
+  INSERT INTO tasks_new (
+    id, projectId, slug, title, body, level, modelChain, baseRef, branch, worktreePath,
+    status, dependsOn, attempt, resume, createdAt, updatedAt, notBefore, transientRetries, slot,
+    checkFixAttempts, reviewerChangesRequested, reviewerEscalated, reviewerEscalatedAt,
+    reviewerEscalationReason, waitReason, doneReport, blockedReport, diffStat, sourceRef, reviewStep, batchId,
+    creationSessionId, creationGoal, externalRef, cancelReason, cancelledBy
+  ) SELECT
+    id, projectId, slug, title, body, level, modelChain, baseRef, branch, worktreePath,
+    status, dependsOn, attempt, resume, createdAt, updatedAt, notBefore, transientRetries, slot,
+    checkFixAttempts, reviewerChangesRequested, reviewerEscalated, reviewerEscalatedAt,
+    reviewerEscalationReason, waitReason, doneReport, blockedReport, diffStat, sourceRef, reviewStep, batchId,
+    creationSessionId, creationGoal, externalRef, cancelReason, cancelledBy
+  FROM tasks;
+  DROP TABLE tasks;
+  ALTER TABLE tasks_new RENAME TO tasks;
+  CREATE INDEX IF NOT EXISTS idx_tasks_project_created ON tasks(projectId, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_tasks_project_status_created ON tasks(projectId, status, createdAt);
+  PRAGMA foreign_keys = ON;
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -1266,6 +1306,20 @@ export interface BlockingDiskInfo {
   minFreeGB: number;
 }
 
+export type TaskStatus =
+  | 'draft'
+  | 'queued'
+  | 'running'
+  | 'checking'
+  | 'review'
+  | 'done'
+  | 'blocked'
+  | 'failed'
+  | 'cancelled'
+  | 'waiting_quota'
+  | 'paused'
+  | 'pushed';
+
 export interface TaskRow {
   id: string;
   projectId: string;
@@ -1308,6 +1362,8 @@ export interface TaskRow {
   batchId?: string | null;
   creationSessionId?: string | null;
   creationGoal?: string | null;
+  pushedAt?: string | null;
+  pushResult?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -2014,7 +2070,7 @@ export class TaskRepo {
 
   update(
     id: string,
-    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'blockedReport' | 'diffStat' | 'cancelReason' | 'cancelledBy' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
+    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'blockedReport' | 'diffStat' | 'cancelReason' | 'cancelledBy' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId' | 'pushedAt' | 'pushResult'>>,
   ): void {
     const sets: string[] = ["updatedAt = datetime('now')"];
     const values: unknown[] = [];
@@ -2047,7 +2103,7 @@ export class TaskRepo {
 
   getUsedSlots(projectId: string): number[] {
     const rows = this.db
-      .prepare("SELECT slot FROM tasks WHERE projectId = ? AND slot IS NOT NULL AND status NOT IN ('done', 'cancelled')")
+      .prepare("SELECT slot FROM tasks WHERE projectId = ? AND slot IS NOT NULL AND status NOT IN ('done', 'cancelled', 'pushed')")
       .all(projectId) as Array<{ slot: number }>;
     return rows.map((row) => row.slot);
   }

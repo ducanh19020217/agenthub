@@ -573,6 +573,23 @@ describe('AgentHub MCP Server Tools', () => {
     })) as { content: Array<{ type: string; text: string }> };
     expect(retryRes.content[0].text).toContain('✓ Đã retry task "proj/t-fail"');
     expect(['queued', 'waiting_quota']).toContain(ctx.taskRepo.get('proj/t-fail')?.status);
+
+    // Done task hub_publish
+    ctx.taskRepo.insert({
+      id: 'proj/t-pub',
+      projectId: 'proj',
+      slug: 't-pub',
+      title: 'Pub Task',
+      status: 'done',
+    });
+
+    const pubRes = (await client.callTool({
+      name: 'hub_publish',
+      arguments: {
+        id: 'proj/t-pub',
+      },
+    })) as { content: Array<{ type: string; text: string }> };
+    expect(pubRes.content[0].text).toBeDefined();
   });
 
   it('hub_review supports source: operational without incrementing reviewerChangesRequested', async () => {

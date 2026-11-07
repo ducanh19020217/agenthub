@@ -17,6 +17,9 @@ describe('StatusBadge Component', () => {
     rerender(<StatusBadge status="done" />);
     expect(screen.getByText('Hoàn thành')).toBeInTheDocument();
 
+    rerender(<StatusBadge status="pushed" />);
+    expect(screen.getByText('Đã đẩy git')).toBeInTheDocument();
+
     rerender(<StatusBadge status="waiting_quota" />);
     expect(screen.getByText('Đang chờ')).toBeInTheDocument();
 

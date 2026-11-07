@@ -298,4 +298,34 @@ describe('Worktree Auto-Cleanup', () => {
     expect(execFileSync('git', ['-C', projectPath, 'branch', '--list', 'agenthub/orphan'], { encoding: 'utf8' })).toContain('agenthub/orphan');
     expect(fs.existsSync(outside)).toBe(true);
   });
+
+  it('deleteWorktree cho phép xóa worktree của task trạng thái pushed và ném lỗi 409 nhắc đủ done, pushed, cancelled', () => {
+    const worktreePushed = path.join(config.worktreesDir, 'proj', 'task-pushed');
+    execFileSync('git', ['-C', projectPath, 'worktree', 'add', worktreePushed, '-b', 'agenthub/task-pushed', 'main']);
+
+    ctx.taskRepo.insert({
+      id: 'proj/task-pushed',
+      projectId: 'proj',
+      slug: 'task-pushed',
+      title: 'Task Pushed',
+      status: 'pushed',
+    });
+    ctx.taskRepo.update('proj/task-pushed', { worktreePath: worktreePushed });
+
+    const result = ctx.service.deleteWorktree('proj/task-pushed');
+    expect(result.ok).toBe(true);
+    expect(fs.existsSync(worktreePushed)).toBe(false);
+
+    // Running task: throws 409 conflict
+    ctx.taskRepo.insert({
+      id: 'proj/task-running',
+      projectId: 'proj',
+      slug: 'task-running',
+      title: 'Task Running',
+      status: 'running',
+    });
+    expect(() => ctx.service.deleteWorktree('proj/task-running')).toThrowError(
+      'Chỉ có thể xóa worktree của task đã done, pushed hoặc cancelled (hiện tại: running)'
+    );
+  });
 });

@@ -347,7 +347,7 @@ export const PlansPage: React.FC = () => {
   const batchTasks = currentBatch?.tasks || [];
   const progress = currentBatch?.progress || {
     total: batchTasks.length,
-    done: batchTasks.filter((task) => task.status === 'done').length,
+    done: batchTasks.filter((task) => task.status === 'done' || task.status === 'pushed').length,
     running: batchTasks.filter((task) => ['running', 'checking', 'review'].includes(task.status)).length,
     failed: batchTasks.filter((task) => ['failed', 'blocked'].includes(task.status)).length,
     waiting: batchTasks.filter((task) => ['draft', 'queued', 'waiting_quota'].includes(task.status)).length,

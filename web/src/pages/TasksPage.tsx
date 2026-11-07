@@ -343,7 +343,17 @@ export const TasksPage: React.FC = () => {
   });
   const { data: completedTasks = [] } = useQuery({
     queryKey: ['tasks-triage-pending'],
-    queryFn: () => getTasks({ status: 'done' }),
+    queryFn: async () => {
+      const [doneTasks, pushedTasks] = await Promise.all([
+        getTasks({ status: 'done' }),
+        getTasks({ status: 'pushed' }),
+      ]);
+      const taskMap = new Map<string, Task>();
+      for (const t of [...doneTasks, ...pushedTasks]) {
+        taskMap.set(t.id, t);
+      }
+      return Array.from(taskMap.values());
+    },
     refetchInterval: 5000,
   });
   const pendingTriageTasks = completedTasks.filter((task) => task.triage?.analysis && !task.triage.decision);

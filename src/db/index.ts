@@ -1031,6 +1031,7 @@ export function openDatabase(dbPath: string): Database.Database {
 
   let currentVersion = versionRow ? parseInt(versionRow.value, 10) : -1;
   currentVersion = repairForkAvatarMigration(db, currentVersion);
+  repairMissingTimesheetTable(db, currentVersion);
 
   for (let i = currentVersion + 1; i < MIGRATIONS.length; i++) {
     try {
@@ -1087,6 +1088,22 @@ function repairForkAvatarMigration(db: Database.Database, currentVersion: number
   }
   db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run('40');
   return 40;
+}
+
+/**
+ * DB đã ghi schema_version = 64 nhưng không có bảng timesheet_entries (gặp ngày 07/11, có thể do hai bản
+ * build khác nhau cùng migrate một hub.db): migration 65 copy từ bảng đó nên lỗi và daemon không khởi động.
+ * Tạo lại bảng theo migration 64 và bỏ bảng tạm rỗng mà lần migration 65 lỗi để lại.
+ */
+function repairMissingTimesheetTable(db: Database.Database, currentVersion: number): void {
+  const hasTable = (name: string) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+  if (currentVersion !== 64 || hasTable('timesheet_entries')) return;
+  if (hasTable('timesheet_entries_new')) {
+    const { c } = db.prepare('SELECT COUNT(*) AS c FROM timesheet_entries_new').get() as { c: number };
+    if (c > 0) return;
+    db.exec('DROP TABLE timesheet_entries_new');
+  }
+  db.exec(MIGRATIONS[64]);
 }
 
 /** Cột riêng của bản fork (avatarUrl, plan) nằm ngoài MIGRATIONS để không giành số migration với upstream. */

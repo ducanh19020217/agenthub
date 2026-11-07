@@ -5074,7 +5074,7 @@ export class AppService {
       throw new HttpError(
         409,
         'conflict',
-        `Chỉ có thể xóa worktree của task đã done hoặc cancelled (hiện tại: ${task.status})`,
+        `Chỉ có thể xóa worktree của task đã done, pushed hoặc cancelled (hiện tại: ${task.status})`,
       );
     }
 

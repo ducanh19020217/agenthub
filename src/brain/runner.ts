@@ -90,6 +90,7 @@ export class BrainRunner {
     if (this.started) return;
     this.started = true;
     if (this.opts.config.mode !== 'off' || this.opts.config.director?.enabled) this.ensureSession(null);
+    this.syncClaudeProfiles();
     this.opts.eventBus.on('*', this.bound);
   }
 

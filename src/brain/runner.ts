@@ -45,7 +45,10 @@ export interface BrainRunnerOptions {
   profileRepo?: Pick<ProfileRepo, 'getAll'>;
   taskRepo?: Pick<TaskRepo, 'get'>;
   turnRepo: BrainTurnRepo;
-  projectRepo?: { get(id: string): { id: string; name: string; path: string; departmentId?: string; settings?: string | null } | undefined; getAll?: () => Array<{ id: string }> };
+  projectRepo?: {
+    get(id: string): { id: string; name: string; path: string; departmentId?: string; settings?: string | null } | undefined;
+    getAll?: () => Array<{ id: string; departmentId?: string }>;
+  };
   departmentRepo?: DepartmentRepo;
   directiveRepo?: BrainDirectiveRepo;
   knowledgeRepo?: KnowledgeRepo;
@@ -339,7 +342,7 @@ export class BrainRunner {
 
   /** Apply current Brain account defaults to existing, idle Brain sessions. */
   syncClaudeProfiles(): void {
-    const projects = this.opts.projectRepo?.getAll() || [];
+    const projects = this.opts.projectRepo?.getAll?.() || [];
     const sessions = this.opts.chatSessionRepo.getAll().filter((session) => session.kind === 'brain');
     for (const session of sessions) {
       if (session.id.startsWith('brain:department:')) {

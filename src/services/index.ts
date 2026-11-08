@@ -5553,6 +5553,9 @@ export class AppService {
     updateConfigInMemory(this.config, parsed);
     if (parsed.brain?.fallback) this.chatService?.configureFailoverSteps(this.config.brain.fallback);
     if (parsed.brain?.policy) this.config.brain.policy = [...parsed.brain.policy];
+    if (parsed.chat?.claudeProfile !== undefined || parsed.brain?.claudeProfile !== undefined) {
+      this.brainRunner?.syncClaudeProfiles();
+    }
 
     // Save to config.json
     saveConfig(this.config.hubHome, parsed);

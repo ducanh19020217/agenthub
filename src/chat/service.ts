@@ -788,6 +788,21 @@ export class ChatService {
     return this.chatSessionRepo.get(id)!;
   }
 
+  /** Switch an idle session to another account and restart its persistent CLI process. */
+  setSessionProfile(id: string, profileName: string | null): ChatSessionRow {
+    const session = this.chatSessionRepo.get(id);
+    if (!session) throw new HttpError(404, 'not_found', `Phiên trò chuyện "${id}" không tồn tại`);
+    if (session.profileName === profileName) return session;
+    const proc = this.persistentProcesses.get(id);
+    if (session.busy === 1 || this.runningTurns.has(id) || proc?.active) {
+      throw new HttpError(409, 'conflict', 'Không thể đổi tài khoản khi Brain đang chạy');
+    }
+    if (proc) this.closePersistentProcess(proc);
+    this.chatSessionRepo.updateProfileName(id, profileName);
+    this.chatSessionRepo.clearClaudeSessionId(id);
+    return this.chatSessionRepo.get(id)!;
+  }
+
   private validateSessionOptions(body: {
     mode?: 'safe' | 'full';
     model?: string;

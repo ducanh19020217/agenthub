@@ -285,6 +285,14 @@ export class BrainRunner {
     const director = !projectId ? this.opts.config.director : undefined;
     const effectivePermission = director?.permissions || permission;
     const mode = effectivePermission === 'full' ? 'full' : 'safe';
+    // Brain sessions have stable IDs, so their stored account must follow the
+    // current global default unless a department has an account of its own.
+    const projectEngine = projectSettings_.brain.engine;
+    const deptEngine = department?.brainEngine && department.brainEngine !== 'inherit' ? department.brainEngine : undefined;
+    const resolvedEngine = director?.engine || (projectEngine !== 'inherit' ? projectEngine : (deptEngine ?? (this.opts.config.engine || 'claude')));
+    const resolvedProfile = resolvedEngine === 'codex'
+      ? this.codexProfile(project, director?.codexProfile || department?.brainCodexProfile || undefined, department)
+      : this.profileName(department);
     const existing = this.opts.chatSessionRepo.get(id)
       || (!department && projectId ? this.opts.chatSessionRepo.getByKind('brain', projectId) : undefined);
     if (existing) {
@@ -301,13 +309,21 @@ export class BrainRunner {
           // mode and retry synchronization on the next runner event.
         }
       }
+      if (resolvedEngine === 'claude' && existing.profileName !== resolvedProfile && existing.busy !== 1) {
+        const chatService = this.opts.chatService as ChatService & { setSessionProfile?: (id: string, profileName: string | null) => unknown };
+        try {
+          if (typeof chatService.setSessionProfile === 'function') {
+            chatService.setSessionProfile(existing.id, resolvedProfile);
+          } else {
+            this.opts.chatSessionRepo.updateProfileName(existing.id, resolvedProfile);
+          }
+        } catch {
+          // Retry synchronization on the next runner event after the active turn.
+        }
+      }
       return this.opts.chatSessionRepo.get(existing.id) || existing;
     }
     // Priority: project > department > global for engine and model
-    const projectEngine = projectSettings_.brain.engine;
-    const deptEngine = department?.brainEngine && department.brainEngine !== 'inherit' ? department.brainEngine : undefined;
-    const resolvedEngine = director?.engine || (projectEngine !== 'inherit' ? projectEngine : (deptEngine ?? (this.opts.config.engine || 'claude')));
-
     const projectModel = projectSettings_.brain.model;
     const deptModel = department?.brainModel && department.brainModel !== 'inherit' ? department.brainModel : undefined;
     const defaultModel = resolvedEngine === 'codex' ? (this.opts.config.codexModel || 'gpt-5.6-luna') : this.opts.config.model;
@@ -315,12 +331,27 @@ export class BrainRunner {
     this.opts.chatService.getOrCreateSession(id, {
       title: department ? `Bộ não · ${department.name}` : project ? `Bộ não · ${project.name}` : director ? 'Bộ não Giám đốc' : 'Bộ não', mode,
       model: resolvedModel,
-      profileName: resolvedEngine === 'codex'
-        ? this.codexProfile(project, director?.codexProfile || department?.brainCodexProfile || undefined, department)
-        : this.profileName(department), kind: 'brain', projectId: department ? null : projectId,
+      profileName: resolvedProfile, kind: 'brain', projectId: department ? null : projectId,
     } as never);
     this.opts.chatSessionRepo.updatePinned(id, 1);
     return this.opts.chatSessionRepo.get(id)!;
+  }
+
+  /** Apply current Brain account defaults to existing, idle Brain sessions. */
+  syncClaudeProfiles(): void {
+    const projects = this.opts.projectRepo?.getAll() || [];
+    const sessions = this.opts.chatSessionRepo.getAll().filter((session) => session.kind === 'brain');
+    for (const session of sessions) {
+      if (session.id.startsWith('brain:department:')) {
+        const departmentId = session.id.slice('brain:department:'.length);
+        const project = projects.find((item) => item.departmentId === departmentId);
+        if (project) this.ensureSession(project.id);
+      } else if (session.projectId) {
+        this.ensureSession(session.projectId);
+      } else {
+        this.ensureSession(null);
+      }
+    }
   }
 
   private profileName(department?: { id: string }): string {

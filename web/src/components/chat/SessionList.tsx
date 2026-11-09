@@ -20,6 +20,7 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { useLocale } from '../../context/LocaleContext';
+import { formatDateTime, formatIsoTitle, parseApiTime, type TimeLocale } from '../../lib/time';
 import { UI_Z_INDEX } from '../ui/layers';
 
 export interface SessionListProps {
@@ -44,20 +45,17 @@ export interface SessionListProps {
 function formatRelativeTime(
   dateString: string,
   t: (key: string, params?: Record<string, string | number>) => string,
-  locale: 'vi' | 'en' = 'vi',
+  locale: TimeLocale = 'vi',
 ): string {
-  try {
-    const date = new Date(dateString);
-    const now = new Date();
-    const diffSec = Math.floor((now.getTime() - date.getTime()) / 1000);
+  const parsed = parseApiTime(dateString);
+  if (!Number.isFinite(parsed)) return '';
+  const now = Date.now();
+  const diffSec = Math.max(0, Math.floor((now - parsed) / 1000));
 
-    if (diffSec < 60) return t('extra.justNow');
-    if (diffSec < 3600) return t('extra.minutesAgo', { count: Math.floor(diffSec / 60) });
-    if (diffSec < 86400) return t('extra.hoursAgo', { count: Math.floor(diffSec / 3600) });
-    return date.toLocaleDateString(locale === 'vi' ? 'vi-VN' : 'en-US');
-  } catch {
-    return dateString;
-  }
+  if (diffSec < 60) return t('extra.justNow');
+  if (diffSec < 3600) return t('extra.minutesAgo', { count: Math.floor(diffSec / 60) });
+  if (diffSec < 86400) return t('extra.hoursAgo', { count: Math.floor(diffSec / 3600) });
+  return formatDateTime(parsed, locale, { seconds: false });
 }
 
 export const SessionList: React.FC<SessionListProps> = ({
@@ -112,8 +110,8 @@ export const SessionList: React.FC<SessionListProps> = ({
         if (pinA !== pinB) return pinB - pinA;
 
         // Then by updatedAt
-        const timeA = new Date(a.updatedAt || 0).getTime();
-        const timeB = new Date(b.updatedAt || 0).getTime();
+        const timeA = parseApiTime(a.updatedAt) || 0;
+        const timeB = parseApiTime(b.updatedAt) || 0;
         return timeB - timeA;
       });
   }, [sessions, activeTab, searchQuery]);
@@ -478,7 +476,10 @@ export const SessionList: React.FC<SessionListProps> = ({
 
                   {/* Time */}
                   {!session.busy && (
-                    <span className="inline-flex items-center gap-1 text-[var(--t-text-3)] ml-auto">
+                    <span
+                      className="inline-flex items-center gap-1 text-[var(--t-text-3)] ml-auto"
+                      title={formatIsoTitle(session.updatedAt)}
+                    >
                       <Clock className="w-3 h-3" />
                       <span>{formatRelativeTime(session.updatedAt, t, locale)}</span>
                     </span>

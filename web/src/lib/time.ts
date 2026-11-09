@@ -179,3 +179,123 @@ export function formatTimeTitle(value: number | null | undefined, locale: TimeLo
   const observed = observedAt ? new Intl.DateTimeFormat(locale === 'en' ? 'en-GB' : 'vi-VN', { timeZone: TIME_ZONE, hour: '2-digit', minute: '2-digit' }).format(new Date(typeof observedAt === 'number' ? observedAt : observedAt)) : null;
   return `${full} (${TIME_ZONE})${source ? ` · ${source}` : ''}${observed ? ` · ${locale === 'en' ? 'observed at' : 'theo lúc'} ${observed}` : ''}`;
 }
+
+export interface FormatDateTimeOptions {
+  seconds?: boolean;
+  timeZone?: string;
+  fallback?: string;
+}
+
+/**
+ * Format a timestamp as a localized 24h date-time string.
+ * Uses browser/system timezone unless overridden by opts.timeZone.
+ * vi: 06/11/2026 00:52:44
+ * en: 06/11/2026, 00:52:44
+ */
+export function formatDateTime(
+  value: string | number | Date | null | undefined,
+  locale: TimeLocale = 'vi',
+  opts?: FormatDateTimeOptions,
+): string {
+  const parsed = parseApiTime(value);
+  if (!Number.isFinite(parsed)) {
+    return opts?.fallback ?? '—';
+  }
+  const showSeconds = opts?.seconds ?? true;
+  const isEn = String(locale).startsWith('en');
+  const d = new Date(parsed);
+
+  const formatterOpts: Intl.DateTimeFormatOptions = {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    ...(opts?.timeZone ? { timeZone: opts.timeZone } : {}),
+  };
+  if (showSeconds) {
+    formatterOpts.second = '2-digit';
+  }
+
+  const formatter = new Intl.DateTimeFormat(isEn ? 'en-GB' : 'vi-VN', formatterOpts);
+  const parts = Object.fromEntries(
+    formatter.formatToParts(d).map(({ type, value }) => [type, value])
+  );
+  const { day, month, year, hour, minute, second } = parts;
+  const timePart = showSeconds ? `${hour}:${minute}:${second}` : `${hour}:${minute}`;
+
+  if (isEn) {
+    return `${day}/${month}/${year}, ${timePart}`;
+  }
+  return `${day}/${month}/${year} ${timePart}`;
+}
+
+export interface FormatTimeOptions {
+  seconds?: boolean;
+  timeZone?: string;
+  fallback?: string;
+}
+
+/**
+ * Format timestamp as a localized 24h clock string (HH:MM:SS or HH:MM).
+ */
+export function formatTime(
+  value: string | number | Date | null | undefined,
+  locale: TimeLocale = 'vi',
+  opts?: FormatTimeOptions,
+): string {
+  const parsed = parseApiTime(value);
+  if (!Number.isFinite(parsed)) {
+    return opts?.fallback ?? '—';
+  }
+  const showSeconds = opts?.seconds ?? true;
+  const isEn = String(locale).startsWith('en');
+  const d = new Date(parsed);
+
+  const formatterOpts: Intl.DateTimeFormatOptions = {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    ...(opts?.timeZone ? { timeZone: opts.timeZone } : {}),
+  };
+  if (showSeconds) {
+    formatterOpts.second = '2-digit';
+  }
+
+  const formatter = new Intl.DateTimeFormat(isEn ? 'en-GB' : 'vi-VN', formatterOpts);
+  const parts = Object.fromEntries(
+    formatter.formatToParts(d).map(({ type, value }) => [type, value])
+  );
+  return showSeconds ? `${parts.hour}:${parts.minute}:${parts.second}` : `${parts.hour}:${parts.minute}`;
+}
+
+/**
+ * Format timestamp as localized date-time without seconds alongside relative time ago.
+ * E.g. "06/11/2026 00:52 · 3 giờ trước" or "06/11/2026, 00:52 · 3h ago"
+ */
+export function formatDateTimeWithAgo(
+  value: string | number | Date | null | undefined,
+  locale: TimeLocale = 'vi',
+  now: number | Date = Date.now(),
+  opts?: { timeZone?: string },
+): string {
+  const parsed = parseApiTime(value);
+  if (!Number.isFinite(parsed)) {
+    return locale === 'en' ? 'time unknown' : 'chưa rõ thời gian';
+  }
+  const dateStr = formatDateTime(parsed, locale, { seconds: false, timeZone: opts?.timeZone });
+  const agoStr = formatTimeAgo(parsed, nowMs(now), locale);
+  return `${dateStr} · ${agoStr}`;
+}
+
+/**
+ * Format full ISO timestamp for title tooltip attributes.
+ * Returns empty string on invalid/missing input.
+ */
+export function formatIsoTitle(value: string | number | Date | null | undefined): string {
+  const parsed = parseApiTime(value);
+  if (!Number.isFinite(parsed)) return '';
+  return new Date(parsed).toISOString();
+}
+

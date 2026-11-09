@@ -214,3 +214,11 @@
   1. Mỗi git repository có cấu hình remote (`origin`, `upstream`...) và chính sách phân nhánh (default branch, target branch) riêng biệt.
   2. Các preset (`safe`, `balanced`, `auto`) cấu hình cờ `publish.enabled` khi áp dụng cho project: `auto` bật `true`, `safe` và `balanced` để `false`.
   3. Tránh việc một cấu hình remote/nhánh toàn cục gây ảnh hưởng ngoài ý muốn lên các repo khác nhau trong cùng một hub.
+
+## DEC-020: Múi giờ hiển thị thời gian phía web và duy trì tương thích các hàm quota reset
+
+- **Bối cảnh**: `web/src/lib/time.ts` ban đầu cố định `TIME_ZONE = 'Asia/Ho_Chi_Minh'`. Yêu cầu mới đặt ra là giao diện phải hiển thị thời gian theo múi giờ địa phương trên máy của người dùng (trình duyệt). Tuy nhiên, các hàm tính thời điểm reset quota của Claude (`formatReset`, `formatResetCompact`, `formatExpiry`, `formatTimeTitle`) đang phục vụ các component thuộc phạm vi task song song `web-time-format-rest` và có bộ test hiện tại gắn liền với múi giờ Việt Nam.
+- **Quyết định**:
+  1. Các hàm định dạng thời gian chung mới (`formatDateTime`, `formatTime`, `formatDateTimeWithAgo`) mặc định không truyền `timeZone` cố định vào `Intl.DateTimeFormat`, cho phép sử dụng múi giờ của máy người dùng/trình duyệt. Hỗ trợ tùy chọn `timeZone` trong `opts` để phục vụ unit test và các ngữ cảnh cần cố định timezone.
+  2. Các hàm reset quota cũ (`formatReset*`, `formatExpiry`, `formatTimeTitle`) tiếp tục sử dụng `TIME_ZONE = 'Asia/Ho_Chi_Minh'` làm mặc định để giữ nguyên vẹn kết quả test và tương thích với component quota đang do task song song xử lý.
+- **Hệ quả**: Đảm bảo hiển thị ngày giờ chuẩn xác theo môi trường người dùng ở các trang chính (Task Detail, Dashboard...) mà không gây xung đột chéo hay phá vỡ test của các tính năng quota.

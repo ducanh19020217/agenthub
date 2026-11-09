@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { BrainStatus, BrainActivity, ClaudeQuota } from '../types/api';
 import { AlertCircle, ExternalLink } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
-import { formatReset } from '../lib/time';
+import { formatReset, formatIsoTitle, parseApiTime } from '../lib/time';
 
 export const BRAIN_ACTIVITY_LABELS: Record<BrainActivity, string> = {
   planning: 'extra.brainPlanning', dispatching: 'extra.brainDispatching', reviewing: 'extra.brainReviewing', merging: 'extra.brainMerging',
@@ -12,11 +12,9 @@ export const BRAIN_ACTIVITY_LABELS: Record<BrainActivity, string> = {
 
 export function formatMinutesAgo(updatedAt?: string, now = Date.now(), translate: (key: string, params?: Record<string, string | number>) => string = (key) => key): string {
   if (!updatedAt) return '';
-  const ts = updatedAt.includes('T')
-    ? new Date(updatedAt).getTime()
-    : new Date(updatedAt.replace(' ', 'T') + 'Z').getTime();
+  const ts = parseApiTime(updatedAt);
 
-  if (isNaN(ts)) return '';
+  if (!Number.isFinite(ts)) return '';
   const diffSec = Math.max(0, Math.floor((now - ts) / 1000));
   const diffMins = Math.floor(diffSec / 60);
 
@@ -106,6 +104,7 @@ export const BrainCard: React.FC<BrainCardProps> = ({ brain, quota, onRetryLimit
                 <span
                   data-testid="brain-time-ago"
                   className="text-xs text-[var(--t-text-3)]"
+                  title={formatIsoTitle(brain.updatedAt)}
                 >
                   · {timeAgoText}
                 </span>
@@ -140,7 +139,7 @@ export const BrainCard: React.FC<BrainCardProps> = ({ brain, quota, onRetryLimit
       {quota && <div className="mt-4 pt-3 border-t border-[var(--t-border)] text-xs flex items-center justify-between gap-3">
         <span className="text-[var(--t-text-2)]">{t('extra.claudeQuota')}</span>
         <span className={quotaLimited ? 'text-[var(--t-crit)]' : 'text-[var(--t-ok)]'}>
-          {quota.status === 'allowed' ? t('extra.claudeQuotaAvailable') : quota.status === 'allowed_warning' ? t('extra.claudeQuotaWarning') : quotaLimited ? t('extra.claudeQuotaRejected') : (quota.status || t('extra.unknown'))} {quota.resetsAt && `· ${formatReset(quota.resetsAt, Date.now(), locale)}`}
+          {quota.status === 'allowed' ? t('extra.claudeQuotaAvailable') : quota.status === 'allowed_warning' ? t('extra.claudeQuotaWarning') : quotaLimited ? t('extra.claudeQuotaRejected') : (quota.status || t('extra.unknown'))} {quota.resetsAt && <span title={formatIsoTitle(quota.resetsAt)}>· {formatReset(quota.resetsAt, Date.now(), locale)}</span>}
         </span>
       </div>}
       {brain.state === 'waiting' && onRetryLimit && <button type="button" onClick={onRetryLimit} className="mt-3 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--t-warn)]/15 text-[var(--t-warn)] border border-[var(--t-warn)]/30">{t('extra.retryLimit')}</button>}

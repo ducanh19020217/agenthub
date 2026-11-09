@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { ArrowRight, Check, ChevronDown, Play, X } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
 import { formatCheckName } from '../utils/events';
-import { parseApiTime } from '../lib/time';
+import { formatIsoTitle, formatTime } from '../lib/time';
 import type { CheckResult } from '../types/api';
 
 export type { CheckResult };
@@ -33,15 +33,6 @@ function getShortCheckName(name: string, t: (key: string) => string, locale: str
 
   const full = formatCheckName(name, locale as any);
   return full.length > 18 ? `${full.slice(0, 16)}…` : full;
-}
-
-function formatStartTime(value: string): string {
-  const parsed = parseApiTime(value);
-  if (!Number.isFinite(parsed) || Number.isNaN(parsed)) {
-    return value;
-  }
-  const d = new Date(parsed);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 }
 
 export const CheckResults: React.FC<CheckResultsProps> = ({ checks = [], onRerun, rerunning = false, onCreateTask }) => {
@@ -75,8 +66,8 @@ export const CheckResults: React.FC<CheckResultsProps> = ({ checks = [], onRerun
               )}
               {totalDurationMs > 0 && runStartedAt && <span aria-hidden="true">•</span>}
               {runStartedAt && (
-                <span title={runStartedAt}>
-                  {t('extra.checkStartedAt', { time: formatStartTime(runStartedAt) })}
+                <span title={formatIsoTitle(runStartedAt)}>
+                  {t('extra.checkStartedAt', { time: formatTime(runStartedAt, locale) })}
                 </span>
               )}
             </div>

@@ -6,6 +6,45 @@ describe('API time helpers', () => {
     expect(parseApiTime('2026-10-15 08:20:00')).toBe(Date.parse('2026-10-15T08:20:00Z'));
   });
 
+  it('parses various input types in parseApiTime', () => {
+    const expectedUtc = Date.parse('2026-11-06T17:52:44.000Z');
+
+    // SQLite string without Z
+    expect(parseApiTime('2026-11-06 17:52:44')).toBe(expectedUtc);
+
+    // ISO string without Z (treated as UTC)
+    expect(parseApiTime('2026-11-06T17:52:44')).toBe(expectedUtc);
+
+    // ISO string with Z
+    expect(parseApiTime('2026-11-06T17:52:44Z')).toBe(expectedUtc);
+    expect(parseApiTime('2026-11-06T17:52:44.000Z')).toBe(expectedUtc);
+
+    // ISO string with offset
+    expect(parseApiTime('2026-11-07T00:52:44+07:00')).toBe(expectedUtc);
+
+    // Epoch ms
+    expect(parseApiTime(expectedUtc)).toBe(expectedUtc);
+
+    // Epoch seconds (< 1e11)
+    const epochSec = Math.floor(expectedUtc / 1000);
+    expect(parseApiTime(epochSec)).toBe(epochSec * 1000);
+
+    // Numeric strings
+    expect(parseApiTime(String(epochSec))).toBe(epochSec * 1000);
+    expect(parseApiTime(String(expectedUtc))).toBe(expectedUtc);
+
+    // Date object
+    expect(parseApiTime(new Date(expectedUtc))).toBe(expectedUtc);
+
+    // Invalid / empty / null / undefined values
+    expect(parseApiTime('invalid-date')).toBeNaN();
+    expect(parseApiTime('')).toBeNaN();
+    expect(parseApiTime('   ')).toBeNaN();
+    expect(parseApiTime(null)).toBeNaN();
+    expect(parseApiTime(undefined)).toBeNaN();
+    expect(parseApiTime(NaN)).toBeNaN();
+  });
+
   it('formats legacy timestamps as relative time', () => {
     const now = Date.parse('2026-10-15T08:21:00Z');
     expect(formatTimeAgo('2026-10-15 08:20:00', now)).toBe('1 phút trước');

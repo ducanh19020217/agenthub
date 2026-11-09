@@ -1,15 +1,29 @@
 export type TimeLocale = 'vi' | 'en' | string;
 
 const TIME_ZONE = 'Asia/Ho_Chi_Minh';
-/** Parse API timestamps, including legacy SQLite UTC strings without a suffix. */
-export function parseApiTime(value: string | number): number {
-  if (typeof value === 'number') return value;
+/** Parse API timestamps, including legacy SQLite UTC strings without a suffix, ISO strings without timezone (treated as UTC), epoch seconds (< 1e11), numeric strings, and Date instances. */
+export function parseApiTime(value: string | number | Date | null | undefined): number {
+  if (value instanceof Date) {
+    const t = value.getTime();
+    return Number.isFinite(t) ? t : NaN;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return NaN;
+    return Math.abs(value) < 1e11 ? value * 1000 : value;
+  }
   if (!value || typeof value !== 'string') return NaN;
-  const match = value.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/);
-  return Date.parse(match ? `${match[1]}T${match[2]}Z` : value);
+  const trimmed = value.trim();
+  if (!trimmed) return NaN;
+  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+    const num = Number(trimmed);
+    if (!Number.isFinite(num)) return NaN;
+    return Math.abs(num) < 1e11 ? num * 1000 : num;
+  }
+  const match = trimmed.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/);
+  return Date.parse(match ? `${match[1]}T${match[2]}Z` : trimmed);
 }
 
-export function formatTimeAgo(value: string | number, now = Date.now(), locale: TimeLocale = 'vi'): string {
+export function formatTimeAgo(value: string | number | Date | null | undefined, now = Date.now(), locale: TimeLocale = 'vi'): string {
   const parsed = parseApiTime(value);
   if (!Number.isFinite(parsed) || Number.isNaN(parsed)) {
     return locale === 'en' ? 'time unknown' : 'chưa rõ thời gian';

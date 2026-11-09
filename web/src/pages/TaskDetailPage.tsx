@@ -30,7 +30,7 @@ import {
 } from '../api/client';
 import { TaskLevel, EventItem } from '../types/api';
 import { subscribeToRunOutput, subscribeToEvents } from '../api/sse';
-import { parseApiTime } from '../lib/time';
+import { formatDateTime, formatIsoTitle, parseApiTime } from '../lib/time';
 import { CheckResults } from '../components/CheckResults';
 import { StatusBadge } from '../components/StatusBadge';
 import { SilentRunIndicator } from '../components/SilentRunIndicator';
@@ -869,7 +869,7 @@ export const TaskDetailPage: React.FC = () => {
             {task.cancelReason?.trim() ? task.cancelReason : <span className="italic text-[var(--t-text-3)]">{t('taskDetail.cancelledNoReason')}</span>}
           </div>
           <div className="text-xs text-[var(--t-text-3)]">
-            {t('taskDetail.cancelledBy')}: <code className="font-mono">{task.cancelledBy || t('taskDetail.cancelledByUnknown')}</code> · {new Date(parseApiTime(task.updatedAt)).toLocaleString()}
+            {t('taskDetail.cancelledBy')}: <code className="font-mono">{task.cancelledBy || t('taskDetail.cancelledByUnknown')}</code> · <span title={formatIsoTitle(task.updatedAt)}>{formatDateTime(task.updatedAt, locale)}</span>
           </div>
         </section>
       )}
@@ -952,8 +952,8 @@ export const TaskDetailPage: React.FC = () => {
               </div>
               <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
                 <span className="text-[var(--t-text-3)] block">{t('taskDetail.publishTime')}</span>
-                <span className="font-medium text-[var(--t-text)]">
-                  {task.pushedAt ? new Date(task.pushedAt).toLocaleString() : '—'}
+                <span className="font-medium text-[var(--t-text)]" title={formatIsoTitle(task.pushedAt)}>
+                  {formatDateTime(task.pushedAt, locale)}
                 </span>
               </div>
             </div>
@@ -979,9 +979,16 @@ export const TaskDetailPage: React.FC = () => {
                     />
                   ) : null}
                 </span>
-                <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-full ${review.verdict === 'approved' ? 'text-[var(--t-ok)] bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)]' : 'text-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)]'}`}>
-                  {review.verdict === 'approved' ? t('taskDetail.reviewApproved') : t('taskDetail.reviewChangesRequested')}
-                </span>
+                <div className="flex items-center gap-2">
+                  {review.createdAt && (
+                    <span className="text-xs text-[var(--t-text-3)] font-mono" title={formatIsoTitle(review.createdAt)}>
+                      {formatDateTime(review.createdAt, locale)}
+                    </span>
+                  )}
+                  <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-full ${review.verdict === 'approved' ? 'text-[var(--t-ok)] bg-[color-mix(in_srgb,var(--t-ok)_15%,transparent)]' : 'text-[var(--t-warn)] bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)]'}`}>
+                    {review.verdict === 'approved' ? t('taskDetail.reviewApproved') : t('taskDetail.reviewChangesRequested')}
+                  </span>
+                </div>
               </li>
             ))}
           </ul>
@@ -1018,10 +1025,8 @@ export const TaskDetailPage: React.FC = () => {
                     />
                   )}
                   {evt.ts && (
-                    <span className="text-[var(--t-text-3)] font-mono text-[11px]">
-                      {Number.isFinite(parseApiTime(evt.ts))
-                        ? new Date(parseApiTime(evt.ts)).toISOString()
-                        : String(evt.ts)}
+                    <span className="text-[var(--t-text-3)] font-mono text-[11px]" title={formatIsoTitle(evt.ts)}>
+                      {formatDateTime(evt.ts, locale, { fallback: evt.ts })}
                     </span>
                   )}
                 </div>
@@ -1198,10 +1203,8 @@ export const TaskDetailPage: React.FC = () => {
                         {r.reason === 'stalled' ? t('extra.stuck') : (r.outcome || t('status.running'))}
                       </span>
                     </td>
-                    <td className="px-6 py-3 text-xs text-[var(--t-text-3)]">
-                      {Number.isFinite(parseApiTime(r.startedAt))
-                        ? new Date(parseApiTime(r.startedAt)).toISOString()
-                        : String(r.startedAt || '')}
+                    <td className="px-6 py-3 text-xs text-[var(--t-text-3)]" title={formatIsoTitle(r.startedAt)}>
+                      {formatDateTime(r.startedAt, locale, { fallback: r.startedAt || '—' })}
                     </td>
                     <td className="px-6 py-3 text-xs font-mono text-[var(--t-text-3)]">
                       {calculateDuration(r.startedAt, r.endedAt)}
@@ -1299,8 +1302,8 @@ export const TaskDetailPage: React.FC = () => {
                         </span>
                         <span className="font-medium">{ov.content}</span>
                       </div>
-                      <span className="text-[var(--t-text-3)] text-[10px] shrink-0 font-mono">
-                        {ov.createdAt}
+                      <span className="text-[var(--t-text-3)] text-[10px] shrink-0 font-mono" title={formatIsoTitle(ov.createdAt)}>
+                        {formatDateTime(ov.createdAt, locale, { fallback: ov.createdAt || '—' })}
                       </span>
                     </div>
                   ))}
@@ -1358,7 +1361,9 @@ export const TaskDetailPage: React.FC = () => {
                         <span className="font-semibold text-[var(--t-text)]">
                           {note.taskId}
                         </span>
-                        <span className="font-mono text-[10px]">{note.createdAt}</span>
+                        <span className="font-mono text-[10px]" title={formatIsoTitle(note.createdAt)}>
+                          {formatDateTime(note.createdAt, locale, { fallback: note.createdAt || '—' })}
+                        </span>
                       </div>
                       <p className="text-[var(--t-text)]">{note.content}</p>
                     </div>

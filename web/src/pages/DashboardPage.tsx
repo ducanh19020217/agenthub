@@ -5,7 +5,7 @@ import { getStatus, getProfiles, getClaudeQuota, getClaudeFailover, clearClaudeF
 import { retryChatLimitNow } from '../api/chat';
 import { subscribeToEvents } from '../api/sse';
 import { EventItem } from '../types/api';
-import { parseApiTime, formatTimeAgo } from '../lib/time';
+import { parseApiTime, formatTimeAgo, formatDateTime, formatIsoTitle } from '../lib/time';
 import {
   PlayCircle,
   Clock,
@@ -78,7 +78,7 @@ function RunningDuration({ startedAt }: { startedAt: string }) {
     return () => clearInterval(timer);
   }, [startedAt]);
 
-  return <span className="font-mono text-xs">{elapsed}</span>;
+  return <span className="font-mono text-xs" title={formatIsoTitle(startedAt)}>{elapsed}</span>;
 }
 
 export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile }> = ({ pollingProfile = 'optimized' }) => {
@@ -730,7 +730,7 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
               </div>
             )}
             {claudeFailover.reason && <div className="text-xs mt-1">{t('dashboard.failoverReason')}: {formatReason(claudeFailover.reason, locale)}</div>}
-            {claudeFailover.evidence && <div className="text-xs text-[var(--t-text-2)] mt-1 truncate">{t('dashboard.failoverEvidence')}: {claudeFailover.evidence.file}:{claudeFailover.evidence.line} · {new Date(claudeFailover.evidence.observedAt).toLocaleString(locale === 'vi' ? 'vi-VN' : 'en-US')}</div>}
+            {claudeFailover.evidence && <div className="text-xs text-[var(--t-text-2)] mt-1 truncate">{t('dashboard.failoverEvidence')}: {claudeFailover.evidence.file}:{claudeFailover.evidence.line} · <span title={formatIsoTitle(claudeFailover.evidence.observedAt)}>{formatDateTime(claudeFailover.evidence.observedAt, locale)}</span></div>}
           </div>
           {claudeFailover.active && <button type="button" onClick={() => failoverMutation.mutate()} disabled={failoverMutation.isPending} className="shrink-0 px-3 py-2 rounded-lg bg-[var(--t-warn)] text-[var(--t-on-accent)] text-xs font-semibold disabled:opacity-50">{failoverMutation.isPending ? t('dashboard.failoverTurningOff') : t('dashboard.failoverTurnOff')}</button>}
         </div>
@@ -828,7 +828,7 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
                       </span>
                     )}
                   </div>
-                  <span className="text-xs text-[var(--t-text-3)] shrink-0" title={Number.isFinite(parseApiTime(event.ts)) ? new Date(parseApiTime(event.ts)).toISOString() : String(event.ts)}>{formatTimeAgo(event.ts, undefined, locale)}</span>
+                  <span className="text-xs text-[var(--t-text-3)] shrink-0" title={formatIsoTitle(event.ts)}>{formatTimeAgo(event.ts, undefined, locale)}</span>
                 </li>
               );
             }}

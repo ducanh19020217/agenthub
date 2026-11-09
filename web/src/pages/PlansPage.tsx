@@ -14,6 +14,7 @@ import {
 } from '../api/client';
 import { Task, BatchStatus, TaskLevel } from '../types/api';
 import { useLocale } from '../context/LocaleContext';
+import { formatDateTime, formatIsoTitle, parseApiTime } from '../lib/time';
 import { TaskDag } from '../components/dag';
 import { StatusBadge } from '../components/StatusBadge';
 import { Modal } from '../components/ui/Modal';
@@ -119,19 +120,13 @@ export const PlansPage: React.FC = () => {
   }, [isRequireAll, minTasks, t]);
 
   const formatBatchTime = (value: string | number) => {
-    try {
-      const ts =
-        typeof value === 'number'
-          ? value
-          : Date.parse(value.includes('T') ? value : value.replace(' ', 'T') + 'Z');
-      const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-      if (diffSec < 60) return t('plans.justNow');
-      if (diffSec < 3600) return t('plans.minutesAgo', { count: Math.floor(diffSec / 60) });
-      if (diffSec < 86400) return t('plans.hoursAgo', { count: Math.floor(diffSec / 3600) });
-      return t('plans.daysAgo', { count: Math.floor(diffSec / 86400) });
-    } catch {
-      return String(value);
-    }
+    const ts = parseApiTime(value);
+    if (!Number.isFinite(ts)) return '—';
+    const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (diffSec < 60) return t('plans.justNow');
+    if (diffSec < 3600) return t('plans.minutesAgo', { count: Math.floor(diffSec / 60) });
+    if (diffSec < 86400) return t('plans.hoursAgo', { count: Math.floor(diffSec / 3600) });
+    return t('plans.daysAgo', { count: Math.floor(diffSec / 86400) });
   };
 
   const { data: projects = [] } = useQuery({
@@ -520,7 +515,7 @@ export const PlansPage: React.FC = () => {
                         {t('plans.progress', { done: batch.progress?.done ?? 0, total: batch.progress?.total ?? 0 })}
                       </span>
                       <span>•</span>
-                      <span>{formatBatchTime(batch.createdAt)}</span>
+                      <span title={formatIsoTitle(batch.createdAt)}>{formatBatchTime(batch.createdAt)}</span>
                     </div>
                   </div>
                 );
@@ -617,11 +612,9 @@ export const PlansPage: React.FC = () => {
                         {currentBatch.createdBy === 'claude-auto' ? t('plans.auto') : currentBatch.createdBy || 'unknown'}
                       </span>
                       <span>•</span>
-                      <span className="inline-flex items-center gap-1">
+                      <span className="inline-flex items-center gap-1" title={formatIsoTitle(currentBatch.createdAt)}>
                         <Clock className="w-3.5 h-3.5" />
-                        {new Date(currentBatch.createdAt).toLocaleString(
-                          locale === 'vi' ? 'vi-VN' : 'en-US'
-                        )}
+                        {formatDateTime(currentBatch.createdAt, locale)}
                       </span>
                     </div>
                   </div>

@@ -38,7 +38,7 @@ import { QuotaUsage } from '../components/QuotaUsage';
 import { useLocale } from '../context/LocaleContext';
 import { ToastViewport, useToasts, type ToastKind } from '../components/ui/Toast';
 import { Profile } from '../types/api';
-import { formatReset, formatTimeTitle } from '../lib/time';
+import { formatReset, formatTime, formatTimeTitle, formatIsoTitle } from '../lib/time';
 import { useTour } from '../components/tour/TourContext';
 import { AgentIcon } from '../components/AgentIcon';
 import { UI_Z_INDEX } from '../components/ui/layers';
@@ -638,9 +638,12 @@ function ProfileCard({
                 </span>
               )}
               {profile.coolingUntil && profile.coolingUntil > Math.floor(Date.now() / 1000) && (
-                <span className="rounded bg-[var(--t-warn)]/15 px-1.5 py-0.5 text-[10px] font-bold text-[var(--t-warn)]">
+                <span
+                  className="rounded bg-[var(--t-warn)]/15 px-1.5 py-0.5 text-[10px] font-bold text-[var(--t-warn)]"
+                  title={formatIsoTitle(profile.coolingUntil * 1000)}
+                >
                   {t('profiles.coolingUntil', {
-                    time: new Date(profile.coolingUntil * 1000).toLocaleTimeString(locale === 'vi' ? 'vi-VN' : 'en-US'),
+                    time: formatTime(profile.coolingUntil * 1000, locale),
                   })}
                 </span>
               )}

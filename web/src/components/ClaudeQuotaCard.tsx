@@ -1,6 +1,6 @@
 import { Clock, Gauge, RefreshCw } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
-import { formatReset, formatTimeTitle } from '../lib/time';
+import { formatReset, formatTime, formatTimeTitle, formatIsoTitle } from '../lib/time';
 import type { ClaudeQuota } from '../types/api';
 
 type QuotaTone = 'ok' | 'warn' | 'crit' | 'unknown';
@@ -31,7 +31,6 @@ function toneOf(row: QuotaRow): QuotaTone {
 
 export function ClaudeQuotaCard({ quota, className = '' }: { quota: ClaudeQuota; className?: string }) {
   const { t, locale } = useLocale();
-  const timeLocale = locale === 'vi' ? 'vi-VN' : 'en-US';
 
   const rows: QuotaRow[] = quota.profiles?.length
     ? quota.profiles.map((p) => ({
@@ -104,10 +103,13 @@ export function ClaudeQuotaCard({ quota, className = '' }: { quota: ClaudeQuota;
                   <span className="truncate">{formatReset(row.resetsAt, Date.now(), locale)}</span>
                 </div>
               ) : null}
-              <div className="mt-1 flex items-center gap-1.5 text-[11px] text-[var(--t-text-3)]">
+              <div
+                className="mt-1 flex items-center gap-1.5 text-[11px] text-[var(--t-text-3)]"
+                title={formatIsoTitle(row.observedAt)}
+              >
                 <RefreshCw className="h-3 w-3 shrink-0" />
                 <span className="truncate">
-                  {t('extra.updatedAt')} {row.observedAt ? new Date(row.observedAt).toLocaleTimeString(timeLocale) : t('extra.unknown')}
+                  {t('extra.updatedAt')} {row.observedAt ? formatTime(row.observedAt, locale) : t('extra.unknown')}
                 </span>
               </div>
             </li>

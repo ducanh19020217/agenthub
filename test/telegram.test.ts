@@ -4431,6 +4431,246 @@ describe('Telegram theo dự án (b3-telegram-per-project)', () => {
     expect(ctx.service.getFocus().projectId).toBeNull();
   });
 
+  describe('Lệnh /projects trên Telegram (t-telegram-projects-cmd)', () => {
+    it('(a) /projects với 2 dự án (1 đã ẩn) -> chỉ 1 nút, callback_data đúng use:select:<id>, nội dung có số task', async () => {
+      createProject('p-active', 'Active Project');
+      createProject('p-archived', 'Archived Project');
+      ctx.projectRepo.archive('p-archived');
+
+      ctx.taskRepo.insert({ id: 'p-active/t-1', projectId: 'p-active', slug: 't-1', title: 'Task 1', status: 'running', level: 'easy' });
+      ctx.taskRepo.insert({ id: 'p-active/t-2', projectId: 'p-active', slug: 't-2', title: 'Task 2', status: 'queued', level: 'easy' });
+      ctx.taskRepo.insert({ id: 'p-active/t-3', projectId: 'p-active', slug: 't-3', title: 'Task 3', status: 'review', level: 'easy' });
+      ctx.taskRepo.insert({ id: 'p-active/t-4', projectId: 'p-active', slug: 't-4', title: 'Task 4', status: 'pushed', level: 'easy' });
+
+      const bot = createProjectBot('suggest');
+
+      await bot.handleUpdate({
+        update_id: 10,
+        message: { message_id: 10, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: '/projects' },
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      const sendCall = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1);
+      expect(sendCall).toBeDefined();
+      const text = sendCall?.body?.text as string;
+      expect(text).toContain('Active Project');
+      expect(text).toContain('p-active');
+      expect(text).toContain('1 đang chạy, 1 chờ, 1 chờ duyệt');
+      expect(text).not.toContain('Archived Project');
+      expect(text).not.toContain('p-archived');
+
+      const markup = sendCall?.body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+      expect(markup).toBeDefined();
+      const allButtons = markup.inline_keyboard.flat();
+      expect(allButtons).toHaveLength(1);
+      expect(allButtons[0].text).toContain('Active Project');
+      expect(allButtons[0].callback_data).toBe('use:select:p-active');
+    });
+
+    it('(b) bấm use:select:<id> -> selectedProject đổi, gọi editMessageText với nút có ✅', async () => {
+      createProject('p-active', 'Active Project');
+      const bot = createProjectBot('suggest');
+
+      // Send /projects first
+      await bot.handleUpdate({
+        update_id: 20,
+        message: { message_id: 20, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: '/projects' },
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      recordedCalls.length = 0;
+
+      // Click use:select:p-active
+      await bot.handleUpdate({
+        update_id: 21,
+        callback_query: {
+          id: 'cb-select-1',
+          from: { id: CHAT_ID, first_name: 'Tester', is_bot: false },
+          message: { message_id: 20, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: '📁 Danh sách dự án:\n• Active Project' },
+          data: 'use:select:p-active',
+        },
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      expect(bot.getSelectedProject(CHAT_ID)).toBe('p-active');
+
+      const editCall = recordedCalls.filter((c) => c.url.includes('/editMessageText')).at(-1);
+      expect(editCall).toBeDefined();
+      const editText = editCall?.body?.text as string;
+      expect(editText).toContain('✅');
+      expect(editText).toContain('Active Project');
+
+      const markup = editCall?.body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+      expect(markup).toBeDefined();
+      const allButtons = markup.inline_keyboard.flat();
+      const projBtn = allButtons.find((b) => b.callback_data === 'use:select:p-active');
+      expect(projBtn?.text).toContain('✅');
+      expect(projBtn?.text).toContain('Active Project');
+
+      // And clear button is now present
+      const clearBtn = allButtons.find((b) => b.callback_data === 'use:clear:');
+      expect(clearBtn).toBeDefined();
+
+      const answerCall = recordedCalls.filter((c) => c.url.includes('/answerCallbackQuery')).at(-1);
+      expect(answerCall).toBeDefined();
+    });
+
+    it('(c) use:clear: -> bỏ chọn và sửa tin danh sách', async () => {
+      createProject('p-active', 'Active Project');
+      const bot = createProjectBot('suggest');
+
+      // First select p-active
+      await bot.handleUpdate({
+        update_id: 30,
+        message: { message_id: 30, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: '/use p-active' },
+      });
+      await bot.flushQueue(CHAT_ID);
+      expect(bot.getSelectedProject(CHAT_ID)).toBe('p-active');
+
+      recordedCalls.length = 0;
+
+      // Click use:clear:
+      await bot.handleUpdate({
+        update_id: 31,
+        callback_query: {
+          id: 'cb-clear-1',
+          from: { id: CHAT_ID, first_name: 'Tester', is_bot: false },
+          message: { message_id: 30, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: '📁 Danh sách dự án:\n✅ Active Project' },
+          data: 'use:clear:',
+        },
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      expect(bot.getSelectedProject(CHAT_ID)).toBeUndefined();
+
+      const editCall = recordedCalls.filter((c) => c.url.includes('/editMessageText')).at(-1);
+      expect(editCall).toBeDefined();
+      const markup = editCall?.body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+      const allButtons = markup.inline_keyboard.flat();
+      const projBtn = allButtons.find((b) => b.callback_data === 'use:select:p-active');
+      expect(projBtn?.text).not.toContain('✅');
+      const clearBtn = allButtons.find((b) => b.callback_data === 'use:clear:');
+      expect(clearBtn).toBeUndefined();
+
+      const answerCall = recordedCalls.filter((c) => c.url.includes('/answerCallbackQuery')).at(-1);
+      expect(answerCall).toBeDefined();
+    });
+
+    it('(d) /use khi đã chọn -> kèm bàn phím chọn dự án', async () => {
+      createProject('p-active', 'Active Project');
+      const bot = createProjectBot('suggest');
+
+      // Select p-active
+      await bot.handleUpdate({
+        update_id: 40,
+        message: { message_id: 40, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: '/use p-active' },
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      recordedCalls.length = 0;
+
+      // Now invoke /use with no args
+      await bot.handleUpdate({
+        update_id: 41,
+        message: { message_id: 41, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: '/use' },
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      const sendCall = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1);
+      expect(sendCall).toBeDefined();
+      expect(sendCall?.body?.text).toContain('Dự án đang chọn: <b>Active Project (p-active)</b>');
+      const markup = sendCall?.body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+      expect(markup).toBeDefined();
+      const allButtons = markup.inline_keyboard.flat();
+      const projBtn = allButtons.find((b) => b.callback_data === 'use:select:p-active');
+      expect(projBtn?.text).toContain('✅');
+      expect(allButtons.some((b) => b.callback_data === 'use:clear:')).toBe(true);
+    });
+
+    it('(e) dự án đã ẩn bị từ chối khi bấm callback hoặc /use', async () => {
+      createProject('p-active', 'Active Project');
+      createProject('p-archived', 'Archived Project');
+      ctx.projectRepo.archive('p-archived');
+
+      const bot = createProjectBot('suggest');
+
+      // Try selecting archived project via callback
+      await bot.handleUpdate({
+        update_id: 50,
+        callback_query: {
+          id: 'cb-archived',
+          from: { id: CHAT_ID, first_name: 'Tester', is_bot: false },
+          message: { message_id: 50, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000) },
+          data: 'use:select:p-archived',
+        },
+      });
+      await bot.flushQueue(CHAT_ID);
+      expect(bot.getSelectedProject(CHAT_ID)).toBeUndefined();
+      const answerCall = recordedCalls.filter((c) => c.url.includes('/answerCallbackQuery')).at(-1);
+      expect(answerCall?.body?.text).toContain('Dự án đã bị ẩn');
+
+      // Try selecting non-existent project
+      await bot.handleUpdate({
+        update_id: 51,
+        callback_query: {
+          id: 'cb-nonexistent',
+          from: { id: CHAT_ID, first_name: 'Tester', is_bot: false },
+          message: { message_id: 51, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000) },
+          data: 'use:select:p-nonexistent',
+        },
+      });
+      await bot.flushQueue(CHAT_ID);
+      const answerNonExistent = recordedCalls.filter((c) => c.url.includes('/answerCallbackQuery')).at(-1);
+      expect(answerNonExistent?.body?.text).toContain('Dự án không tồn tại');
+    });
+
+    it('(f) TELEGRAM_BOT_COMMANDS có projects ngay sau use và renderHelp có projects', async () => {
+      const { TELEGRAM_BOT_COMMANDS } = await import('../src/telegram.js');
+      const useIndex = TELEGRAM_BOT_COMMANDS.findIndex((c) => c.command === 'use');
+      const projectsIndex = TELEGRAM_BOT_COMMANDS.findIndex((c) => c.command === 'projects');
+      expect(projectsIndex).toBe(useIndex + 1);
+      expect(TELEGRAM_BOT_COMMANDS[projectsIndex].description).toBe('Danh sách dự án, bấm để chọn nhanh');
+
+      const bot = createProjectBot('suggest');
+      const help = (bot as unknown as { renderHelp(): string }).renderHelp();
+      expect(help).toContain('/projects - Danh sách dự án, bấm để chọn nhanh');
+    });
+
+    it('từ 6 dự án trở lên xếp 2 nút một hàng', async () => {
+      for (let i = 1; i <= 6; i++) {
+        createProject(`p-${i}`, `Project ${i}`);
+      }
+      const bot = createProjectBot('suggest');
+
+      await bot.handleUpdate({
+        update_id: 60,
+        message: { message_id: 60, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: '/projects' },
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      const sendCall = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1);
+      const markup = sendCall?.body?.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+      expect(markup.inline_keyboard.length).toBe(3);
+      expect(markup.inline_keyboard[0].length).toBe(2);
+      expect(markup.inline_keyboard[1].length).toBe(2);
+      expect(markup.inline_keyboard[2].length).toBe(2);
+    });
+
+    it('báo Chưa có dự án nào khi hệ thống không có dự án', async () => {
+      const bot = createProjectBot('suggest');
+
+      await bot.handleUpdate({
+        update_id: 70,
+        message: { message_id: 70, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: '/projects' },
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      const sendCall = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1);
+      expect(sendCall?.body?.text).toContain('Chưa có dự án nào');
+      expect(sendCall?.body?.text).toContain('dashboard');
+    });
+  });
+
   describe('13. Telegram Topics per Department & Group Pairing (d-telegram-topics)', () => {
     const SUPERGROUP_ID = -100987654321;
     const AUTHORIZED_USER_ID = 777111;

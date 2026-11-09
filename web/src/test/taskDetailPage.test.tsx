@@ -938,5 +938,47 @@ describe('TaskDetailPage', () => {
       expect(publishSpy).toHaveBeenCalledWith('proj-1~t1');
     });
   });
+
+  it('26. Timeline TaskDetailPage: render event với ts dạng SQLite và ISO, không có text ISO thô trong nội dung hiển thị', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      events: [
+        {
+          id: 1,
+          type: 'task.running',
+          ts: '2026-11-06 17:52:44',
+          taskId: 'proj-1~t1',
+        },
+        {
+          id: 2,
+          type: 'worktree.cleaned',
+          ts: '2026-11-07T18:22:34.000Z',
+          taskId: 'proj-1~t1',
+        },
+      ],
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const timeline = await screen.findByTestId('task-timeline');
+    expect(timeline).toBeInTheDocument();
+
+    const runningEvent = screen.getByTestId('timeline-event-task.running');
+    const cleanedEvent = screen.getByTestId('timeline-event-worktree.cleaned');
+
+    expect(runningEvent).toBeInTheDocument();
+    expect(cleanedEvent).toBeInTheDocument();
+
+    // Khẳng định không có text khớp regex \d{4}-\d{2}-\d{2}T\d{2}:\d{2} trong nội dung hiển thị
+    const isoRegex = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+    expect(timeline.textContent).not.toMatch(isoRegex);
+
+    // Thuộc tính title được phép chứa chuỗi ISO đầy đủ
+    const eventTimeSpans = timeline.querySelectorAll('span[title]');
+    const titles = Array.from(eventTimeSpans).map((el) => el.getAttribute('title'));
+    expect(titles).toContain('2026-11-06T17:52:44.000Z');
+    expect(titles).toContain('2026-11-07T18:22:34.000Z');
+  });
 });
 

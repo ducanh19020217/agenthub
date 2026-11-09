@@ -232,6 +232,7 @@ export function readTelegramToken(tokenPath: string): string | null {
 export const TELEGRAM_BOT_COMMANDS: Array<{ command: string; description: string }> = [
   { command: 'gio', description: 'Thêm/xem bảng giờ: /gio <ticket|new> <giờ>h [cho <giờ>h] [co-dinh] <mô tả>' },
   { command: 'use', description: 'Chọn dự án: /use <dự án> · xem dự án đang chọn: /use' },
+  { command: 'projects', description: 'Danh sách dự án, bấm để chọn nhanh' },
   { command: 'ask', description: 'Hỏi/trao đổi với bộ não: /ask <câu hỏi>' },
   { command: 'brain', description: 'Bộ não: /brain · /brain trust [dự án] standard|trusted|full|inherit' },
   { command: 'digest', description: 'Tóm tắt tình hình hệ thống và quota' },
@@ -1391,6 +1392,10 @@ export class TelegramBotService {
         await this.handleUseCommand(chatId, argStr);
         break;
 
+      case '/projects':
+        await this.handleProjectsCommand(chatId);
+        break;
+
       case '/status':
         await this.handleStatusCommand(chatId);
         break;
@@ -1791,6 +1796,70 @@ export class TelegramBotService {
     await this.sendMessage(chatId, rows.length ? rows.map((row) => `• <code>${this.escapeHtml(row.id)}</code>: ${this.escapeHtml(row.text)}`).join('\n') : 'Chưa có chỉ thị. Dùng /directives add <nội dung>.');
   }
 
+  private buildProjectsListText(chatId: number): string {
+    const projects = this.projectRepo.getAll().filter((p) => !p.archivedAt);
+    if (projects.length === 0) {
+      return `ℹ️ Chưa có dự án nào. Vui lòng đăng ký trên dashboard: ${this.getDashboardUrl()}`;
+    }
+    const current = this.selectedProject.get(chatId);
+    const currentSelected = current && projects.some((p) => p.id === current) ? current : undefined;
+    const lines: string[] = ['📁 <b>Danh sách dự án:</b>\n'];
+    for (const p of projects) {
+      const isSelected = currentSelected === p.id;
+      const prefix = isSelected ? '✅ ' : '• ';
+      const nameStr = p.name ? `<b>${this.escapeHtml(p.name)}</b> (<code>${this.escapeHtml(p.id)}</code>)` : `<b>${this.escapeHtml(p.id)}</b>`;
+      const branchStr = `<code>${this.escapeHtml(p.defaultBranch || 'main')}</code>`;
+      const tasks = this.taskRepo?.getByProject ? this.taskRepo.getByProject(p.id) : [];
+      const runningCount = tasks.filter((t) => t.status === 'running' || t.status === 'checking').length;
+      const queuedCount = tasks.filter((t) => t.status === 'queued').length;
+      const reviewCount = tasks.filter((t) => t.status === 'review').length;
+      const taskStr = `${runningCount} đang chạy, ${queuedCount} chờ, ${reviewCount} chờ duyệt`;
+      lines.push(`${prefix}${nameStr} · ${branchStr} — ${taskStr}`);
+    }
+    return lines.join('\n');
+  }
+
+  private buildProjectPicker(chatId: number): InlineKeyboardButton[][] {
+    const projects = this.projectRepo.getAll().filter((p) => !p.archivedAt);
+    if (projects.length === 0) return [];
+    const current = this.selectedProject.get(chatId);
+    const currentSelected = current && projects.some((p) => p.id === current) ? current : undefined;
+    const buttons: InlineKeyboardButton[] = projects.map((p) => {
+      const isSelected = currentSelected === p.id;
+      const label = p.name || p.id;
+      return {
+        text: isSelected ? `✅ 📁 ${label}` : `📁 ${label}`,
+        callback_data: `use:select:${p.id}`,
+      };
+    });
+
+    const keyboard: InlineKeyboardButton[][] = [];
+    if (buttons.length >= 6) {
+      for (let i = 0; i < buttons.length; i += 2) {
+        keyboard.push(buttons.slice(i, i + 2));
+      }
+    } else {
+      for (const btn of buttons) {
+        keyboard.push([btn]);
+      }
+    }
+    if (currentSelected) {
+      keyboard.push([{ text: '🚫 Bỏ chọn', callback_data: 'use:clear:' }]);
+    }
+    return keyboard;
+  }
+
+  private async handleProjectsCommand(chatId: number): Promise<void> {
+    const projects = this.projectRepo.getAll().filter((p) => !p.archivedAt);
+    if (projects.length === 0) {
+      await this.sendMessage(chatId, `ℹ️ Chưa có dự án nào. Vui lòng đăng ký trên dashboard: ${this.getDashboardUrl()}`);
+      return;
+    }
+    const text = this.buildProjectsListText(chatId);
+    const keyboard = this.buildProjectPicker(chatId);
+    await this.sendMessage(chatId, text, { inline_keyboard: keyboard });
+  }
+
   private async handleUseCommand(chatId: number, argStr: string): Promise<void> {
     const trimmed = argStr.trim();
     if (!trimmed) {
@@ -1804,16 +1873,18 @@ export class TelegramBotService {
           return;
         }
         const name = proj?.name ? `${proj.name} (${current})` : current;
-        await this.sendMessage(chatId, `📁 Dự án đang chọn: <b>${this.escapeHtml(name)}</b>\n\nGõ <code>/use &lt;dự án&gt;</code> để đổi, hoặc <code>/use none</code> để bỏ chọn.`);
+        await this.sendMessage(
+          chatId,
+          `📁 Dự án đang chọn: <b>${this.escapeHtml(name)}</b>\n\nGõ <code>/use &lt;dự án&gt;</code> để đổi, hoặc <code>/use none</code> để bỏ chọn.`,
+          { inline_keyboard: this.buildProjectPicker(chatId) },
+        );
       } else {
-        const projects = this.projectRepo.getAll();
+        const projects = this.projectRepo.getAll().filter((p) => !p.archivedAt);
         if (projects.length === 0) {
           await this.sendMessage(chatId, 'ℹ️ Chưa chọn dự án nào và không có dự án nào trong hệ thống.');
           return;
         }
-        const keyboard: InlineKeyboardButton[][] = projects.map((p) => [
-          { text: p.name ? `${p.name} (${p.id})` : p.id, callback_data: `use:select:${p.id}` },
-        ]);
+        const keyboard = this.buildProjectPicker(chatId);
         await this.sendMessage(chatId, '📁 Chưa chọn dự án nào. Chọn dự án:', { inline_keyboard: keyboard });
       }
       return;
@@ -1824,9 +1895,13 @@ export class TelegramBotService {
       await this.sendMessage(chatId, '📁 Đã bỏ chọn dự án. Tin nhắn sẽ gửi tới bộ não hệ thống.');
       return;
     }
-    const project = this.projectRepo.get(trimmed);
-    if (!project || project.archivedAt) {
+    const project = this.projectRepo.getIncludingArchived ? this.projectRepo.getIncludingArchived(trimmed) : this.projectRepo.get(trimmed);
+    if (!project) {
       await this.sendMessage(chatId, `❌ Không tìm thấy dự án "${this.escapeHtml(trimmed)}".`);
+      return;
+    }
+    if (project.archivedAt) {
+      await this.sendMessage(chatId, `❌ Dự án "${this.escapeHtml(trimmed)}" đã bị ẩn.`);
       return;
     }
     this.selectedProject.set(chatId, project.id);
@@ -2454,16 +2529,67 @@ export class TelegramBotService {
       case 'use': {
         if (action === 'select') {
           const projectId = taskIdOrParam;
-          const project = this.projectRepo.get(projectId);
+          const project = this.projectRepo.getIncludingArchived ? this.projectRepo.getIncludingArchived(projectId) : this.projectRepo.get(projectId);
           if (!project) {
             await this.answerCallbackQuery(query.id, 'Dự án không tồn tại.');
+            return;
+          }
+          if (project.archivedAt) {
+            await this.answerCallbackQuery(query.id, 'Dự án đã bị ẩn.');
             return;
           }
           this.selectedProject.set(chatId, project.id);
           this.persistSelectedProject(chatId, project.id);
           const name = project.name ? `${project.name} (${project.id})` : project.id;
           await this.answerCallbackQuery(query.id, `Đã chọn ${project.id}`);
-          await this.sendMessage(chatId, `📁 Đã chọn dự án <b>${this.escapeHtml(name)}</b>. Tin nhắn sẽ được gửi tới bộ não dự án này.`);
+
+          let edited = false;
+          if (query.message?.message_id) {
+            try {
+              let text: string;
+              if (query.message.text?.includes('Dự án đang chọn') || query.message.text?.includes('Chưa chọn dự án nào')) {
+                text = `📁 Dự án đang chọn: <b>${this.escapeHtml(name)}</b>\n\nGõ <code>/use &lt;dự án&gt;</code> để đổi, hoặc <code>/use none</code> để bỏ chọn.`;
+              } else {
+                text = this.buildProjectsListText(chatId);
+              }
+              const replyMarkup = { inline_keyboard: this.buildProjectPicker(chatId) };
+              await this.editMessage(chatId, query.message.message_id, text, replyMarkup);
+              edited = true;
+            } catch {
+              edited = false;
+            }
+          }
+          if (!edited) {
+            await this.sendMessage(chatId, `📁 Đã chọn dự án <b>${this.escapeHtml(name)}</b>. Tin nhắn sẽ được gửi tới bộ não dự án này.`);
+          }
+          return;
+        }
+
+        if (action === 'clear') {
+          this.selectedProject.delete(chatId);
+          this.persistSelectedProject(chatId, undefined);
+          await this.answerCallbackQuery(query.id, 'Đã bỏ chọn dự án');
+
+          let edited = false;
+          if (query.message?.message_id) {
+            try {
+              let text: string;
+              if (query.message.text?.includes('Dự án đang chọn') || query.message.text?.includes('Chưa chọn dự án nào')) {
+                text = '📁 Chưa chọn dự án nào. Chọn dự án:';
+              } else {
+                text = this.buildProjectsListText(chatId);
+              }
+              const replyMarkup = { inline_keyboard: this.buildProjectPicker(chatId) };
+              await this.editMessage(chatId, query.message.message_id, text, replyMarkup);
+              edited = true;
+            } catch {
+              edited = false;
+            }
+          }
+          if (!edited) {
+            await this.sendMessage(chatId, '📁 Đã bỏ chọn dự án. Tin nhắn sẽ gửi tới bộ não hệ thống.');
+          }
+          return;
         }
         break;
       }
@@ -5239,6 +5365,7 @@ export class TelegramBotService {
     return `🤖 <b>Danh sách lệnh ${this.escapeHtml(this.appName)} Telegram Bot:</b>
 
 /use &lt;dự án&gt; - Chọn dự án hiện tại cho chat (/use để xem, /use none để bỏ chọn)
+/projects - Danh sách dự án, bấm để chọn nhanh
 /ask &lt;câu hỏi&gt; - Hỏi/trao đổi với bộ não: /ask &lt;câu hỏi&gt;
 /status - Xem tổng quan hệ thống (task, hồ sơ, quota, ổ đĩa)
 /focus &lt;dự án&gt; - Tập trung tài nguyên cho dự án; /focus off để tắt

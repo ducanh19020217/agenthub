@@ -41,6 +41,7 @@ import {
 import { Card, Button, Input, DataTable, SelectOrCustomInput } from '../components/ui';
 import { DEFAULT_COMMON_BRANCHES, validateBranchSyntax } from '../utils/models';
 import { useLocale } from '../context/LocaleContext';
+import { formatDateTime, formatIsoTitle } from '../lib/time';
 import { UI_Z_INDEX } from '../components/ui/layers';
 import { useTour } from '../components/tour/TourContext';
 import { Project } from '../types/api';
@@ -398,7 +399,7 @@ function ProjectSettingsForm({
 }
 
 export const ProjectsPage: React.FC = () => {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const { suggestModalTour } = useTour();
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
@@ -1600,7 +1601,14 @@ export const ProjectsPage: React.FC = () => {
                         title: t('common.createdAt'),
                         sortable: true,
                         sortValue: (entry) => entry.createdAt,
-                        render: (entry) => <span className="whitespace-nowrap text-xs text-[var(--t-text-3)]">{entry.createdAt}</span>,
+                        render: (entry) => (
+                          <span
+                            className="whitespace-nowrap text-xs text-[var(--t-text-3)]"
+                            title={formatIsoTitle(entry.createdAt)}
+                          >
+                            {formatDateTime(entry.createdAt, locale)}
+                          </span>
+                        ),
                       }]}
                     />
                   </div>

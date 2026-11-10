@@ -254,3 +254,9 @@
   - AgentHub đọc khoá này để giải mã **chỉ phía server**, khi quét (để biết tài khoản có nhập được không) và khi nhập. Kết quả giải mã không trả ra API, không log. Vẫn chỉ đọc, không ghi vào thư mục Cockpit. Khoá chỉ bảo vệ khi file bị chép riêng ra ngoài; mọi tiến trình cùng user đều đọc được, nên việc hub đọc không làm giảm thêm độ an toàn trên máy.
   - Thiếu khoá, sai khoá, hoặc thuật toán lạ: báo lý do theo từng tài khoản và gợi ý nhập file Export. Đường dự phòng `POST /api/integrations/cockpit/import-export` nhận file Export của Cockpit, tự nhận diện Antigravity/Codex/Claude theo từng mục.
   - Mã giải mã viết lại bằng `node:crypto`, không chép code Cockpit (giấy phép CC BY-NC-SA 4.0).
+
+## DEC-022: Sửa migration 73 để giữ bộ đếm task khi rebuild bảng
+
+- **Bối cảnh**: Migration 73 rebuild `tasks`, trong khi `runCount` và `consecutiveCrashes` được thêm ngoài danh sách migration sau vòng lặp. Bản rebuild cũ dùng `SELECT *`, gây lỗi trên DB đã có hai cột và có thể để lại bảng `tasks_new` rỗng.
+- **Quyết định**: Sửa migration 73 tại chỗ vì migration này chưa được khóa và chưa chạy thành công trên DB thật có các cột bộ đếm. Migration xóa `tasks_new` cũ bằng `DROP TABLE IF EXISTS`, sao chép theo danh sách cột tường minh, và mang theo cả hai bộ đếm. Trước khi chạy migration 73, đảm bảo hai cột bộ đếm đã tồn tại; DB mới cũng cần bước này vì các cột vẫn được quản lý ngoài danh sách migration.
+- **Hệ quả**: DB bị bỏ lại bảng tạm có thể tự chạy tiếp; dữ liệu bộ đếm được giữ nguyên qua rebuild.

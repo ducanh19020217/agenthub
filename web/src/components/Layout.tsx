@@ -5,7 +5,7 @@ import { useTheme } from '../context/ThemeContext';
 import { useLocale } from '../context/LocaleContext';
 import { VersionBanner } from './VersionBanner';
 import { subscribeConnectionState } from '../api/sse';
-import { cancelRestart, getBatches, getStatus, setFocus } from '../api/client';
+import { cancelRestart, getBatches, getStatus, requestRestart, setFocus } from '../api/client';
 import { useBranding } from '../context/BrandingContext';
 import { useAuthedImage } from '../hooks/useAuthedImage';
 import {
@@ -84,15 +84,23 @@ const RestartBannerInner: React.FC = () => {
   const queryClient = useQueryClient();
   const { data: status } = useQuery({ queryKey: ['status'], queryFn: getStatus, staleTime: 2000 });
   const cancel = useMutation({ mutationFn: cancelRestart, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['status'] }) });
+  const forceRestart = useMutation({
+    mutationFn: () => requestRestart('now'),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['status'] }),
+  });
   const restart = (status as { restart?: { draining?: boolean; waitingFor?: unknown[] } } | undefined)?.restart;
   if (!restart?.draining) return null;
+  const workerCount = restart.waitingFor?.length || 0;
   return <div className="flex items-center justify-between gap-3 px-6 py-2 text-sm bg-[var(--t-selected)] border-b border-[var(--t-accent)]/30" role="status">
-    <span>🔄 {t('settings.restartDraining', { count: String(restart.waitingFor?.length || 0) })}</span>
-    <button type="button" className="underline" onClick={() => cancel.mutate()} disabled={cancel.isPending}>{t('settings.restartCancel')}</button>
+    <span>🔄 {t('settings.restartDraining', { count: String(workerCount) })}</span>
+    <span className="flex items-center gap-3">
+      <button type="button" className="underline" onClick={() => cancel.mutate()} disabled={cancel.isPending || forceRestart.isPending}>{t('settings.restartCancel')}</button>
+      <button type="button" className="underline text-[var(--t-crit)]" onClick={() => { if (window.confirm(t('settings.restartNowConfirm', { count: String(workerCount) }))) forceRestart.mutate(); }} disabled={cancel.isPending || forceRestart.isPending}>{t('settings.restartNow')}</button>
+    </span>
   </div>;
 };
 
-const RestartBanner: React.FC = () => {
+export const RestartBanner: React.FC = () => {
   const client = React.useContext(QueryClientContext);
   if (!client) return null;
   return <RestartBannerInner />;

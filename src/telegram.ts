@@ -4094,6 +4094,8 @@ export class TelegramBotService {
         type === 'disk.docker_low' ||
         type === 'claude.quota_exhausted' ||
         type === 'hub.restart_failed' ||
+        type === 'hub.restarting' ||
+        type === 'hub.restart_timeout' ||
         type.startsWith('deploy.') ||
         type.startsWith('gitea.sync.') ||
         type.startsWith('remote_deploy.') ||
@@ -4342,6 +4344,18 @@ export class TelegramBotService {
           `${prefix}${header}\nID: <code>${taskId}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>`,
           { inline_keyboard: keyboard },
         );
+        break;
+      }
+
+      case 'hub.restarting':
+      case 'hub.restart_timeout': {
+        const timeout = type === 'hub.restart_timeout';
+        const waiting = typeof p.waiting === 'number'
+          ? p.waiting
+          : Array.isArray(p.waitingFor) ? p.waitingFor.length : 0;
+        this.broadcastMessage(timeout
+          ? `${prefix}⏳ <b>Khởi động lại hub hết thời gian chờ</b>\nHub tiếp tục chạy bình thường; còn ${waiting} việc đang hoạt động.`
+          : `${prefix}🔄 <b>Hub đang khởi động lại</b>\nCác worker đã hoàn tất; dịch vụ sẽ khởi động lại ngay.`);
         break;
       }
 
@@ -5250,7 +5264,7 @@ export class TelegramBotService {
   }
 
   /** Sự kiện làm task bị ngắt giữa chừng; báo Telegram khi notify.interrupted bật (kể cả brain auto). */
-  private static readonly INTERRUPT_EVENTS = new Set(['task.cancelled', 'task.timeout', 'task.no_commit', 'task.looping', 'task.overlap', 'task.failover', 'task.auto_closed']);
+  private static readonly INTERRUPT_EVENTS = new Set(['task.cancelled', 'task.timeout', 'task.no_commit', 'task.looping', 'task.overlap', 'task.failover', 'task.auto_closed', 'hub.restart_timeout']);
   private static readonly INTERRUPT_LABELS: Record<string, string> = {
     'task.timeout': '⏱ <b>Task quá thời gian</b>',
     'task.no_commit': '⚠️ <b>Task lâu không commit</b>',
@@ -5258,6 +5272,7 @@ export class TelegramBotService {
     'task.overlap': '⚠️ <b>Task chồng lấn</b>',
     'task.failover': '🔀 <b>Task chuyển tài khoản/model</b>',
     'task.auto_closed': '📦 <b>Task tự đóng</b>',
+    'hub.restart_timeout': '⏳ <b>Khởi động lại hub hết thời gian chờ</b>',
   };
 
   /** Trạng thái coi là "còn việc": task chưa kết thúc. */

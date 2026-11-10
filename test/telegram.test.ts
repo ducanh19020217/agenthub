@@ -584,6 +584,21 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(calls[0].body?.text).toContain('/resume');
     });
 
+    it('/restart drains by default and /restart now asks for confirmation', async () => {
+      await bot.handleUpdate({ update_id: 111, message: { message_id: 111, date: 123456, chat: { id: CHAT_ID, type: 'private' }, text: '/restart' } });
+      expect(ctx.scheduler.getRestartState().draining).toBe(true);
+      let calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls.at(-1)?.body?.text).toContain('khởi động lại khi');
+      ctx.scheduler.cancelRestartDrain();
+      recordedCalls.length = 0;
+
+      await bot.handleUpdate({ update_id: 112, message: { message_id: 112, date: 123456, chat: { id: CHAT_ID, type: 'private' }, text: '/restart now' } });
+      calls = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+      expect(calls.at(-1)?.body?.text).toContain('Khởi động lại ngay');
+      const keyboard = calls.at(-1)?.body?.reply_markup as { inline_keyboard: Array<Array<{ callback_data?: string }>> };
+      expect(keyboard.inline_keyboard.flat().map((button) => button.callback_data)).toContain('hubrestart:confirm');
+    });
+
     it('/status returns task overview and scheduler state', async () => {
       ctx.taskRepo.insert({ id: 'p1/t-done', projectId: 'p1', slug: 't-done', title: 'Task Done', status: 'done', level: 'easy' });
       ctx.taskRepo.insert({ id: 'p1/t-pushed', projectId: 'p1', slug: 't-pushed', title: 'Task Pushed', status: 'pushed', level: 'easy' });

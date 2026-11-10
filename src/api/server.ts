@@ -534,6 +534,17 @@ export async function createServer(
     return service.listProfiles();
   });
 
+  fastify.get('/api/profiles/:name/avatar', async (req: FastifyRequest, reply: FastifyReply) => {
+    const { name } = req.params as { name: string };
+    const avatar = await service.getProfileAvatar(name);
+    return reply
+      .header('Content-Type', avatar.contentType)
+      .header('Cache-Control', 'private, max-age=86400')
+      .header('X-Content-Type-Options', 'nosniff')
+      .header('Content-Security-Policy', "default-src 'none'")
+      .send(avatar.data);
+  });
+
   fastify.post('/api/profiles/:name/usage/refresh', async (req: FastifyRequest) => {
     const { name } = req.params as { name: string };
     return service.refreshUsage(name);

@@ -1378,7 +1378,7 @@ export class TelegramBotService {
       }
 
       case '/restart': {
-        if (args[1]?.toLowerCase() === 'now') {
+        if (args[0]?.toLowerCase() === 'now') {
           const status = this.service.getStatus();
           const running = status.tasks.running + status.tasks.checking;
           await this.sendMessage(chatId, `⚠️ <b>Khởi động lại ngay?</b> ${running} worker/check đang chạy sẽ bị dừng.`, { inline_keyboard: [[

@@ -129,8 +129,6 @@ export const en: typeof vi = {
     overlapWarningDesc: 'There are {count} file overlap warnings among running tasks:',
     brains: 'Brains', assistant: 'Assistant', assistantWorking: 'answering', assistantReady: 'ready', openAssistantChat: 'Open assistant', brainMode: 'Mode', brainEngine: 'Engine', brainStatewaiting_limit: 'waiting for quota reset', brainStatewaiting_permission: 'waiting for your permission', brainMode_off: 'off', brainMode_suggest: 'suggest', brainMode_auto: 'auto', brainMode_external: 'external Claude', brainStateidle: 'idle', brainStaterunning: 'running', brainStatewaiting: 'waiting', brainStateerror: 'error', brainQueued: 'queued', brainTokens: 'Today tokens', brainTurns: 'turns', brainRotations: 'rotations', brainSkipped: 'skipped', openBrainChat: 'Open brain chat', brainStateWaitingUser: 'waiting for your reply', brainStateWorking: 'working', brainStateInactive: 'inactive',
     ciCardTitle: 'CI', ciCardSubtitle: 'Latest GitHub Actions CI status', ciCardNoData: 'No CI data recorded', ciPassed: 'Passed', ciFailed: 'Failed', ciRunning: 'Running', projectTaskSummary: 'Tasks by project', projectRunning: 'Running', projectWaiting: 'Waiting',
-    worktrees: 'Worktrees',
-    worktreesCount: '{count} active · {size} GB',
     brainSessionMode: 'Session mode',
     perfTitle: 'Performance',
     perfSubtitle: 'CPU/RSS by process group · last 1 hour',

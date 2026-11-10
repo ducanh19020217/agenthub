@@ -345,23 +345,6 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
         </div>
       )}
 
-      {status.worktrees && (
-        <section data-testid="worktree-usage" className="order-3 rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <div><h2 className="text-base font-semibold">{t('dashboard.worktrees')}</h2><p className="text-xs text-[var(--t-text-2)]">{t('dashboard.worktreesCount', { count: status.worktrees.count, size: (status.worktrees.bytes / 1024 ** 3).toFixed(2) })}</p></div>
-            <HardDrive className="w-5 h-5 text-[var(--t-accent)]" />
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-            {Object.entries(status.worktrees.byStatus).map(([taskStatus, usage]) => (
-              <div key={taskStatus} className="rounded-lg bg-[var(--t-surface-2)] px-3 py-2 text-xs">
-                <div className="font-medium">{taskStatus}</div>
-                <div className="text-[var(--t-text-2)]">{usage.count} · {(usage.bytes / 1024 ** 3).toFixed(2)} GB</div>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
       {/* Brain Card */}
       {status.brain && <div className="order-4"><BrainCard brain={status.brain} quota={claudeQuota} onRetryLimit={() => retryChatLimitNow('brain')} /></div>}
       {brainOverview?.brains && <div data-tour="brain" data-testid="project-brains" className="order-4 rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-5 space-y-3">

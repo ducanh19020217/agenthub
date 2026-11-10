@@ -127,8 +127,6 @@ export const vi = {
     overlapWarningDesc: 'Có {count} cảnh báo sửa trùng file giữa các task đang chạy:',
     brains: 'Bộ não', assistant: 'Trợ lý', assistantWorking: 'đang trả lời', assistantReady: 'sẵn sàng', openAssistantChat: 'Mở Trợ lý', brainMode: 'Chế độ', brainEngine: 'Engine', brainStatewaiting_limit: 'chờ hết giới hạn quota', brainStatewaiting_permission: 'chờ bạn cấp quyền', brainMode_off: 'tắt', brainMode_suggest: 'gợi ý', brainMode_auto: 'tự động', brainMode_external: 'Claude ngoài điều phối', brainStateidle: 'rảnh', brainStaterunning: 'đang chạy', brainStatewaiting: 'đang chờ', brainStateerror: 'lỗi', brainQueued: 'đang xếp hàng', brainTokens: 'Token hôm nay', brainTurns: 'lượt', brainRotations: 'xoay', brainSkipped: 'bỏ qua', openBrainChat: 'Mở phiên chat', brainStateWaitingUser: 'chờ bạn trả lời', brainStateWorking: 'đang làm', brainStateInactive: 'không hoạt động',
     ciCardTitle: 'CI', ciCardSubtitle: 'Trạng thái CI GitHub Actions gần nhất', ciCardNoData: 'Chưa có dữ liệu CI', ciPassed: 'Thành công', ciFailed: 'Thất bại', ciRunning: 'Đang chạy', projectTaskSummary: 'Task theo project', projectRunning: 'Đang chạy', projectWaiting: 'Đang chờ',
-    worktrees: 'Worktree',
-    worktreesCount: '{count} đang có · {size} GB',
     brainSessionMode: 'Mode phiên',
     perfTitle: 'Hiệu năng',
     perfSubtitle: 'CPU/RSS theo nhóm tiến trình · vòng 1 giờ gần nhất',

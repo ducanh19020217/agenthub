@@ -94,21 +94,6 @@ const execFileAsync = promisify(execFile);
 const CODEX_EMAIL_RECHECK_MS = 10 * 60 * 1000;
 const ESCALATION_MODEL = 'claude-opus-4-6-thinking';
 
-function worktreeBytes(root: string): number {
-  let total = 0;
-  let entries: fs.Dirent[];
-  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return 0; }
-  for (const entry of entries) {
-    const fullPath = path.join(root, entry.name);
-    try {
-      if (entry.isDirectory()) total += worktreeBytes(fullPath);
-      else if (entry.isFile()) total += fs.statSync(fullPath).size;
-    } catch {
-      // Files can disappear while the status snapshot is being collected.
-    }
-  }
-  return total;
-}
 
 function apiProject(project: ProjectRow, hubHome?: string, ciRepo?: CiRepo): ProjectRow {
   let merge: unknown = null;
@@ -1007,7 +992,6 @@ export class AppService {
   private perfCollector?: PerfCollector;
   private profileChecks = new Set<string>();
   private reviewingTasks = new Set<string>();
-  private worktreeUsageCache: { at: number; value: { count: number; bytes: number; byStatus: Record<string, { count: number; bytes: number }> } } | null = null;
   private gitVersion: { value: string | null; checkedAt: number } | null = null;
   private gitVersionCheck?: Promise<string | null>;
   private static readonly SETUP_VERSION_CACHE_MS = 10 * 60 * 1000;
@@ -1524,22 +1508,6 @@ export class AppService {
     const taskMap = new Map(tasks.map((t) => [t.id, t]));
 
     const now = Date.now();
-    if (!this.worktreeUsageCache || now - this.worktreeUsageCache.at >= 15_000) {
-      const byStatus: Record<string, { count: number; bytes: number }> = {};
-      let count = 0;
-      let bytes = 0;
-      for (const task of tasks) {
-        if (!task.worktreePath || !fs.existsSync(task.worktreePath)) continue;
-        const size = worktreeBytes(task.worktreePath);
-        const current = byStatus[task.status] || { count: 0, bytes: 0 };
-        current.count += 1;
-        current.bytes += size;
-        byStatus[task.status] = current;
-        count += 1;
-        bytes += size;
-      }
-      this.worktreeUsageCache = { at: now, value: { count, bytes, byStatus } };
-    }
 
     const runningTasks = Array.from(runningMap.values()).map((r) => {
       const task = taskMap.get(r.taskId) || taskMap.get(toTaskId(r.taskId)) || taskMap.get(r.taskId.replace('/', '~'));
@@ -1648,7 +1616,6 @@ export class AppService {
         minFreeGB: this.config.disk.minFreeGB,
       },
       disks,
-      worktrees: this.worktreeUsageCache.value,
       load: this.scheduler.getLoadStatus(),
       telegram: {
         enabled: this.config.telegram?.enabled ?? false,

@@ -37,6 +37,7 @@ import { SetupTools } from './setup-tools.js';
 import { OpenProjectWritebackService } from './integrations/openproject/writeback.js';
 import { GiteaSyncService } from './integrations/gitea/service.js';
 import { ProfileService } from './profiles/index.js';
+import { AvatarService } from './avatar.js';
 import { Scheduler } from './scheduler/index.js';
 import { Engine, AgyEngine, CodexEngine, FakeEngine } from './engines/index.js';
 import { AppService } from './services/index.js';
@@ -91,6 +92,7 @@ export interface DaemonContext {
   chatRetryRepo: ChatRetryRepo;
   permissionBroker: PermissionBroker;
   profileService: ProfileService;
+  avatarService: AvatarService;
   scheduler: Scheduler;
   service: AppService;
   chatService: ChatService;
@@ -480,6 +482,7 @@ export function createContext(
     chatRetryRepo,
     permissionBroker,
     profileService,
+    avatarService: service.avatarService,
     scheduler,
     service,
     chatService,
@@ -613,6 +616,7 @@ export async function startDaemon(
 
   // Register profiles on startup
   ctx.profileService.registerAll();
+  ctx.service.cleanupAvatarCache();
   // Claude /usage opens the real Claude Code CLI; never do that from the test suite.
   if (!process.env.VITEST) {
     ctx.usageService.configureClaude({

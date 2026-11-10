@@ -21,6 +21,7 @@ import {
   deleteProfile,
   deleteQuota,
   getProfiles,
+  getProfileAvatarBlob,
   getConfig,
   getStatus,
   importAgyTokens,
@@ -461,22 +462,121 @@ function getAvatarGradient(name: string): string {
   return `linear-gradient(135deg, hsl(${h1}, 65%, 45%), hsl(${h2}, 75%, 35%))`;
 }
 
-function ProfileAvatar({ profile }: { profile: Profile }) {
+interface AvatarCacheEntry {
+  objectUrl?: string;
+  promise?: Promise<string>;
+  refCount: number;
+}
+
+export const avatarObjectUrlCache = new Map<string, AvatarCacheEntry>();
+
+export function getAvatarCacheKey(name: string, avatarUrl: string): string {
+  return `${name}:${avatarUrl}`;
+}
+
+export async function acquireAvatar(name: string, avatarUrl: string): Promise<string> {
+  const key = getAvatarCacheKey(name, avatarUrl);
+  let entry = avatarObjectUrlCache.get(key);
+  if (entry) {
+    entry.refCount++;
+    if (entry.objectUrl) return entry.objectUrl;
+    if (entry.promise) return await entry.promise;
+  }
+
+  entry = { refCount: 1 };
+  const fetchPromise = (async () => {
+    try {
+      const blob = await getProfileAvatarBlob(name);
+      const objectUrl = URL.createObjectURL(blob);
+      entry!.objectUrl = objectUrl;
+      if (entry!.refCount <= 0) {
+        try { URL.revokeObjectURL(objectUrl); } catch { /* ignore */ }
+        avatarObjectUrlCache.delete(key);
+      }
+      return objectUrl;
+    } catch (err) {
+      avatarObjectUrlCache.delete(key);
+      throw err;
+    }
+  })();
+
+  entry.promise = fetchPromise;
+  avatarObjectUrlCache.set(key, entry);
+  return await fetchPromise;
+}
+
+export function releaseAvatar(name: string, avatarUrl: string): void {
+  const key = getAvatarCacheKey(name, avatarUrl);
+  const entry = avatarObjectUrlCache.get(key);
+  if (!entry) return;
+  entry.refCount--;
+  if (entry.refCount <= 0) {
+    if (entry.objectUrl) {
+      try { URL.revokeObjectURL(entry.objectUrl); } catch { /* ignore */ }
+    }
+    avatarObjectUrlCache.delete(key);
+  }
+}
+
+export const MAX_AVATAR_RETRIES = 3;
+export const AVATAR_RETRY_DELAY_MS = 30_000;
+
+export function ProfileAvatar({ profile }: { profile: Profile }) {
+  const [src, setSrc] = useState<string | null>(null);
   const [imgError, setImgError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
   const avatarUrl = profile.avatarUrl;
 
   useEffect(() => {
-    setImgError(false);
-  }, [avatarUrl]);
+    setRetryCount(0);
+  }, [profile.name, avatarUrl]);
 
-  if (avatarUrl && !imgError) {
+  useEffect(() => {
+    if (!avatarUrl) {
+      setSrc(null);
+      setImgError(false);
+      return;
+    }
+
+    let active = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+    acquireAvatar(profile.name, avatarUrl)
+      .then((url) => {
+        if (!active) return;
+        setSrc(url);
+        setImgError(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setSrc(null);
+        setImgError(true);
+        if (retryCount < MAX_AVATAR_RETRIES) {
+          retryTimer = setTimeout(() => {
+            if (active) {
+              setRetryCount((c) => c + 1);
+            }
+          }, AVATAR_RETRY_DELAY_MS);
+        }
+      });
+
+    return () => {
+      active = false;
+      if (retryTimer) clearTimeout(retryTimer);
+      releaseAvatar(profile.name, avatarUrl);
+    };
+  }, [profile.name, avatarUrl, retryCount]);
+
+  if (avatarUrl && src && !imgError) {
     return (
       <div className="relative shrink-0">
         <img
-          src={avatarUrl}
+          src={src}
           alt={profile.label || profile.name}
-          referrerPolicy="no-referrer"
-          onError={() => setImgError(true)}
+          onError={() => {
+            setImgError(true);
+            setSrc(null);
+          }}
           className="h-9 w-9 rounded-xl object-cover shadow-xs ring-1 ring-[var(--t-border)]"
         />
       </div>

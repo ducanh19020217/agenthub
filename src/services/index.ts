@@ -74,6 +74,7 @@ import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt
 import type { TelegramBotService } from '../telegram.js';
 import { ReviewChainSchema, isAutomatedStep, parseReviewChain, type ReviewChainStep, type ReviewChainStepView } from '../review-chain.js';
 import { isAutoReviewer } from '../reviewer.js';
+import { AvatarService, type AvatarResult } from '../avatar.js';
 import { isKnownModel } from '../quota/index.js';
 import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, ReviewerOrderSchema, reviewerSettingsFromLegacy } from '../reviewer-config.js';
 import { SetupManager } from '../tools/setup.js';
@@ -1021,6 +1022,7 @@ export class AppService {
   private autoMergeCheckRetries = new Set<string>();
   private autoMergeCheckRetryPromises = new Map<string, Promise<boolean>>();
   private autoMergeSkipped = new Set<string>();
+  public avatarService: AvatarService;
   constructor(
     public config: AgentHubConfig,
     public projectRepo: ProjectRepo,
@@ -1050,6 +1052,7 @@ export class AppService {
     public departmentRepo?: DepartmentRepo,
     public setupTools?: SetupTools,
   ) {
+    this.avatarService = new AvatarService(this.config.hubHome, this.profileRepo);
     this.migrateProjectMergeMappings();
   }
 
@@ -2520,6 +2523,14 @@ export class AppService {
       return { avatarUrl: info.picture, message: 'Đã cập nhật ảnh đại diện' };
     }
     return { avatarUrl: info.picture, message: 'Ảnh đại diện đã là mới nhất' };
+  }
+
+  async getProfileAvatar(name: string, options?: { forceRefresh?: boolean }): Promise<AvatarResult> {
+    return this.avatarService.getProfileAvatar(name, options);
+  }
+
+  cleanupAvatarCache(): void {
+    this.avatarService.cleanupOrphanedAvatars();
   }
 
   /** Chạy CLI khi đánh thức; test thay bằng runner giả để không bao giờ chạy agy/codex thật. */

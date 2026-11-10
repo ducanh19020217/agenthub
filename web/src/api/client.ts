@@ -523,6 +523,10 @@ export async function getProfiles(): Promise<Profile[]> {
   return apiFetch<Profile[]>('/api/profiles');
 }
 
+export async function getProfileAvatarBlob(name: string, signal?: AbortSignal): Promise<Blob> {
+  return apiFetchBlob(`/api/profiles/${encodeURIComponent(name)}/avatar`, { signal });
+}
+
 export async function refreshProfileUsage(name: string): Promise<Profile> {
   return apiFetch<Profile>(`/api/profiles/${encodeURIComponent(name)}/usage/refresh`, {
     method: 'POST',

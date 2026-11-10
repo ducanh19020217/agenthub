@@ -1,6 +1,8 @@
 import { Button, Input } from '../ui';
 import { Suggestion } from './Suggestion';
 import type { ClaudeSession, Reference, StepWithInspectionProps } from './types';
+import { useLocale } from '../../context/LocaleContext';
+import { formatDateTime, formatIsoTitle } from '../../lib/time';
 
 export function StepContext({
   inspection,
@@ -8,6 +10,7 @@ export function StepContext({
   update,
   t,
 }: StepWithInspectionProps) {
+  const { locale } = useLocale();
   const sessions: ClaudeSession[] = inspection?.claudeSessions || [];
 
   const toggleSession = (name: string) =>
@@ -203,8 +206,8 @@ export function StepContext({
                     />
                     <span className="text-xs font-mono font-medium">{session.name}</span>
                   </label>
-                  <span className="text-xs text-[var(--t-text-3)]">
-                    {new Date(session.modifiedAt).toLocaleString()} · {Math.round(session.sizeBytes / 1024)} KB
+                  <span className="text-xs text-[var(--t-text-3)]" title={formatIsoTitle(session.modifiedAt)}>
+                    {formatDateTime(session.modifiedAt, locale)} · {Math.round(session.sizeBytes / 1024)} KB
                   </span>
                 </div>
                 <details className="text-xs">

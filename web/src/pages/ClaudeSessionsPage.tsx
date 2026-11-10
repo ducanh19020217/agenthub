@@ -6,6 +6,7 @@ import { Card, DataTable } from '../components/ui';
 import { ModelBadge } from '../components/ModelBadge';
 import { useLocale } from '../context/LocaleContext';
 import { formatNumber } from '../utils/format';
+import { formatDateTime, formatIsoTitle } from '../lib/time';
 
 type TaskUsage = { taskId: string; effectiveTokens: number };
 type Session = ClaudeSession;
@@ -25,7 +26,7 @@ const SessionTable: React.FC<{ sessions: Session[]; page: number; pageSize: numb
         { key: 'model', title: t('extra.model'), render: (session) => session.model ? <ModelBadge model={session.model} engine="claude" /> : t('extra.unknown') },
         { key: 'tokens', title: t('extra.token'), render: (session) => formatTokens(session.effectiveTokens, locale) },
         { key: 'task', title: t('extra.task'), render: (session) => session.topTasks.length > 0 ? session.topTasks.map((task) => `${formatTaskId(task.taskId, t('claudeSessions.outsideTask'))} (${formatTokens(task.effectiveTokens, locale)})`).join(', ') : t('claudeSessions.outsideTask') },
-        { key: 'lastAt', title: t('extra.lastActive'), sortable: true, sortValue: (session) => session.lastAt || '', render: (session) => session.lastAt ? new Date(session.lastAt).toLocaleString(locale === 'vi' ? 'vi-VN' : 'en-US') : '' },
+        { key: 'lastAt', title: t('extra.lastActive'), sortable: true, sortValue: (session) => session.lastAt || '', render: (session) => session.lastAt ? <span title={formatIsoTitle(session.lastAt)}>{formatDateTime(session.lastAt, locale)}</span> : '' },
       ]}
       page={page}
       pageSize={pageSize}
@@ -83,9 +84,9 @@ const SessionDetail: React.FC<{ data: SessionDetail; sessionId: string }> = ({ d
           {t('claudeSessions.autoResumeLimit')}
         </label>
         {data.limitResetAt ? (
-          <p className="text-sm text-[var(--t-warn)] mt-2">
+          <p className="text-sm text-[var(--t-warn)] mt-2" title={formatIsoTitle(data.limitResetAt * 1000 + 60_000)}>
             {t('claudeSessions.rateLimit5h', {
-              time: new Date(data.limitResetAt * 1000 + 60_000).toLocaleString(locale === 'vi' ? 'vi-VN' : 'en-US'),
+              time: formatDateTime(data.limitResetAt * 1000 + 60_000, locale),
             })}
           </p>
         ) : null}
@@ -103,7 +104,7 @@ const SessionDetail: React.FC<{ data: SessionDetail; sessionId: string }> = ({ d
             <tbody>
               {data.turns.map((turn) => (
                 <tr className="border-t border-[var(--t-border)]" key={`${turn.turnId}-${turn.ts}`}>
-                  <td className="py-2">{new Date(turn.ts).toLocaleString(locale === 'vi' ? 'vi-VN' : 'en-US')}</td>
+                  <td className="py-2" title={formatIsoTitle(turn.ts)}>{formatDateTime(turn.ts, locale)}</td>
                   <td>{formatTokens(turn.effectiveTokens, locale)}</td>
                   <td>
                     {turn.tasks.length > 0

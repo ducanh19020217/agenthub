@@ -44,6 +44,7 @@ import {
   validateReviewChainReviewerSyntax,
 } from '../utils/models';
 import { useLocale } from '../context/LocaleContext';
+import { formatDateTime, formatIsoTitle } from '../lib/time';
 import { UI_Z_INDEX } from './ui/layers';
 import { ModelBadge } from './ModelBadge';
 import { InfoTooltip } from './tour/InfoTooltip';
@@ -3075,7 +3076,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
               const last = giteaStatus.data.last;
               const resultLabel = last.status === 'succeeded' ? t('integrations.syncSucceeded') : last.status === 'skipped' ? t('integrations.syncSkipped') : last.status === 'conflict' ? t('integrations.syncConflict') : t('integrations.syncFailed');
               return <p className="text-xs text-[var(--t-text-3)]" data-testid="gitea-last-sync">
-                {t('integrations.lastSync')}: {new Date(last.finishedAt || '').toLocaleString()} — {resultLabel}
+                {t('integrations.lastSync')}: <span title={formatIsoTitle(last.finishedAt)}>{formatDateTime(last.finishedAt, locale)}</span> — {resultLabel}
                 {(last.reason || last.error) && <> ({last.reason || last.error})</>}
                 {last.url && <> · <a className="underline" href={last.url} target="_blank" rel="noreferrer">{t('integrations.syncPr')} #{last.prNumber}</a></>}
               </p>;

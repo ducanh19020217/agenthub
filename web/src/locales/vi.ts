@@ -632,6 +632,7 @@ export const vi = {
     cockpitImportedSuccess: 'Đã nhập thành công',
     cockpitUpdatedSuccess: 'Đã cập nhật token',
     cockpitSkippedResult: 'Bỏ qua: {reason}',
+    cockpitNoEmail: '(không rõ email)',
     cockpitFailedResult: 'Lỗi: {reason}',
     cockpitAutoSyncSection: 'Cài đặt tự đồng bộ định kỳ',
     cockpitAutoSyncDesc: 'Tự động quét và nhập tài khoản mới theo chu kỳ',

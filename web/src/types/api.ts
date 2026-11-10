@@ -916,6 +916,10 @@ export interface CockpitScanItem {
   source: CockpitSource;
   cockpitId: string;
   email: string;
+  /** Tên hiển thị trong Cockpit, nếu có. */
+  name?: string;
+  /** Gói tài khoản theo chỉ mục Cockpit, nếu có. */
+  planType?: string;
   disabled: boolean;
   importable: boolean;
   skipReason?: string;

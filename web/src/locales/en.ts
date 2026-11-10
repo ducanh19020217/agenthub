@@ -633,6 +633,7 @@ export const en: typeof vi = {
     cockpitImportedSuccess: 'Successfully imported',
     cockpitUpdatedSuccess: 'Token updated',
     cockpitSkippedResult: 'Skipped: {reason}',
+    cockpitNoEmail: '(unknown email)',
     cockpitFailedResult: 'Error: {reason}',
     cockpitAutoSyncSection: 'Periodic Auto-sync Settings',
     cockpitAutoSyncDesc: 'Automatically scan and import new accounts on a schedule',

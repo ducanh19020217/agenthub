@@ -269,6 +269,41 @@ describe('Cockpit Storage Scanner (src/profiles/cockpit.ts)', () => {
     expect(claudeApiKeyItem?.skipReason).toContain('Bỏ qua tài khoản API key');
   });
 
+  it('reads email, name and plan from the plaintext index when detail files use the current AES-GCM envelope', () => {
+    const envelope = (kind: string) => JSON.stringify({
+      version: 1, kind, algorithm: 'aes-256-gcm', key_id: 'k1', nonce: 'bm9uY2Vub25jZTEy', ciphertext: 'ZmFrZS1jaXBoZXJ0ZXh0',
+    });
+    fs.mkdirSync(path.join(cockpitDir, 'accounts'), { recursive: true });
+    fs.mkdirSync(path.join(cockpitDir, 'codex_accounts'), { recursive: true });
+    fs.mkdirSync(path.join(cockpitDir, 'claude_accounts'), { recursive: true });
+    fs.writeFileSync(path.join(cockpitDir, 'accounts.json'), JSON.stringify({
+      version: '2', accounts: [{ id: 'antigravity_abc', email: 'Gem@Example.com', name: 'Gem One', created_at: 1, last_used: 1 }],
+    }));
+    fs.writeFileSync(path.join(cockpitDir, 'codex_accounts.json'), JSON.stringify({
+      version: '1', accounts: [{ id: 'codex_def', email: 'cx@example.com', plan_type: 'plus', created_at: 1, last_used: 1 }],
+    }));
+    fs.writeFileSync(path.join(cockpitDir, 'claude_accounts.json'), JSON.stringify({
+      version: '1', accounts: [{ id: 'claude_ghi', email: 'cl@example.com', plan_type: 'max', created_at: 1, last_used: 1 }],
+    }));
+    fs.writeFileSync(path.join(cockpitDir, 'accounts', 'antigravity_abc.json'), envelope('antigravity'));
+    fs.writeFileSync(path.join(cockpitDir, 'codex_accounts', 'codex_def.json'), envelope('codex'));
+    fs.writeFileSync(path.join(cockpitDir, 'claude_accounts', 'claude_ghi.json'), envelope('claude'));
+
+    const result = scanCockpit(cockpitDir, []);
+    const agy = result.items.find((i) => i.cockpitId === 'antigravity_abc');
+    const codex = result.items.find((i) => i.cockpitId === 'codex_def');
+    const claude = result.items.find((i) => i.cockpitId === 'claude_ghi');
+
+    expect(agy).toMatchObject({ email: 'gem@example.com', name: 'Gem One', importable: false });
+    expect(codex).toMatchObject({ email: 'cx@example.com', planType: 'plus', importable: false });
+    expect(claude).toMatchObject({ email: 'cl@example.com', planType: 'max', importable: false });
+    for (const item of [agy, codex, claude]) {
+      expect(item?.skipReason).toContain('Cockpit đang mã hoá');
+      expect(item?.skipReason).not.toContain('kiểu cũ');
+    }
+    expect(JSON.stringify(result)).not.toContain('ZmFrZS1jaXBoZXJ0ZXh0');
+  });
+
   it('handles corrupt JSON in an account file gracefully without failing other accounts', () => {
     const agyAccountsDir = path.join(cockpitDir, 'accounts');
     fs.mkdirSync(agyAccountsDir, { recursive: true });

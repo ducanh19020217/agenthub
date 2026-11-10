@@ -272,8 +272,13 @@ export const CockpitSyncModal: React.FC<CockpitSyncModalProps> = ({
                       className="rounded border-[var(--t-border)] h-4 w-4 text-[var(--t-accent)]"
                     />
                     <div className="min-w-0">
-                      <p className="text-xs font-medium text-[var(--t-text)] truncate">
-                        {item.email || item.cockpitId}
+                      <p className="text-xs font-medium text-[var(--t-text)] truncate" data-testid="cockpit-item-email">
+                        {item.email || t('profiles.cockpitNoEmail')}
+                      </p>
+                      <p className="text-[11px] text-[var(--t-text-3)] truncate" title={item.cockpitId}>
+                        {[item.name, item.planType?.toUpperCase()].filter(Boolean).join(' · ')}
+                        {(item.name || item.planType) ? ' · ' : ''}
+                        <span className="font-mono">{item.cockpitId}</span>
                       </p>
                     </div>
                   </label>

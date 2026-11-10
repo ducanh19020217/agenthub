@@ -10,6 +10,10 @@ export interface CockpitScanItem {
   source: CockpitSource;
   cockpitId: string;
   email: string;
+  /** Tên hiển thị trong Cockpit (Antigravity), nếu có. */
+  name?: string;
+  /** Gói tài khoản theo chỉ mục Cockpit (plus, pro, max…), nếu có. */
+  planType?: string;
   disabled: boolean;
   importable: boolean;
   skipReason?: string;
@@ -72,6 +76,34 @@ function safeReadJson(filePath: string): unknown | null {
     return null;
   }
 }
+
+/** Thông tin không nhạy cảm lấy từ file chỉ mục Cockpit (luôn để dạng thường). */
+interface CockpitIndexMeta { email: string; name?: string; planType?: string }
+
+/** Đọc email, tên, gói từ mảng `accounts` của file chỉ mục, theo id. */
+function readIndexMeta(indexRaw: Record<string, unknown> | null): Map<string, CockpitIndexMeta> {
+  const meta = new Map<string, CockpitIndexMeta>();
+  if (!indexRaw || !Array.isArray(indexRaw.accounts)) return meta;
+  for (const acc of indexRaw.accounts) {
+    if (!acc || typeof acc !== 'object') continue;
+    const row = acc as Record<string, unknown>;
+    if (typeof row.id !== 'string') continue;
+    const name = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : undefined;
+    const planType = typeof row.plan_type === 'string' && row.plan_type.trim() ? row.plan_type.trim() : undefined;
+    meta.set(row.id, { email: String(row.email || '').trim().toLowerCase(), name, planType });
+  }
+  return meta;
+}
+
+/**
+ * Cockpit (từ bản có secure_account_storage) mã hoá file chi tiết tài khoản bằng AES-256-GCM:
+ * `{ version, kind, algorithm, key_id, nonce, ciphertext }`. Chỉ mục vẫn để dạng thường.
+ */
+function isSecureEnvelope(data: Record<string, unknown>): boolean {
+  return typeof data.ciphertext === 'string' && typeof data.nonce === 'string';
+}
+
+const ENCRYPTED_SKIP_REASON = 'Cockpit đang mã hoá chi tiết tài khoản, AgentHub chưa đọc được token. Dùng Export trong Cockpit rồi nhập file';
 
 function listAccountFiles(dir: string): string[] {
   try {
@@ -155,6 +187,7 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
   for (const id of listAccountFiles(agyAccountsDir)) {
     agyIds.add(id);
   }
+  const agyMeta = readIndexMeta(agyIndexRaw);
 
   for (const id of agyIds) {
     const accFile = path.join(agyAccountsDir, `${id}.json`);
@@ -166,7 +199,7 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
       items.push({
         source: 'antigravity',
         cockpitId: id,
-        email: '',
+        email: agyMeta.get(id)?.email || '',
         disabled: false,
         importable: false,
         skipReason: 'File JSON hỏng',
@@ -175,7 +208,8 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
       continue;
     }
 
-    const email = String(data.email || '').trim().toLowerCase();
+    const meta = agyMeta.get(id);
+    const email = String(data.email || meta?.email || '').trim().toLowerCase();
     const disabled = Boolean(data.disabled);
     const tokenObj = data.token && typeof data.token === 'object' ? (data.token as Record<string, unknown>) : null;
 
@@ -188,7 +222,10 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
       (hasAgyKeyFile && tokenObj && !tokenObj.refresh_token),
     );
 
-    if (isEncryptedEnvelope) {
+    if (isSecureEnvelope(data)) {
+      importable = false;
+      skipReason = ENCRYPTED_SKIP_REASON;
+    } else if (isEncryptedEnvelope) {
       importable = false;
       skipReason = 'Token mã hoá kiểu cũ, hãy mở Cockpit để nâng cấp';
     } else if (!tokenObj || typeof tokenObj.refresh_token !== 'string' || !tokenObj.refresh_token.trim()) {
@@ -204,6 +241,8 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
       source: 'antigravity',
       cockpitId: id,
       email,
+      ...(meta?.name ? { name: meta.name } : {}),
+      ...(meta?.planType ? { planType: meta.planType } : {}),
       disabled,
       importable,
       skipReason,
@@ -232,6 +271,7 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
   for (const id of listAccountFiles(codexAccountsDir)) {
     codexIds.add(id);
   }
+  const codexMeta = readIndexMeta(codexIndexRaw);
 
   for (const id of codexIds) {
     const accFile = path.join(codexAccountsDir, `${id}.json`);
@@ -243,7 +283,7 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
       items.push({
         source: 'codex',
         cockpitId: id,
-        email: '',
+        email: codexMeta.get(id)?.email || '',
         disabled: false,
         importable: false,
         skipReason: 'File JSON hỏng',
@@ -252,7 +292,8 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
       continue;
     }
 
-    const email = String(data.email || '').trim().toLowerCase();
+    const meta = codexMeta.get(id);
+    const email = String(data.email || meta?.email || '').trim().toLowerCase();
     const disabled = Boolean(data.disabled || data.requires_reauth);
     const authMode = String(data.auth_mode || '').trim().toLowerCase();
     const apiProviderId = String(data.api_provider_id || '').trim();
@@ -260,7 +301,10 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
     let importable = true;
     let skipReason: string | undefined;
 
-    if (authMode === 'apikey' || authMode === 'api_key' || Boolean(data.openai_api_key)) {
+    if (isSecureEnvelope(data)) {
+      importable = false;
+      skipReason = ENCRYPTED_SKIP_REASON;
+    } else if (authMode === 'apikey' || authMode === 'api_key' || Boolean(data.openai_api_key)) {
       importable = false;
       skipReason = 'Bỏ qua tài khoản API key';
     } else if (apiProviderId === 'cockpit_chatgpt_plan' || id.startsWith('chatgpt_plan_')) {
@@ -282,6 +326,8 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
       source: 'codex',
       cockpitId: id,
       email,
+      ...(meta?.name ? { name: meta.name } : {}),
+      ...(meta?.planType ? { planType: meta.planType } : {}),
       disabled,
       importable,
       skipReason,
@@ -310,6 +356,7 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
   for (const id of listAccountFiles(claudeAccountsDir)) {
     claudeIds.add(id);
   }
+  const claudeMeta = readIndexMeta(claudeIndexRaw);
 
   for (const id of claudeIds) {
     const accFile = path.join(claudeAccountsDir, `${id}.json`);
@@ -321,7 +368,7 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
       items.push({
         source: 'claude',
         cockpitId: id,
-        email: '',
+        email: claudeMeta.get(id)?.email || '',
         disabled: false,
         importable: false,
         skipReason: 'File JSON hỏng',
@@ -330,14 +377,18 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
       continue;
     }
 
-    const email = String(data.email || '').trim().toLowerCase();
+    const meta = claudeMeta.get(id);
+    const email = String(data.email || meta?.email || '').trim().toLowerCase();
     const disabled = Boolean(data.disabled || data.status === 'disabled');
     const authMode = String(data.auth_mode || '').trim().toLowerCase();
 
     let importable = true;
     let skipReason: string | undefined;
 
-    if (authMode === 'desktop_oauth') {
+    if (isSecureEnvelope(data)) {
+      importable = false;
+      skipReason = ENCRYPTED_SKIP_REASON;
+    } else if (authMode === 'desktop_oauth') {
       importable = false;
       skipReason = 'Bỏ qua tài khoản desktop_oauth';
     } else if (authMode === 'api_key' || authMode === 'apikey') {
@@ -368,6 +419,8 @@ export function scanCockpit(dir: string, existingProfiles: ProfileRow[] = []): C
       source: 'claude',
       cockpitId: id,
       email,
+      ...(meta?.name ? { name: meta.name } : {}),
+      ...(meta?.planType ? { planType: meta.planType } : {}),
       disabled,
       importable,
       skipReason,

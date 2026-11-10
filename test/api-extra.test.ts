@@ -568,7 +568,12 @@ describe('AgentHub API Extra Endpoints', () => {
   });
 
   describe('branding logo security headers', () => {
-    it('serves sanitized SVG with a restrictive policy and inline disposition', async () => {
+    it('returns 401 when GET /api/branding/logo is requested without authentication', async () => {
+      const response = await server.inject({ method: 'GET', url: '/api/branding/logo', headers: { host: '127.0.0.1' } });
+      expect(response.statusCode).toBe(401);
+    });
+
+    it('serves sanitized SVG with a restrictive policy, inline disposition, and correct content-type with auth', async () => {
       const svg = '<svg xmlns="http://www.w3.org/2000/svg"><path/></svg>';
       const upload = await server.inject({
         method: 'PUT',
@@ -580,9 +585,28 @@ describe('AgentHub API Extra Endpoints', () => {
 
       const response = await server.inject({ method: 'GET', url: '/api/branding/logo', headers: authHeaders() });
       expect(response.statusCode).toBe(200);
+      expect(response.headers['content-type']).toBe('image/svg+xml');
       expect(response.headers['content-security-policy']).toBe("default-src 'none'; style-src 'unsafe-inline'; img-src data:");
       expect(response.headers['x-content-type-options']).toBe('nosniff');
       expect(response.headers['content-disposition']).toBe('inline; filename="logo.svg"');
+    });
+
+    it('serves PNG logo with correct content-type and security headers when authenticated', async () => {
+      const pngHeader = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+      const upload = await server.inject({
+        method: 'PUT',
+        url: '/api/branding/logo',
+        headers: authHeaders(),
+        payload: { mimeType: 'image/png', data: pngHeader.toString('base64') },
+      });
+      expect(upload.statusCode).toBe(200);
+
+      const response = await server.inject({ method: 'GET', url: '/api/branding/logo', headers: authHeaders() });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['content-type']).toBe('image/png');
+      expect(response.headers['content-security-policy']).toBe("default-src 'none'; style-src 'unsafe-inline'; img-src data:");
+      expect(response.headers['x-content-type-options']).toBe('nosniff');
+      expect(response.headers['content-disposition']).toBe('inline; filename="logo.png"');
     });
   });
 

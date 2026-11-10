@@ -97,6 +97,8 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
       label = t('waitReason.project_unavailable');
     } else if (waitReason === 'focus') {
       label = t('waitReason.focus');
+    } else if (waitReason === 'restart') {
+      label = t('waitReason.restart');
     } else {
       label = formatReason(waitReason, locale);
     }

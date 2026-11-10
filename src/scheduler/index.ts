@@ -297,6 +297,20 @@ interface QueuedCheck {
   resolve: () => void;
 }
 
+export type RestartActivityKind = 'run' | 'check' | 'review';
+export interface RestartWaitingActivity {
+  taskId: string;
+  kind: RestartActivityKind;
+  startedAt: number;
+}
+export interface RestartState {
+  draining: boolean;
+  since: number | null;
+  reason: string | null;
+  timeoutAt: number | null;
+  waitingFor: RestartWaitingActivity[];
+}
+
 const STALL_NOTE = 'Lượt trước bị kẹt khi chờ tác vụ nền. Chạy lệnh trực tiếp với timeout.';
 
 export interface SchedulerOptions {
@@ -372,6 +386,9 @@ export class Scheduler {
   private checkingPromises = new Map<string, Promise<void>>();
   private checkingRunIds = new Map<string, string>();
   private checkingWorktrees = new Set<string>();
+  private restartState: Omit<RestartState, 'waitingFor'> = { draining: false, since: null, reason: null, timeoutAt: null };
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private restartReady?: () => void;
 
   constructor(
     private config: AgentHubConfig,
@@ -396,6 +413,9 @@ export class Scheduler {
     this.loadGuard = new LoadGuard(config.load);
     this.locks = locks || new ProfileLockService(path.join(config.agyHomesDir, '.state'), config.slotsPerAgyProfile, config.slotsPerCodexProfile);
     this.db = db;
+    // Drain is process-local. A daemon started after an unclean kill must not
+    // inherit a stale flag that would stop dispatch forever.
+    if (this.db) this.db.prepare("DELETE FROM meta WHERE key = 'restart.drain'").run();
     this.runMetricsRepo = runMetricsRepo;
     this.knowledgeRepo = knowledgeRepo;
     if (db) {
@@ -455,7 +475,10 @@ export class Scheduler {
     });
     this.eventBus.on('task.done', (taskId) => this.onTaskDoneOrCancelled(taskId));
     this.eventBus.on('task.cancelled', (taskId) => this.onTaskDoneOrCancelled(taskId));
-    this.eventBus.on('task.queued', (taskId) => this.invalidateChecks(taskId));
+    this.eventBus.on('task.queued', (taskId) => {
+      this.invalidateChecks(taskId);
+      if (this.restartState.draining) this.markRestartWaiter(taskId);
+    });
   }
 
   getCheckResults(taskId: string) { return this.db ? getCheckResults(this.db, taskId) : []; }
@@ -558,6 +581,80 @@ export class Scheduler {
   getRunning(): Map<string, RunningTask> {
     for (const runningTask of this.running.values()) this.refreshActivity(runningTask);
     return this.running;
+  }
+
+  getRestartState(): RestartState {
+    const waitingFor: RestartWaitingActivity[] = [
+      ...[...this.running.values()].map((run) => ({ taskId: run.taskId, kind: 'run' as const, startedAt: run.startTime })),
+      ...[...this.checkingActive.values()].map((check) => ({ taskId: check.taskId, kind: 'check' as const, startedAt: check.queuedAt })),
+      ...[...this.reviewerRuns.values()].map((review) => ({ taskId: review.taskId, kind: 'review' as const, startedAt: review.startedAt })),
+    ];
+    return { ...this.restartState, waitingFor };
+  }
+
+  isDraining(): boolean { return this.restartState.draining; }
+
+  beginRestartDrain(timeoutMinutes = 120, reason?: string, onReady?: () => void): RestartState {
+    const now = Date.now();
+    const timeoutAt = now + Math.max(1, timeoutMinutes) * 60_000;
+    this.restartState = { draining: true, since: this.restartState.since || now, reason: reason?.trim() || null, timeoutAt };
+    this.restartReady = onReady;
+    this.markQueuedTasksForRestart();
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = setTimeout(() => {
+      if (!this.restartState.draining) return;
+      const waitingFor = this.getRestartState().waitingFor;
+      this.restartState = { draining: false, since: null, reason: null, timeoutAt: null };
+      this.restartReady = undefined;
+      this.eventBus.emit('hub.restart_timeout', undefined, { waitingFor });
+      this.persistRestartState();
+    }, Math.max(1, timeoutMinutes) * 60_000);
+    this.restartTimer.unref?.();
+    this.persistRestartState();
+    this.eventBus.emit('hub.restart_requested', undefined, { reason: this.restartState.reason, timeoutAt });
+    this.eventBus.emit('hub.restart_draining', undefined, { waiting: this.getRestartState().waitingFor.length });
+    this.maybeFinishRestartDrain();
+    return this.getRestartState();
+  }
+
+  cancelRestartDrain(): RestartState {
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
+    const wasDraining = this.restartState.draining;
+    this.restartState = { draining: false, since: null, reason: null, timeoutAt: null };
+    this.restartReady = undefined;
+    for (const task of this.taskRepo.getByStatus('queued')) {
+      if (task.waitReason === 'restart') this.taskRepo.update(task.id, { status: 'queued', waitReason: null });
+    }
+    this.persistRestartState();
+    if (wasDraining) this.eventBus.emit('hub.restart_cancelled');
+    this.triggerTick();
+    return this.getRestartState();
+  }
+
+  private persistRestartState(): void {
+    if (!this.db) return;
+    if (this.restartState.draining) this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('restart.drain', ?)").run(JSON.stringify(this.restartState));
+    else this.db.prepare("DELETE FROM meta WHERE key = 'restart.drain'").run();
+  }
+
+  private markRestartWaiter(taskId: string): void {
+    const task = this.taskRepo.get(taskId);
+    if (task?.status === 'queued' && task.waitReason !== 'restart') {
+      this.taskRepo.update(taskId, { status: 'queued', waitReason: 'restart' });
+    }
+  }
+
+  private markQueuedTasksForRestart(): void {
+    for (const task of this.taskRepo.getByStatus('queued')) this.markRestartWaiter(task.id);
+  }
+
+  private maybeFinishRestartDrain(): void {
+    if (!this.restartState.draining || this.getRestartState().waitingFor.length > 0) return;
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
+    this.eventBus.emit('hub.restarting', undefined, { reason: this.restartState.reason });
+    this.restartReady?.();
   }
 
   effectiveParallel(project: { maxParallel: number; id?: string; departmentId?: string }): number {
@@ -852,7 +949,7 @@ export class Scheduler {
   }
 
   /** Persist a resumable state before the service manager terminates the daemon. */
-  shutdownForUser(): { queued: number; reviewers: number; childPids: number[] } {
+  shutdownForUser(reason = 'user_stop'): { queued: number; reviewers: number; childPids: number[] } {
     const childPids: number[] = [];
     let queued = 0;
     for (const rt of [...this.running.values()]) {
@@ -861,9 +958,10 @@ export class Scheduler {
       this.running.delete(rt.taskId);
       if (rt.lockFile) this.locks.release(rt.profileName, rt.lockFile);
       this.locks.invalidate(rt.profileName);
-      this.runRepo.finish(rt.runId, 'crashed', undefined, 'user_stop');
+      this.runRepo.finish(rt.runId, 'crashed', undefined, reason);
+      if (reason === 'hub_restart') this.appendRestartLog(rt.runId);
       this.taskRepo.update(rt.taskId, { status: 'queued', resume: 1 });
-      this.eventBus.emit('task.queued', rt.taskId, { reason: 'user_stop', note: 'dừng bởi người dùng' });
+      this.eventBus.emit('task.queued', rt.taskId, { reason, note: reason === 'hub_restart' ? 'hub khởi động lại' : 'dừng bởi người dùng' });
       queued++;
     }
 
@@ -871,7 +969,7 @@ export class Scheduler {
       const task = this.taskRepo.get(entry.taskId);
       if (task && (task.status === 'checking' || task.status === 'running')) {
         this.taskRepo.update(entry.taskId, { status: 'queued', resume: 1 });
-        this.eventBus.emit('task.queued', entry.taskId, { reason: 'user_stop', note: 'dừng bởi người dùng' });
+        this.eventBus.emit('task.queued', entry.taskId, { reason, note: reason === 'hub_restart' ? 'hub khởi động lại' : 'dừng bởi người dùng' });
         queued++;
       }
     }
@@ -887,12 +985,19 @@ export class Scheduler {
       clearTimeout(active.timeout);
       if (active.exitTimeout) clearTimeout(active.exitTimeout);
       if (active.lockFile) this.locks.release(active.profileName, active.lockFile);
-      this.runRepo.finish(active.runId, 'crashed', undefined, 'user_stop');
+      this.runRepo.finish(active.runId, 'crashed', undefined, reason);
+      if (reason === 'hub_restart') this.appendRestartLog(active.runId);
       this.reviewerRuns.delete(active.taskId);
       reviewers++;
     }
-    this.eventBus.emit('daemon.shutdown_requested', undefined, { queued, reviewers, note: 'dừng bởi người dùng' });
+    this.eventBus.emit('daemon.shutdown_requested', undefined, { queued, reviewers, reason, note: 'dừng bởi người dùng' });
     return { queued, reviewers, childPids };
+  }
+
+  private appendRestartLog(runId: string): void {
+    const run = this.runRepo.get(runId);
+    if (!run?.logPath) return;
+    try { fs.appendFileSync(run.logPath, `\n[agenthub] Run bị dừng vì hub khởi động lại lúc ${new Date().toISOString()}\n`); } catch { /* best effort */ }
   }
 
   /**
@@ -1113,6 +1218,7 @@ export class Scheduler {
 
   async runChecksForTask(taskId: string, runId: string, reuseSavedResults = false): Promise<void> {
     if (this.stopped) return;
+    if (this.restartState.draining) return;
     const task = this.taskRepo.get(taskId);
     if (!task) return;
     // Checks are only admitted for the task state written by the worker
@@ -1605,6 +1711,7 @@ export class Scheduler {
       this.reapOrphans();
     }
     } finally {
+      this.maybeFinishRestartDrain();
       this.inTick = false;
     }
   }
@@ -2442,6 +2549,10 @@ export class Scheduler {
   }
 
   private scheduleNewTasks(): void {
+    if (this.restartState.draining) {
+      this.markQueuedTasksForRestart();
+      return;
+    }
     if (this.paused) {
       return;
     }
@@ -2461,7 +2572,7 @@ export class Scheduler {
         }
         continue;
       }
-      if (task.waitReason === 'focus') this.taskRepo.update(task.id, { status: 'queued', waitReason: null });
+      if (task.waitReason === 'focus' || task.waitReason === 'restart') this.taskRepo.update(task.id, { status: 'queued', waitReason: null });
       schedulableTasks.push(task);
     }
 
@@ -2580,6 +2691,7 @@ export class Scheduler {
   }
 
   private scheduleReviews(): void {
+    if (this.restartState.draining) return;
     const state = this.failoverState;
     if (!this.reviewRepo || this.config.reviewer?.enabled === false) return;
     const snapshot = state?.snapshot() || { active: false, step: undefined };

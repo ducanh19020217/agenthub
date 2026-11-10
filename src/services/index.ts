@@ -1022,6 +1022,7 @@ export interface TokenImportResult {
 }
 
 export class AppService {
+  private restartHandler?: () => void;
   private trackerRepo?: TrackerItemRepo;
   private triageDecisionHandler?: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>;
   private triageInputHandler?: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>;
@@ -1190,8 +1191,8 @@ export class AppService {
 
   setPerfCollector(collector: PerfCollector): void { this.perfCollector = collector; }
 
-  shutdownForUser(): { queued: number; reviewers: number; childPids: number[] } {
-    const result = this.scheduler.shutdownForUser();
+  shutdownForUser(reason = 'user_stop'): { queued: number; reviewers: number; childPids: number[] } {
+    const result = this.scheduler.shutdownForUser(reason);
     const chatPids = this.chatService?.getRunningPids?.() || [];
     this.chatService?.stop();
     this.deployService?.stop();
@@ -1203,6 +1204,12 @@ export class AppService {
       childPids: [...(result.childPids || []), ...chatPids],
     };
   }
+
+  getRestartState() { return this.scheduler.getRestartState(); }
+  setRestartHandler(handler: () => void) { this.restartHandler = handler; }
+  triggerRestart() { this.restartHandler?.(); }
+  beginRestartDrain(timeoutMinutes?: number, reason?: string, onReady?: () => void) { return this.scheduler.beginRestartDrain(timeoutMinutes, reason, onReady); }
+  cancelRestartDrain() { return this.scheduler.cancelRestartDrain(); }
   getPerf() { return { samples: this.perfCollector?.getSamples() || [], latest: this.perfCollector?.latest() || null }; }
 
   async getSetupStatus() {
@@ -1675,6 +1682,7 @@ export class AppService {
       recentEvents,
       brain: this.brainService?.getStatus(),
       schedulerPaused: this.scheduler.isPaused(),
+      restart: this.scheduler.getRestartState(),
       focus: this.config.focus,
       disk: {
         freeGB: disk.freeGB,

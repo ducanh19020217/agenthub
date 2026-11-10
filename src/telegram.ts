@@ -243,6 +243,7 @@ export const TELEGRAM_BOT_COMMANDS: Array<{ command: string; description: string
   { command: 'status', description: 'Tình hình hub: task, worker, quota' },
   { command: 'focus', description: 'Tập trung tài nguyên cho một dự án: /focus <dự án>|off' },
   { command: 'shutdown', description: 'Tắt AgentHub (bật lại từ máy bằng agenthub start)' },
+  { command: 'restart', description: 'Khởi động lại khi rảnh; /restart now để xác nhận khởi động lại ngay' },
   { command: 'tasks', description: 'Danh sách task (lọc: /tasks running)' },
   { command: 'task', description: 'Chi tiết một task: /task <id>' },
   { command: 'newtask', description: 'Tạo task từ một đoạn mô tả chung' },
@@ -1376,6 +1377,21 @@ export class TelegramBotService {
         break;
       }
 
+      case '/restart': {
+        if (args[0]?.toLowerCase() === 'now') {
+          const status = this.service.getStatus();
+          const running = status.tasks.running + status.tasks.checking;
+          await this.sendMessage(chatId, `⚠️ <b>Khởi động lại ngay?</b> ${running} worker/check đang chạy sẽ bị dừng.`, { inline_keyboard: [[
+            { text: '✅ Xác nhận', callback_data: 'hubrestart:confirm' },
+            { text: '❌ Hủy', callback_data: 'hubrestart:cancel' },
+          ]] });
+        } else {
+          const state = this.service.beginRestartDrain(120, `telegram:${chatId}`, () => this.service.triggerRestart());
+          await this.sendMessage(chatId, `⏳ Sẽ khởi động lại khi ${state.waitingFor.length} việc đang chạy hoàn tất.`);
+        }
+        break;
+      }
+
       case '/compact':
         await this.sendMessage(chatId, 'ℹ️ Tính năng nén ngữ cảnh chưa được bật.');
         break;
@@ -2482,6 +2498,18 @@ export class TelegramBotService {
       this.service.shutdownForUser();
       await this.sendMessage(chatId, '🛑 AgentHub đã lưu trạng thái và đang tắt. Bật lại từ máy bằng: <code>agenthub start</code>.');
       setImmediate(() => process.kill(process.pid, 'SIGTERM'));
+      return;
+    }
+
+    if (domain === 'hubrestart') {
+      if (action !== 'confirm') {
+        await this.answerCallbackQuery(query.id, 'Đã hủy.');
+        return;
+      }
+      await this.answerCallbackQuery(query.id, 'Đang khởi động lại...');
+      this.service.shutdownForUser('hub_restart');
+      await this.sendMessage(chatId, '🔄 Đang khởi động lại AgentHub; worker đã được đưa về hàng chờ.');
+      this.service.triggerRestart();
       return;
     }
 
@@ -4066,6 +4094,8 @@ export class TelegramBotService {
         type === 'disk.docker_low' ||
         type === 'claude.quota_exhausted' ||
         type === 'hub.restart_failed' ||
+        type === 'hub.restarting' ||
+        type === 'hub.restart_timeout' ||
         type.startsWith('deploy.') ||
         type.startsWith('gitea.sync.') ||
         type.startsWith('remote_deploy.') ||
@@ -4314,6 +4344,18 @@ export class TelegramBotService {
           `${prefix}${header}\nID: <code>${taskId}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>`,
           { inline_keyboard: keyboard },
         );
+        break;
+      }
+
+      case 'hub.restarting':
+      case 'hub.restart_timeout': {
+        const timeout = type === 'hub.restart_timeout';
+        const waiting = typeof p.waiting === 'number'
+          ? p.waiting
+          : Array.isArray(p.waitingFor) ? p.waitingFor.length : 0;
+        this.broadcastMessage(timeout
+          ? `${prefix}⏳ <b>Khởi động lại hub hết thời gian chờ</b>\nHub tiếp tục chạy bình thường; còn ${waiting} việc đang hoạt động.`
+          : `${prefix}🔄 <b>Hub đang khởi động lại</b>\nCác worker đã hoàn tất; dịch vụ sẽ khởi động lại ngay.`);
         break;
       }
 
@@ -5222,7 +5264,7 @@ export class TelegramBotService {
   }
 
   /** Sự kiện làm task bị ngắt giữa chừng; báo Telegram khi notify.interrupted bật (kể cả brain auto). */
-  private static readonly INTERRUPT_EVENTS = new Set(['task.cancelled', 'task.timeout', 'task.no_commit', 'task.looping', 'task.overlap', 'task.failover', 'task.auto_closed']);
+  private static readonly INTERRUPT_EVENTS = new Set(['task.cancelled', 'task.timeout', 'task.no_commit', 'task.looping', 'task.overlap', 'task.failover', 'task.auto_closed', 'hub.restart_timeout']);
   private static readonly INTERRUPT_LABELS: Record<string, string> = {
     'task.timeout': '⏱ <b>Task quá thời gian</b>',
     'task.no_commit': '⚠️ <b>Task lâu không commit</b>',
@@ -5230,6 +5272,7 @@ export class TelegramBotService {
     'task.overlap': '⚠️ <b>Task chồng lấn</b>',
     'task.failover': '🔀 <b>Task chuyển tài khoản/model</b>',
     'task.auto_closed': '📦 <b>Task tự đóng</b>',
+    'hub.restart_timeout': '⏳ <b>Khởi động lại hub hết thời gian chờ</b>',
   };
 
   /** Trạng thái coi là "còn việc": task chưa kết thúc. */
@@ -5370,6 +5413,7 @@ export class TelegramBotService {
 /status - Xem tổng quan hệ thống (task, hồ sơ, quota, ổ đĩa)
 /focus &lt;dự án&gt; - Tập trung tài nguyên cho dự án; /focus off để tắt
 /shutdown - Tắt AgentHub; bật lại từ máy bằng <code>agenthub start</code>
+/restart - Khởi động lại khi rảnh; dùng <code>/restart now</code> để xác nhận dừng ngay
 /digest - Xem tóm tắt hệ thống (task hoàn thành, đã merge, quota, việc cần quyết định)
 /plans - Xem 5 kế hoạch gần nhất và tiến độ
 /ci [dự án] - Xem trạng thái CI GitHub Actions gần nhất và job lỗi

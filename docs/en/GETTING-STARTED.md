@@ -125,6 +125,10 @@ systemctl --user status agenthub  # Check daemon running status
 agenthub open                     # Opens http://127.0.0.1:7700/#token=... in your default browser
 ```
 
+`agenthub restart` drains by default; add `--wait` to wait until the drain completes. Use `--now`/`--force` only when you accept stopping active workers. `./scripts/run-prod.sh --restart` and `./scripts/stop-prod.sh` also drain by default, while `--force` stops immediately.
+
+If the service was installed before safe restart support, run `agenthub install-service` again (or `./scripts/run-prod.sh --build-only` followed by `node dist/cli.js install-service`) so the systemd unit receives `KillMode=process`; verify with `systemctl --user cat agenthub`. This does not require interrupting active workers: the drain restarts the hub when it becomes idle.
+
 - The Web Dashboard binds strictly to `127.0.0.1` and requires an authentication token (which can also be retrieved via `agenthub open --no-browser`).
 - To access the dashboard from a remote machine, **use an SSH tunnel** rather than exposing port 7700 to the public network:
   ```bash

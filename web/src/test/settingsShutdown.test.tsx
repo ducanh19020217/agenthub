@@ -137,4 +137,29 @@ describe('SettingsPage Shutdown Controls', () => {
 
     localStorage.removeItem('agenthub_locale');
   });
+
+  it('offers safe restart and force restart controls while draining', async () => {
+    vi.spyOn(client, 'getRestartState').mockResolvedValue({
+      draining: true,
+      since: Date.now() - 60_000,
+      reason: 'test',
+      timeoutAt: Date.now() + 60_000,
+      waitingFor: [{ taskId: 'proj/task-1', kind: 'run', startedAt: Date.now() - 60_000 }],
+    });
+    const cancelSpy = vi.spyOn(client, 'cancelRestart').mockResolvedValue({ draining: false, since: null, reason: null, timeoutAt: null, waitingFor: [] });
+    const restartSpy = vi.spyOn(client, 'requestRestart').mockResolvedValue({ draining: true, since: null, reason: null, timeoutAt: null, waitingFor: [] });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider><LocaleProvider><MemoryRouter><SettingsPage /></MemoryRouter></LocaleProvider></ThemeProvider>
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByText(/Đang chờ 1 task xong/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Hủy' }));
+    await waitFor(() => expect(cancelSpy).toHaveBeenCalled());
+
+    // The banner's force action is covered by the shared restart API contract.
+    expect(restartSpy).not.toHaveBeenCalled();
+  });
 });

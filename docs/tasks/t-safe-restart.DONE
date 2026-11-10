@@ -1,0 +1,36 @@
+# t-safe-restart hoàn tất
+
+## Đã làm
+
+- Thêm trạng thái drain restart trong Scheduler, lưu meta để xóa cờ stale khi daemon khởi động lại.
+- Thêm `POST/GET/DELETE /api/system/restart`; `when-idle` chặn dispatch worker/check/reviewer mới, chờ hoạt động hiện tại, timeout an toàn và phát các event restart; `now` giữ hành vi dừng cũ nhưng ghi `hub_restart` và dòng giải thích vào log run.
+- Thêm callback restart có kiểm soát cho daemon, `KillMode=process` trong systemd unit, CLI `agenthub restart`, và run-prod gọi API drain trước khi fallback restart trực tiếp.
+- Thêm nút drain/hủy trong Settings, banner trạng thái drain, Telegram `/restart` và xác nhận `/restart now`, cập nhật locale và getting-started.
+
+## Kiểm tra
+
+- `timeout 300 npm run lint`: đạt, 80 warning `no-explicit-any` có sẵn trong test, 0 error.
+- `timeout 300 npx tsc --noEmit -p .`: đạt.
+- `timeout 300 npx tsc --noEmit -p web`: đạt.
+- `timeout 300 npm run test -- --run`: đạt, 134 file / 1.656 test.
+- `timeout 300 npm run test:web -- --run`: đạt, 72 file / 630 test.
+- `timeout 300 npm run build:web`: đạt.
+- Test mục tiêu shutdown/Telegram: đạt, 2 file / 150 test.
+
+## Còn thiếu
+
+- `scripts/stop-prod.sh` chưa chuyển hoàn toàn sang một luồng stop-after-drain riêng; API hiện có luồng restart drain và script vẫn giữ fallback stop tương thích.
+- Chưa thêm `waitReason: 'restart'` riêng cho task queued và chưa có test drain chuyên biệt; các kiểm tra hiện có không chạy agy/codex thật hay restart service thật.
+
+## Commit
+
+- `1efb6d74 feat: add safe restart drain mode`
+- `310a10e5 feat: expose safe restart controls`
+- `076e87b9 feat: show restart drain status`
+- `139521fe fix: guard restart banner without query client`
+
+## Bổ sung sau feedback
+
+- Bọc `RestartBanner` bằng `QueryClientContext` guard, đồng nhất với các banner khác để Layout vẫn render được trong test/consumer không dùng `QueryClientProvider`.
+- Kiểm tra lại sau sửa: `timeout 300 npm run lint` đạt với 0 error và 80 warning `no-explicit-any` có sẵn trong test; `timeout 300 npx tsc --noEmit -p .` đạt; `timeout 300 npx tsc --noEmit -p web` đạt; `timeout 300 npm run test -- --run` đạt 134 file / 1.656 test; `timeout 300 npm run test:web -- --run` đạt 72 file / 630 test; `timeout 300 npm run build:web` đạt.
+- Không còn việc mới phát sinh. Các giới hạn đã nêu ở mục “Còn thiếu” vẫn là giới hạn phạm vi triển khai hiện tại.

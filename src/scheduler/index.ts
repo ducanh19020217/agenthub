@@ -475,7 +475,10 @@ export class Scheduler {
     });
     this.eventBus.on('task.done', (taskId) => this.onTaskDoneOrCancelled(taskId));
     this.eventBus.on('task.cancelled', (taskId) => this.onTaskDoneOrCancelled(taskId));
-    this.eventBus.on('task.queued', (taskId) => this.invalidateChecks(taskId));
+    this.eventBus.on('task.queued', (taskId) => {
+      this.invalidateChecks(taskId);
+      if (this.restartState.draining) this.markRestartWaiter(taskId);
+    });
   }
 
   getCheckResults(taskId: string) { return this.db ? getCheckResults(this.db, taskId) : []; }
@@ -596,6 +599,7 @@ export class Scheduler {
     const timeoutAt = now + Math.max(1, timeoutMinutes) * 60_000;
     this.restartState = { draining: true, since: this.restartState.since || now, reason: reason?.trim() || null, timeoutAt };
     this.restartReady = onReady;
+    this.markQueuedTasksForRestart();
     if (this.restartTimer) clearTimeout(this.restartTimer);
     this.restartTimer = setTimeout(() => {
       if (!this.restartState.draining) return;
@@ -619,6 +623,9 @@ export class Scheduler {
     const wasDraining = this.restartState.draining;
     this.restartState = { draining: false, since: null, reason: null, timeoutAt: null };
     this.restartReady = undefined;
+    for (const task of this.taskRepo.getByStatus('queued')) {
+      if (task.waitReason === 'restart') this.taskRepo.update(task.id, { status: 'queued', waitReason: null });
+    }
     this.persistRestartState();
     if (wasDraining) this.eventBus.emit('hub.restart_cancelled');
     this.triggerTick();
@@ -629,6 +636,17 @@ export class Scheduler {
     if (!this.db) return;
     if (this.restartState.draining) this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('restart.drain', ?)").run(JSON.stringify(this.restartState));
     else this.db.prepare("DELETE FROM meta WHERE key = 'restart.drain'").run();
+  }
+
+  private markRestartWaiter(taskId: string): void {
+    const task = this.taskRepo.get(taskId);
+    if (task?.status === 'queued' && task.waitReason !== 'restart') {
+      this.taskRepo.update(taskId, { status: 'queued', waitReason: 'restart' });
+    }
+  }
+
+  private markQueuedTasksForRestart(): void {
+    for (const task of this.taskRepo.getByStatus('queued')) this.markRestartWaiter(task.id);
   }
 
   private maybeFinishRestartDrain(): void {
@@ -2531,7 +2549,10 @@ export class Scheduler {
   }
 
   private scheduleNewTasks(): void {
-    if (this.restartState.draining) return;
+    if (this.restartState.draining) {
+      this.markQueuedTasksForRestart();
+      return;
+    }
     if (this.paused) {
       return;
     }
@@ -2551,7 +2572,7 @@ export class Scheduler {
         }
         continue;
       }
-      if (task.waitReason === 'focus') this.taskRepo.update(task.id, { status: 'queued', waitReason: null });
+      if (task.waitReason === 'focus' || task.waitReason === 'restart') this.taskRepo.update(task.id, { status: 'queued', waitReason: null });
       schedulableTasks.push(task);
     }
 

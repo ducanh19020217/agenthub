@@ -83,6 +83,7 @@ export const vi = {
     slot: 'Chờ slot chạy',
     load: 'Chờ giảm tải máy',
     dependency: 'Chờ task phụ thuộc',
+    restart: 'Hub sắp khởi động lại',
     hubHome: 'Ổ chứa dữ liệu hub (~/.agenthub) sắp đầy (còn {free} GB / cần {min} GB)',
     hubHomeShort: 'Ổ dữ liệu hub đầy',
   },

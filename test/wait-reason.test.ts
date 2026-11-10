@@ -518,4 +518,30 @@ describe('Task waitReason (lý do chờ)', () => {
       payload: { reason: 'department_changed' },
     });
   });
+
+  it('marks queued tasks while restart drain is active and clears the reason on cancel', () => {
+    ctx.profileRepo.upsert({
+      name: 'restart-profile',
+      engine: 'agy',
+      kind: 'isolated',
+      home: path.join(tmpDir, 'agy-homes', 'restart-profile'),
+      email: 'restart@example.com',
+      enabled: 1,
+    });
+    ctx.taskRepo.insert({
+      id: 'proj/t-restart-wait',
+      projectId: 'proj',
+      slug: 't-restart-wait',
+      title: 'Restart wait',
+      status: 'queued',
+      level: 'easy',
+    });
+
+    ctx.scheduler.beginRestartDrain(120, 'test');
+    expect(ctx.taskRepo.get('proj/t-restart-wait')?.waitReason).toBe('restart');
+
+    ctx.scheduler.cancelRestartDrain();
+    expect(ctx.taskRepo.get('proj/t-restart-wait')?.waitReason).toBeNull();
+    expect(ctx.scheduler.getRestartState().draining).toBe(false);
+  });
 });

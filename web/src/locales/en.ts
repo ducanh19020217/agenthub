@@ -85,6 +85,7 @@ export const en: typeof vi = {
     slot: 'Waiting for slot',
     load: 'Waiting for machine load',
     dependency: 'Waiting for dependency',
+    restart: 'Waiting for hub to restart',
     hubHome: 'Hub data drive (~/.agenthub) almost full ({free} GB free / {min} GB needed)',
     hubHomeShort: 'Hub data drive full',
   },

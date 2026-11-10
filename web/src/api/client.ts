@@ -40,6 +40,7 @@ import {
   ApplyPresetResult,
   EffectiveConfigResponse,
   OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto, OpenProjectTypeDto, OpenProjectSyncResult, GiteaStatus, RemoteDeployStatus, ProjectGitStatus,
+  CockpitScanResult, CockpitImportResult, CockpitSource,
 } from '../types/api';
 import { getActiveLocale, translateApiErrorMessage } from '../utils/apiError';
 
@@ -535,6 +536,25 @@ export async function importAgyTokens(data: {
   return apiFetch<ImportTokensResult>('/api/profiles/import-tokens', {
     method: 'POST',
     body: JSON.stringify(data),
+  });
+}
+
+export async function scanCockpit(dataDir?: string): Promise<CockpitScanResult> {
+  const query = dataDir ? `?dataDir=${encodeURIComponent(dataDir)}` : '';
+  return apiFetch<CockpitScanResult>(`/api/integrations/cockpit/scan${query}`);
+}
+
+export async function importCockpit(
+  items: Array<{ source: CockpitSource; cockpitId: string }>,
+  options?: { verify?: boolean; dataDir?: string },
+): Promise<CockpitImportResult> {
+  return apiFetch<CockpitImportResult>('/api/integrations/cockpit/import', {
+    method: 'POST',
+    body: JSON.stringify({
+      items,
+      verify: options?.verify,
+      dataDir: options?.dataDir,
+    }),
   });
 }
 

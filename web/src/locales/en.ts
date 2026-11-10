@@ -450,6 +450,8 @@ export const en: typeof vi = {
     timeline: 'Timeline',
     noEvents: 'No events recorded yet.',
     reviewFallbackLine: 'Codex out of quota, Claude is reviewing ({profile})',
+    adoptedBadge: 'adopted after hub restart',
+    runAdoptedNote: 'Hub restarted, continuing to monitor worker',
     reviewHistory: 'Review history', unknownReviewer: 'Unknown reviewer', reviewApproved: 'Approved', reviewChangesRequested: 'Changes requested',
     reviewChain: 'Review chain',
     mergeNotConfigured: 'Project has not configured auto-merge',
@@ -1672,6 +1674,7 @@ export const en: typeof vi = {
       waiting: "Waiting for review",
     },
     run: {
+      adopted: "Adopted worker after restart",
       crashed: "Run crashed",
       output: "Run output",
       stalled: "Run stalled",

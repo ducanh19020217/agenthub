@@ -75,6 +75,7 @@ export const ALL_BACKEND_EVENT_TYPES: string[] = [
   'review.gate_started',
   'review.started',
   'review.waiting',
+  'run.adopted',
   'run.crashed',
   'run.output',
   'run.stalled',

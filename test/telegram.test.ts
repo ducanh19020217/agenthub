@@ -3087,6 +3087,18 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(3);
   });
 
+  it('notifies when a worker is adopted after restart', async () => {
+    ctx.projectRepo.insert({ id: 'padopt', name: 'PAdopt', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'padopt/t-1', projectId: 'padopt', slug: 't-1', title: 'Task Adopted', body: '', level: 'easy', status: 'running' });
+    const bot = createBot('auto');
+    bot.handleEvent('run.adopted', 'padopt/t-1', { runId: 'run-1', pid: 1234, note: 'Hub khởi động lại, tiếp tục theo dõi worker' });
+    await bot.flushQueue(CHAT_ID);
+    const sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    const lastSend = sends[sends.length - 1];
+    expect(lastSend.body?.text).toContain('Hub khởi động lại, tiếp tục theo dõi worker');
+    expect(lastSend.body?.text).toContain('padopt/t-1');
+  });
+
   it('tắt notify.taskDone và notify.projectIdle thì task.done bị chặn trong auto mode như trước', async () => {
     ctx.projectRepo.insert({ id: 'pq', name: 'PQ', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
     ctx.taskRepo.insert({ id: 'pq/t-1', projectId: 'pq', slug: 't-1', title: 'Xong', body: '', level: 'easy', status: 'done' });

@@ -622,6 +622,14 @@ export const TaskDetailPage: React.FC = () => {
                   {getReviewerEngine(task) === 'claude' ? 'Claude' : 'Codex'}
                 </span>
               )}
+              {(task.currentRun?.adopted || task.events?.some((e) => e.type === 'run.adopted')) && (
+                <span
+                  data-testid="task-adopted-badge"
+                  className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)] border border-[color-mix(in_srgb,var(--t-accent)_30%,transparent)]"
+                >
+                  {t('taskDetail.adoptedBadge')}
+                </span>
+              )}
               {task.status === 'running' && (task.paused || task.currentRun?.paused) && (
                 <span
                   data-testid="task-paused-badge"
@@ -1030,6 +1038,11 @@ export const TaskDetailPage: React.FC = () => {
                     </span>
                   )}
                 </div>
+                {evt.type === 'run.adopted' && (
+                  <p className="text-xs text-[var(--t-accent)] font-medium">
+                    {String(evt.payload?.note || t('taskDetail.runAdoptedNote'))}
+                  </p>
+                )}
                 {evt.type === 'review.fallback' && (
                   <p className="text-xs text-[var(--t-warn)] font-medium">
                     {t('taskDetail.reviewFallbackLine', { profile: evt.payload?.profile || 'claude' })}

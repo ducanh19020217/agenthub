@@ -3140,7 +3140,8 @@ export class TelegramBotService {
         const pauseBadge = r.paused
           ? (r.pauseReason === 'load' || r.pauseReason === 'brain_load' ? ' ⏸ [Tạm dừng (quá tải)]' : ' ⏸ [Tạm dừng (thủ công)]')
           : '';
-        text = text + `• <code>${r.taskId}</code> (${r.profileName}/${r.model})${pauseBadge}\n  <i>${this.escapeHtml(titleStr)}</i>\n`;
+        const adoptedBadge = (r as { adopted?: boolean }).adopted ? ' 🔄 [Đã nhận lại sau khởi động lại]' : '';
+        text = text + `• <code>${r.taskId}</code> (${r.profileName}/${r.model})${pauseBadge}${adoptedBadge}\n  <i>${this.escapeHtml(titleStr)}</i>\n`;
       }
     }
 
@@ -4088,6 +4089,7 @@ export class TelegramBotService {
     const effectiveMode = effectiveBrainMode(projectId, projectId ? this.projectRepo.get(projectId) : null, this.config.brain);
     if (effectiveMode === 'auto') {
       const isAllowedInAuto =
+        type === 'run.adopted' ||
         type === 'brain.notify' ||
         type === 'disk.low' ||
         type === 'disk.ok' ||
@@ -4343,6 +4345,18 @@ export class TelegramBotService {
         this.broadcastMessage(
           `${prefix}${header}\nID: <code>${taskId}</code>\nTiêu đề: <b>${this.escapeHtml(title)}</b>`,
           { inline_keyboard: keyboard },
+        );
+        break;
+      }
+
+      case 'run.adopted': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const keyboard: InlineKeyboardButton[][] = taskId
+          ? [[{ text: '🌐 Xem task', url: this.getDashboardUrl(`#/tasks/${toRouteId(taskId)}`) }]]
+          : [];
+        this.broadcastMessage(
+          `${prefix}🔄 <b>Hub khởi động lại, tiếp tục theo dõi worker</b>\nID: <code>${taskId}</code>${minimal ? '' : `\nTiêu đề: <b>${this.escapeHtml(title)}</b>`}`,
+          keyboard.length ? { inline_keyboard: keyboard } : undefined,
         );
         break;
       }
@@ -5325,6 +5339,8 @@ export class TelegramBotService {
     const prefix = this.projectPrefix(projectId, { raw: true });
     const minimal = this.isMinimalProject(projectId);
     switch (type) {
+      case 'run.adopted':
+        return minimal ? `${prefix}Tiếp tục theo dõi worker` : `${prefix}Task ${this.resolveTaskTitle(taskId, p)}: Hub khởi động lại, tiếp tục theo dõi worker`;
       case 'brain.notify':
         return minimal ? `${prefix}Bộ não: đã trả lời` : `${prefix}Bộ não: ${p?.text || 'Thông báo mới'}`;
       case 'task.review_ready':

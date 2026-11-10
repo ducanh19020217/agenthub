@@ -448,6 +448,8 @@ export const vi = {
     timeline: 'Dòng thời gian (Timeline)',
     noEvents: 'Chưa có sự kiện nào.',
     reviewFallbackLine: 'Codex hết quota, Claude đang duyệt ({profile})',
+    adoptedBadge: 'đã nhận lại sau khi hub khởi động lại',
+    runAdoptedNote: 'Hub khởi động lại, tiếp tục theo dõi worker',
     reviewHistory: 'Lịch sử duyệt', unknownReviewer: 'Reviewer không xác định', reviewApproved: 'Đã duyệt', reviewChangesRequested: 'Yêu cầu sửa',
     reviewChain: 'Chuỗi review',
     mergeNotConfigured: 'Project chưa cấu hình merge tự động',
@@ -1701,6 +1703,7 @@ export const vi = {
       waiting: "Đang chờ duyệt",
     },
     run: {
+      adopted: "Nhận lại tiến trình sau khởi động lại",
       crashed: "Tiến trình dừng đột ngột",
       output: "Đầu ra tiến trình",
       stalled: "Tiến trình bị treo",

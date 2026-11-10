@@ -1,0 +1,26 @@
+# t-worker-survive-restart — DONE
+
+Đã hoàn tất worker handoff/adoption trên nhánh `agenthub/t-worker-survive-restart`.
+
+- Chọn `KillMode=process` cho systemd, `TimeoutStopSec=20`, và `AbandonProcessGroup=true` cho launchd; lý do được ghi tại `docs/DECISIONS.md` (DEC-022).
+- Thêm `agenthub service upgrade` để ghi lại unit/plist đã cài và reload/activate service; `scripts/run-prod.sh` tự gọi lệnh này sau build.
+- Daemon ghi durable handoff (`pid`, `pgid`, log offset, lock file, thời điểm handoff), không giết worker khi restart/handoff; thao tác dừng hẳn vẫn kill worker như cũ.
+- Daemon mới xác minh PID qua start time, worktree cwd và command line trước khi adopt, giữ lock/profile slot, polling kết thúc, tiếp tục watchdog/log và pipeline DONE/BLOCKED → check → review → merge. Run được adopt được ghi rõ là không có exit code.
+- Có event/timeline `run.adopted` với thông báo “Hub khởi động lại, tiếp tục theo dõi worker”; task không bị dispatch trùng.
+- Reviewer/check process không được adopt trực tiếp; các bước này được chạy lại riêng sau restart và giữ nguyên kết quả worker.
+
+Kiểm tra:
+
+- `npm run lint`: đạt, 0 lỗi, 82 warning `no-explicit-any` cũ.
+- `npx tsc --noEmit -p .`: đạt.
+- `npx tsc --noEmit -p web`: đạt.
+- `npm run test -- --run`: đạt, 135 files / 1666 tests.
+- `npm run test:web -- --run`: đạt, 73 files / 632 tests.
+- `npm run build:web`: đạt; chỉ có cảnh báo chunk lớn hơn 500 kB.
+
+Commit triển khai:
+
+- `b18042fd feat: preserve workers across service upgrades`
+- `676283eb feat: adopt workers after daemon handoff`
+
+Việc còn thiếu/giới hạn: reviewer/check không nhận lại process đang chạy trực tiếp; hub chạy lại bước đó riêng. Người dùng cần chạy `agenthub service upgrade` (hoặc `scripts/run-prod.sh`) trên máy đã cài để cập nhật unit/plist hiện hữu; không restart service thật trong test.

@@ -654,6 +654,13 @@ export async function startDaemon(
 
   // Start Fastify HTTP server with security and API endpoints
   let controlledRestart = false;
+  ctx.service.setRestartHandler(() => {
+    controlledRestart = true;
+    setImmediate(() => {
+      getPlatform().restartService();
+      void shutdown();
+    });
+  });
   const fastify = await createServer(ctx.service, config, {
     openProjectSync: (sourceId) => ctx.intakeService.sync(sourceId),
     openProjectDailyReport: (sourceId, date) =>
@@ -679,11 +686,7 @@ export async function startDaemon(
       setImmediate(() => { void shutdown(); });
     },
     onRestart: () => {
-      controlledRestart = true;
-      setImmediate(() => {
-        getPlatform().restartService();
-        void shutdown();
-      });
+      ctx.service.triggerRestart();
     },
   });
 

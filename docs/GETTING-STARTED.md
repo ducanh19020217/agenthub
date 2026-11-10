@@ -125,6 +125,9 @@ agenthub install-service          # Linux: systemd; macOS: ~/Library/LaunchAgent
 agenthub stop                     # tắt êm, task đang chạy sẽ resume
 agenthub stop --disable           # tắt và không tự bật khi đăng nhập
 agenthub start                    # bật lại
+agenthub restart                  # yêu cầu khởi động lại khi rảnh, giữ worker đang chạy
+agenthub restart --now             # khởi động lại ngay (cảnh báo: dừng worker)
+agenthub restart --when-idle --wait # chờ đến khi drain hoàn tất
 # Đóng tab web không tắt hub; uninstall-service là gỡ service.
 loginctl enable-linger "$USER"    # (tuỳ chọn) chạy cả khi chưa đăng nhập màn hình
 systemctl --user status agenthub  # kiểm tra đang chạy
@@ -135,7 +138,7 @@ agenthub open                     # mở http://127.0.0.1:7700/#token=...
 - Dashboard chỉ nghe ở `127.0.0.1` và cần token (lấy bằng `agenthub open --no-browser`).
 - Xem dashboard từ máy khác: **dùng SSH tunnel**, không mở cổng ra mạng:
   `ssh -L 7700:127.0.0.1:7700 user@may-chay-hub` rồi mở `http://127.0.0.1:7700/#token=...` trên máy của bạn.
-- Cập nhật phiên bản mới: `git pull && npm ci && npm --prefix web ci && npm run build && npm run build:web && systemctl --user restart agenthub`.
+- Cập nhật phiên bản mới: `git pull && npm ci && npm --prefix web ci && npm run build && npm run build:web && ./scripts/run-prod.sh --restart` (mặc định restart khi rảnh; dùng `--force` nếu cần dừng ngay).
 
 ## 4. Kết nối tài khoản worker (Gemini, Codex)
 

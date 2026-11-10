@@ -973,6 +973,20 @@ export async function shutdownHub(disable = false): Promise<{ ok: boolean; queue
   return apiFetch('/api/hub/shutdown', { method: 'POST', body: JSON.stringify({ disable }) });
 }
 
+export interface RestartState {
+  draining: boolean;
+  since: number | null;
+  reason: string | null;
+  timeoutAt: number | null;
+  waitingFor: Array<{ taskId: string; kind: 'run' | 'check' | 'review'; startedAt: number }>;
+}
+
+export async function getRestartState(): Promise<RestartState> { return apiFetch('/api/system/restart'); }
+export async function requestRestart(mode: 'when-idle' | 'now' = 'when-idle'): Promise<RestartState> {
+  return apiFetch('/api/system/restart', { method: 'POST', body: JSON.stringify({ mode }) });
+}
+export async function cancelRestart(): Promise<RestartState> { return apiFetch('/api/system/restart', { method: 'DELETE' }); }
+
 export async function uploadBrandingLogo(file: File): Promise<{ ok: boolean; logo: string }> {
   const data = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();

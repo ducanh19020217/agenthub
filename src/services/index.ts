@@ -1022,6 +1022,7 @@ export interface TokenImportResult {
 }
 
 export class AppService {
+  private restartHandler?: () => void;
   private trackerRepo?: TrackerItemRepo;
   private triageDecisionHandler?: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>;
   private triageInputHandler?: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>;
@@ -1205,6 +1206,8 @@ export class AppService {
   }
 
   getRestartState() { return this.scheduler.getRestartState(); }
+  setRestartHandler(handler: () => void) { this.restartHandler = handler; }
+  triggerRestart() { this.restartHandler?.(); }
   beginRestartDrain(timeoutMinutes?: number, reason?: string, onReady?: () => void) { return this.scheduler.beginRestartDrain(timeoutMinutes, reason, onReady); }
   cancelRestartDrain() { return this.scheduler.cancelRestartDrain(); }
   getPerf() { return { samples: this.perfCollector?.getSamples() || [], latest: this.perfCollector?.latest() || null }; }

@@ -48,6 +48,7 @@ function messageText(value: unknown): string {
 export class ClaudeSessionScanner {
   private timer?: NodeJS.Timeout;
   private lastBrainEventAt = 0;
+  private scanning = false;
   private readonly weights: { cacheCreation: number; cacheRead: number };
   constructor(private db: Database.Database, private options: ClaudeScanOptions) {
     this.weights = { cacheCreation: options.weights?.cacheCreation ?? 1.25, cacheRead: options.weights?.cacheRead ?? 0.1 };
@@ -70,6 +71,12 @@ export class ClaudeSessionScanner {
     }
   }
   async scan() {
+    // Quét lâu hơn chu kỳ 60s thì bỏ lượt mới, tránh nhiều lượt đọc cùng file chồng nhau.
+    if (this.scanning) return;
+    this.scanning = true;
+    try { await this.scanOnce(); } finally { this.scanning = false; }
+  }
+  private async scanOnce() {
     this.cleanExpiredLimits();
     const repo = new ClaudeSessionRepo(this.db);
     const tasks = this.db.prepare('SELECT id,slug FROM tasks').all() as Array<{ id: string; slug: string }>;
@@ -108,8 +115,11 @@ export class ClaudeSessionScanner {
     const stream = fs.createReadStream(file, { start, encoding: 'utf8' });
     const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
     try {
-      let lineNumber = start === 0 ? 0 : countNewlines(file, start);
+      // Số dòng trước offset chỉ dùng để ghi chú vị trí (failover); chỉ đếm khi thật sự có dòng mới,
+      // file không đổi thì không đọc lại phần đã quét.
+      let lineNumber: number | null = start === 0 ? 0 : null;
       for await (const line of lines) {
+        if (lineNumber === null) lineNumber = await countNewlines(file, start);
         lineNumber += 1;
         const raw = line as string;
         const bytes = Buffer.byteLength(raw + '\n');
@@ -377,15 +387,17 @@ function findTranscriptFiles(dir: string, maxAgeDays: number, dirAllowed: (name:
   return files;
 }
 
-function countNewlines(file: string, end: number): number {
+async function countNewlines(file: string, end: number): Promise<number> {
+  // Đọc từng khúc, không nạp cả phần đầu file (có thể hàng trăm MB) vào bộ nhớ và không chặn event loop.
+  let count = 0;
   try {
-    const prefix = Buffer.allocUnsafe(end);
-    const fd = fs.openSync(file, 'r');
-    try { fs.readSync(fd, prefix, 0, end, 0); } finally { fs.closeSync(fd); }
-    let count = 0;
-    for (const byte of prefix) if (byte === 10) count += 1;
-    return count;
-  } catch { return 0; }
+    const stream = fs.createReadStream(file, { start: 0, end: end - 1, highWaterMark: 1 << 20 });
+    for await (const chunk of stream as AsyncIterable<Buffer>) {
+      let index = chunk.indexOf(10);
+      while (index !== -1) { count += 1; index = chunk.indexOf(10, index + 1); }
+    }
+  } catch { return count; }
+  return count;
 }
 
 function extractUserText(event: ClaudeTranscriptEvent): string | null {

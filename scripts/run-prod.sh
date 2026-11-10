@@ -60,6 +60,26 @@ print_dashboard_link() {
   echo "  (Hoặc chạy lệnh 'agenthub open' để tự mở trình duyệt)"
 }
 
+print_restart_waiting() {
+  RESTART_JSON="$1" node -e '
+    const state = JSON.parse(process.env.RESTART_JSON || "{}");
+    const waiting = state.waitingFor || [];
+    console.log(`Sẽ khởi động lại khi ${waiting.length} task chạy xong.`);
+    for (const item of waiting) {
+      const started = Number(item.startedAt);
+      const elapsed = Number.isFinite(started) ? Math.max(0, Math.floor((Date.now() - started) / 60000)) : 0;
+      console.log(`  - ${item.taskId} (${item.kind}, đã chạy ${elapsed} phút)`);
+    }
+  ' 2>/dev/null || echo "Sẽ khởi động lại khi daemon rảnh."
+}
+
+wait_for_restart() {
+  while health_ok; do
+    sleep 1
+  done
+  echo "✅ Daemon đã thoát để service manager khởi động lại."
+}
+
 show_help() {
   echo "Cách dùng: $0 [tùy_chọn]"
   echo ""
@@ -103,11 +123,8 @@ case "$MODE" in
       else
         RESPONSE=$(curl -fsS -m 5 -X POST "http://127.0.0.1:7700/api/system/restart" -H "Authorization: Bearer $TOKEN" -H 'Host: 127.0.0.1:7700' -H 'Content-Type: application/json' --data '{"mode":"when-idle"}' || true)
         if [ -n "$RESPONSE" ]; then
-          COUNT=$(printf '%s' "$RESPONSE" | grep -o '"taskId"' | wc -l | tr -d ' ')
-          echo "Sẽ khởi động lại khi $COUNT task chạy xong."
-          if [ "$WAIT" = 1 ]; then
-            while health_ok; do sleep 1; done
-          fi
+          print_restart_waiting "$RESPONSE"
+          if [ "$WAIT" = 1 ]; then wait_for_restart; fi
           exit 0
         fi
       fi
@@ -205,9 +222,8 @@ else
       TOKEN=$(cat "$HOME/.agenthub/token" 2>/dev/null || true)
       RESTART_RESPONSE=$(curl -fsS -m 5 -X POST "http://127.0.0.1:7700/api/system/restart" -H "Authorization: Bearer $TOKEN" -H 'Host: 127.0.0.1:7700' -H 'Content-Type: application/json' --data '{"mode":"when-idle"}' || true)
       if [ -n "$RESTART_RESPONSE" ]; then
-        COUNT=$(printf '%s' "$RESTART_RESPONSE" | grep -o '"taskId"' | wc -l | tr -d ' ')
-        echo "Sẽ khởi động lại khi $COUNT task chạy xong."
-        if [ "$WAIT" = 1 ]; then while health_ok; do sleep 1; done; fi
+        print_restart_waiting "$RESTART_RESPONSE"
+        if [ "$WAIT" = 1 ]; then wait_for_restart; fi
         exit 0
       fi
     fi

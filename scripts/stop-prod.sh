@@ -19,20 +19,27 @@ fi
 cd "$ROOT_DIR"
 
 DISABLE=0
-case "${1:-}" in
+WAIT=0
+FORCE=0
+for arg in "$@"; do
+  case "$arg" in
   -h|--help)
-    echo "Cách dùng: $0 [--disable]"
+    echo "Cách dùng: $0 [--wait] [--force|--now] [--disable]"
     echo ""
-    echo "  (không truyền)   Tắt service, lưu task đang chạy để tiếp tục khi bật lại"
+    echo "  (không truyền)   Drain an toàn, không giết worker đang chạy"
+    echo "  --wait           Chờ daemon thoát sau khi drain hoàn tất"
+    echo "  --force, --now   Dừng ngay, worker đang chạy sẽ bị giết"
     echo "  --disable        Tắt và không tự bật lại khi đăng nhập/khởi động máy"
     echo ""
     echo "Bật lại bằng: ./scripts/run-prod.sh"
     exit 0
     ;;
   --disable) DISABLE=1 ;;
-  "") ;;
-  *) echo "❌ Tùy chọn không hợp lệ: $1 (xem --help)"; exit 1 ;;
-esac
+  --wait) WAIT=1 ;;
+  --force|--now) FORCE=1 ;;
+  *) echo "❌ Tùy chọn không hợp lệ: $arg (xem --help)"; exit 1 ;;
+  esac
+done
 
 IS_DARWIN=0
 [ "$(uname -s)" = "Darwin" ] && IS_DARWIN=1
@@ -53,7 +60,28 @@ stop_service_directly() {
 
 echo "🛑 Đang tắt AgentHub Production..."
 
-# 1. Tắt êm qua CLI: daemon lưu task đang chạy vào hàng chờ rồi dừng service.
+# 1. Hỏi daemon trước để không giết worker đang chạy.
+if health_ok && [ -f "$HOME/.agenthub/token" ] && [ "$FORCE" = 0 ]; then
+  TOKEN=$(cat "$HOME/.agenthub/token" 2>/dev/null || true)
+  RESPONSE=$(curl -fsS -m 5 -X POST "http://127.0.0.1:7700/api/system/restart" -H "Authorization: Bearer $TOKEN" -H 'Host: 127.0.0.1:7700' -H 'Content-Type: application/json' --data '{"mode":"when-idle","reason":"stop-prod"}' || true)
+  if [ -n "$RESPONSE" ]; then
+    RESTART_JSON="$RESPONSE" node -e '
+      const state = JSON.parse(process.env.RESTART_JSON || "{}");
+      const waiting = state.waitingFor || [];
+      console.log(`Sẽ dừng an toàn sau khi ${waiting.length} task chạy xong.`);
+      for (const item of waiting) console.log(`  - ${item.taskId} (${item.kind})`);
+    ' 2>/dev/null || true
+    if [ "$WAIT" = 1 ]; then
+      while health_ok; do sleep 1; done
+      echo "✅ Daemon đã thoát sau khi drain."
+    fi
+    exit 0
+  fi
+elif [ "$FORCE" = 1 ]; then
+  echo "⚠️ Dừng ngay: worker đang chạy sẽ bị giết."
+fi
+
+# 2. Tắt trực tiếp: giữ hành vi cũ làm fallback hoặc khi --force.
 STOP_ARGS=()
 [ "$DISABLE" = 1 ] && STOP_ARGS+=(--disable)
 if ! health_ok; then

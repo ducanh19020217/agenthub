@@ -5,7 +5,7 @@ import { useTheme } from '../context/ThemeContext';
 import { useLocale } from '../context/LocaleContext';
 import { VersionBanner } from './VersionBanner';
 import { subscribeConnectionState } from '../api/sse';
-import { getBatches, getStatus, setFocus } from '../api/client';
+import { cancelRestart, getBatches, getStatus, setFocus } from '../api/client';
 import { useBranding } from '../context/BrandingContext';
 import { useAuthedImage } from '../hooks/useAuthedImage';
 import {
@@ -77,6 +77,19 @@ const FocusBanner: React.FC = () => {
   const client = React.useContext(QueryClientContext);
   if (!client) return null;
   return <FocusBannerInner />;
+};
+
+const RestartBanner: React.FC = () => {
+  const { t } = useLocale();
+  const queryClient = useQueryClient();
+  const { data: status } = useQuery({ queryKey: ['status'], queryFn: getStatus, staleTime: 2000 });
+  const cancel = useMutation({ mutationFn: cancelRestart, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['status'] }) });
+  const restart = (status as { restart?: { draining?: boolean; waitingFor?: unknown[] } } | undefined)?.restart;
+  if (!restart?.draining) return null;
+  return <div className="flex items-center justify-between gap-3 px-6 py-2 text-sm bg-[var(--t-selected)] border-b border-[var(--t-accent)]/30" role="status">
+    <span>🔄 {t('settings.restartDraining', { count: String(restart.waitingFor?.length || 0) })}</span>
+    <button type="button" className="underline" onClick={() => cancel.mutate()} disabled={cancel.isPending}>{t('settings.restartCancel')}</button>
+  </div>;
 };
 
 export const Layout: React.FC = () => {
@@ -230,6 +243,7 @@ export const Layout: React.FC = () => {
       <div className="flex-1 min-w-0 flex flex-col">
         <VersionBanner />
         <FocusBanner />
+        <RestartBanner />
 
         {/* Header 56px */}
         <header className="h-[56px] sticky top-0 z-20 bg-[var(--t-surface)]/90 backdrop-blur border-b border-[var(--t-border)] px-6 flex items-center justify-between gap-4">

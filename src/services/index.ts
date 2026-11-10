@@ -1682,6 +1682,7 @@ export class AppService {
       recentEvents,
       brain: this.brainService?.getStatus(),
       schedulerPaused: this.scheduler.isPaused(),
+      restart: this.scheduler.getRestartState(),
       focus: this.config.focus,
       disk: {
         freeGB: disk.freeGB,

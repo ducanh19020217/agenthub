@@ -144,7 +144,11 @@ export function initTokenFromHash(): string | null {
   return getToken();
 }
 
-export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+export interface ApiFetchOptions extends RequestInit {
+  responseType?: 'json' | 'text' | 'blob';
+}
+
+export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
   const token = getToken();
   if (!token) {
     notifyUnauthorized();
@@ -218,15 +222,28 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
     }
 
     // Handle empty or text responses
+    if (options.responseType === 'blob') {
+      return (await response.blob()) as unknown as T;
+    }
+    if (options.responseType === 'text') {
+      return (await response.text()) as unknown as T;
+    }
     const contentType = response.headers.get('content-type');
     if (contentType && contentType.includes('application/json')) {
       return (await response.json()) as T;
+    }
+    if (contentType && contentType.startsWith('image/')) {
+      return (await response.blob()) as unknown as T;
     }
     return (await response.text()) as unknown as T;
   } finally {
     clearTimeout(timeout);
     options.signal?.removeEventListener('abort', onAbort);
   }
+}
+
+export async function apiFetchBlob(path: string, options: ApiFetchOptions = {}): Promise<Blob> {
+  return apiFetch<Blob>(path, { ...options, responseType: 'blob' });
 }
 
 // API methods

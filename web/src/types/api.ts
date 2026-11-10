@@ -76,6 +76,8 @@ export interface Profile {
   plan?: string | null;
   crashCount?: number;
   coolingUntil?: number | null;
+  source?: string | null;
+  cockpitId?: string | null;
   /** Chỉ có trong phản hồi của nút Làm mới: kết quả lấy ảnh đại diện. */
   avatarMessage?: string;
   /** Chỉ có trong phản hồi của nút Làm mới cho Codex: kết quả lấy quota/gói qua API. */
@@ -893,6 +895,57 @@ export interface SystemConfig {
     recoverAfterSec: number;
   };
   ui?: { tours?: Record<string, boolean> };
+  integrations?: {
+    openproject?: {
+      sources?: OpenProjectSource[];
+    };
+    cockpit?: {
+      dataDir?: string;
+      autoSync?: {
+        enabled: boolean;
+        intervalMinutes: number;
+        engines: Array<'antigravity' | 'codex' | 'claude'>;
+      };
+    };
+  };
+}
+
+export type CockpitSource = 'antigravity' | 'codex' | 'claude';
+
+export interface CockpitScanItem {
+  source: CockpitSource;
+  cockpitId: string;
+  email: string;
+  disabled: boolean;
+  importable: boolean;
+  skipReason?: string;
+  hubStatus: 'new' | 'exists' | 'conflict';
+}
+
+export interface CockpitScanResult {
+  dataDir?: string;
+  exists: boolean;
+  schemaVersion?: string;
+  items: CockpitScanItem[];
+}
+
+export interface CockpitImportItemResult {
+  source: CockpitSource;
+  cockpitId: string;
+  email: string;
+  name?: string;
+  action: 'imported' | 'updated' | 'skipped';
+  status: 'ok' | 'error';
+  message?: string;
+}
+
+export interface CockpitImportResult {
+  items: CockpitImportItemResult[];
+  total: number;
+  importedCount: number;
+  updatedCount: number;
+  skippedCount: number;
+  failedCount: number;
 }
 
 export interface ModelOptions {

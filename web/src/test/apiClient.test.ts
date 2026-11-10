@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { apiFetch, API_REQUEST_TIMEOUT_MS, AuthError, clearToken, getTasksPage, setToken } from '../api/client';
+import { apiFetch, apiFetchBlob, API_REQUEST_TIMEOUT_MS, AuthError, clearToken, getTasksPage, setToken } from '../api/client';
 
 describe('API Client', () => {
   const originalFetch = window.fetch;
@@ -221,5 +221,26 @@ describe('API Client', () => {
     expect(caughtUnaccentedVi?.message).toBe('Xung đột dữ liệu');
     expect(caughtUnaccentedVi?.code).toBe('conflict');
     expect(caughtUnaccentedVi?.rawMessage).toBe('Conflict occurred');
+  });
+
+  it('hỗ trợ tải dữ liệu nhị phân/hình ảnh qua responseType: blob hoặc tự nhận diện image/*', async () => {
+    setToken('blob_token');
+
+    let capturedHeaders: Headers | undefined;
+    window.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      capturedHeaders = new Headers(init?.headers);
+      return new Response(new Blob(['<svg></svg>'], { type: 'image/svg+xml' }), {
+        status: 200,
+        headers: { 'Content-Type': 'image/svg+xml' },
+      });
+    });
+
+    const res = await apiFetch<Blob>('/api/branding/logo');
+    expect(res.size).toBe(13);
+    expect(res.type).toBe('image/svg+xml');
+    expect(capturedHeaders?.get('Authorization')).toBe('Bearer blob_token');
+
+    const resBlobHelper = await apiFetchBlob('/api/branding/logo');
+    expect(resBlobHelper.size).toBe(13);
   });
 });

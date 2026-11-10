@@ -1150,6 +1150,8 @@ function repairMissingTimesheetTable(db: Database.Database, currentVersion: numb
 function ensureProfileAvatarColumn(db: Database.Database): void {
   if (!hasColumn(db, 'profiles', 'avatarUrl')) db.exec('ALTER TABLE profiles ADD COLUMN avatarUrl TEXT');
   if (!hasColumn(db, 'profiles', 'plan')) db.exec('ALTER TABLE profiles ADD COLUMN plan TEXT');
+  if (!hasColumn(db, 'profiles', 'source')) db.exec('ALTER TABLE profiles ADD COLUMN source TEXT');
+  if (!hasColumn(db, 'profiles', 'cockpitId')) db.exec('ALTER TABLE profiles ADD COLUMN cockpitId TEXT');
 }
 
 /** Scheduler safety state is appended outside numbered migrations to preserve the public schema sequence. */
@@ -1276,6 +1278,8 @@ export interface ProfileRow {
   /** Gói tài khoản đã chuẩn hoá (free, plus, pro, team, max_20x…); xem src/profiles/plan.ts. */
   plan?: string | null;
   deletedAt?: string | null;
+  source?: string | null;
+  cockpitId?: string | null;
   consecutiveCrashes?: number;
   lastCrashAt?: number | null;
   coolingUntil?: number | null;
@@ -1664,8 +1668,8 @@ export class ProfileRepo {
   upsert(row: Omit<ProfileRow, 'createdAt'>): void {
     this.db
       .prepare(
-        `INSERT INTO profiles (name, engine, kind, home, email, enabled, authState, authMessage, verifyUrl, label, notes, priority, deletedAt, accountType, avatarUrl)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO profiles (name, engine, kind, home, email, enabled, authState, authMessage, verifyUrl, label, notes, priority, deletedAt, accountType, avatarUrl, source, cockpitId)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            engine=excluded.engine,
            kind=excluded.kind,
@@ -1679,7 +1683,9 @@ export class ProfileRepo {
            priority=COALESCE(excluded.priority, profiles.priority),
            accountType=COALESCE(excluded.accountType, profiles.accountType),
            avatarUrl=COALESCE(excluded.avatarUrl, profiles.avatarUrl),
-           deletedAt=COALESCE(excluded.deletedAt, profiles.deletedAt)`,
+           deletedAt=COALESCE(excluded.deletedAt, profiles.deletedAt),
+           source=COALESCE(excluded.source, profiles.source),
+           cockpitId=COALESCE(excluded.cockpitId, profiles.cockpitId)`,
       )
       .run(
         row.name,
@@ -1697,6 +1703,8 @@ export class ProfileRepo {
         row.deletedAt ?? null,
         row.accountType ?? 'personal',
         row.avatarUrl ?? null,
+        row.source ?? null,
+        row.cockpitId ?? null,
       );
   }
 
@@ -1708,9 +1716,13 @@ export class ProfileRepo {
     this.db.prepare('UPDATE profiles SET avatarUrl = ? WHERE name = ?').run(avatarUrl, name);
   }
 
+  updateCockpitSource(name: string, source: string | null, cockpitId: string | null): void {
+    this.db.prepare('UPDATE profiles SET source = ?, cockpitId = ? WHERE name = ?').run(source, cockpitId, name);
+  }
+
   update(
     name: string,
-    fields: Partial<Pick<ProfileRow, 'label' | 'notes' | 'priority' | 'enabled'>>,
+    fields: Partial<Pick<ProfileRow, 'label' | 'notes' | 'priority' | 'enabled' | 'source' | 'cockpitId'>>,
   ): void {
     const sets: string[] = [];
     const values: unknown[] = [];

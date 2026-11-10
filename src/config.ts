@@ -399,14 +399,39 @@ export const OpenProjectIntegrationSchema = z.object({
   sources: z.array(OpenProjectSourceSchema).default([]),
 });
 
+export const CockpitIntegrationSchema = z.object({
+  dataDir: z.string().optional(),
+  autoSync: z.object({
+    enabled: z.boolean().default(false),
+    intervalMinutes: z.number().default(30),
+    engines: z.array(z.enum(['antigravity', 'codex', 'claude'])).default(['antigravity']),
+  }).default({ enabled: false, intervalMinutes: 30, engines: ['antigravity'] }),
+});
+
+export type CockpitIntegrationConfig = z.infer<typeof CockpitIntegrationSchema>;
+
+export type CockpitIntegrationPatch = {
+  dataDir?: string;
+  autoSync?: Partial<CockpitIntegrationConfig['autoSync']>;
+};
+
 export interface IntegrationsConfig {
   openproject: {
     sources: OpenProjectSource[];
   };
+  cockpit: CockpitIntegrationConfig;
 }
 
 export const DEFAULT_INTEGRATIONS_CONFIG: IntegrationsConfig = {
   openproject: { sources: [] },
+  cockpit: {
+    dataDir: undefined,
+    autoSync: {
+      enabled: false,
+      intervalMinutes: 30,
+      engines: ['antigravity'],
+    },
+  },
 };
 
 export function parseOpenProjectSources(raw: unknown): OpenProjectSource[] {
@@ -564,7 +589,7 @@ export function saveConfig(
     profileCooling?: Partial<ProfileCoolingConfig>;
     ui?: Partial<UiConfig>;
     branding?: Partial<BrandingConfig>;
-    integrations?: Partial<{ openproject: { sources: unknown[] } }>;
+    integrations?: Partial<{ openproject: { sources: unknown[] }; cockpit: CockpitIntegrationPatch }>;
   }>,
 ): void {
   const configFilePath = path.join(hubHome, 'config.json');
@@ -767,7 +792,7 @@ export function updateConfigInMemory(
     profileCooling?: Partial<ProfileCoolingConfig>;
     ui?: Partial<UiConfig>;
     branding?: Partial<BrandingConfig>;
-    integrations?: Partial<{ openproject: { sources: unknown[] } }>;
+    integrations?: Partial<{ openproject: { sources: unknown[] }; cockpit: CockpitIntegrationPatch }>;
   }>,
 ): void {
   if (patch.modelChainHard) {
@@ -1002,6 +1027,21 @@ export function updateConfigInMemory(
       ...config.integrations,
       openproject: {
         sources: parseOpenProjectSources(patch.integrations),
+      },
+    };
+  }
+  if (patch.integrations?.cockpit) {
+    const prev = config.integrations.cockpit;
+    const incoming = patch.integrations.cockpit;
+    config.integrations = {
+      ...config.integrations,
+      cockpit: {
+        ...prev,
+        ...incoming,
+        autoSync: {
+          ...prev.autoSync,
+          ...(incoming.autoSync || {}),
+        },
       },
     };
   }
@@ -1242,7 +1282,10 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
   const rawTools = (userConfig.tools as Record<string, unknown>) || {};
   const integrationsRaw = userConfig.integrations && typeof userConfig.integrations === 'object'
     ? userConfig.integrations : {};
-  const integrationsResult = z.object({ openproject: OpenProjectIntegrationSchema.default({}) }).safeParse(integrationsRaw);
+  const integrationsResult = z.object({
+    openproject: OpenProjectIntegrationSchema.default({}),
+    cockpit: CockpitIntegrationSchema.default({}),
+  }).safeParse(integrationsRaw);
   const integrations: IntegrationsConfig = integrationsResult.success
     ? integrationsResult.data
     : DEFAULT_INTEGRATIONS_CONFIG;

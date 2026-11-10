@@ -40,6 +40,7 @@ import {
   ApplyPresetResult,
   EffectiveConfigResponse,
   OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto, OpenProjectTypeDto, OpenProjectSyncResult, GiteaStatus, RemoteDeployStatus, ProjectGitStatus,
+  CockpitScanResult, CockpitImportResult, CockpitSource,
 } from '../types/api';
 import { getActiveLocale, translateApiErrorMessage } from '../utils/apiError';
 
@@ -146,7 +147,12 @@ export function initTokenFromHash(): string | null {
   return getToken();
 }
 
-export async function apiFetch<T>(path: string, { timeoutMs = API_REQUEST_TIMEOUT_MS, ...options }: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
+export interface ApiFetchOptions extends RequestInit {
+  responseType?: 'json' | 'text' | 'blob';
+  timeoutMs?: number;
+}
+
+export async function apiFetch<T>(path: string, { timeoutMs = API_REQUEST_TIMEOUT_MS, ...options }: ApiFetchOptions = {}): Promise<T> {
   const token = getToken();
   if (!token) {
     notifyUnauthorized();
@@ -220,9 +226,18 @@ export async function apiFetch<T>(path: string, { timeoutMs = API_REQUEST_TIMEOU
     }
 
     // Handle empty or text responses
+    if (options.responseType === 'blob') {
+      return (await response.blob()) as unknown as T;
+    }
+    if (options.responseType === 'text') {
+      return (await response.text()) as unknown as T;
+    }
     const contentType = response.headers.get('content-type');
     if (contentType && contentType.includes('application/json')) {
       return (await response.json()) as T;
+    }
+    if (contentType && contentType.startsWith('image/')) {
+      return (await response.blob()) as unknown as T;
     }
     return (await response.text()) as unknown as T;
   } finally {
@@ -231,66 +246,8 @@ export async function apiFetch<T>(path: string, { timeoutMs = API_REQUEST_TIMEOU
   }
 }
 
-export async function apiFetchBlob(path: string, options: RequestInit = {}): Promise<Blob> {
-  const token = getToken();
-  if (!token) {
-    notifyUnauthorized();
-    throw new AuthError(getActiveLocale() === 'en' ? 'Missing authentication token' : 'Thiếu token xác thực');
-  }
-
-  const headers = new Headers(options.headers || {});
-  headers.set('Authorization', `Bearer ${token}`);
-  if (!headers.has('Accept-Language')) {
-    headers.set('Accept-Language', getActiveLocale());
-  }
-
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  if (options.signal?.aborted) {
-    controller.abort();
-  } else {
-    options.signal?.addEventListener('abort', onAbort, { once: true });
-  }
-  const timeout = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(path, {
-      ...options,
-      headers,
-      signal: controller.signal,
-    });
-
-    if (response.status === 401) {
-      clearToken();
-      throw new AuthError(getActiveLocale() === 'en' ? 'Token is invalid or expired' : 'Token không hợp lệ hoặc đã hết hạn');
-    }
-
-    if (!response.ok) {
-      let errorMsg = getActiveLocale() === 'en' ? `Error ${response.status}: ${response.statusText}` : `Lỗi ${response.status}: ${response.statusText}`;
-      let errorCode: string | undefined;
-      try {
-        const errJson = await response.json();
-        if (errJson) {
-          if (typeof errJson.error === 'string') errorCode = errJson.error;
-          else if (typeof errJson.code === 'string') errorCode = errJson.code;
-          if (errJson.message) errorMsg = errJson.message;
-          else if (errJson.error) errorMsg = errJson.error;
-        }
-      } catch {
-        // ignore
-      }
-      errorMsg = translateApiErrorMessage(errorMsg, errorCode, getActiveLocale());
-      const err: any = new Error(errorMsg);
-      err.status = response.status;
-      err.code = errorCode;
-      throw err;
-    }
-
-    return await response.blob();
-  } finally {
-    clearTimeout(timeout);
-    options.signal?.removeEventListener('abort', onAbort);
-  }
+export async function apiFetchBlob(path: string, options: ApiFetchOptions = {}): Promise<Blob> {
+  return apiFetch<Blob>(path, { ...options, responseType: 'blob' });
 }
 
 // API methods
@@ -604,6 +561,25 @@ export async function importAgyTokens(data: {
   return apiFetch<ImportTokensResult>('/api/profiles/import-tokens', {
     method: 'POST',
     body: JSON.stringify(data),
+  });
+}
+
+export async function scanCockpit(dataDir?: string): Promise<CockpitScanResult> {
+  const query = dataDir ? `?dataDir=${encodeURIComponent(dataDir)}` : '';
+  return apiFetch<CockpitScanResult>(`/api/integrations/cockpit/scan${query}`);
+}
+
+export async function importCockpit(
+  items: Array<{ source: CockpitSource; cockpitId: string }>,
+  options?: { verify?: boolean; dataDir?: string },
+): Promise<CockpitImportResult> {
+  return apiFetch<CockpitImportResult>('/api/integrations/cockpit/import', {
+    method: 'POST',
+    body: JSON.stringify({
+      items,
+      verify: options?.verify,
+      dataDir: options?.dataDir,
+    }),
   });
 }
 

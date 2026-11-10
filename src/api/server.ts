@@ -572,6 +572,28 @@ export async function createServer(
     return reply.status(200).send(result);
   });
 
+  // --- Cockpit Tools Integration ---
+  fastify.get('/api/integrations/cockpit/scan', async (req: FastifyRequest) => {
+    const query = req.query as { dataDir?: string };
+    return service.scanCockpit(query?.dataDir);
+  });
+
+  fastify.post('/api/integrations/cockpit/import', async (req: FastifyRequest, reply: FastifyReply) => {
+    const body = (req.body || {}) as {
+      items?: Array<{ source: 'antigravity' | 'codex' | 'claude'; cockpitId: string }>;
+      verify?: boolean;
+      dataDir?: string;
+    };
+    if (!Array.isArray(body.items)) {
+      throw new HttpError(400, 'bad_request', 'Trường "items" phải là một mảng');
+    }
+    const result = await service.importFromCockpit(body.items, {
+      verify: body.verify,
+      customDir: body.dataDir,
+    });
+    return reply.status(200).send(result);
+  });
+
   fastify.post('/api/profiles/:name/wakeup', async (req: FastifyRequest) => {
     const { name } = req.params as { name: string };
     return service.wakeupProfile(name, { force: true });

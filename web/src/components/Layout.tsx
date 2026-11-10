@@ -7,6 +7,7 @@ import { VersionBanner } from './VersionBanner';
 import { subscribeConnectionState } from '../api/sse';
 import { getBatches, getStatus, setFocus } from '../api/client';
 import { useBranding } from '../context/BrandingContext';
+import { useAuthedImage } from '../hooks/useAuthedImage';
 import {
   Activity,
   CheckSquare,
@@ -107,6 +108,13 @@ export const Layout: React.FC = () => {
 
   const connected = isOnline && sseConnected;
   const branding = useBranding();
+  const logoUrl = branding.logo ? `/api/branding/logo?v=${branding.logoVersion ?? encodeURIComponent(branding.logo)}` : null;
+  const { src: logoSrc, error: logoError } = useAuthedImage(logoUrl, branding.logoVersion ?? branding.logo);
+  const [logoImgFailed, setLogoImgFailed] = useState(false);
+
+  useEffect(() => {
+    setLogoImgFailed(false);
+  }, [logoSrc]);
 
   const navItems = [
     { to: '/', label: t('common.dashboard'), icon: Activity },
@@ -170,7 +178,17 @@ export const Layout: React.FC = () => {
             className="flex items-center gap-3 overflow-hidden rounded-lg focus:outline-hidden focus-visible:ring-2 focus-visible:ring-[var(--t-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--t-surface)]"
           >
             <div className="w-8 h-8 rounded-lg bg-[var(--t-accent)] flex items-center justify-center text-[var(--t-on-accent)] shrink-0 shadow-xs">
-              {branding.logo ? <img src={`/api/branding/logo?v=${branding.logoVersion ?? encodeURIComponent(branding.logo)}`} alt="" className="w-full h-full rounded-lg object-contain" /> : <Bot size={18} />}
+              {branding.logo && logoSrc && !logoError && !logoImgFailed ? (
+                <img
+                  src={logoSrc}
+                  alt=""
+                  data-testid="branding-logo"
+                  onError={() => setLogoImgFailed(true)}
+                  className="w-full h-full rounded-lg object-contain"
+                />
+              ) : (
+                <Bot size={18} />
+              )}
             </div>
             <span className="font-bold text-base tracking-tight text-[var(--t-text)] max-[1100px]:hidden truncate">
               {branding.name}

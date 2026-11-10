@@ -79,7 +79,7 @@ const FocusBanner: React.FC = () => {
   return <FocusBannerInner />;
 };
 
-const RestartBanner: React.FC = () => {
+const RestartBannerInner: React.FC = () => {
   const { t } = useLocale();
   const queryClient = useQueryClient();
   const { data: status } = useQuery({ queryKey: ['status'], queryFn: getStatus, staleTime: 2000 });
@@ -90,6 +90,12 @@ const RestartBanner: React.FC = () => {
     <span>🔄 {t('settings.restartDraining', { count: String(restart.waitingFor?.length || 0) })}</span>
     <button type="button" className="underline" onClick={() => cancel.mutate()} disabled={cancel.isPending}>{t('settings.restartCancel')}</button>
   </div>;
+};
+
+const RestartBanner: React.FC = () => {
+  const client = React.useContext(QueryClientContext);
+  if (!client) return null;
+  return <RestartBannerInner />;
 };
 
 export const Layout: React.FC = () => {

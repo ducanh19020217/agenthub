@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -269,13 +270,19 @@ describe('Cockpit Storage Scanner (src/profiles/cockpit.ts)', () => {
     expect(claudeApiKeyItem?.skipReason).toContain('Bỏ qua tài khoản API key');
   });
 
-  it('reads email, name and plan from the plaintext index when detail files use the current AES-GCM envelope', () => {
-    const envelope = (kind: string) => JSON.stringify({
-      version: 1, kind, algorithm: 'aes-256-gcm', key_id: 'k1', nonce: 'bm9uY2Vub25jZTEy', ciphertext: 'ZmFrZS1jaXBoZXJ0ZXh0',
+  /** Mã hoá giống Cockpit secure_account_storage: AES-256-GCM, nonce 12 byte, tag 16 byte nối sau ciphertext. */
+  function sealLikeCockpit(kind: string, payload: Record<string, unknown>, key: Buffer): string {
+    const nonce = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, nonce);
+    const body = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final(), cipher.getAuthTag()]);
+    return JSON.stringify({
+      version: 1, kind, algorithm: 'AES-256-GCM', key_id: 'k1', encrypted_at: 1,
+      nonce: nonce.toString('base64'), ciphertext: body.toString('base64'),
     });
-    fs.mkdirSync(path.join(cockpitDir, 'accounts'), { recursive: true });
-    fs.mkdirSync(path.join(cockpitDir, 'codex_accounts'), { recursive: true });
-    fs.mkdirSync(path.join(cockpitDir, 'claude_accounts'), { recursive: true });
+  }
+
+  function writeEncryptedFixture(key: Buffer) {
+    for (const d of ['accounts', 'codex_accounts', 'claude_accounts']) fs.mkdirSync(path.join(cockpitDir, d), { recursive: true });
     fs.writeFileSync(path.join(cockpitDir, 'accounts.json'), JSON.stringify({
       version: '2', accounts: [{ id: 'antigravity_abc', email: 'Gem@Example.com', name: 'Gem One', created_at: 1, last_used: 1 }],
     }));
@@ -285,23 +292,55 @@ describe('Cockpit Storage Scanner (src/profiles/cockpit.ts)', () => {
     fs.writeFileSync(path.join(cockpitDir, 'claude_accounts.json'), JSON.stringify({
       version: '1', accounts: [{ id: 'claude_ghi', email: 'cl@example.com', plan_type: 'max', created_at: 1, last_used: 1 }],
     }));
-    fs.writeFileSync(path.join(cockpitDir, 'accounts', 'antigravity_abc.json'), envelope('antigravity'));
-    fs.writeFileSync(path.join(cockpitDir, 'codex_accounts', 'codex_def.json'), envelope('codex'));
-    fs.writeFileSync(path.join(cockpitDir, 'claude_accounts', 'claude_ghi.json'), envelope('claude'));
+    fs.writeFileSync(path.join(cockpitDir, 'accounts', 'antigravity_abc.json'), sealLikeCockpit('antigravity', {
+      id: 'antigravity_abc', email: 'gem@example.com', token: { access_token: 'at-secret-agy', refresh_token: 'rt-secret-agy', expires_in: 1, expiry_timestamp: 1, token_type: 'Bearer' },
+    }, key));
+    fs.writeFileSync(path.join(cockpitDir, 'codex_accounts', 'codex_def.json'), sealLikeCockpit('codex', {
+      id: 'codex_def', email: 'cx@example.com', auth_mode: 'oauth', account_id: 'acc-1', tokens: { id_token: 'idt-secret-cx', access_token: 'at-secret-cx', refresh_token: 'rt-secret-cx' },
+    }, key));
+    fs.writeFileSync(path.join(cockpitDir, 'claude_accounts', 'claude_ghi.json'), sealLikeCockpit('claude', {
+      id: 'claude_ghi', email: 'cl@example.com', auth_mode: 'oauth', claude_credentials_raw: { claudeAiOauth: { accessToken: 'at-secret-cl', refreshToken: 'rt-secret-cl', expiresAt: 1 } },
+    }, key));
+  }
+
+  it('decrypts the current Cockpit AES-GCM envelope with its key file; index supplies name and plan; no secret leaks', () => {
+    const key = crypto.randomBytes(32);
+    writeEncryptedFixture(key);
+    fs.writeFileSync(path.join(cockpitDir, 'secure-account-storage.key'), key.toString('base64'));
 
     const result = scanCockpit(cockpitDir, []);
-    const agy = result.items.find((i) => i.cockpitId === 'antigravity_abc');
-    const codex = result.items.find((i) => i.cockpitId === 'codex_def');
-    const claude = result.items.find((i) => i.cockpitId === 'claude_ghi');
+    expect(result.items.find((i) => i.cockpitId === 'antigravity_abc')).toMatchObject({ email: 'gem@example.com', name: 'Gem One', importable: true });
+    expect(result.items.find((i) => i.cockpitId === 'codex_def')).toMatchObject({ email: 'cx@example.com', planType: 'plus', importable: true });
+    expect(result.items.find((i) => i.cockpitId === 'claude_ghi')).toMatchObject({ email: 'cl@example.com', planType: 'max', importable: true });
+    expect(JSON.stringify(result)).not.toMatch(/secret/);
 
-    expect(agy).toMatchObject({ email: 'gem@example.com', name: 'Gem One', importable: false });
-    expect(codex).toMatchObject({ email: 'cx@example.com', planType: 'plus', importable: false });
-    expect(claude).toMatchObject({ email: 'cl@example.com', planType: 'max', importable: false });
-    for (const item of [agy, codex, claude]) {
-      expect(item?.skipReason).toContain('Cockpit đang mã hoá');
-      expect(item?.skipReason).not.toContain('kiểu cũ');
+    expect(readCockpitAgyAccount(cockpitDir, 'antigravity_abc').refreshToken).toBe('rt-secret-agy');
+    expect(readCockpitCodexAccount(cockpitDir, 'codex_def').tokens.id_token).toBe('idt-secret-cx');
+    expect(readCockpitClaudeAccount(cockpitDir, 'claude_ghi').claudeAiOauth.accessToken).toBe('at-secret-cl');
+  });
+
+  it('reports a clear reason when the Cockpit key is missing or does not match, still showing email from the index', () => {
+    const key = crypto.randomBytes(32);
+    writeEncryptedFixture(key);
+
+    let result = scanCockpit(cockpitDir, []);
+    for (const item of result.items) {
+      expect(item.importable).toBe(false);
+      expect(item.skipReason).toContain('Không tìm thấy khoá');
+      expect(item.email).toMatch(/@example\.com$/);
     }
-    expect(JSON.stringify(result)).not.toContain('ZmFrZS1jaXBoZXJ0ZXh0');
+    expect(() => readCockpitAgyAccount(cockpitDir, 'antigravity_abc')).toThrow(/Không tìm thấy khoá/);
+
+    fs.writeFileSync(path.join(cockpitDir, 'secure-account-storage.key'), crypto.randomBytes(32).toString('base64'));
+    result = scanCockpit(cockpitDir, []);
+    for (const item of result.items) {
+      expect(item.importable).toBe(false);
+      expect(item.skipReason).toContain('không khớp');
+    }
+  });
+
+  it('rejects path traversal in Cockpit account ids', () => {
+    expect(() => readCockpitAgyAccount(cockpitDir, '../../etc/passwd')).toThrow(/không hợp lệ/);
   });
 
   it('handles corrupt JSON in an account file gracefully without failing other accounts', () => {

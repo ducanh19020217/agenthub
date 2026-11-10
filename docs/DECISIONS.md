@@ -248,3 +248,9 @@
   - API scan chỉ trả về metadata, không trả token ra ngoài.
   - Sự kiện `profile.imported` và log hệ thống tuyệt đối không chứa token hay JWT secret.
   - MCP tool `hub_cockpit_scan` chỉ cung cấp metadata phục vụ tham khảo, không có công cụ import tự động qua MCP.
+- **Giải mã kho Cockpit bản mới (2026-11-10, người dùng đồng ý)**:
+  - Cockpit từ bản có `secure_account_storage` (tham chiếu v1.3.81, `src-tauri/src/modules/secure_account_storage.rs`) mã hoá file chi tiết từng tài khoản bằng AES-256-GCM; file chỉ mục (`accounts.json`, `codex_accounts.json`, `claude_accounts.json`) vẫn để dạng thường và có `email`, `name`, `plan_type`.
+  - Khoá là 32 byte ngẫu nhiên, base64, trong `<dataDir>/secure-account-storage.key`, tạo một lần và không đổi; "rotation 30 ngày" của Cockpit chỉ mã hoá lại bằng nonce mới với cùng khoá. Envelope: `{ version, kind, algorithm, key_id, encrypted_at, nonce, ciphertext }`, nonce 12 byte, ciphertext có tag 16 byte nối ở cuối.
+  - AgentHub đọc khoá này để giải mã **chỉ phía server**, khi quét (để biết tài khoản có nhập được không) và khi nhập. Kết quả giải mã không trả ra API, không log. Vẫn chỉ đọc, không ghi vào thư mục Cockpit. Khoá chỉ bảo vệ khi file bị chép riêng ra ngoài; mọi tiến trình cùng user đều đọc được, nên việc hub đọc không làm giảm thêm độ an toàn trên máy.
+  - Thiếu khoá, sai khoá, hoặc thuật toán lạ: báo lý do theo từng tài khoản và gợi ý nhập file Export. Đường dự phòng `POST /api/integrations/cockpit/import-export` nhận file Export của Cockpit, tự nhận diện Antigravity/Codex/Claude theo từng mục.
+  - Mã giải mã viết lại bằng `node:crypto`, không chép code Cockpit (giấy phép CC BY-NC-SA 4.0).

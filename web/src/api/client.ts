@@ -569,6 +569,14 @@ export async function scanCockpit(dataDir?: string): Promise<CockpitScanResult> 
   return apiFetch<CockpitScanResult>(`/api/integrations/cockpit/scan${query}`);
 }
 
+/** Nhập file Export của Cockpit (có thể lẫn Antigravity, Codex, Claude). */
+export async function importCockpitExport(content: string, options?: { verify?: boolean }): Promise<ImportTokensResult> {
+  return apiFetch<ImportTokensResult>('/api/integrations/cockpit/import-export', {
+    method: 'POST',
+    body: JSON.stringify({ content, verify: options?.verify }),
+  });
+}
+
 export async function importCockpit(
   items: Array<{ source: CockpitSource; cockpitId: string }>,
   options?: { verify?: boolean; dataDir?: string },

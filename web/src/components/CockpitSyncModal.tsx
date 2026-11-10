@@ -1,14 +1,16 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { RefreshCw, AlertTriangle, Check, Sliders } from 'lucide-react';
+import { RefreshCw, AlertTriangle, Check, Sliders, FileUp } from 'lucide-react';
 import { Modal } from './ui/Modal';
 import { AgentIcon } from './AgentIcon';
 import { useLocale } from '../context/LocaleContext';
 import {
   scanCockpit,
   importCockpit,
+  importCockpitExport,
   getConfig,
   updateConfig,
 } from '../api/client';
+import type { ImportTokensResult } from '../api/client';
 import type {
   CockpitScanResult,
   CockpitScanItem,
@@ -47,6 +49,48 @@ export const CockpitSyncModal: React.FC<CockpitSyncModalProps> = ({
   const [importError, setImportError] = useState<string | null>(null);
 
   // Auto-sync settings
+  // Nhập file Export của Cockpit (đường dự phòng)
+  const [exportFileName, setExportFileName] = useState<string>('');
+  const [exportContent, setExportContent] = useState<string>('');
+  const [isImportingExport, setIsImportingExport] = useState<boolean>(false);
+  const [exportResult, setExportResult] = useState<ImportTokensResult | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  const handleExportFile = async (file: File | undefined) => {
+    setExportResult(null);
+    setExportError(null);
+    if (!file) { setExportFileName(''); setExportContent(''); return; }
+    setExportFileName(file.name);
+    try {
+      setExportContent(await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result ?? ''));
+        reader.onerror = () => reject(reader.error ?? new Error(t('profiles.cockpitExportReadError')));
+        reader.readAsText(file);
+      }));
+    } catch (err) {
+      setExportContent('');
+      setExportError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleImportExport = async () => {
+    if (!exportContent || isImportingExport) return;
+    setIsImportingExport(true);
+    setExportError(null);
+    setExportResult(null);
+    try {
+      const res = await importCockpitExport(exportContent, { verify: verifyTokens });
+      setExportResult(res);
+      onProfilesUpdated?.();
+      void handleScan();
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsImportingExport(false);
+    }
+  };
+
   const [showAutoSync, setShowAutoSync] = useState<boolean>(false);
   const [autoSyncEnabled, setAutoSyncEnabled] = useState<boolean>(false);
   const [autoSyncInterval, setAutoSyncInterval] = useState<number>(30);
@@ -477,6 +521,47 @@ export const CockpitSyncModal: React.FC<CockpitSyncModalProps> = ({
             t('profiles.cockpitClaudeGroup'),
             groupedItems.claude,
             true,
+          )}
+        </div>
+
+        {/* Import a Cockpit export file (fallback) */}
+        <div className="rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] p-3 space-y-2" data-testid="cockpit-export-import">
+          <div className="flex items-center gap-2 text-xs font-semibold text-[var(--t-text)]">
+            <FileUp className="h-4 w-4" />
+            <span>{t('profiles.cockpitExportTitle')}</span>
+          </div>
+          <p className="text-[11px] text-[var(--t-text-3)]">{t('profiles.cockpitExportDesc')}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="button-secondary text-xs cursor-pointer">
+              <input
+                type="file"
+                accept=".json,application/json"
+                className="hidden"
+                data-testid="cockpit-export-file"
+                onChange={(e) => void handleExportFile(e.target.files?.[0])}
+              />
+              {t('profiles.cockpitExportChoose')}
+            </label>
+            <span className="text-[11px] text-[var(--t-text-2)] truncate max-w-[220px]">{exportFileName || t('profiles.cockpitExportNoFile')}</span>
+            <button
+              type="button"
+              onClick={() => void handleImportExport()}
+              disabled={!exportContent || isImportingExport}
+              className="button-primary text-xs flex items-center gap-1.5"
+              data-testid="cockpit-export-import-btn"
+            >
+              {isImportingExport && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
+              {t('profiles.cockpitExportImport')}
+            </button>
+          </div>
+          {exportError && <p className="text-[11px] text-[var(--t-crit)]">{exportError}</p>}
+          {exportResult && (
+            <div className="text-[11px] space-y-1" data-testid="cockpit-export-result">
+              <p className="text-[var(--t-text)]">{t('profiles.cockpitExportSummary', { ok: exportResult.successCount, total: exportResult.total })}</p>
+              {exportResult.results.filter((r) => r.status !== 'ok').map((r, i) => (
+                <p key={`${r.email}-${i}`} className="text-[var(--t-warn)]">{r.email || '?'}: {r.message}</p>
+              ))}
+            </div>
           )}
         </div>
 

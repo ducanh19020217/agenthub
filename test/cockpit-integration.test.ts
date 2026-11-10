@@ -480,6 +480,52 @@ describe('Cockpit Tools Backend Integration', () => {
     }
   });
 
+  it('(i) imports from the current encrypted Cockpit store using its key file', async () => {
+    const key = crypto.randomBytes(32);
+    const nonce = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, nonce);
+    const payload = { id: 'agy-enc', email: 'enc.user@gmail.com', token: { access_token: 'a', refresh_token: '1//enc_refresh_secret', expires_in: 1, expiry_timestamp: 1, token_type: 'Bearer' } };
+    const sealed = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final(), cipher.getAuthTag()]);
+    fs.writeFileSync(path.join(cockpitDir, 'accounts', 'agy-enc.json'), JSON.stringify({
+      version: 1, kind: 'antigravity', algorithm: 'AES-256-GCM', key_id: 'k', encrypted_at: 1,
+      nonce: nonce.toString('base64'), ciphertext: sealed.toString('base64'),
+    }));
+    fs.writeFileSync(path.join(cockpitDir, 'secure-account-storage.key'), key.toString('base64'));
+
+    const scan = ctx.service.scanCockpit();
+    expect(scan.items.find((i) => i.cockpitId === 'agy-enc')).toMatchObject({ email: 'enc.user@gmail.com', importable: true });
+    expect(JSON.stringify(scan)).not.toContain('enc_refresh_secret');
+
+    const res = await ctx.service.importFromCockpit([{ source: 'antigravity', cockpitId: 'agy-enc' }], { verify: false });
+    expect(res.items[0].status).toBe('ok');
+    expect(ctx.profileRepo.getAll().find((p) => p.email === 'enc.user@gmail.com')?.source).toBe('cockpit');
+  });
+
+  it('(j) POST /api/integrations/cockpit/import-export routes a mixed export file by engine', async () => {
+    const content = JSON.stringify([
+      { email: 'export.agy@gmail.com', refresh_token: '1//export_agy_secret' },
+      { email: 'nobody@example.com', foo: 'bar' },
+    ]);
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/integrations/cockpit/import-export',
+      headers: authHeaders(),
+      payload: { content, verify: false },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.total).toBe(2);
+    expect(body.successCount).toBe(1);
+    expect(body.results.find((r: { email: string }) => r.email === 'nobody@example.com').message).toContain('Không nhận ra loại tài khoản');
+    expect(ctx.profileRepo.getAll().some((p) => p.email === 'export.agy@gmail.com' && p.engine === 'agy')).toBe(true);
+    expect(res.body).not.toContain('export_agy_secret');
+
+    const bad = await server.inject({
+      method: 'POST', url: '/api/integrations/cockpit/import-export', headers: authHeaders(), payload: { content: '{not json' },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
   it('(h) autoSync only imports new accounts for enabled engines and notifies Telegram', async () => {
     const broadcastMock = vi.fn();
     (ctx.service as unknown as { telegramBotService: unknown }).telegramBotService = {

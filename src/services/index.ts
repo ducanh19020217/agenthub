@@ -51,6 +51,7 @@ import {
   readCockpitAgyAccount,
   readCockpitCodexAccount,
   readCockpitClaudeAccount,
+  detectCockpitExportSource,
   type CockpitScanResult,
   type CockpitSource,
 } from '../profiles/cockpit.js';
@@ -3318,6 +3319,60 @@ export class AppService {
   scanCockpit(customDir?: string): CockpitScanResult {
     const dir = resolveCockpitDir(customDir || this.config.integrations?.cockpit?.dataDir);
     return runScanCockpit(dir, this.profileRepo.getAll());
+  }
+
+  /**
+   * Nhập file Export của Cockpit (đường dự phòng khi không đọc được kho Cockpit).
+   * File có thể chứa lẫn Antigravity, Codex và Claude; mỗi mục được nhận diện riêng rồi
+   * chuyển vào đường nhập token sẵn có của từng engine.
+   */
+  async importCockpitExport(content: unknown, options: { verify?: boolean } = {}): Promise<TokenImportResult> {
+    let parsed: unknown = content;
+    if (typeof parsed === 'string') {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch {
+        throw new HttpError(400, 'bad_request', 'File Export không phải JSON hợp lệ');
+      }
+    }
+    const list: unknown[] = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === 'object' && Array.isArray((parsed as Record<string, unknown>).accounts)
+        ? (parsed as { accounts: unknown[] }).accounts
+        : parsed && typeof parsed === 'object' ? [parsed] : [];
+    if (list.length === 0) {
+      throw new HttpError(400, 'bad_request', 'File Export không có tài khoản nào');
+    }
+    const groups: Record<CockpitSource, Record<string, unknown>[]> = { antigravity: [], codex: [], claude: [] };
+    const results: TokenImportResult['results'] = [];
+    for (const raw of list) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        results.push({ name: '', email: '', action: 'skipped', status: 'error', message: 'Mục dữ liệu không phải là object hợp lệ' });
+        continue;
+      }
+      const item = raw as Record<string, unknown>;
+      const source = detectCockpitExportSource(item);
+      if (!source) {
+        results.push({
+          name: '', email: typeof item.email === 'string' ? item.email : '', action: 'skipped', status: 'error',
+          message: 'Không nhận ra loại tài khoản (cần token Antigravity, Codex hoặc Claude OAuth)',
+        });
+        continue;
+      }
+      if (source === 'antigravity' && item.token && typeof item.token === 'object' && typeof item.refresh_token !== 'string') {
+        groups.antigravity.push({ email: item.email, refresh_token: (item.token as Record<string, unknown>).refresh_token });
+      } else {
+        groups[source].push(item);
+      }
+    }
+    const engineOf: Record<CockpitSource, 'agy' | 'codex' | 'claude'> = { antigravity: 'agy', codex: 'codex', claude: 'claude' };
+    for (const source of ['antigravity', 'codex', 'claude'] as const) {
+      if (groups[source].length === 0) continue;
+      const res = await this.importTokens({ engine: engineOf[source], tokens: groups[source] }, { verify: options.verify });
+      results.push(...res.results);
+    }
+    const successCount = results.filter((r) => r.status === 'ok').length;
+    return { success: successCount > 0, total: results.length, successCount, failedCount: results.length - successCount, results };
   }
 
   async importFromCockpit(

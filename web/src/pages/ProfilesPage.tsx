@@ -42,6 +42,7 @@ import { Profile } from '../types/api';
 import { formatReset, formatTime, formatTimeTitle, formatIsoTitle } from '../lib/time';
 import { useTour } from '../components/tour/TourContext';
 import { AgentIcon } from '../components/AgentIcon';
+import { CockpitSyncModal } from '../components/CockpitSyncModal';
 import { UI_Z_INDEX } from '../components/ui/layers';
 
 const LoginTerminal = lazy(() => import('../components/LoginTerminal').then((m) => ({ default: m.LoginTerminal })));
@@ -113,6 +114,7 @@ export const ProfilesPage: React.FC = () => {
   const { hash } = useLocation();
   const queryClient = useQueryClient();
   const [showAdd, setShowAdd] = useState(false);
+  const [showCockpit, setShowCockpit] = useState(false);
   const [activeLogin, setActiveLogin] = useState<{ name: string; engine: Provider; sessionId: string } | null>(null);
   const [menu, setMenu] = useState<string | null>(null);
   const [editing, setEditing] = useState<Profile | null>(null);
@@ -260,18 +262,32 @@ export const ProfilesPage: React.FC = () => {
             {t('profiles.subtitle')}
           </p>
         </div>
-        <button
-          type="button"
-          data-tour="add-account"
-          onClick={(e) => {
-            e.stopPropagation();
-            setShowAdd(true);
-          }}
-          className="inline-flex items-center gap-2 rounded-lg bg-[var(--t-accent)] px-4 py-2 text-sm font-semibold text-[var(--t-on-accent)]"
-        >
-          <Plus className="h-4 w-4" />
-          {t('profiles.addBtn')}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            data-tour="sync-cockpit"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowCockpit(true);
+            }}
+            className="inline-flex items-center gap-2 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-sm font-semibold text-[var(--t-text)] hover:bg-[var(--t-hover)] cursor-pointer"
+          >
+            <RefreshCw className="h-4 w-4" />
+            {t('profiles.syncCockpitBtn')}
+          </button>
+          <button
+            type="button"
+            data-tour="add-account"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowAdd(true);
+            }}
+            className="inline-flex items-center gap-2 rounded-lg bg-[var(--t-accent)] px-4 py-2 text-sm font-semibold text-[var(--t-on-accent)] cursor-pointer"
+          >
+            <Plus className="h-4 w-4" />
+            {t('profiles.addBtn')}
+          </button>
+        </div>
       </div>
       <ToastViewport toasts={toasts} onDismiss={dismissToast} closeLabel={t('common.close')} />
       {isLoading ? (
@@ -426,6 +442,15 @@ export const ProfilesPage: React.FC = () => {
           sessionId={activeLogin.sessionId}
           onClose={() => {
             setActiveLogin(null);
+            queryClient.invalidateQueries({ queryKey: ['profiles'] });
+          }}
+        />
+      )}
+      {showCockpit && (
+        <CockpitSyncModal
+          isOpen={showCockpit}
+          onClose={() => setShowCockpit(false)}
+          onProfilesUpdated={() => {
             queryClient.invalidateQueries({ queryKey: ['profiles'] });
           }}
         />

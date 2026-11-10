@@ -578,6 +578,28 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     },
   );
 
+  server.tool(
+    'hub_cockpit_scan',
+    'Quét danh sách tài khoản trong kho Cockpit Tools (chỉ metadata, không chứa token)',
+    { dataDir: z.string().optional() },
+    async (args) => {
+      try {
+        const query = args.dataDir ? `?dataDir=${encodeURIComponent(args.dataDir)}` : '';
+        const result = await callApi('GET', `/api/integrations/cockpit/scan${query}`);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
   // 5. hub_create_task
   server.tool(
     'hub_tracker_sync',

@@ -578,6 +578,7 @@ export function closeContext(ctx: DaemonContext): void {
   try {
     ctx.usageService?.stop();
     ctx.service?.stopWakeupTimer();
+    ctx.service?.stopCockpitAutoSyncTimer();
   } catch {
     // ignore
   }
@@ -626,6 +627,7 @@ export async function startDaemon(
   }
   ctx.usageService.start();
   ctx.service.startWakeupTimer();
+  ctx.service.startCockpitAutoSyncTimer();
 
   // Start scheduler
   ctx.scheduler.start();

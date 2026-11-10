@@ -252,6 +252,7 @@ interface RunningTask {
   pausedAt?: number | null;
   pauseReminded?: boolean;
   referenceSnapshots?: ReferenceSnapshot[];
+  adopted?: boolean;
 }
 
 interface StartingTask {
@@ -955,17 +956,29 @@ export class Scheduler {
 
   private isWorkerProcessForRun(pid: number, task: TaskRow, engineId: string): boolean {
     if (!task.worktreePath) return false;
+    const worktree = path.resolve(task.worktreePath);
+    const token = engineId === 'agy' ? '(?:agy|fake-agent(?:\\.mjs)?)' : engineId;
+    const commandMatches = (command: string): boolean =>
+      new RegExp(`(?:^|[\\s/])${token}(?:$|[\\s/])`, 'i').test(command);
     try {
       const cwd = fs.realpathSync(`/proc/${pid}/cwd`);
-      const worktree = fs.realpathSync(task.worktreePath);
-      if (cwd !== worktree) return false;
+      if (cwd !== fs.realpathSync(worktree)) return false;
       const command = fs.readFileSync(`/proc/${pid}/cmdline`).toString('utf8').replaceAll('\0', ' ');
       // The recorded PID may be the flock/nice/ionice wrapper, so match the
       // engine token anywhere in argv rather than assuming a fixed argv[0].
-      const token = engineId === 'agy' ? '(?:agy|fake-agent(?:\\.mjs)?)' : engineId;
-      return new RegExp(`(?:^|[\\s/])${token}(?:$|[\\s/])`, 'i').test(command);
+      return commandMatches(command);
     } catch {
-      return false;
+      // macOS has no /proc. Use ps for the command and lsof for the cwd so a
+      // live but unrelated process cannot be mistaken for the old worker.
+      if (process.platform !== 'darwin') return false;
+      try {
+        const command = execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' }).trim();
+        const cwd = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8' })
+          .split('\n').find((line) => line.startsWith('n'))?.slice(1);
+        return Boolean(cwd && path.resolve(cwd) === worktree && commandMatches(command));
+      } catch {
+        return false;
+      }
     }
   }
 
@@ -1102,12 +1115,13 @@ export class Scheduler {
 
       const task = this.taskRepo.get(run.taskId);
       const engine = this.engines.get(run.engine);
-      // Rows written before durable handoff existed are recovered with the
-      // historical liveness check for backwards compatibility. New handoff
-      // rows must pass the stronger PID identity check below.
-      const processMatchesRun = !run.handoff || !task || !engine
-        ? true
-        : this.isWorkerProcessForRun(run.pid || 0, task, engine.id);
+      // Every durable worker row must pass the identity check, including rows
+      // from a daemon crash without a handoff marker. The only compatibility
+      // exception is an old pre-identity row with no handoff and no pidStart.
+      const legacyRun = !run.handoff && run.pidStart == null;
+      const processMatchesRun = legacyRun || (run.kind === 'worker' && Boolean(task && engine)
+        ? this.isWorkerProcessForRun(run.pid || 0, task!, engine!.id)
+        : false);
       if (!task || !engine || !run.pid || !processMatchesRun) {
         // A PID can be reused between daemon instances. Never adopt a process
         // unless both its worktree cwd and command identify this run's engine.
@@ -1165,6 +1179,7 @@ export class Scheduler {
         pausedAt: null,
         lockFile: run.lockFile || undefined,
         lastLogOffset: run.logOffset || 0,
+        adopted: true,
       });
       if (run.lockFile) this.locks.reserve(run.profileName, run.lockFile);
       this.eventBus.emit('run.adopted', run.taskId, { taskId: run.taskId, runId: run.id, pid: run.pid, note: 'Hub khởi động lại, tiếp tục theo dõi worker' });

@@ -222,3 +222,29 @@
   1. Các hàm định dạng thời gian chung mới (`formatDateTime`, `formatTime`, `formatDateTimeWithAgo`) mặc định không truyền `timeZone` cố định vào `Intl.DateTimeFormat`, cho phép sử dụng múi giờ của máy người dùng/trình duyệt. Hỗ trợ tùy chọn `timeZone` trong `opts` để phục vụ unit test và các ngữ cảnh cần cố định timezone.
   2. Các hàm reset quota cũ (`formatReset*`, `formatExpiry`, `formatTimeTitle`) tiếp tục sử dụng `TIME_ZONE = 'Asia/Ho_Chi_Minh'` làm mặc định để giữ nguyên vẹn kết quả test và tương thích với component quota đang do task song song xử lý.
 - **Hệ quả**: Đảm bảo hiển thị ngày giờ chuẩn xác theo môi trường người dùng ở các trang chính (Task Detail, Dashboard...) mà không gây xung đột chéo hay phá vỡ test của các tính năng quota.
+
+## DEC-021: Đồng bộ một chiều tài khoản từ Cockpit Tools (t-cockpit-account-sync)
+
+- **Bối cảnh & Bản quyền**: Người dùng quản lý tài khoản qua Cockpit Tools (Rust/Tauri, bản tham chiếu v1.3.81, giấy phép CC BY-NC-SA 4.0). AgentHub chỉ đọc dữ liệu định dạng JSON từ thư mục lưu trữ ngoài (`~/.cockpit_tools` hoặc `~/.antigravity_cockpit` hoặc `COCKPIT_TOOLS_DATA_DIR`), tuyệt đối không sao chép bất kỳ mã nguồn nào của Cockpit Tools vào repo AgentHub.
+- **Nguồn tham chiếu từ Cockpit Tools v1.3.81**:
+  - `crates/cockpit-core/src/modules/data_paths.rs`: xác định thư mục `DATA_DIR` (`~/.cockpit_tools` và fallback `~/.antigravity_cockpit`).
+  - `accounts.json` và `accounts/<id>.json`: cấu trúc Antigravity chứa `email`, `token: { access_token, refresh_token, expires_in }`.
+  - `codex_accounts.json` và `codex_accounts/<id>.json`: cấu trúc Codex chứa `email`, `auth_mode`, `tokens: { id_token, access_token, refresh_token }`, `account_id`.
+  - `claude_accounts.json` và `claude_accounts/<id>.json` (và logic sync CLI trong `src-tauri/src/modules/claude_account_cli_sync.rs`): cấu trúc Claude chứa `email`, `auth_mode`, `claude_credentials_raw: { claudeAiOauth: { accessToken, refreshToken, subscriptionType } }`.
+- **Định dạng Cockpit hỗ trợ & Các trường hợp bỏ qua**:
+  - *Antigravity*: Nhập tài khoản OAuth (email + refresh_token). Cho phép đồng bộ lặp lại vì Google OAuth refresh token không bị xoay vòng khi đổi access token. Bỏ qua các envelope token mã hoá kiểu cũ (`account-token.key`, ciphertext) với lý do yêu cầu người dùng mở Cockpit để nâng cấp.
+  - *Codex*: Nhập tài khoản `auth_mode = "oauth"`. Bỏ qua tài khoản API key (`auth_mode != "oauth"` hoặc có `openai_api_key`) và tài khoản ChatGPT plan nội bộ của Cockpit (`cockpit_chatgpt_plan`).
+  - *Claude*: Nhập tài khoản `auth_mode = "oauth"`. Bỏ qua tài khoản `desktop_oauth` và tài khoản `api_key`.
+  - *File hỏng*: Xử lý try/catch độc lập cho từng file tài khoản, đánh dấu `importable: false` kèm `skipReason = "File JSON hỏng"` mà không làm gián đoạn cả phiên quét.
+- **Chính sách xoay vòng token (Token Rotation Policy)**:
+  - Token OAuth của Codex và Claude có thể bị xoay vòng (refresh token cũ bị thu hồi khi cấp refresh token mới). Nếu cả Cockpit và AgentHub cùng chạy tiến trình refresh độc lập, tài khoản sẽ bị đăng xuất ở một trong hai bên.
+  - Vì vậy, hồ sơ Codex và Claude chỉ được **nhập một lần**, đánh dấu `source: 'cockpit'` và `cockpitId`. Các lần sync tiếp theo không ghi đè token của hồ sơ đã tồn tại, chỉ báo `exists` / `skipped`. Giao diện hiển thị cảnh báo rõ ràng cho người dùng.
+- **Phương pháp xác thực token Claude**:
+  - Không chạy binary `claude` CLI thật trên máy.
+  - Sử dụng Anthropic OAuth profile endpoint (`https://api.anthropic.com/api/oauth/profile`) để lấy email, uuid, và subscription/billing plan.
+  - Hồ sơ Claude isolated được tạo với `<home>/.credentials.json` (chứa `claudeAiOauth`) và `<home>/.claude.json` với quyền file nghiêm ngặt `0600`.
+- **Tính an toàn và bảo mật**:
+  - Thư mục Cockpit chỉ đọc (read-only), kiểm tra hash/mtime trước và sau đảm bảo không ghi bất kỳ byte nào vào thư mục Cockpit.
+  - API scan chỉ trả về metadata, không trả token ra ngoài.
+  - Sự kiện `profile.imported` và log hệ thống tuyệt đối không chứa token hay JWT secret.
+  - MCP tool `hub_cockpit_scan` chỉ cung cấp metadata phục vụ tham khảo, không có công cụ import tự động qua MCP.

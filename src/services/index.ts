@@ -168,6 +168,8 @@ function apiProfile(profile: ProfileRow): ProfileRow {
     verifyUrl: profile.verifyUrl ?? null,
     avatarUrl: profile.avatarUrl ?? null,
     plan: profile.plan ?? null,
+    source: profile.source ?? null,
+    cockpitId: profile.cockpitId ?? null,
   };
 }
 
@@ -705,6 +707,16 @@ export const UpdateConfigSchema = z.object({
   }).optional(),
   ui: z.object({
     tours: z.record(z.boolean()).optional(),
+  }).optional(),
+  integrations: z.object({
+    cockpit: z.object({
+      dataDir: z.string().optional(),
+      autoSync: z.object({
+        enabled: z.boolean().optional(),
+        intervalMinutes: z.number().positive().optional(),
+        engines: z.array(z.enum(['antigravity', 'codex', 'claude'])).optional(),
+      }).optional(),
+    }).optional(),
   }).optional(),
 });
 
@@ -5502,6 +5514,7 @@ export class AppService {
       updates: this.config.updates,
       workers: this.config.workers,
       ui: this.config.ui,
+      integrations: this.config.integrations,
     };
   }
 

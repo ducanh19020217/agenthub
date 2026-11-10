@@ -292,6 +292,30 @@ export async function cmdStop(config: AgentHubConfig, extraArgs: string[] = []):
   console.log(`✓ AgentHub đã tắt${disable ? ' và không tự bật khi đăng nhập' : ''}.`);
 }
 
+export async function cmdRestart(config: AgentHubConfig, extraArgs: string[] = []): Promise<void> {
+  const mode = extraArgs.includes('--now') ? 'now' : 'when-idle';
+  const response = await hubRequest(config, 'POST', '/api/system/restart', { mode });
+  if (!response.ok) throw new Error(`API restart trả về HTTP ${response.status}`);
+  const state = await response.json() as { waitingFor?: Array<{ taskId: string; startedAt: number }>; draining?: boolean };
+  const waiting = state.waitingFor || [];
+  if (mode === 'now') {
+    console.log(`⚠️ Đã yêu cầu khởi động lại ngay; ${waiting.length} worker/reviewer sẽ bị dừng.`);
+    return;
+  }
+  console.log(`✓ Sẽ khởi động lại khi ${waiting.length} task chạy xong.`);
+  if (extraArgs.includes('--wait')) {
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const status = await hubRequest(config, 'GET', '/api/system/restart');
+      if (!status.ok) break;
+      const current = await status.json() as { draining?: boolean; waitingFor?: Array<{ taskId: string }> };
+      const count = current.waitingFor?.length || 0;
+      console.log(`  Còn ${count} việc đang chạy.`);
+      if (!current.draining) break;
+    }
+  }
+}
+
 export async function cmdStart(config: AgentHubConfig): Promise<void> {
   const manager = serviceManager();
   try {
@@ -521,6 +545,10 @@ async function main() {
       await cmdStop(config, args.slice(1));
       break;
 
+    case 'restart':
+      await cmdRestart(config, args.slice(1));
+      break;
+
     case 'start':
       await cmdStart(config);
       break;
@@ -617,6 +645,7 @@ Cách dùng:
   agenthub install-service [--print]  Cài đặt systemd/LaunchAgent user service
   agenthub uninstall-service          Gỡ bỏ service chạy nền của AgentHub
   agenthub stop [--disable]           Tắt AgentHub và lưu task đang chạy để tiếp tục
+  agenthub restart [--when-idle|--now] [--wait] Khởi động lại an toàn
   agenthub start                       Bật AgentHub và chờ daemon sẵn sàng
   agenthub mcp-install [--print]      Đăng ký MCP server với Claude Code
   agenthub link                       Tạo symlink vào ~/.local/bin/agenthub

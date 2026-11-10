@@ -1190,8 +1190,8 @@ export class AppService {
 
   setPerfCollector(collector: PerfCollector): void { this.perfCollector = collector; }
 
-  shutdownForUser(): { queued: number; reviewers: number; childPids: number[] } {
-    const result = this.scheduler.shutdownForUser();
+  shutdownForUser(reason = 'user_stop'): { queued: number; reviewers: number; childPids: number[] } {
+    const result = this.scheduler.shutdownForUser(reason);
     const chatPids = this.chatService?.getRunningPids?.() || [];
     this.chatService?.stop();
     this.deployService?.stop();
@@ -1203,6 +1203,10 @@ export class AppService {
       childPids: [...(result.childPids || []), ...chatPids],
     };
   }
+
+  getRestartState() { return this.scheduler.getRestartState(); }
+  beginRestartDrain(timeoutMinutes?: number, reason?: string, onReady?: () => void) { return this.scheduler.beginRestartDrain(timeoutMinutes, reason, onReady); }
+  cancelRestartDrain() { return this.scheduler.cancelRestartDrain(); }
   getPerf() { return { samples: this.perfCollector?.getSamples() || [], latest: this.perfCollector?.latest() || null }; }
 
   async getSetupStatus() {

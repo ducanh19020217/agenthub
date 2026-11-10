@@ -71,6 +71,7 @@ import { PerfCollector } from './perf.js';
 import { pruneNodeModulesCache } from './cache.js';
 import { cleanupStaleAgentHubTempDirs } from './temp-cleanup.js';
 import { getOrCreateToken } from './auth.js';
+import { getPlatform } from './platform/index.js';
 
 export interface DaemonContext {
   config: AgentHubConfig;
@@ -514,7 +515,7 @@ export function createContext(
   };
 }
 
-export function closeContext(ctx: DaemonContext): void {
+export function closeContext(ctx: DaemonContext, preserveWorkerProcesses = false): void {
   try {
     ctx.perfCollector?.stop();
   } catch {
@@ -566,7 +567,7 @@ export function closeContext(ctx: DaemonContext): void {
     // ignore
   }
   try {
-    stopProcessGroups('SIGTERM');
+    if (!preserveWorkerProcesses) stopProcessGroups('SIGTERM');
   } catch {
     // ignore
   }
@@ -652,6 +653,7 @@ export async function startDaemon(
   }
 
   // Start Fastify HTTP server with security and API endpoints
+  let controlledRestart = false;
   const fastify = await createServer(ctx.service, config, {
     openProjectSync: (sourceId) => ctx.intakeService.sync(sourceId),
     openProjectDailyReport: (sourceId, date) =>
@@ -675,6 +677,13 @@ export async function startDaemon(
         }
       }
       setImmediate(() => { void shutdown(); });
+    },
+    onRestart: () => {
+      controlledRestart = true;
+      setImmediate(() => {
+        getPlatform().restartService();
+        void shutdown();
+      });
     },
   });
 
@@ -718,7 +727,7 @@ export async function startDaemon(
     try {
       // Dừng nhận request trước, rồi mới đóng scheduler và DB
       await fastify.close();
-      closeContext(ctx);
+      closeContext(ctx, controlledRestart);
     } catch (err) {
       console.error('Error during shutdown:', err);
     } finally {

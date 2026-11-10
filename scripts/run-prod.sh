@@ -26,6 +26,12 @@ fi
 cd "$ROOT_DIR"
 
 MODE="${1:-service}"
+WAIT=0
+FORCE=0
+for arg in "$@"; do
+  [ "$arg" = "--wait" ] && WAIT=1
+  if [ "$arg" = "--force" ] || [ "$arg" = "--now" ]; then FORCE=1; fi
+done
 
 # macOS không có systemd: service là LaunchAgent dev.agenthub (xem src/platform/darwin.ts).
 IS_DARWIN=0
@@ -63,6 +69,8 @@ show_help() {
   echo "  -b, --build-only            Chỉ build mã nguồn (Backend & Frontend), không khởi chạy"
   echo "  -s, --status                Xem trạng thái dịch vụ Production hiện tại"
   echo "  --restart                   Khởi động lại dịch vụ Production"
+  echo "  --wait                      Chờ drain hoàn tất sau --restart"
+  echo "  --force, --now              Khởi động lại ngay, dừng worker đang chạy"
   echo "  --stop                      Dừng dịch vụ Production (= ./scripts/stop-prod.sh)"
   echo "  -h, --help                  Xem hướng dẫn này"
   echo ""
@@ -87,6 +95,23 @@ case "$MODE" in
     exit 0
     ;;
   --restart)
+    if health_ok && [ -f "$HOME/.agenthub/token" ]; then
+      TOKEN=$(cat "$HOME/.agenthub/token" 2>/dev/null || true)
+      if [ "$FORCE" = 1 ]; then
+        echo "⚠️ Khởi động lại ngay: worker đang chạy sẽ bị dừng."
+        if curl -fsS -m 5 -X POST "http://127.0.0.1:7700/api/system/restart" -H "Authorization: Bearer $TOKEN" -H 'Host: 127.0.0.1:7700' -H 'Content-Type: application/json' --data '{"mode":"now"}' >/dev/null; then exit 0; fi
+      else
+        RESPONSE=$(curl -fsS -m 5 -X POST "http://127.0.0.1:7700/api/system/restart" -H "Authorization: Bearer $TOKEN" -H 'Host: 127.0.0.1:7700' -H 'Content-Type: application/json' --data '{"mode":"when-idle"}' || true)
+        if [ -n "$RESPONSE" ]; then
+          COUNT=$(printf '%s' "$RESPONSE" | grep -o '"taskId"' | wc -l | tr -d ' ')
+          echo "Sẽ khởi động lại khi $COUNT task chạy xong."
+          if [ "$WAIT" = 1 ]; then
+            while health_ok; do sleep 1; done
+          fi
+          exit 0
+        fi
+      fi
+    fi
     echo "🔄 Đang khởi động lại dịch vụ agenthub..."
     if [ "$IS_DARWIN" = 1 ]; then
       launchctl kickstart -k "$LAUNCHD_TARGET"
@@ -175,6 +200,17 @@ else
     # Kích hoạt linger để service chạy 24/7 kể cả khi logout
     loginctl enable-linger "$USER" 2>/dev/null || true
 
+    # Nếu daemon còn sống, yêu cầu drain để build/restart không cắt worker.
+    if health_ok && [ -f "$HOME/.agenthub/token" ]; then
+      TOKEN=$(cat "$HOME/.agenthub/token" 2>/dev/null || true)
+      RESTART_RESPONSE=$(curl -fsS -m 5 -X POST "http://127.0.0.1:7700/api/system/restart" -H "Authorization: Bearer $TOKEN" -H 'Host: 127.0.0.1:7700' -H 'Content-Type: application/json' --data '{"mode":"when-idle"}' || true)
+      if [ -n "$RESTART_RESPONSE" ]; then
+        COUNT=$(printf '%s' "$RESTART_RESPONSE" | grep -o '"taskId"' | wc -l | tr -d ' ')
+        echo "Sẽ khởi động lại khi $COUNT task chạy xong."
+        if [ "$WAIT" = 1 ]; then while health_ok; do sleep 1; done; fi
+        exit 0
+      fi
+    fi
     # Nạp lại và khởi động service
     systemctl --user daemon-reload
     systemctl --user restart agenthub

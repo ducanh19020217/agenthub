@@ -39,6 +39,7 @@ export async function createServer(
   options?: {
     webDir?: string;
     onShutdown?: (disable: boolean) => void;
+    onRestart?: () => void;
     openProjectSync?: (sourceId: string) => Promise<OpenProjectSyncResult>;
     openProjectDailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
     openProjectTimesheetPreview?: (sourceId: string, date?: string) => Promise<unknown>;
@@ -207,6 +208,24 @@ export async function createServer(
     const result = service.shutdownForUser();
     options?.onShutdown?.(disable);
     return { ok: true, daemonPid: process.pid, ...result };
+  });
+
+  fastify.get('/api/system/restart', async () => service.getRestartState());
+  fastify.delete('/api/system/restart', async () => service.cancelRestartDrain());
+  fastify.post('/api/system/restart', async (req) => {
+    const body = (req.body || {}) as { mode?: unknown; timeoutMinutes?: unknown; reason?: unknown };
+    const mode = body.mode === undefined || body.mode === 'when-idle' ? 'when-idle' : body.mode === 'now' ? 'now' : null;
+    if (!mode) throw new HttpError(400, 'bad_request', "mode phải là 'when-idle' hoặc 'now'");
+    const timeoutMinutes = body.timeoutMinutes === undefined ? 120 : Number(body.timeoutMinutes);
+    if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) throw new HttpError(400, 'bad_request', 'timeoutMinutes phải lớn hơn 0');
+    const reason = typeof body.reason === 'string' ? body.reason : undefined;
+    if (mode === 'now') {
+      const waiting = service.getRestartState().waitingFor;
+      const result = service.shutdownForUser('hub_restart');
+      options?.onRestart?.();
+      return { ...service.getRestartState(), mode, waitingFor: waiting, ...result };
+    }
+    return service.beginRestartDrain(timeoutMinutes, reason, () => options?.onRestart?.());
   });
 
   fastify.get('/api/perf', async () => service.getPerf());

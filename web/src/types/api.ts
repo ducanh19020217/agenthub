@@ -363,6 +363,7 @@ export type WaitReason =
   | 'slot'
   | 'load'
   | 'dependency'
+  | 'restart'
   | null;
 
 export interface BlockingDiskInfo {

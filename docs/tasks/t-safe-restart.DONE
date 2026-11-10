@@ -1,0 +1,32 @@
+# t-safe-restart hoàn tất
+
+## Tóm tắt
+
+- Drain `when-idle` lưu trạng thái, chặn dispatch run/check/review mới, chờ hoạt động hiện tại rồi gọi service-manager restart; timeout thì hủy drain an toàn.
+- `now` và SIGTERM ngoài drain ghi run `crashed` với `reason: hub_restart` và thêm dòng giải thích vào log; systemd dùng `KillMode=process` để không giết worker detached.
+- Hoàn thiện API/CLI/dashboard/Telegram, banner và nút hủy/xác nhận; task queued trong drain có `waitReason: 'restart'` và locale vi/en.
+- `run-prod.sh` và `stop-prod.sh` gọi API drain trước, in từng task cùng thời gian chạy, hỗ trợ `--wait` và `--force`/`--now`, fallback trực tiếp khi daemon không phản hồi.
+
+## Kiểm tra
+
+- `timeout 300 npm run lint`: đạt, 0 lỗi / 80 cảnh báo `no-explicit-any` có sẵn.
+- `timeout 300 npx tsc --noEmit -p .`: đạt.
+- `timeout 300 npx tsc --noEmit -p web`: đạt.
+- `timeout 300 npm run test -- --run`: đạt, 134 file / 1.657 test.
+- `timeout 300 npm run test:web -- --run`: đạt, 72 file / 630 test.
+- `timeout 300 npm run build`: đạt.
+- `timeout 300 npm run build:web`: đạt.
+- Test mục tiêu `test/wait-reason.test.ts`: đạt, 9/9; không chạy agy/codex thật hoặc service thật.
+
+## Việc còn thiếu
+
+- Không còn việc trong phạm vi task. Việc restart service thật vẫn chỉ được kiểm tra qua helper/API mock trong test, theo ràng buộc task.
+
+## Commit
+
+- `1efb6d74 feat: add safe restart drain mode`
+- `310a10e5 feat: expose safe restart controls`
+- `076e87b9 feat: show restart drain status`
+- `139521fe fix: guard restart banner without query client`
+- `61c29e19 fix: explain tasks waiting during restart drain`
+- `13d94a45 fix: drain production scripts before restart`

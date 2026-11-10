@@ -71,6 +71,7 @@ import { PerfCollector } from './perf.js';
 import { pruneNodeModulesCache } from './cache.js';
 import { cleanupStaleAgentHubTempDirs } from './temp-cleanup.js';
 import { getOrCreateToken } from './auth.js';
+import { getPlatform } from './platform/index.js';
 
 export interface DaemonContext {
   config: AgentHubConfig;
@@ -514,7 +515,7 @@ export function createContext(
   };
 }
 
-export function closeContext(ctx: DaemonContext): void {
+export function closeContext(ctx: DaemonContext, preserveWorkerProcesses = false): void {
   try {
     ctx.perfCollector?.stop();
   } catch {
@@ -566,7 +567,7 @@ export function closeContext(ctx: DaemonContext): void {
     // ignore
   }
   try {
-    stopProcessGroups('SIGTERM');
+    if (!preserveWorkerProcesses) stopProcessGroups('SIGTERM');
   } catch {
     // ignore
   }
@@ -652,6 +653,14 @@ export async function startDaemon(
   }
 
   // Start Fastify HTTP server with security and API endpoints
+  let controlledRestart = false;
+  ctx.service.setRestartHandler(() => {
+    controlledRestart = true;
+    setImmediate(() => {
+      getPlatform().restartService();
+      void shutdown();
+    });
+  });
   const fastify = await createServer(ctx.service, config, {
     openProjectSync: (sourceId) => ctx.intakeService.sync(sourceId),
     openProjectDailyReport: (sourceId, date) =>
@@ -675,6 +684,9 @@ export async function startDaemon(
         }
       }
       setImmediate(() => { void shutdown(); });
+    },
+    onRestart: () => {
+      ctx.service.triggerRestart();
     },
   });
 
@@ -718,7 +730,7 @@ export async function startDaemon(
     try {
       // Dừng nhận request trước, rồi mới đóng scheduler và DB
       await fastify.close();
-      closeContext(ctx);
+      closeContext(ctx, controlledRestart);
     } catch (err) {
       console.error('Error during shutdown:', err);
     } finally {
@@ -736,6 +748,10 @@ export async function startDaemon(
     try {
       parentIsServiceManager = /^(?:systemd|launchd)$/i.test(fs.readFileSync(`/proc/${process.ppid}/comm`, 'utf8').trim());
     } catch { /* platform does not expose the parent name */ }
+    // A termination that did not come through the explicit drain API is still
+    // a hub restart from the worker's point of view. Persist the outcome and
+    // explanation before the process group is torn down.
+    if (workersRunning) ctx.scheduler.shutdownForUser('hub_restart');
     if (workersRunning && !parentIsServiceManager) ctx.eventRepo.insert('daemon.stop_requested', undefined, { senderPid: process.ppid || null });
     void shutdown();
   };

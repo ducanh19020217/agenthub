@@ -40,7 +40,7 @@ export const WaitingQueue: React.FC<WaitingQueueProps> = ({
   });
 
   const allTasks = propTasks !== undefined ? propTasks : fetchedTasks || [];
-  const waitingTasks = allTasks.filter((task) => task.status === 'waiting_quota' || task.waitReason === 'parallel' || task.waitReason === 'profile_busy' || task.waitReason === 'focus');
+  const waitingTasks = allTasks.filter((task) => task.status === 'waiting_quota' || task.waitReason === 'parallel' || task.waitReason === 'profile_busy' || task.waitReason === 'focus' || task.waitReason === 'restart');
 
   return (
     <div

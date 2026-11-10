@@ -751,7 +751,7 @@ export async function startDaemon(
     // A termination that did not come through the explicit drain API is still
     // a hub restart from the worker's point of view. Persist the outcome and
     // explanation before the process group is torn down.
-    if (workersRunning) ctx.scheduler.shutdownForUser('hub_restart');
+    if (workersRunning) ctx.scheduler.shutdownForUser('hub_handoff');
     if (workersRunning && !parentIsServiceManager) ctx.eventRepo.insert('daemon.stop_requested', undefined, { senderPid: process.ppid || null });
     void shutdown();
   };

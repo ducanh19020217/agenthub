@@ -57,7 +57,6 @@ import { TelegramBotService } from './telegram.js';
 import { PermissionBroker } from './chat/permissions.js';
 import { findClaudeBin } from './chat/claude.js';
 import { stopProcessGroups } from './priority.js';
-import fs from 'node:fs';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { SetupManager } from './tools/setup.js';
@@ -715,7 +714,7 @@ export async function startDaemon(
   const shutdown = async (preserveWorkerProcesses = controlledRestart) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
-    process.removeListener('SIGINT', shutdown);
+    process.removeListener('SIGINT', onInt);
     process.removeListener('SIGTERM', onTerm);
 
     const startTime = Date.now();

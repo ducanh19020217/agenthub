@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <title>NCS AgentHub</title>
+  <rect width="128" height="128" rx="28" fill="#081412"/>
+  <rect x="2" y="2" width="124" height="124" rx="26" stroke="#1F4039" stroke-width="4"/>
+  <path d="M64 16 104 30v31c0 25-16.5 42.5-40 51-23.5-8.5-40-26-40-51V30l40-14Z" fill="#0F211D" stroke="#34D399" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M34 42h60" stroke="#10B981" stroke-width="4" stroke-linecap="round"/>
+  <text x="64" y="38" fill="#A7F3D0" font-family="Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="2" text-anchor="middle">NCS</text>
+  <rect x="43" y="53" width="42" height="34" rx="9" fill="#122A25" stroke="#6EE7B7" stroke-width="3.5"/>
+  <circle cx="55" cy="67" r="3.5" fill="#A7F3D0"/>
+  <circle cx="73" cy="67" r="3.5" fill="#A7F3D0"/>
+  <path d="M55 78h18" stroke="#34D399" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M64 46v7M36 70h7M85 70h7" stroke="#34D399" stroke-width="3.5" stroke-linecap="round"/>
+</svg>

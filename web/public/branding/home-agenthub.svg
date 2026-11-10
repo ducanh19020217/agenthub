@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <title>Home AgentHub</title>
+  <rect width="128" height="128" rx="28" fill="#0B0D12"/>
+  <rect x="2" y="2" width="124" height="124" rx="26" stroke="#263042" stroke-width="4"/>
+  <path d="M22 58.5 64 24l42 34.5v41a8.5 8.5 0 0 1-8.5 8.5h-47A8.5 8.5 0 0 1 42 99.5V77" stroke="#60A5FA" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M18 61 64 23l46 38" stroke="#3B82F6" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="42" y="53" width="44" height="38" rx="10" fill="#121923" stroke="#93C5FD" stroke-width="4"/>
+  <circle cx="55" cy="68" r="4" fill="#BFDBFE"/>
+  <circle cx="73" cy="68" r="4" fill="#BFDBFE"/>
+  <path d="M55 80h18" stroke="#60A5FA" stroke-width="4" stroke-linecap="round"/>
+  <path d="M64 45v8M35 73h7M86 73h7" stroke="#60A5FA" stroke-width="4" stroke-linecap="round"/>
+</svg>

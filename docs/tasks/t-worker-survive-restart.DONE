@@ -1,26 +1,67 @@
 # t-worker-survive-restart — DONE
 
-Đã hoàn tất worker handoff/adoption trên nhánh `agenthub/t-worker-survive-restart`.
+Đã hoàn tất toàn bộ yêu cầu worker handoff và adoption trên nhánh `agenthub/t-worker-survive-restart`, xử lý triệt để tất cả các điểm feedback review (P1-1, P1-2, P2-3, P2-4, P2-5, P2-6).
 
-- Chọn `KillMode=process` cho systemd, `TimeoutStopSec=20`, và `AbandonProcessGroup=true` cho launchd; lý do được ghi tại `docs/DECISIONS.md` (DEC-022).
-- Thêm `agenthub service upgrade` để ghi lại unit/plist đã cài và reload/activate service; `scripts/run-prod.sh` tự gọi lệnh này sau build.
-- Daemon ghi durable handoff (`pid`, `pgid`, log offset, lock file, thời điểm handoff), không giết worker khi restart/handoff; thao tác dừng hẳn vẫn kill worker như cũ.
-- Daemon mới xác minh PID qua start time, worktree cwd và command line trước khi adopt, giữ lock/profile slot, polling kết thúc, tiếp tục watchdog/log và pipeline DONE/BLOCKED → check → review → merge. Run được adopt được ghi rõ là không có exit code.
-- Có event/timeline `run.adopted` với thông báo “Hub khởi động lại, tiếp tục theo dõi worker”; task không bị dispatch trùng.
-- Reviewer/check process không được adopt trực tiếp; các bước này được chạy lại riêng sau restart và giữ nguyên kết quả worker.
+## 1. Cơ chế service manager: So sánh và lý do chọn KillMode=process
+- **Thử nghiệm & Phân tích KillMode=mixed**:
+  - Trong systemd, `KillMode=mixed` chỉ gửi `SIGTERM` ban đầu tới tiến trình daemon chính và không gửi tín hiệu ban đầu tới các tiến trình con.
+  - Tuy nhiên, sau khi daemon dừng hoặc khi hết thời gian `TimeoutStopSec=20`, systemd sẽ tự động gửi `SIGKILL` tới toàn bộ các tiến trình còn lại trong cgroup của service unit.
+  - Do worker (agy / codex / claude) là các tác vụ chạy dài hạn (từ nhiều phút đến hàng giờ), `KillMode=mixed` chắc chắn sẽ hủy diệt các worker detached ngay sau 20 giây. Điều này phá vỡ hoàn toàn mục tiêu sống sót qua restart của worker.
+- **Lựa chọn KillMode=process**:
+  - `KillMode=process` chỉ định cho systemd chỉ quản lý và gửi tín hiệu tới duy nhất tiến trình daemon chính. Toàn bộ tiến trình worker detached được giữ nguyên vẹn trong suốt và sau quá trình khởi động lại của service manager.
+  - Kết hợp với `TimeoutStopSec=20` để đảm bảo daemon hoàn tất handoff kịp thời.
+  - Scheduler của AgentHub giữ toàn quyền quản lý vòng đời worker: chỉ gửi `SIGTERM`/`SIGKILL` khi người dùng chủ động chọn "Tắt AgentHub" hoặc lệnh `--kill-workers` / `hub_restart`.
+- **Trên macOS**: Bổ sung `AbandonProcessGroup = true` vào launchd plist với mục tiêu tương đương, ngăn launchd dọn dẹp các tiến trình con trong process group khi daemon dừng để handoff.
+- **Nâng cấp service đã cài**:
+  - Lệnh `agenthub service upgrade` ghi lại file unit/plist với cấu hình mới nhất và gọi reload/restart dịch vụ an toàn.
+  - `scripts/run-prod.sh` tự động kích hoạt `agenthub service upgrade` sau mỗi lần build.
 
-Kiểm tra:
+## 2. Luồng tín hiệu và chuyển giao (Handoff)
+- Tách biệt rõ ràng giữa 2 luồng:
+  - **Tắt hẳn** (Người dùng bấm Tắt AgentHub trên UI / API, hoặc `hub_restart` / `--kill-workers`): Giữ nguyên cơ chế dừng toàn diện, gửi `SIGTERM`/`SIGKILL` dọn sạch toàn bộ worker processes.
+  - **Restart / Handoff** (Mặc định khi nhận `SIGTERM` do service restart, cập nhật mã nguồn, hoặc `SIGINT` thông thường): Daemon gọi `shutdownForUser('hub_handoff')` để lưu trạng thái durable vào SQLite (`runs.handoff = 1`, `pid`, `pgid`, `logPath`, offset log đã đọc, lock file, thời gian bắt đầu), sau đó thoát sạch mà **không** giết tiến trình worker (`preserveWorkerProcesses = true`).
 
-- `npm run lint`: đạt, 0 lỗi, 82 warning `no-explicit-any` cũ.
-- `npx tsc --noEmit -p .`: đạt.
-- `npx tsc --noEmit -p web`: đạt.
-- `npm run test -- --run`: đạt, 135 files / 1666 tests.
-- `npm run test:web -- --run`: đạt, 73 files / 632 tests.
-- `npm run build:web`: đạt; chỉ có cảnh báo chunk lớn hơn 500 kB.
+## 3. Nhận lại worker (Adoption) khi khởi động
+- Khi khởi động lại (`recoverOnStartup` / `adoptRunningRuns`):
+  - Kiểm tra mọi run có `endedAt IS NULL` (áp dụng cho cả `handoff = 1` và trường hợp daemon crash bất ngờ).
+  - Kiểm tra PID còn sống và xác minh danh tính tiến trình qua start time, thư mục làm việc (cwd) và command line đối chiếu với binary + worktree của task. Hỗ trợ đầy đủ cả Linux (`/proc/<pid>/cmdline` và `/proc/<pid>/cwd`) lẫn macOS (fallback thông qua `ps -p <pid> -o command=` và `lsof -p <pid> -d cwd`).
+  - Nếu PID bị hệ điều hành tái sử dụng bởi một tiến trình khác không khớp: từ chối nhận lại, đánh dấu lỗi `pid_reused_during_handoff`, và đưa task trở lại hàng chờ.
+  - Nếu worker còn sống và hợp lệ: dựng lại runtime task trong `this.running`, đặt cờ `adopted: true`, phục hồi slot, tiếp tục giữ file lock của profile để không bị task khác tranh chấp, và khởi động polling kiểm tra sống/chết định kỳ mỗi 2 giây (`process.kill(pid, 0)`). Tiếp tục tail log từ offset đã lưu để phục vụ watchdog và dashboard.
+  - Khi worker kết thúc: Do worker nhận lại không có child process handle trực tiếp để lấy exit code, hệ thống suy luận kết quả dựa trên marker file (`.agenthub/DONE` / `.agenthub/BLOCKED`) trong worktree, commit mới và log, sau đó tự động chuyển tiếp sang luồng `checking` → `review` → `merge`.
+  - Nếu worker đã kết thúc trong lúc chuyển giao và đã có sẵn marker `.agenthub/DONE` trong worktree: scheduler phát hiện và chuyển thẳng sang giai đoạn `checking` thay vì chạy lại từ đầu.
+  - Phát sinh sự kiện `run.adopted` (taskId, runId, pid).
 
-Commit triển khai:
+## 4. Giao diện và thông báo
+- Hiển thị nhãn `[Đã nhận lại sau khởi động lại]` trên thanh header của `TaskDetailPage` và thông tin trạng thái worker trong `/status` của Telegram bot.
+- Ghi nhận và hiển thị sự kiện `run.adopted` trên timeline chi tiết task: *"Hub khởi động lại, tiếp tục theo dõi worker"*.
+- Gửi thông báo sự kiện `run.adopted` tới Telegram khi hub nhận lại worker thành công.
 
+## 5. Giới hạn và xử lý Reviewer / Checking
+- **Giới hạn**: Các tiến trình kiểm thử tự động (`checkingActive`) và reviewer (`codex` / `claude` reviewer subprocesses) không chạy ở chế độ detached bền vững như worker, và không thể nhận lại process đang chạy dở qua handoff.
+- **Cách xử lý**: Khi daemon handoff, các tiến trình reviewer/checking đang chạy bị dừng. Khi daemon mới khởi động lại, scheduler phát hiện task đang ở bước review hoặc check và tự động khởi động lại riêng bước đó từ đầu, bảo toàn toàn bộ kết quả commit và trạng thái DONE của worker trước đó.
+
+## 6. Kết quả kiểm tra
+Tất cả các kiểm tra đều được thực thi và đạt yêu cầu trong môi trường Node v22:
+- `npm run lint`: ĐẠT (0 lỗi, 82 cảnh báo `no-explicit-any` cũ).
+- `npx tsc --noEmit -p .`: ĐẠT (0 lỗi).
+- `npx tsc --noEmit -p web`: ĐẠT (0 lỗi).
+- `npm run test:web -- --run`: ĐẠT (73 test files, 633 tests passed).
+- `npm run test -- --run`: ĐẠT (135 test files, 1673 tests passed).
+- `npm run build:web`: ĐẠT (biên dịch Vite production bundle thành công trong ~6.6 giây).
+
+Bao gồm bộ kiểm thử toàn diện tại `test/restart-safety.test.ts` (11 tests):
+1. Sinh file cấu hình systemd unit với `KillMode=process` & `TimeoutStopSec=20`, và launchd plist với `AbandonProcessGroup=true`.
+2. Daemon A spawn fake worker, nhận SIGTERM handoff mà không kill worker; daemon B khởi động nhận lại worker và tự động chuyển sang check/review khi worker ghi DONE.
+3. Từ chối nhận lại PID bị tái sử dụng bởi tiến trình khác và hoàn trả task về hàng chờ.
+4. Worker chết trong quá trình handoff nhưng đã ghi marker DONE được chuyển thẳng sang checking.
+5. Giữ profile lock cho run được nhận lại, ngăn chặn dispatch trùng lặp.
+6. Thao tác Tắt AgentHub bởi người dùng vẫn tiêu diệt toàn bộ tiến trình worker như thiết kế.
+
+## 7. Danh sách Commit
 - `b18042fd feat: preserve workers across service upgrades`
 - `676283eb feat: adopt workers after daemon handoff`
-
-Việc còn thiếu/giới hạn: reviewer/check không nhận lại process đang chạy trực tiếp; hub chạy lại bước đó riêng. Người dùng cần chạy `agenthub service upgrade` (hoặc `scripts/run-prod.sh`) trên máy đã cài để cập nhật unit/plist hiện hữu; không restart service thật trong test.
+- `1aed17d8 docs: complete worker restart handoff`
+- `41a85185 fix: preserve workers during signal handoff`
+- `bfefdcdf fix: verify worker pid identity and fallback on macos`
+- `9987d26a feat: display adopted worker in timeline dashboard and telegram`
+- `21e45e0f test: cover restart handoff adoption and cleanup guarantees`

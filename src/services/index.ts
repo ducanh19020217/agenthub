@@ -905,6 +905,11 @@ export function formatEventSummary(
     case 'run.crashed':
       return `${taskLabel} bị dừng đột ngột`;
 
+    case 'run.adopted': {
+      const note = typeof p.note === 'string' && p.note ? p.note : 'Hub khởi động lại, tiếp tục theo dõi worker';
+      return `${taskLabel}: ${note}`;
+    }
+
     case 'run.stalled':
       return `${taskLabel} bị kẹt khi chờ tác vụ nền`;
 
@@ -1605,6 +1610,7 @@ export class AppService {
         cpu: r.cpu ?? 0,
         paused: Boolean(r.paused),
         pauseReason: r.pauseReason ?? null,
+        adopted: Boolean(r.adopted),
       };
     });
 
@@ -4155,6 +4161,7 @@ export class AppService {
         pauseReason: activeRun.pauseReason ?? null,
         rss: activeRun.rss ?? 0,
         cpu: activeRun.cpu ?? 0,
+        adopted: Boolean(activeRun.adopted),
       } : null,
       runs: runs.map(apiRun),
       reviews: reviewsWithModels.map(apiReview),

@@ -248,3 +248,9 @@
   - API scan chỉ trả về metadata, không trả token ra ngoài.
   - Sự kiện `profile.imported` và log hệ thống tuyệt đối không chứa token hay JWT secret.
   - MCP tool `hub_cockpit_scan` chỉ cung cấp metadata phục vụ tham khảo, không có công cụ import tự động qua MCP.
+## DEC-022: Worker sống qua restart service bằng KillMode=process
+
+- systemd unit dùng `KillMode=process` để khi daemon nhận SIGTERM, systemd chỉ quản lý tiến trình chính; worker detached không nằm trong nhóm bị kết thúc khi service restart. `TimeoutStopSec=20` giới hạn thời gian daemon thoát sạch.
+- launchd dùng `AbandonProcessGroup=true` với cùng mục tiêu trên macOS.
+- `agenthub service upgrade` ghi lại unit/plist hiện hành và thực hiện thao tác reload/activate của platform thông qua luồng cài service. `scripts/run-prod.sh` gọi lệnh này sau mỗi build production.
+- Giữ `KillMode=process` thay vì `mixed`: mục tiêu handoff yêu cầu worker không bị SIGTERM/SIGKILL theo vòng đời service manager; scheduler chịu trách nhiệm kill worker chỉ trong luồng người dùng chọn dừng hẳn.

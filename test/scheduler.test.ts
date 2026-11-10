@@ -573,6 +573,30 @@ describe('Scheduler regression fixes', () => {
     delete process.env.FAKE_MODE;
   });
 
+  it('hands off a detached worker and adopts it without dispatching a duplicate', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/a', projectId: 'test-project', slug: 'a', title: 'A', status: 'queued' });
+    process.env.FAKE_MODE = 'slow';
+    const first = makeScheduler();
+    first.tick();
+    await vi.waitFor(() => expect(first.getRunning().has('test-project/a')).toBe(true));
+    const run = runRepo.getByTask('test-project/a')[0];
+    first.shutdownForUser('hub_handoff');
+    expect(runRepo.get(run.id)?.outcome).toBeNull();
+    expect(runRepo.get(run.id)?.handoff).toBe(1);
+    first.stop();
+
+    const second = makeScheduler();
+    second.start();
+    expect(second.getRunning().has('test-project/a')).toBe(true);
+    expect(runRepo.getByTask('test-project/a').filter((candidate) => candidate.outcome === null)).toHaveLength(1);
+    second.cancelAll();
+    second.stop();
+    delete process.env.FAKE_MODE;
+  });
+
   it('does not kill a recovered run immediately when its old timeout has elapsed', () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);

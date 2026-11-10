@@ -94,6 +94,11 @@ export async function cmdInstallService(extraArgs: string[], projectRootOverride
   return result.content;
 }
 
+/** Rewrite the installed unit/plist after an AgentHub upgrade. */
+export async function cmdServiceUpgrade(projectRootOverride?: string): Promise<string> {
+  return cmdInstallService([], projectRootOverride);
+}
+
 function serviceManager(): { bin: string; args: (action: string, disable?: boolean) => string[] } {
   if (process.platform === 'darwin') {
     const uid = process.getuid?.() ?? '';
@@ -502,7 +507,7 @@ export async function cmdCleanTmp(extraArgs: string[] = []): Promise<void> {
 
 async function main() {
   const config = loadConfig();
-  if (command === 'install-service' || command === 'uninstall' || command === 'stop' || command === 'start' || command === 'update' || (command === 'daemon' && subcommand === 'stop')) {
+  if (command === 'install-service' || command === 'service' || command === 'uninstall' || command === 'stop' || command === 'start' || command === 'update' || (command === 'daemon' && subcommand === 'stop')) {
     assertWorkerMayControlHub(command === 'daemon' ? 'daemon stop' : command);
   }
 
@@ -539,6 +544,11 @@ async function main() {
 
     case 'install-service':
       await cmdInstallService(args.slice(1));
+      break;
+
+    case 'service':
+      if (subcommand !== 'upgrade') throw new Error('Cách dùng: agenthub service upgrade');
+      await cmdServiceUpgrade();
       break;
 
     case 'stop':
@@ -643,6 +653,7 @@ Cách dùng:
   agenthub update                     Cập nhật AgentHub lên phiên bản mới nhất
   agenthub version [--check]          Xem phiên bản và kiểm tra cập nhật mới
   agenthub install-service [--print]  Cài đặt systemd/LaunchAgent user service
+  agenthub service upgrade             Ghi lại unit/plist và daemon-reload sau khi nâng cấp
   agenthub uninstall-service          Gỡ bỏ service chạy nền của AgentHub
   agenthub stop [--disable]           Tắt AgentHub và lưu task đang chạy để tiếp tục
   agenthub restart [--when-idle|--now] [--wait] Khởi động lại an toàn

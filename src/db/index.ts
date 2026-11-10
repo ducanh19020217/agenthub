@@ -1077,6 +1077,14 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_tasks_project_status_created ON tasks(projectId, status, createdAt);
   PRAGMA foreign_keys = ON;
   `,
+  // Migration 74: durable worker handoff across daemon replacement.
+  `
+  ALTER TABLE runs ADD COLUMN handoff INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE runs ADD COLUMN pgid INTEGER;
+  ALTER TABLE runs ADD COLUMN logOffset INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE runs ADD COLUMN lockFile TEXT;
+  ALTER TABLE runs ADD COLUMN handoffAt TEXT;
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -1409,6 +1417,11 @@ export interface RunRow {
   resetAt: number | null;
   pidStart: number | null;
   kind: 'worker' | 'reviewer';
+  handoff: number;
+  pgid: number | null;
+  logOffset: number;
+  lockFile: string | null;
+  handoffAt: string | null;
 }
 
 export interface EventRow {
@@ -2278,6 +2291,10 @@ export class RunRepo {
       .all() as RunRow[];
   }
 
+  getHandoffRuns(): RunRow[] {
+    return this.db.prepare('SELECT * FROM runs WHERE endedAt IS NULL AND handoff = 1').all() as RunRow[];
+  }
+
   get(id: string): RunRow | undefined {
     return this.db.prepare('SELECT * FROM runs WHERE id = ?').get(id) as RunRow | undefined;
   }
@@ -2293,12 +2310,13 @@ export class RunRepo {
     pidStart?: number;
     startedAt?: string;
     kind?: 'worker' | 'reviewer';
+    lockFile?: string;
   }): void {
     this.db
       .prepare(
-        'INSERT INTO runs (id, taskId, engine, model, profileName, pid, startedAt, logPath, pidStart, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO runs (id, taskId, engine, model, profileName, pid, startedAt, logPath, pidStart, kind, lockFile) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       )
-      .run(row.id, row.taskId, row.engine, row.model, row.profileName, row.pid || null, row.startedAt || new Date().toISOString(), row.logPath || null, row.pidStart || null, row.kind || 'worker');
+      .run(row.id, row.taskId, row.engine, row.model, row.profileName, row.pid || null, row.startedAt || new Date().toISOString(), row.logPath || null, row.pidStart || null, row.kind || 'worker', row.lockFile || null);
   }
 
   finish(id: string, outcome: string, resetAt?: number, reason?: string): void {
@@ -2309,6 +2327,11 @@ export class RunRepo {
 
   updatePid(id: string, pid: number, pidStart?: number | null): void {
     this.db.prepare('UPDATE runs SET pid = ?, pidStart = ? WHERE id = ?').run(pid, pidStart || null, id);
+  }
+
+  markHandoff(id: string, snapshot: { pid: number; pgid: number; logOffset: number; lockFile?: string | null }): void {
+    this.db.prepare("UPDATE runs SET handoff = 1, pid = ?, pgid = ?, logOffset = ?, lockFile = ?, handoffAt = datetime('now') WHERE id = ? AND endedAt IS NULL")
+      .run(snapshot.pid, snapshot.pgid, snapshot.logOffset, snapshot.lockFile || null, id);
   }
 }
 

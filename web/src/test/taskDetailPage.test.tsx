@@ -980,5 +980,49 @@ describe('TaskDetailPage', () => {
     expect(titles).toContain('2026-11-06T17:52:44.000Z');
     expect(titles).toContain('2026-11-07T18:22:34.000Z');
   });
+
+  it('renders adopted badge and timeline event when worker was adopted after hub restart', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      id: 'proj-1~t1',
+      projectId: 'proj-1',
+      slug: 't1',
+      title: 'Task Adopted',
+      level: 'easy',
+      status: 'running',
+      currentRun: {
+        startedAt: '2026-11-06T17:50:00.000Z',
+        lastOutputAt: '2026-11-06T17:52:00.000Z',
+        lastActivityAt: '2026-11-06T17:52:00.000Z',
+        activitySource: 'log',
+        model: 'gemini-3.8-flash-high',
+        profileName: 'profile-1',
+        engine: 'agy',
+        adopted: true,
+      },
+      events: [
+        {
+          id: 1,
+          type: 'run.adopted',
+          ts: '2026-11-06T17:51:00.000Z',
+          taskId: 'proj-1~t1',
+          payload: { note: 'Hub khởi động lại, tiếp tục theo dõi worker' },
+        },
+      ],
+      runs: [],
+      reviews: [],
+    } as never);
+
+    renderPage();
+
+    expect(await screen.findByText('Task Adopted')).toBeInTheDocument();
+    const badge = screen.getByTestId('task-adopted-badge');
+    expect(badge).toBeInTheDocument();
+    expect(badge.textContent).toContain('đã nhận lại sau khi hub khởi động lại');
+
+    const adoptedEvent = screen.getByTestId('timeline-event-run.adopted');
+    expect(adoptedEvent).toBeInTheDocument();
+    expect(adoptedEvent.textContent).toContain('Hub khởi động lại, tiếp tục theo dõi worker');
+  });
 });
 

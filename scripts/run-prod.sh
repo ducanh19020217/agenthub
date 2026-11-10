@@ -212,7 +212,7 @@ else
     fi
   else
     # Cài đặt hoặc cập nhật service file
-    node dist/cli.js install-service >/dev/null 2>&1 || true
+    node dist/cli.js service upgrade >/dev/null 2>&1 || true
 
     # Kích hoạt linger để service chạy 24/7 kể cả khi logout
     loginctl enable-linger "$USER" 2>/dev/null || true

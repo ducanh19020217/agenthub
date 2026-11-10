@@ -57,7 +57,6 @@ import { TelegramBotService } from './telegram.js';
 import { PermissionBroker } from './chat/permissions.js';
 import { findClaudeBin } from './chat/claude.js';
 import { stopProcessGroups } from './priority.js';
-import fs from 'node:fs';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { SetupManager } from './tools/setup.js';
@@ -712,10 +711,10 @@ export async function startDaemon(
 
   // Graceful shutdown
   let isShuttingDown = false;
-  const shutdown = async () => {
+  const shutdown = async (preserveWorkerProcesses = controlledRestart) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
-    process.removeListener('SIGINT', shutdown);
+    process.removeListener('SIGINT', onInt);
     process.removeListener('SIGTERM', onTerm);
 
     const startTime = Date.now();
@@ -730,7 +729,7 @@ export async function startDaemon(
     try {
       // Dừng nhận request trước, rồi mới đóng scheduler và DB
       await fastify.close();
-      closeContext(ctx, controlledRestart);
+      closeContext(ctx, preserveWorkerProcesses);
     } catch (err) {
       console.error('Error during shutdown:', err);
     } finally {
@@ -744,23 +743,25 @@ export async function startDaemon(
 
   const onTerm = () => {
     const workersRunning = ctx.scheduler.getRunning().size > 0 || ctx.scheduler.getReviewerStatus().running.length > 0;
-    let parentIsServiceManager = false;
-    try {
-      parentIsServiceManager = /^(?:systemd|launchd)$/i.test(fs.readFileSync(`/proc/${process.ppid}/comm`, 'utf8').trim());
-    } catch { /* platform does not expose the parent name */ }
-    // A termination that did not come through the explicit drain API is still
-    // a hub restart from the worker's point of view. Persist the outcome and
-    // explanation before the process group is torn down.
-    if (workersRunning) ctx.scheduler.shutdownForUser('hub_restart');
-    if (workersRunning && !parentIsServiceManager) ctx.eventRepo.insert('daemon.stop_requested', undefined, { senderPid: process.ppid || null });
-    void shutdown();
+    // A signal termination is a daemon handoff by default. Persist the outcome
+    // before closing resources, and keep detached workers outside the daemon's
+    // process-group cleanup so the next daemon can adopt them.
+    if (workersRunning) ctx.scheduler.shutdownForUser('hub_handoff');
+    if (workersRunning) ctx.eventRepo.insert('daemon.stop_requested', undefined, { senderPid: process.ppid || null });
+    void shutdown(true);
+  };
+
+  const onInt = () => {
+    const workersRunning = ctx.scheduler.getRunning().size > 0 || ctx.scheduler.getReviewerStatus().running.length > 0;
+    if (workersRunning) ctx.scheduler.shutdownForUser('hub_handoff');
+    void shutdown(true);
   };
 
   // Last line of defence: log stray async errors instead of taking the whole hub down.
   process.on('unhandledRejection', (reason) => {
     console.error('[daemon] unhandled rejection:', reason instanceof Error ? reason.stack || reason.message : reason);
   });
-  process.on('SIGINT', shutdown);
+  process.on('SIGINT', onInt);
   process.on('SIGTERM', onTerm);
 
   return { fastify, ctx, shutdown };

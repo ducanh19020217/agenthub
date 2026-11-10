@@ -336,6 +336,8 @@ export interface Run {
   reason?: string | null;
   logPath?: string | null;
   resetAt?: number | null;
+  handoff?: number | null;
+  adopted?: boolean;
 }
 
 export interface Review {
@@ -441,6 +443,7 @@ export interface Task {
     pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
     rss?: number;
     cpu?: number;
+    adopted?: boolean;
   } | null;
   paused?: boolean;
   pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
@@ -558,6 +561,7 @@ export interface RunningWorker {
   cpu?: number;
   paused?: boolean;
   pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
+  adopted?: boolean;
 }
 
 export type BrainActivity =

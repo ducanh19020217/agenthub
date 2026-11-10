@@ -117,6 +117,25 @@ async function run() {
       );
       break;
 
+    case 'sleep-done': {
+      console.log('Fake agent: sleep-done waiting for trigger...');
+      const triggerFile = path.join(agentHubDir, 'TRIGGER_DONE');
+      let waiting = true;
+      while (waiting) {
+        if (fs.existsSync(triggerFile) || process.env.STOP_SLEEP === '1') {
+          waiting = false;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      fs.writeFileSync(
+        path.join(agentHubDir, 'DONE'),
+        'Task completed successfully.\n\n- All tests pass\n- No remaining work',
+      );
+      console.log('Fake agent: sleep-done finished with DONE');
+      break;
+    }
+
     case 'sleep-loop': {
       console.log('Fake agent: sleep loop...');
       let running = true;

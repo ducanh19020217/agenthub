@@ -69,7 +69,11 @@ if health_ok && [ -f "$HOME/.agenthub/token" ] && [ "$FORCE" = 0 ]; then
       const state = JSON.parse(process.env.RESTART_JSON || "{}");
       const waiting = state.waitingFor || [];
       console.log(`Sẽ dừng an toàn sau khi ${waiting.length} task chạy xong.`);
-      for (const item of waiting) console.log(`  - ${item.taskId} (${item.kind})`);
+      for (const item of waiting) {
+        const started = Number(item.startedAt);
+        const elapsed = Number.isFinite(started) ? Math.max(0, Math.floor((Date.now() - started) / 60000)) : 0;
+        console.log(`  - ${item.taskId} (${item.kind}, đã chạy ${elapsed} phút)`);
+      }
     ' 2>/dev/null || true
     if [ "$WAIT" = 1 ]; then
       while health_ok; do sleep 1; done

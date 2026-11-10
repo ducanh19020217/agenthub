@@ -135,6 +135,10 @@ systemctl --user status agenthub  # kiểm tra đang chạy
 agenthub open                     # mở http://127.0.0.1:7700/#token=...
 ```
 
+`agenthub restart` mặc định chờ hub rảnh; thêm `--wait` để chờ lệnh kết thúc drain. Chỉ dùng `--now`/`--force` khi chấp nhận dừng worker đang chạy. `./scripts/run-prod.sh --restart` và `./scripts/stop-prod.sh` cũng dùng drain mặc định, còn `--force` là dừng ngay.
+
+Nếu service đã được cài trước phiên bản hỗ trợ restart an toàn, chạy lại `agenthub install-service` (hoặc `./scripts/run-prod.sh --build-only` rồi `node dist/cli.js install-service`) để unit systemd nhận `KillMode=process`; sau đó kiểm tra bằng `systemctl --user cat agenthub`. Không cần restart worker đang chạy để cập nhật unit, vì drain sẽ tự khởi động lại hub khi rảnh.
+
 - Dashboard chỉ nghe ở `127.0.0.1` và cần token (lấy bằng `agenthub open --no-browser`).
 - Xem dashboard từ máy khác: **dùng SSH tunnel**, không mở cổng ra mạng:
   `ssh -L 7700:127.0.0.1:7700 user@may-chay-hub` rồi mở `http://127.0.0.1:7700/#token=...` trên máy của bạn.

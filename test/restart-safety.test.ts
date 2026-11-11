@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import type { AddressInfo } from 'node:net';
 import { execFileSync } from 'node:child_process';
 import { loadConfig } from '../src/config.js';
 import { createContext, startDaemon } from '../src/daemon.js';
@@ -610,7 +611,7 @@ process.on('SIGTERM', () => { clearInterval(interval); process.exit(143); });
     expect(process.kill(workerPid, 0)).toBe(true);
 
     // Telegram shutdown callback from allowed chat
-    await (daemon.ctx.telegramService as any).handleCallbackQuery({
+    await (daemon.ctx.telegramService as unknown as { handleCallbackQuery: (q: unknown) => Promise<void> }).handleCallbackQuery({
       id: 'cb-shutdown',
       from: { id: 123 },
       message: { message_id: 1, chat: { id: 123 } },
@@ -651,7 +652,7 @@ process.on('SIGTERM', () => { clearInterval(interval); process.exit(143); });
     const workerPid1 = rt1.pid;
     expect(process.kill(workerPid1, 0)).toBe(true);
 
-    const addr1 = daemon1.fastify.server.address() as any;
+    const addr1 = daemon1.fastify.server.address() as AddressInfo | null;
     const port1 = addr1 ? addr1.port : config.port;
     const token1 = getOrCreateToken(config.tokenPath);
     const headers1 = { host: `127.0.0.1:${port1}`, authorization: `Bearer ${token1}` };
@@ -685,7 +686,7 @@ process.on('SIGTERM', () => { clearInterval(interval); process.exit(143); });
     const workerPid2 = rt2.pid;
     expect(process.kill(workerPid2, 0)).toBe(true);
 
-    const addr2 = daemon2.fastify.server.address() as any;
+    const addr2 = daemon2.fastify.server.address() as AddressInfo | null;
     const port2 = addr2 ? addr2.port : config.port;
     const token2 = getOrCreateToken(config.tokenPath);
     const headers2 = { host: `127.0.0.1:${port2}`, authorization: `Bearer ${token2}` };

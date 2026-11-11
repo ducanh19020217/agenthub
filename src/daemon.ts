@@ -516,7 +516,7 @@ export function createContext(
   };
 }
 
-export function closeContext(ctx: DaemonContext, preserveWorkerProcesses = false): void {
+export function closeContext(ctx: DaemonContext, _preserveWorkerProcesses = false): void {
   try {
     ctx.perfCollector?.stop();
   } catch {

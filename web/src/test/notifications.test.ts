@@ -195,4 +195,9 @@ describe('browser notification policy', () => {
 
     now.mockRestore();
   });
+
+  it('formats decision.answered notification body with other answer label', () => {
+    const ev = event('decision.answered', { answer: 'other', customAnswer: 'Phương án mới' });
+    expect(browserNotificationBody(ev)).toBe('Đã phản hồi quyết định: Phương án khác — Phương án mới');
+  });
 });

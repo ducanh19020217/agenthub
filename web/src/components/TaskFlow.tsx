@@ -392,7 +392,6 @@ const FlowEdges: React.FC<{
         const midY = bFrom.y + 28; // Align horizontally with icon center
         const animated = isStatusActive(from) || isStatusActive(to);
         const isDoneToPushed = from === 'done' && to === 'pushed';
-        const gapWidth = endX - startX;
 
         return (
           <g key={`${from}-${to}`}>
@@ -402,8 +401,10 @@ const FlowEdges: React.FC<{
             />
             {isDoneToPushed && (
               <text
+                data-testid="flow-merge-label"
+                data-placement="above-node"
                 x={(startX + endX) / 2}
-                y={midY - 10}
+                y={Math.min(bFrom.y, bTo.y) - 10}
                 fontSize={11.5}
                 textAnchor="middle"
                 className="select-none fill-[var(--t-text-3)] font-medium"
@@ -414,18 +415,7 @@ const FlowEdges: React.FC<{
                   strokeLinejoin: 'round',
                 }}
               >
-                {gapWidth < 85 ? (
-                  <>
-                    <tspan x={(startX + endX) / 2} dy="-0.2em">
-                      {t('tasks.flow.edgeAutoMergePush').split('+')[0]?.trim() || t('tasks.flow.edgeAutoMergePush')}
-                    </tspan>
-                    <tspan x={(startX + endX) / 2} dy="1.2em">
-                      {`+ ${t('tasks.flow.edgeAutoMergePush').split('+')[1]?.trim() || ''}`}
-                    </tspan>
-                  </>
-                ) : (
-                  t('tasks.flow.edgeAutoMergePush')
-                )}
+                {t('tasks.flow.edgeAutoMergePush')}
               </text>
             )}
           </g>

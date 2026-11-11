@@ -463,4 +463,18 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
       errorSpy.mockRestore();
     }
   });
+
+  it('renders merge label in an area not covered by nodes (above node boundary)', async () => {
+    renderPage('/tasks?view=flow');
+    const label = await screen.findByTestId('flow-merge-label');
+    expect(label).toBeInTheDocument();
+    expect(label).toHaveAttribute('data-placement', 'above-node');
+
+    // Label should be positioned above node top boundary (in fallback box, row 1 node y is 52)
+    const yAttr = Number(label.getAttribute('y'));
+    expect(yAttr).toBeLessThan(52);
+
+    // Label text is visible in both vi and en
+    expect(label.textContent).toMatch(/merge.*push/i);
+  });
 });

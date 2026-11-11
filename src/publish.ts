@@ -157,6 +157,7 @@ export interface PublishFailedResult {
   remote: string;
   branch: string;
   auditFailed?: boolean;
+  retryable?: boolean;
   findings?: PrePublishAuditFinding[];
 }
 
@@ -169,25 +170,157 @@ export interface PublishSkippedResult {
 export type PublishResult = PublishSuccessResult | PublishFailedResult | PublishSkippedResult;
 
 /**
+ * Checks if a commit is an ancestor of a base ref.
+ */
+async function isAncestor(repoPath: string, commit: string, base: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['-C', repoPath, 'merge-base', '--is-ancestor', commit, base], { env });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Find the merge commit that merged a task's branch into the integration or target branch.
+ */
+async function findMergeCommitForTask(
+  repoPath: string,
+  task: TaskRow,
+  candidateBranches: string[],
+  env: NodeJS.ProcessEnv,
+): Promise<string | null> {
+  const taskBranch = task.branch || `agenthub/${task.slug}`;
+  const branchRef = `refs/heads/${taskBranch}`;
+  const hasBranch = await refExists(repoPath, branchRef, env);
+
+  const validRefs: string[] = [];
+  for (const b of candidateBranches) {
+    if (!b) continue;
+    const bRef = `refs/heads/${b}`;
+    if (await refExists(repoPath, bRef, env)) {
+      if (!validRefs.includes(bRef)) validRefs.push(bRef);
+    } else if (await refExists(repoPath, b, env)) {
+      if (!validRefs.includes(b)) validRefs.push(b);
+    }
+  }
+  if (validRefs.length === 0 && (await refExists(repoPath, 'HEAD', env))) {
+    validRefs.push('HEAD');
+  }
+
+  for (const searchRef of validRefs) {
+    if (hasBranch) {
+      try {
+        const tip = await runGit(['-C', repoPath, 'rev-parse', branchRef], repoPath, env);
+        const out = await runGit(
+          ['-C', repoPath, 'log', '--merges', '--first-parent', '--ancestry-path', `${tip}..${searchRef}`, '--reverse', '-n', '1', '--format=%H'],
+          repoPath,
+          env,
+        );
+        if (out.trim()) return out.trim();
+      } catch {
+        // ignore
+      }
+    }
+
+    // Fallback: search merge commits by branch name or slug in commit message
+    for (const pattern of [taskBranch, task.slug]) {
+      if (!pattern) continue;
+      try {
+        const out = await runGit(
+          ['-C', repoPath, 'log', '--merges', '--first-parent', '-n', '1', `--grep=${pattern}`, '--format=%H', searchRef],
+          repoPath,
+          env,
+        );
+        if (out.trim()) return out.trim();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Returns number of audit fix rounds already completed by this task.
+ */
+function getTaskAuditRounds(task: TaskRow, deps: PublishTaskDeps): number {
+  if (deps.reviewRepo?.getByTask) {
+    try {
+      const reviews = deps.reviewRepo.getByTask(task.id);
+      const auditReviews = reviews.filter((r) => r.actor === 'audit-prepublish');
+      if (auditReviews.length > 0) return auditReviews.length;
+    } catch {
+      // ignore
+    }
+  }
+  if (task.pushResult) {
+    try {
+      const pr = JSON.parse(task.pushResult);
+      if (typeof pr.auditFixRounds === 'number') return pr.auditFixRounds;
+    } catch {
+      // ignore
+    }
+  }
+  return 0;
+}
+
+/**
  * Extracts diff and changed files for a specific task.
+ * Prioritizes merge commit diff (<merge>^1 <merge>) to capture conflict resolution.
  */
 async function getTaskDiff(
   repoPath: string,
   task: TaskRow,
+  sourceBranch: string,
+  targetBranch: string,
   baseRef: string,
   env: NodeJS.ProcessEnv,
-): Promise<{ diff: string; changedFiles: string[]; commitSha: string }> {
+): Promise<{ diff: string; changedFiles: string[]; commitSha: string; branchSha?: string }> {
   let commitSha = '';
+  let branchSha: string | undefined;
   let diff = '';
   let changedFiles: string[] = [];
 
   const taskBranch = task.branch || `agenthub/${task.slug}`;
   const branchExists = await refExists(repoPath, `refs/heads/${taskBranch}`, env);
-
   if (branchExists) {
     try {
-      commitSha = await runGit(['-C', repoPath, 'rev-parse', `refs/heads/${taskBranch}`], repoPath, env);
-      const mergeBase = await runGit(['-C', repoPath, 'merge-base', baseRef, `refs/heads/${taskBranch}`], repoPath, env);
+      branchSha = await runGit(['-C', repoPath, 'rev-parse', `refs/heads/${taskBranch}`], repoPath, env);
+    } catch {
+      // ignore
+    }
+  }
+
+  // 1. Prioritize merge commit on sourceBranch or targetBranch
+  const mergeCommit = await findMergeCommitForTask(repoPath, task, [sourceBranch, targetBranch], env);
+  if (mergeCommit) {
+    try {
+      commitSha = mergeCommit;
+      diff = await runGit(['-C', repoPath, 'diff', `${mergeCommit}^1`, mergeCommit], repoPath, env);
+      const filesOut = await runGit(['-C', repoPath, 'diff', '--name-only', `${mergeCommit}^1`, mergeCommit], repoPath, env);
+      changedFiles = filesOut.split('\n').map((s) => s.trim()).filter(Boolean);
+    } catch {
+      // ignore
+    }
+  }
+
+  // 2. If no merge commit or diff empty, and task branch exists, use merge-base..branch
+  if (!diff && branchExists) {
+    try {
+      if (!commitSha && branchSha) {
+        commitSha = branchSha;
+      }
+      let effectiveBase = baseRef;
+      if (!(await refExists(repoPath, effectiveBase, env))) {
+        effectiveBase = (await refExists(repoPath, `refs/heads/${sourceBranch}`, env))
+          ? `refs/heads/${sourceBranch}`
+          : (await refExists(repoPath, `refs/heads/${targetBranch}`, env))
+            ? `refs/heads/${targetBranch}`
+            : 'HEAD';
+      }
+      const mergeBase = await runGit(['-C', repoPath, 'merge-base', effectiveBase, `refs/heads/${taskBranch}`], repoPath, env);
       diff = await runGit(['-C', repoPath, 'diff', `${mergeBase}..refs/heads/${taskBranch}`], repoPath, env);
       const filesOut = await runGit(['-C', repoPath, 'diff', '--name-only', `${mergeBase}..refs/heads/${taskBranch}`], repoPath, env);
       changedFiles = filesOut.split('\n').map((s) => s.trim()).filter(Boolean);
@@ -196,11 +329,15 @@ async function getTaskDiff(
     }
   }
 
+  // 3. Fallback for commitSha
   if (!commitSha) {
-    try {
-      commitSha = await runGit(['-C', repoPath, 'rev-parse', 'HEAD'], repoPath, env);
-    } catch {
-      commitSha = 'HEAD';
+    commitSha = branchSha || 'HEAD';
+    if (commitSha === 'HEAD') {
+      try {
+        commitSha = await runGit(['-C', repoPath, 'rev-parse', 'HEAD'], repoPath, env);
+      } catch {
+        commitSha = 'HEAD';
+      }
     }
   }
 
@@ -208,17 +345,19 @@ async function getTaskDiff(
     diff = task.diffStat;
   }
 
-  return { diff, changedFiles, commitSha };
+  return { diff, changedFiles, commitSha, branchSha };
 }
 
 /**
- * Identifies tasks merged into sourceBranch but not yet pushed.
+ * Identifies tasks merged into sourceBranch or targetBranch but not yet pushed to remote target branch.
+ * Uses range remote/target..source to exclude tasks already present in remote/target.
  */
 async function findTasksToAudit(
   taskId: string,
   projectId: string,
   sourceBranch: string,
   targetBranch: string,
+  remote: string,
   repoPath: string,
   env: NodeJS.ProcessEnv,
   deps: PublishTaskDeps,
@@ -228,39 +367,51 @@ async function findTasksToAudit(
     ? deps.taskRepo.getByProject(projectId)
     : (deps.taskRepo as unknown as { list?: (f: { project: string }) => TaskRow[] }).list?.({ project: projectId }) || (mainTask ? [mainTask] : []);
 
+  const remoteTargetRef = `refs/remotes/${remote}/${targetBranch}`;
+  const hasRemoteTarget = await refExists(repoPath, remoteTargetRef, env);
+  const sourceRef = `refs/heads/${sourceBranch}`;
+  const hasSource = await refExists(repoPath, sourceRef, env);
+  const targetRef = `refs/heads/${targetBranch}`;
+  const hasTarget = await refExists(repoPath, targetRef, env);
+
   const doneTasks = allTasks.filter((t) => t.status === 'done');
   const tasksToAudit: TaskRow[] = [];
 
   for (const t of doneTasks) {
-    if (t.id === taskId) {
-      tasksToAudit.push(t);
-      continue;
-    }
     const tBranch = t.branch || `agenthub/${t.slug}`;
-    const branchExists = await refExists(repoPath, `refs/heads/${tBranch}`, env);
-    if (branchExists) {
-      const isMergedToSource = await execFileAsync(
-        'git',
-        ['-C', repoPath, 'merge-base', '--is-ancestor', `refs/heads/${tBranch}`, `refs/heads/${sourceBranch}`],
-        { env },
-      )
-        .then(() => true)
-        .catch(() => false);
+    const branchRef = `refs/heads/${tBranch}`;
+    const branchExists = await refExists(repoPath, branchRef, env);
+    const mergeCommit = await findMergeCommitForTask(repoPath, t, [sourceBranch, targetBranch], env);
 
-      const isMergedToTarget =
-        sourceBranch !== targetBranch
-          ? await execFileAsync(
-              'git',
-              ['-C', repoPath, 'merge-base', '--is-ancestor', `refs/heads/${tBranch}`, `refs/heads/${targetBranch}`],
-              { env },
-            )
-              .then(() => true)
-              .catch(() => false)
-          : false;
+    const taskRef = branchExists ? branchRef : mergeCommit;
 
-      if (isMergedToSource || isMergedToTarget) {
+    if (!taskRef) {
+      if (t.id === taskId) {
         tasksToAudit.push(t);
       }
+      continue;
+    }
+
+    // Check if task is already pushed to remote target
+    const alreadyPushed = hasRemoteTarget
+      ? await isAncestor(repoPath, taskRef, remoteTargetRef, env)
+      : false;
+
+    if (alreadyPushed) {
+      continue;
+    }
+
+    let mergedToPushTarget = false;
+    if (hasSource && (await isAncestor(repoPath, taskRef, sourceRef, env))) {
+      mergedToPushTarget = true;
+    } else if (hasTarget && (await isAncestor(repoPath, taskRef, targetRef, env))) {
+      mergedToPushTarget = true;
+    } else if (branchExists && t.id === taskId) {
+      mergedToPushTarget = true;
+    }
+
+    if (mergedToPushTarget || t.id === taskId) {
+      tasksToAudit.push(t);
     }
   }
 
@@ -282,6 +433,7 @@ async function runAuditAgentForTask(
   diff: string,
   changedFiles: string[],
   doneReport: string,
+  commitSha?: string,
 ): Promise<
   | { ok: true; result: PrePublishAuditResult; engineId: string; profileName: string }
   | { ok: false; error: string; retryable: boolean; isQuota?: boolean }
@@ -358,6 +510,7 @@ async function runAuditAgentForTask(
     changedFiles,
     doneReport,
     repoPath,
+    commitSha,
   });
 
   const tmpDir = path.join(deps.hubHome, 'tmp');
@@ -389,15 +542,38 @@ async function runAuditAgentForTask(
     };
   }
 
+  const timeoutSec = (currentSettings.publish?.audit as { timeoutSec?: number })?.timeoutSec ?? 300;
+  const timeoutMs = timeoutSec * 1000;
+  let timeoutTimer: NodeJS.Timeout | undefined;
+
   const exitPromise = new Promise<{ code: number | null; error?: Error }>((resolve) => {
     child.once('error', (err) => resolve({ code: null, error: err }));
     child.once('exit', (code) => resolve({ code }));
   });
   const timeoutPromise = new Promise<{ code: number | null; error?: Error }>((resolve) => {
-    setTimeout(() => resolve({ code: null, error: new Error('Audit process timeout') }), 120_000);
+    timeoutTimer = setTimeout(() => {
+      const pid = child.pid;
+      if (pid) {
+        try { process.kill(-pid, 'SIGTERM'); } catch { /* ignore */ }
+        try { process.kill(pid, 'SIGTERM'); } catch { /* ignore */ }
+        setTimeout(() => {
+          try { process.kill(-pid, 'SIGKILL'); } catch { /* ignore */ }
+          try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ }
+        }, 2000).unref();
+      }
+      resolve({ code: null, error: new Error(`Audit process timeout sau ${timeoutSec} giây`) });
+    }, timeoutMs);
   });
 
-  const { code, error } = await Promise.race([exitPromise, timeoutPromise]);
+  let code: number | null = null;
+  let error: Error | undefined;
+  try {
+    const outcome = await Promise.race([exitPromise, timeoutPromise]);
+    code = outcome.code;
+    error = outcome.error;
+  } finally {
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+  }
 
   let logOutput = '';
   let fileOutput = '';
@@ -540,8 +716,28 @@ export async function publishTask(
         remote,
         branch: targetBranch,
       });
-      return { ok: false, error: errorMsg, remote, branch: targetBranch };
+      return { ok: false, error: errorMsg, remote, branch: targetBranch, retryable: true };
     }
+
+    // Fetch remote target branch early so refs/remotes/<remote>/<targetBranch> is fresh
+    try {
+      await runGit(['-C', repoPath, 'fetch', remote, targetBranch], repoPath, env);
+    } catch {
+      try {
+        await runGit(['-C', repoPath, 'fetch', remote], repoPath, env);
+      } catch {
+        // Non-fatal if remote has no matching ref or is new/empty
+      }
+    }
+
+    const remoteRef = `refs/remotes/${remote}/${targetBranch}`;
+    let prevRemoteSha: string | null = null;
+    if (await refExists(repoPath, remoteRef, env)) {
+      prevRemoteSha = await runGit(['-C', repoPath, 'rev-parse', remoteRef], repoPath, env);
+    }
+    const auditBaseRef = prevRemoteSha
+      ? remoteRef
+      : ((await refExists(repoPath, `refs/heads/${targetBranch}`, env)) ? `refs/heads/${targetBranch}` : targetBranch);
 
     // --- Pre-Publish Audit Gate ---
     const isManual = Boolean(options?.manual);
@@ -560,22 +756,38 @@ export async function publishTask(
         currentProject.id,
         sourceBranch,
         targetBranch,
+        remote,
         repoPath,
         env,
         deps,
       );
 
       for (const t of tasksToAudit) {
-        const { diff, changedFiles, commitSha } = await getTaskDiff(repoPath, t, targetBranch, env);
+        const { diff, changedFiles, commitSha, branchSha } = await getTaskDiff(
+          repoPath,
+          t,
+          sourceBranch,
+          targetBranch,
+          auditBaseRef,
+          env,
+        );
 
-        const cached = getCachedAuditPass(t.id, commitSha);
+        const cached = getCachedAuditPass(t.id, commitSha) || (branchSha ? getCachedAuditPass(t.id, branchSha) : undefined);
         if (cached) {
           continue;
         }
 
-        const doneReport = t.doneReport || (t.worktreePath && fs.existsSync(path.join(t.worktreePath, '.agenthub', 'DONE'))
-          ? fs.readFileSync(path.join(t.worktreePath, '.agenthub', 'DONE'), 'utf8')
-          : '');
+        let doneReport = t.doneReport || '';
+        if (!doneReport && t.worktreePath) {
+          try {
+            const doneFile = path.join(t.worktreePath, '.agenthub', 'DONE');
+            if (fs.existsSync(doneFile)) {
+              doneReport = fs.readFileSync(doneFile, 'utf8');
+            }
+          } catch {
+            // ignore read error
+          }
+        }
 
         deps.eventBus.emit('task.audit_started', t.id, {
           taskId: t.id,
@@ -590,6 +802,7 @@ export async function publishTask(
           diff,
           changedFiles,
           doneReport,
+          commitSha,
         );
 
         if (!auditExec.ok) {
@@ -604,6 +817,16 @@ export async function publishTask(
               auditFailed: true,
             }),
           });
+          if (taskId !== t.id) {
+            deps.taskRepo.update(taskId, {
+              pushResult: JSON.stringify({
+                error: `Audit thất bại ở task ${t.slug}: ${errorMsg}`,
+                failedAt,
+                retryable: true,
+                auditFailed: true,
+              }),
+            });
+          }
           deps.eventBus.emit('task.push_failed', t.id, {
             taskId: t.id,
             projectId: currentProject.id,
@@ -611,7 +834,7 @@ export async function publishTask(
             remote,
             branch: targetBranch,
           });
-          return { ok: false, error: errorMsg, remote, branch: targetBranch, auditFailed: true };
+          return { ok: false, error: errorMsg, remote, branch: targetBranch, auditFailed: true, retryable: true };
         }
 
         const auditResult = auditExec.result;
@@ -619,6 +842,9 @@ export async function publishTask(
 
         if (passed) {
           setCachedAuditPass(t.id, commitSha, auditResult);
+          if (branchSha && branchSha !== commitSha) {
+            setCachedAuditPass(t.id, branchSha, auditResult);
+          }
           deps.eventBus.emit('task.audit_passed', t.id, {
             taskId: t.id,
             projectId: currentProject.id,
@@ -627,16 +853,64 @@ export async function publishTask(
           });
         } else {
           // Task failed audit (P1 or P2)
-          deps.eventBus.emit('task.audit_failed', t.id, {
-            taskId: t.id,
-            projectId: currentProject.id,
-            findings: auditResult.findings,
-            summary: auditResult.summary,
-          });
+          const maxFixRounds = currentSettings.publish?.audit?.maxFixRounds ?? 2;
+          const currentAuditRounds = getTaskAuditRounds(t, deps);
 
+          if (currentAuditRounds >= maxFixRounds) {
+            // Exceeded maxFixRounds -> stop, do not return to worker
+            // Emit task.audit_failed ONCE with exceededMaxRounds: true
+            deps.eventBus.emit('task.audit_failed', t.id, {
+              taskId: t.id,
+              projectId: currentProject.id,
+              exceededMaxRounds: true,
+              maxFixRounds,
+              findings: auditResult.findings,
+              summary: auditResult.summary,
+            });
+
+            const failedAt = new Date().toISOString();
+            const pushResultObj = {
+              auditFailed: true,
+              exceededMaxRounds: true,
+              maxFixRounds,
+              auditFixRounds: currentAuditRounds,
+              findings: auditResult.findings,
+              summary: auditResult.summary,
+              failedAt,
+              retryable: false,
+              error: `Task ${t.slug} vượt quá số vòng sửa tối đa (${maxFixRounds}) khi audit`,
+            };
+            deps.taskRepo.update(t.id, {
+              pushResult: JSON.stringify(pushResultObj),
+            });
+            if (taskId !== t.id) {
+              deps.taskRepo.update(taskId, {
+                pushResult: JSON.stringify({
+                  auditFailed: true,
+                  error: `Chặn publish do task ${t.slug} vượt quá số vòng sửa audit (${maxFixRounds})`,
+                  failedAt,
+                  retryable: false,
+                }),
+              });
+            }
+
+            return {
+              ok: false,
+              error: `Task ${t.slug} vượt quá số vòng sửa tối đa (${maxFixRounds})`,
+              remote,
+              branch: targetBranch,
+              auditFailed: true,
+              findings: auditResult.findings,
+              retryable: false,
+            };
+          }
+
+          // Return task to worker
+          const nextRound = currentAuditRounds + 1;
           const failedAt = new Date().toISOString();
           const pushResultObj = {
             auditFailed: true,
+            auditFixRounds: nextRound,
             findings: auditResult.findings,
             summary: auditResult.summary,
             failedAt,
@@ -646,36 +920,26 @@ export async function publishTask(
           deps.taskRepo.update(t.id, {
             pushResult: JSON.stringify(pushResultObj),
           });
-
-          const maxFixRounds = currentSettings.publish?.audit?.maxFixRounds ?? 2;
-          const currentRounds = t.reviewerChangesRequested || 0;
-
-          if (currentRounds >= maxFixRounds) {
-            // Exceeded maxFixRounds -> stop, do not return to worker
-            deps.eventBus.emit('task.audit_failed', t.id, {
-              taskId: t.id,
-              projectId: currentProject.id,
-              exceededMaxRounds: true,
-              maxFixRounds,
-              findings: auditResult.findings,
-              summary: auditResult.summary,
+          if (taskId !== t.id) {
+            deps.taskRepo.update(taskId, {
+              pushResult: JSON.stringify({
+                auditFailed: true,
+                error: `Chặn publish do task ${t.slug} không vượt qua audit`,
+                failedAt,
+                retryable: false,
+              }),
             });
-            deps.notifyService?.notify(
-              `Task ${t.slug} vượt quá ${maxFixRounds} vòng sửa khi audit; dừng chờ xử lý`,
-              'critical',
-            );
-            return {
-              ok: false,
-              error: `Task ${t.slug} vượt quá số vòng sửa tối đa (${maxFixRounds})`,
-              remote,
-              branch: targetBranch,
-              auditFailed: true,
-              findings: auditResult.findings,
-            };
           }
 
-          // Return task to worker
-          const nextRound = currentRounds + 1;
+          // Emit task.audit_failed ONCE (without exceededMaxRounds)
+          deps.eventBus.emit('task.audit_failed', t.id, {
+            taskId: t.id,
+            projectId: currentProject.id,
+            exceededMaxRounds: false,
+            findings: auditResult.findings,
+            summary: auditResult.summary,
+          });
+
           const feedback = [
             '### Kết quả Audit trước khi publish thất bại',
             auditResult.summary,
@@ -700,7 +964,7 @@ export async function publishTask(
             status: 'queued',
             resume: 1,
             reviewStep: 0,
-            reviewerChangesRequested: nextRound,
+            reviewerChangesRequested: (t.reviewerChangesRequested || 0) + 1,
             body: newBody,
           });
 
@@ -727,6 +991,7 @@ export async function publishTask(
             branch: targetBranch,
             auditFailed: true,
             findings: auditResult.findings,
+            retryable: false,
           };
         }
       }
@@ -740,25 +1005,7 @@ export async function publishTask(
       `publish-${currentProject.id}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     );
 
-    let prevRemoteSha: string | null = null;
     try {
-      // 1. Fetch remote target branch if remote exists
-      try {
-        await runGit(['-C', repoPath, 'fetch', remote, targetBranch], repoPath, env);
-      } catch {
-        // Fallback fetch all from remote
-        try {
-          await runGit(['-C', repoPath, 'fetch', remote], repoPath, env);
-        } catch {
-          // Non-fatal if remote has no matching ref or is new/empty
-        }
-      }
-
-      const remoteRef = `refs/remotes/${remote}/${targetBranch}`;
-      if (await refExists(repoPath, remoteRef, env)) {
-        prevRemoteSha = await runGit(['-C', repoPath, 'rev-parse', remoteRef], repoPath, env);
-      }
-
       const localRef = `refs/heads/${targetBranch}`;
       const localExists = await refExists(repoPath, localRef, env);
       const remoteExists = Boolean(prevRemoteSha);

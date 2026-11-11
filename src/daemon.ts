@@ -635,6 +635,22 @@ export async function startDaemon(
 
   // Start notification service and claude transcript scanner
   ctx.notifier.start();
+
+  // Notify if any project has publish explicitly disabled during initial default-on migration
+  try {
+    const disabledProjectsRow = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_disabled_projects'").get() as { value: string } | undefined;
+    const notifiedRow = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_disabled_notified'").get() as { value: string } | undefined;
+    if (disabledProjectsRow && !notifiedRow) {
+      const list = JSON.parse(disabledProjectsRow.value) as string[];
+      if (list.length > 0) {
+        const msg = `Cấu hình publish: các project sau được giữ nguyên tắt publish theo cấu hình trước đó: ${list.join(', ')}`;
+        ctx.scheduler.getEventBus().emit('brain.notify', undefined, { text: msg, level: 'decision' });
+        db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_disabled_notified', '1')").run();
+      }
+    }
+  } catch {
+    // best effort notification
+  }
   ctx.claudeScanner.start();
   ctx.bulletinService.start();
   ctx.brainRunner.start();

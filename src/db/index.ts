@@ -1133,6 +1133,7 @@ export function openDatabase(dbPath: string): Database.Database {
   ensureSchedulerLimitColumns(db);
   ensureCheckResultsColumns(db);
   cleanExpiredClaudeLimits(db);
+  ensureProjectPublishMigration(db);
 
   return db;
 }
@@ -1198,6 +1199,82 @@ function ensureCheckResultsColumns(db: Database.Database): void {
   };
   add('seq', 'INTEGER');
   add('startedAt', 'TEXT');
+}
+
+export function ensureProjectPublishMigration(db: Database.Database): { migrated: string[]; explicitlyDisabled: string[] } {
+  const migrated: string[] = [];
+  const explicitlyDisabled: string[] = [];
+
+  try {
+    const hasMeta = (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get() as unknown) !== undefined;
+    const hasProjects = (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projects'").get() as unknown) !== undefined;
+    if (!hasMeta || !hasProjects) return { migrated, explicitlyDisabled };
+
+    const metaRow = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_default_on'").get() as { value: string } | undefined;
+    if (metaRow && metaRow.value === '1') {
+      return { migrated, explicitlyDisabled };
+    }
+
+    const projects = db.prepare('SELECT id, defaultBranch, settings FROM projects').all() as Array<{
+      id: string;
+      defaultBranch: string;
+      settings: string | null;
+    }>;
+
+    const defaultPublish = {
+      enabled: true,
+      remote: 'origin',
+      pushIntegrationBranch: true,
+      audit: {
+        enabled: true,
+        maxFixRounds: 2,
+      },
+    };
+
+    const updateStmt = db.prepare('UPDATE projects SET settings = ? WHERE id = ?');
+
+    for (const project of projects) {
+      if (!project.settings) {
+        const newSettings = {
+          publish: defaultPublish,
+        };
+        updateStmt.run(JSON.stringify(newSettings), project.id);
+        migrated.push(project.id);
+        continue;
+      }
+
+      let parsed: Record<string, any>;
+      try {
+        parsed = JSON.parse(project.settings);
+        if (!parsed || typeof parsed !== 'object') {
+          parsed = {};
+        }
+      } catch {
+        parsed = {};
+      }
+
+      if (parsed.publish === undefined || parsed.publish === null) {
+        parsed.publish = defaultPublish;
+        updateStmt.run(JSON.stringify(parsed), project.id);
+        migrated.push(project.id);
+      } else if (parsed.publish.enabled === false) {
+        explicitlyDisabled.push(project.id);
+      }
+    }
+
+    if (explicitlyDisabled.length > 0) {
+      console.log(`[migration] Projects with publish explicitly disabled (kept disabled): ${explicitlyDisabled.join(', ')}`);
+      db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_disabled_projects', ?)").run(
+        JSON.stringify(explicitlyDisabled),
+      );
+    }
+
+    db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_default_on', '1')").run();
+  } catch (err) {
+    console.error('[migration] Error running publish default on migration:', err);
+  }
+
+  return { migrated, explicitlyDisabled };
 }
 
 // Repository helpers

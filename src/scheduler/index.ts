@@ -3353,14 +3353,52 @@ export class Scheduler {
     const actualEngine = engine.id;
     const runNumber = this.runRepo.getByTask(task.id).length;
     this.eventBus.emit('review.started', task.id, { actor: reviewerActor, model: reviewerModel, profile: profileName, engine: actualEngine, runId, runNumber });
-    child.once('error', () => {
-      if (!this.stopped) this.finishReview(task.id, runId, profileName, 'error', null);
-    });
-    child.once('exit', (code) => {
-      if (this.stopped) return;
+    let finished = false;
+    let hasError = false;
+    let savedExitCode: number | null = null;
+    let safetyTimer: NodeJS.Timeout | null = null;
+
+    const doFinish = (reason: 'exit' | 'error', code: number | null) => {
+      if (finished) return;
+      finished = true;
+      if (safetyTimer) {
+        clearTimeout(safetyTimer);
+        safetyTimer = null;
+      }
       const run = this.reviewerRuns.get(task.id);
-      const exitTimeout = setTimeout(() => this.finishReview(task.id, runId, profileName, 'exit', code), 10);
-      if (run) run.exitTimeout = exitTimeout;
+      if (run?.exitTimeout) {
+        clearTimeout(run.exitTimeout);
+        delete run.exitTimeout;
+      }
+      if (!this.stopped) {
+        this.finishReview(task.id, runId, profileName, reason, code);
+      }
+    };
+
+    child.once('error', () => {
+      if (finished || this.stopped) return;
+      hasError = true;
+      if (!safetyTimer) {
+        safetyTimer = setTimeout(() => doFinish('error', null), 2000);
+        const run = this.reviewerRuns.get(task.id);
+        if (run) run.exitTimeout = safetyTimer;
+      }
+    });
+
+    child.once('exit', (code) => {
+      if (finished || this.stopped) return;
+      savedExitCode = code;
+      if (!safetyTimer) {
+        safetyTimer = setTimeout(() => doFinish(hasError ? 'error' : 'exit', savedExitCode), 2000);
+        const run = this.reviewerRuns.get(task.id);
+        if (run) run.exitTimeout = safetyTimer;
+      }
+    });
+
+    child.once('close', (code) => {
+      if (finished || this.stopped) return;
+      const finalCode = code ?? savedExitCode ?? 0;
+      doFinish(hasError ? 'error' : 'exit', finalCode);
     });
   }
 

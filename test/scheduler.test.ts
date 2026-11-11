@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { EventEmitter } from 'node:events';
 import { execFileSync, spawn } from 'node:child_process';
 import { loadConfig } from '../src/config.js';
 import { openDatabase, ProjectRepo, DepartmentRepo, ProfileRepo, QuotaMarkRepo, TaskRepo, RunRepo, EventRepo, ReviewRepo } from '../src/db/index.js';
@@ -765,6 +766,68 @@ describe('Codex reviewer failover lifecycle', () => {
       expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).toBe('crashed');
     });
     expect(taskRepo.get('test-project/review')?.status).toBe('review');
+    scheduler.stop();
+  });
+
+  it('parses verdict and finishes review when child emits exit before stdout flushes with 50ms delay', async () => {
+    const projectPath = path.join(tmpDir, 'review-repo-race');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'codex-1', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const worktreePath = path.join(tmpDir, 'review-worktree-race');
+    fs.cpSync(projectPath, worktreePath, { recursive: true });
+    taskRepo.insert({ id: 'test-project/review-race', projectId: 'test-project', slug: 'review-race', title: 'Review race', body: 'Check race.', status: 'review' });
+    taskRepo.update('test-project/review-race', { worktreePath });
+    db.prepare('INSERT INTO runs (id, taskId, engine, model, profileName) VALUES (?, ?, ?, ?, ?)')
+      .run('autocheck-race', 'test-project/review-race', 'agy', 'gemini-3.8-flash-low', 'codex-1');
+    db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run('test-project/review-race', 'autocheck-race', 'test', 1, 0, 10, 'OK');
+
+    const mockChild = new EventEmitter() as unknown as ChildProcess;
+    mockChild.pid = 99999;
+    mockChild.unref = vi.fn();
+
+    const mockEngine: Engine = {
+      id: 'codex',
+      family: () => 'codex',
+      spawn: (opts: SpawnOpts) => {
+        setTimeout(() => {
+          // Emit exit first
+          mockChild.emit('exit', 0);
+          // 50ms later, write result and emit close
+          setTimeout(() => {
+            if (opts.outputPath) {
+              fs.mkdirSync(path.dirname(opts.outputPath), { recursive: true });
+              fs.writeFileSync(opts.outputPath, JSON.stringify({ verdict: 'approved', feedback: 'Delayed flush verdict ok' }), 'utf8');
+            }
+            mockChild.emit('close', 0);
+          }, 50);
+        }, 10);
+        return mockChild;
+      },
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    };
+
+    config.reviewer.enabled = true;
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', mockEngine]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-race.json'));
+    failover.activate(3600);
+    scheduler.configureReviewer(reviewRepo, failover);
+
+    scheduler.tick();
+
+    await vi.waitFor(() => {
+      const run = runRepo.getByTask('test-project/review-race').find((r) => r.kind === 'reviewer');
+      expect(run?.outcome).toBe('done');
+    }, { timeout: 3000 });
+
+    const review = reviewRepo.getByTask('test-project/review-race')[0];
+    expect(review?.verdict).toBe('approved');
+    expect(review?.feedback).toBe('Delayed flush verdict ok');
+
     scheduler.stop();
   });
 

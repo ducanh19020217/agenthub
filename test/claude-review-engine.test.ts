@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ClaudeReviewEngine, CLAUDE_REVIEW_TOOLS } from '../src/engines/claude-review.js';
+import { ClaudeReviewEngine, ClaudeReviewStreamFormatter, CLAUDE_REVIEW_TOOLS } from '../src/engines/claude-review.js';
 import { parseReviewerOutput } from '../src/reviewer.js';
 import type { ProfileRow } from '../src/db/index.js';
 
@@ -133,7 +133,8 @@ process.stdin.on('end', () => {
       error: { type: 'rate_limit_error', message: 'Rate limit reached (429)' },
     });
     expect(engine.detectQuota(rateLimitJson).exhausted).toBe(true);
-    expect(engine.detectQuota('Error: 429 Too Many Requests').exhausted).toBe(true);
+    expect(engine.detectQuota('[stderr] Error: 429 Too Many Requests').exhausted).toBe(true);
+    expect(engine.detectQuota('[error] Rate limit reached (429)').exhausted).toBe(true);
   });
 
   it('detects auth errors in result event and plain stdout', () => {
@@ -144,7 +145,7 @@ process.stdin.on('end', () => {
       result: 'Error: not logged in. Please run claude login.',
     });
     expect(engine.detectAuthError(authJson).expired).toBe(true);
-    expect(engine.detectAuthError('401 Unauthorized: Invalid API key').expired).toBe(true);
+    expect(engine.detectAuthError('[stderr] 401 Unauthorized: Invalid API key').expired).toBe(true);
     expect(engine.detectAuthError('All good, approved').expired).toBe(false);
   });
 
@@ -156,7 +157,7 @@ process.stdin.on('end', () => {
       result: '529 Overloaded: Claude is currently experiencing high traffic.',
     });
     expect(engine.detectTransientError(transientJson)).toBe(true);
-    expect(engine.detectTransientError('ECONNRESET while connecting to Claude API')).toBe(true);
+    expect(engine.detectTransientError('[stderr] ECONNRESET while connecting to Claude API')).toBe(true);
     expect(engine.detectTransientError('All checks passed')).toBe(false);
   });
 
@@ -179,6 +180,88 @@ process.stdin.on('end', () => {
     });
     expect(engine.detectQuota(approvedVerdict).exhausted).toBe(false);
     expect(engine.detectAuthError(approvedVerdict).expired).toBe(false);
+  });
+
+  it('negative: Claude reviewer timeout with last assistant line containing "429 rate limit" is not quota exhaustion', () => {
+    const engine = new ClaudeReviewEngine();
+    // Assistant prose starting with or containing "429 rate limit"
+    const timeoutLog = [
+      'Bắt đầu duyệt code.',
+      'Read src/index.ts',
+      '  → (40 dòng)',
+      '429 rate limit handling looks fine',
+    ].join('\n');
+
+    expect(engine.detectQuota(timeoutLog).exhausted).toBe(false);
+    expect(engine.detectAuthError(timeoutLog).expired).toBe(false);
+  });
+
+  it('detects quota exhaustion when result event is_error has limit', () => {
+    const engine = new ClaudeReviewEngine();
+    const isErrorQuota = JSON.stringify({
+      type: 'result',
+      is_error: true,
+      result: 'Rate limit reached: You have hit your usage limit. Try again later.',
+    });
+    expect(engine.detectQuota(isErrorQuota).exhausted).toBe(true);
+  });
+
+  it('handles multi-byte UTF-8 split across chunks in ClaudeReviewStreamFormatter', () => {
+    const logLines: string[] = [];
+    let resultText = '';
+    let resultIsError = false;
+
+    const formatter = new ClaudeReviewStreamFormatter(
+      (line) => logLines.push(line),
+      (res, isErr) => {
+        resultText = res;
+        resultIsError = isErr;
+      },
+    );
+
+    // Vietnamese phrase containing 3-byte UTF-8 characters:
+    // "Tiến độ duyệt kiểm tra: kết quả rất tốt, hoàn thành đúng hạn."
+    // 'ế' is [0xE1, 0xBA, 0xBF]
+    // 'ể' is [0xE1, 0xBB, 0x83]
+    const assistantJson = JSON.stringify({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Kiểm tra mã nguồn: tiến độ ổn định, không phát hiện lỗi.' }],
+      },
+    }) + '\n';
+
+    const resultJson = JSON.stringify({
+      type: 'result',
+      is_error: false,
+      result: JSON.stringify({
+        verdict: 'approved',
+        feedback: 'Tiến độ và kết quả kiểm tra rất tốt.',
+      }),
+    }) + '\n';
+
+    const fullPayload = Buffer.from(assistantJson + resultJson, 'utf8');
+
+    // Split at multiple arbitrary points, including in the middle of UTF-8 multi-byte sequences
+    // 'tiến' starts around offset 45; split right in the middle of 'ế'
+    const splitOffset1 = fullPayload.indexOf(Buffer.from('tiến', 'utf8')) + 2;
+    const splitOffset2 = fullPayload.indexOf(Buffer.from('kết quả', 'utf8')) + 2;
+
+    const chunk1 = fullPayload.subarray(0, splitOffset1);
+    const chunk2 = fullPayload.subarray(splitOffset1, splitOffset2);
+    const chunk3 = fullPayload.subarray(splitOffset2);
+
+    formatter.feed(chunk1);
+    formatter.feed(chunk2);
+    formatter.feed(chunk3);
+    formatter.flush();
+
+    expect(resultIsError).toBe(false);
+    expect(resultText).not.toContain('\uFFFD');
+    const parsed = JSON.parse(resultText);
+    expect(parsed.feedback).toBe('Tiến độ và kết quả kiểm tra rất tốt.');
+    expect(logLines).toContain('Kiểm tra mã nguồn: tiến độ ổn định, không phát hiện lỗi.');
+    expect(logLines.join('\n')).not.toContain('\uFFFD');
   });
 
   it('negative: tool summary with line count such as 512 dòng does not trigger transient error', () => {

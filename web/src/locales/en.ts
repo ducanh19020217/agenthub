@@ -396,7 +396,7 @@ export const en: typeof vi = {
     viewCommit: 'View commit',
     publishError: 'Failed to publish to git',
     noLog: 'No log output from worker yet...',
-    reviewingWithProfile: 'Reviewer {{profile}} is reviewing…',
+    reviewingWithProfile: 'Reviewer {profile} is reviewing…',
     reviewing: 'Reviewing…',
     checkingLog: 'Running checks…',
     scrollToBottom: 'Scroll to bottom',

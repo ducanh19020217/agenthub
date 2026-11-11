@@ -3319,6 +3319,8 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     expect(markup.inline_keyboard[0][0].callback_data).toBe('decision:agree:dec-123');
     expect(markup.inline_keyboard[0][1].text).toContain('Không');
     expect(markup.inline_keyboard[0][1].callback_data).toBe('decision:reject:dec-123');
+    expect(markup.inline_keyboard[0][2].text).toContain('Khác');
+    expect(markup.inline_keyboard[0][2].callback_data).toBe('decision:other:dec-123');
     expect(markup.inline_keyboard[1][0].text).toContain('Xem dashboard');
 
     const getOrCreateSpy = vi.spyOn(ctx.chatService, 'getOrCreateSession');
@@ -3385,6 +3387,274 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     expect(lastAnsNonExistent?.body?.text).toContain('Quyết định đã hết hạn hoặc đã trả lời');
   });
 
+  it('quy trình nút ✏️ Khác: prompt nhập phương án, gửi text, sửa tin, forward bộ não và emit event', async () => {
+    const bot = createBot('suggest');
+
+    bot.handleEvent('brain.notify', undefined, {
+      decisionId: 'dec-other-1',
+      text: 'Xác nhận xóa bản ghi tạm thời?',
+      level: 'decision',
+    });
+    await bot.flushQueue(CHAT_ID);
+
+    const sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    const initialMsg = sends.at(-1)?.body;
+    const markup = initialMsg?.reply_markup as { inline_keyboard: InlineKeyboardButton[][] };
+    expect(markup.inline_keyboard[0][2].text).toBe('✏️ Khác');
+    expect(markup.inline_keyboard[0][2].callback_data).toBe('decision:other:dec-other-1');
+
+    const sendBrainSpy = vi.spyOn(ctx.chatService, 'sendMessage').mockReturnValue({
+      userMessageId: 'u-1',
+      assistantMessageId: 'a-1',
+    });
+
+    const emittedEvents: Array<{ type: string; payload: unknown }> = [];
+    ctx.scheduler.getEventBus().on('decision.answered', (_t, p) => {
+      emittedEvents.push({ type: 'decision.answered', payload: p });
+    });
+
+    // 1. Bấm nút Khác
+    await bot.handleUpdate({
+      update_id: 10,
+      callback_query: {
+        id: 'cb-other-1',
+        from: { id: CHAT_ID },
+        message: { message_id: 200, chat: { id: CHAT_ID }, text: initialMsg?.text as string },
+        data: 'decision:other:dec-other-1',
+      },
+    });
+
+    // Quyết định lúc này CHƯA được đánh dấu answered
+    const decBefore = bot.getDecisionTracker().getDecision('dec-other-1');
+    expect(decBefore?.answered).toBe(false);
+
+    // Bot gửi lời nhắc nhập phương án
+    await bot.flushQueue(CHAT_ID);
+    const promptMsg = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1);
+    expect(promptMsg?.body?.text).toContain('✏️ Nhập phương án của bạn cho quyết định này (hoặc /cancel để huỷ):');
+
+    // 2. Nhập khoảng trắng -> nhắc lại, chưa answered
+    await bot.handleUpdate({
+      update_id: 11,
+      message: { message_id: 201, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: '    ' },
+    });
+    await bot.flushQueue(CHAT_ID);
+    const retryMsg = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1);
+    expect(retryMsg?.body?.text).toContain('không được để trống');
+    expect(bot.getDecisionTracker().getDecision('dec-other-1')?.answered).toBe(false);
+
+    // 3. Nhập quá 2000 ký tự -> báo lỗi, chưa answered
+    await bot.handleUpdate({
+      update_id: 12,
+      message: { message_id: 202, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: 'x'.repeat(2005) },
+    });
+    await bot.flushQueue(CHAT_ID);
+    const tooLongMsg = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1);
+    expect(tooLongMsg?.body?.text).toContain('Phương án quá dài');
+    expect(bot.getDecisionTracker().getDecision('dec-other-1')?.answered).toBe(false);
+
+    // 4. Nhập phương án hợp lệ
+    sendBrainSpy.mockClear();
+    await bot.handleUpdate({
+      update_id: 13,
+      message: { message_id: 203, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: 'Lưu vào thư mục backup thay vì xóa' },
+    });
+    await bot.flushQueue(CHAT_ID);
+
+    // Decision tracker cập nhật đúng
+    const decAfter = bot.getDecisionTracker().getDecision('dec-other-1');
+    expect(decAfter?.answered).toBe(true);
+    expect(decAfter?.answer).toBe('other');
+    expect(decAfter?.customAnswer).toBe('Lưu vào thư mục backup thay vì xóa');
+
+    // Bộ não nhận đúng tin
+    expect(sendBrainSpy).toHaveBeenCalledWith(
+      'brain',
+      expect.stringContaining('Phương án khác — Lưu vào thư mục backup thay vì xóa'),
+      { queueIfBusy: true },
+    );
+    expect(sendBrainSpy).toHaveBeenCalledWith(
+      'brain',
+      expect.stringContaining('Đây là phương án người dùng tự đưa ra, cần làm theo hoặc hỏi lại nếu chưa rõ.'),
+      { queueIfBusy: true },
+    );
+
+    // Tin gốc được sửa và giữ nút dashboard
+    const edits = recordedCalls.filter((c) => c.url.includes('/editMessageText'));
+    const lastEdit = edits.at(-1);
+    expect(lastEdit?.body?.text).toContain('✏️ <b>Đã phản hồi: Phương án khác — Lưu vào thư mục backup thay vì xóa</b>');
+    const editMarkup = lastEdit?.body?.reply_markup as { inline_keyboard: InlineKeyboardButton[][] };
+    expect(editMarkup.inline_keyboard).toHaveLength(1);
+    expect(editMarkup.inline_keyboard[0][0].text).toContain('Xem dashboard');
+
+    // Event decision.answered được emit
+    expect(emittedEvents).toHaveLength(1);
+    expect(emittedEvents[0].payload).toMatchObject({
+      decisionId: 'dec-other-1',
+      action: 'other',
+      answer: 'other',
+      customAnswer: 'Lưu vào thư mục backup thay vì xóa',
+    });
+  });
+
+  it('bấm Khác rồi /cancel: state bị xoá, quyết định vẫn pending', async () => {
+    const bot = createBot('suggest');
+
+    bot.handleEvent('brain.notify', undefined, {
+      decisionId: 'dec-cancel-1',
+      text: 'Xác nhận restart dịch vụ?',
+      level: 'decision',
+    });
+    await bot.flushQueue(CHAT_ID);
+
+    // Bấm nút Khác
+    await bot.handleUpdate({
+      update_id: 20,
+      callback_query: {
+        id: 'cb-cancel-1',
+        from: { id: CHAT_ID },
+        message: { message_id: 250, chat: { id: CHAT_ID }, text: 'Tin quyết định' },
+        data: 'decision:other:dec-cancel-1',
+      },
+    });
+
+    // Gửi /cancel
+    await bot.handleUpdate({
+      update_id: 21,
+      message: { message_id: 251, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: '/cancel' },
+    });
+    await bot.flushQueue(CHAT_ID);
+
+    const cancelMsg = recordedCalls.filter((c) => c.url.includes('/sendMessage')).at(-1);
+    expect(cancelMsg?.body?.text).toContain('Đã hủy thao tác');
+
+    const dec = bot.getDecisionTracker().getDecision('dec-cancel-1');
+    expect(dec?.answered).toBe(false);
+  });
+
+  it('tin trả lời phương án khác không bị rơi vào luồng chat thường gửi bộ não', async () => {
+    const bot = createBot('suggest');
+    bot.handleEvent('brain.notify', undefined, {
+      decisionId: 'dec-no-chat-leak',
+      text: 'Xác nhận chạy migrate?',
+      level: 'decision',
+    });
+    await bot.flushQueue(CHAT_ID);
+
+    // Bấm Khác
+    await bot.handleUpdate({
+      update_id: 30,
+      callback_query: {
+        id: 'cb-leak-1',
+        from: { id: CHAT_ID },
+        message: { message_id: 300, chat: { id: CHAT_ID }, text: 'Migrate DB' },
+        data: 'decision:other:dec-no-chat-leak',
+      },
+    });
+
+    const sendBrainSpy = vi.spyOn(ctx.chatService, 'sendMessage');
+    sendBrainSpy.mockClear();
+
+    // Nhập text câu trả lời
+    await bot.handleUpdate({
+      update_id: 31,
+      message: { message_id: 301, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: 'Chỉ migrate bảng users thôi' },
+    });
+
+    // sendBrainSpy chỉ được gọi duy nhất 1 lần cho forwardDecisionToBrain (không bị chat thông thường gọi thêm lần nữa)
+    expect(sendBrainSpy).toHaveBeenCalledTimes(1);
+    expect(sendBrainSpy).toHaveBeenCalledWith(
+      'brain',
+      expect.stringContaining('Phương án khác — Chỉ migrate bảng users thôi'),
+      expect.anything(),
+    );
+  });
+
+  it('bấm Khác khi quyết định đã trả lời hoặc không tồn tại thì báo lỗi', async () => {
+    const bot = createBot('suggest');
+    bot.handleEvent('brain.notify', undefined, {
+      decisionId: 'dec-already-answered',
+      text: 'Xác nhận xóa tài nguyên?',
+      level: 'decision',
+    });
+    bot.getDecisionTracker().answerDecision('dec-already-answered', 'agree');
+
+    await bot.handleUpdate({
+      update_id: 40,
+      callback_query: {
+        id: 'cb-exp-1',
+        from: { id: CHAT_ID },
+        message: { message_id: 400, chat: { id: CHAT_ID } },
+        data: 'decision:other:dec-already-answered',
+      },
+    });
+    const ans = recordedCalls.filter((c) => c.url.includes('/answerCallbackQuery')).at(-1);
+    expect(ans?.body?.text).toContain('Quyết định đã hết hạn hoặc đã trả lời');
+  });
+
+  it('dự án minimal hiển thị nút ✏️ Khác và sửa tin không lộ nội dung nhạy cảm', async () => {
+    ctx.projectRepo.insert({
+      id: 'p-min-dec',
+      name: 'Secured Project',
+      path: tmpDir,
+      defaultBranch: 'main',
+      envTemplate: null,
+      maxParallel: 1,
+      settings: JSON.stringify({
+        brain: { mode: 'suggest' },
+        notifications: { telegramContent: 'minimal' },
+      }),
+    });
+    ctx.taskRepo.insert({
+      id: 'p-min-dec/task-secret',
+      projectId: 'p-min-dec',
+      slug: 'task-secret',
+      title: 'Bí mật kinh doanh',
+      status: 'review',
+    });
+
+    const bot = createBot('suggest');
+
+    bot.handleEvent('brain.notify', 'p-min-dec/task-secret', {
+      decisionId: 'dec-min-1',
+      text: 'Bí mật kinh doanh: xóa bảng tài chính?',
+      level: 'decision',
+      taskId: 'p-min-dec/task-secret',
+    });
+    await bot.flushQueue(CHAT_ID);
+
+    const sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    const msg = sends.at(-1)?.body;
+    expect(msg?.text).toContain('📌 <b>Bộ não yêu cầu quyết định</b> — xem dashboard');
+    expect(msg?.text).not.toContain('Bí mật kinh doanh');
+
+    const markup = msg?.reply_markup as { inline_keyboard: InlineKeyboardButton[][] };
+    expect(markup.inline_keyboard[0][2].text).toBe('✏️ Khác');
+
+    // Bấm Khác
+    await bot.handleUpdate({
+      update_id: 50,
+      callback_query: {
+        id: 'cb-min-1',
+        from: { id: CHAT_ID },
+        message: { message_id: 500, chat: { id: CHAT_ID }, text: msg?.text as string },
+        data: 'decision:other:dec-min-1',
+      },
+    });
+
+    // Trả lời
+    await bot.handleUpdate({
+      update_id: 51,
+      message: { message_id: 501, chat: { id: CHAT_ID, type: 'private' }, date: Math.floor(currentTime / 1000), text: 'Giữ lại báo cáo' },
+    });
+    await bot.flushQueue(CHAT_ID);
+
+    const edits = recordedCalls.filter((c) => c.url.includes('/editMessageText'));
+    const lastEdit = edits.at(-1);
+    expect(lastEdit?.body?.text).toContain('✏️ <b>Đã phản hồi: Phương án khác — Giữ lại báo cáo</b>');
+    expect(lastEdit?.body?.text).not.toContain('Bí mật kinh doanh');
+  });
+
   it('4. nhac lai tin decision sau 2 gio neu chua tra loi (toi da 2 lan)', async () => {
     const bot = createBot('suggest');
 
@@ -3409,6 +3679,8 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     let sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
     expect(sends).toHaveLength(2);
     expect(sends[1].body?.text).toContain('Nhắc lại quyết định (lần 1/2)');
+    const remindKb = sends[1].body?.reply_markup as { inline_keyboard: InlineKeyboardButton[][] };
+    expect(remindKb.inline_keyboard[0][2].callback_data).toBe('decision:other:dec-remind');
 
     // Another 2 hours later: Reminder 2 sent
     currentTime += 2 * 60 * 60 * 1000;
@@ -3561,6 +3833,8 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     expect(markup.inline_keyboard[0][0].callback_data).toBe('decision:agree:dec-in-night');
     expect(markup.inline_keyboard[0][1].text).toContain('Không');
     expect(markup.inline_keyboard[0][1].callback_data).toBe('decision:reject:dec-in-night');
+    expect(markup.inline_keyboard[0][2].text).toContain('Khác');
+    expect(markup.inline_keyboard[0][2].callback_data).toBe('decision:other:dec-in-night');
 
     // Queue is cleared after morning summary
     expect(bot.getQuietHoursQueue()).toHaveLength(0);
@@ -3679,10 +3953,14 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     expect(summary.keyboard[0][0].text).toBe('✅ Đồng ý cập nhật c...');
     expect(summary.keyboard[0][1].text).toBe('❌ Đồng ý cập nhật c...');
     expect(summary.keyboard[0][1].callback_data).toBe('decision:reject:dec-1');
+    expect(summary.keyboard[0][2].text).toBe('✏️ Đồng ý cập nhật c...');
+    expect(summary.keyboard[0][2].callback_data).toBe('decision:other:dec-1');
     // Row 2
     expect(summary.keyboard[1][0].text).toBe('✅ Chạy lệnh di chuy...');
     expect(summary.keyboard[1][1].text).toBe('❌ Chạy lệnh di chuy...');
     expect(summary.keyboard[1][1].callback_data).toBe('decision:reject:dec-2');
+    expect(summary.keyboard[1][2].text).toBe('✏️ Chạy lệnh di chuy...');
+    expect(summary.keyboard[1][2].callback_data).toBe('decision:other:dec-2');
   });
 
   it('15. merge conflict and failure quiet notifications (h-merge-conflict-notify-quiet)', async () => {

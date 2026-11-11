@@ -41,7 +41,7 @@ export function translate(
 
   if (params) {
     for (const [k, v] of Object.entries(params)) {
-      text = text.replace(new RegExp(`\\{${k}\\}`, 'g'), v !== undefined && v !== null ? String(v) : '');
+      text = text.replace(new RegExp(`\\{\\{?${k}\\}?\\}`, 'g'), v !== undefined && v !== null ? String(v) : '');
     }
   }
 

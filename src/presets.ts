@@ -68,7 +68,7 @@ export const PRESET_DEFINITIONS: Record<PresetLevel, PresetDetails> = {
         approvalMinTasks: 0,
       },
       publish: {
-        enabled: false,
+        enabled: true,
         audit: { enabled: true, maxFixRounds: 2 },
       },
     },
@@ -102,7 +102,7 @@ export const PRESET_DEFINITIONS: Record<PresetLevel, PresetDetails> = {
         approvalMinTasks: 5,
       },
       publish: {
-        enabled: false,
+        enabled: true,
         audit: { enabled: true, maxFixRounds: 2 },
       },
     },

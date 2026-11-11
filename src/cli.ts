@@ -299,12 +299,17 @@ export async function cmdStop(config: AgentHubConfig, extraArgs: string[] = []):
 
 export async function cmdRestart(config: AgentHubConfig, extraArgs: string[] = []): Promise<void> {
   const mode = extraArgs.includes('--now') ? 'now' : 'when-idle';
-  const response = await hubRequest(config, 'POST', '/api/system/restart', { mode });
+  const killWorkers = extraArgs.includes('--kill-workers');
+  const response = await hubRequest(config, 'POST', '/api/system/restart', { mode, killWorkers });
   if (!response.ok) throw new Error(`API restart trả về HTTP ${response.status}`);
   const state = await response.json() as { waitingFor?: Array<{ taskId: string; startedAt: number }>; draining?: boolean };
   const waiting = state.waitingFor || [];
   if (mode === 'now') {
-    console.log(`⚠️ Đã yêu cầu khởi động lại ngay; ${waiting.length} worker/reviewer sẽ bị dừng.`);
+    if (killWorkers) {
+      console.log(`⚠️ Đã yêu cầu khởi động lại ngay; ${waiting.length} worker/reviewer sẽ bị dừng.`);
+    } else {
+      console.log(`✓ Đã yêu cầu khởi động lại ngay (handoff: worker tiếp tục chạy).`);
+    }
     return;
   }
   console.log(`✓ Sẽ khởi động lại khi ${waiting.length} task chạy xong.`);
@@ -656,7 +661,7 @@ Cách dùng:
   agenthub service upgrade             Ghi lại unit/plist và daemon-reload sau khi nâng cấp
   agenthub uninstall-service          Gỡ bỏ service chạy nền của AgentHub
   agenthub stop [--disable]           Tắt AgentHub và lưu task đang chạy để tiếp tục
-  agenthub restart [--when-idle|--now] [--wait] Khởi động lại an toàn
+  agenthub restart [--when-idle|--now] [--kill-workers] [--wait] Khởi động lại an toàn
   agenthub start                       Bật AgentHub và chờ daemon sẵn sàng
   agenthub mcp-install [--print]      Đăng ký MCP server với Claude Code
   agenthub link                       Tạo symlink vào ~/.local/bin/agenthub

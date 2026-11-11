@@ -1075,6 +1075,7 @@ export interface TokenImportResult {
 
 export class AppService {
   private restartHandler?: () => void;
+  private userShutdownRequested = false;
   private trackerRepo?: TrackerItemRepo;
   private triageDecisionHandler?: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>;
   private triageInputHandler?: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>;
@@ -1244,6 +1245,9 @@ export class AppService {
   setPerfCollector(collector: PerfCollector): void { this.perfCollector = collector; }
 
   shutdownForUser(reason = 'user_stop'): { queued: number; reviewers: number; childPids: number[] } {
+    if (reason === 'user_stop') {
+      this.userShutdownRequested = true;
+    }
     const result = this.scheduler.shutdownForUser(reason);
     const chatPids = this.chatService?.getRunningPids?.() || [];
     this.chatService?.stop();
@@ -1255,6 +1259,14 @@ export class AppService {
       ...result,
       childPids: [...(result.childPids || []), ...chatPids],
     };
+  }
+
+  isUserShutdownRequested(): boolean {
+    return this.userShutdownRequested;
+  }
+
+  setUserShutdownRequested(value = true): void {
+    this.userShutdownRequested = value;
   }
 
   getRestartState() { return this.scheduler.getRestartState(); }

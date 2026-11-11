@@ -11,7 +11,8 @@ export interface PendingDecision {
   createdAt: number;
   chatIds: number[];
   answered: boolean;
-  answer?: 'agree' | 'reject';
+  answer?: 'agree' | 'reject' | 'other';
+  customAnswer?: string;
   answeredAt?: number;
   remindersCount: number;
   lastReminderAt: number;
@@ -52,14 +53,18 @@ export class DecisionTracker {
 
   answerDecision(
     id: string,
-    answer: 'agree' | 'reject',
+    answer: 'agree' | 'reject' | 'other',
     answeredAt = Date.now(),
+    customAnswer?: string,
   ): PendingDecision | null {
     const d = this.decisions.get(id);
     if (!d) return null;
     d.answered = true;
     d.answer = answer;
     d.answeredAt = answeredAt;
+    if (customAnswer !== undefined) {
+      d.customAnswer = customAnswer;
+    }
     return d;
   }
 
@@ -113,12 +118,19 @@ export function forwardDecisionToBrain(
   chatService: Pick<ChatService, 'getOrCreateSession' | 'sendMessage'> | undefined,
   decisionId: string,
   text: string,
-  answer: 'agree' | 'reject',
+  answer: 'agree' | 'reject' | 'other',
   taskId?: string | null,
+  customText?: string,
 ): void {
   if (!chatService) return;
-  const label = answer === 'agree' ? 'Đồng ý' : 'Không';
-  const brainMsg = `Người dùng trả lời quyết định ${decisionId} («${text}»): ${label}`;
+  let brainMsg: string;
+  if (answer === 'other') {
+    const detail = customText ? ` — ${customText}` : '';
+    brainMsg = `Người dùng trả lời quyết định ${decisionId} («${text}»): Phương án khác${detail}\nĐây là phương án người dùng tự đưa ra, cần làm theo hoặc hỏi lại nếu chưa rõ.`;
+  } else {
+    const label = answer === 'agree' ? 'Đồng ý' : 'Không';
+    brainMsg = `Người dùng trả lời quyết định ${decisionId} («${text}»): ${label}`;
+  }
   try {
     const projectId = taskId?.includes('/') ? taskId.slice(0, taskId.indexOf('/')) : null;
     const sessionId = projectId ? `brain:${projectId}` : 'brain';

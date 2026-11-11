@@ -158,6 +158,13 @@ export interface TelegramServiceOptions {
 
 export type PendingChatState =
   | { action: 'reject_feedback'; taskId: string }
+  | {
+      action: 'decision_other';
+      decisionId: string;
+      messageId?: number;
+      messageChatId?: number;
+      originalText?: string;
+    }
   | { action: 'triage_note'; sourceId: string; wpId: number; decision: 'ask' | 'skip' }
   | { action: 'newtask_description'; projectId?: string }
   | { action: 'newtask_project_description'; description: string; externalRef?: string }
@@ -829,6 +836,7 @@ export class TelegramBotService {
         [
           { text: '✅ Đồng ý', callback_data: `decision:agree:${decision.id}` },
           { text: '❌ Không', callback_data: `decision:reject:${decision.id}` },
+          { text: '✏️ Khác', callback_data: `decision:other:${decision.id}` },
         ],
         [{ text: '🌐 Xem dashboard', url: this.getDashboardUrl() }],
       ];
@@ -878,6 +886,7 @@ export class TelegramBotService {
         keyboard.push([
           { text: '✅ Đồng ý', callback_data: `decision:agree:${dec.id}` },
           { text: '❌ Không', callback_data: `decision:reject:${dec.id}` },
+          { text: '✏️ Khác', callback_data: `decision:other:${dec.id}` },
         ]);
       } else {
         for (const dec of pendingDecisions.slice(0, 5)) {
@@ -888,6 +897,7 @@ export class TelegramBotService {
           keyboard.push([
             { text: `✅ ${short}`, callback_data: `decision:agree:${dec.id}` },
             { text: `❌ ${short}`, callback_data: `decision:reject:${dec.id}` },
+            { text: `✏️ ${short}`, callback_data: `decision:other:${dec.id}` },
           ]);
         }
       }
@@ -1176,6 +1186,79 @@ export class TelegramBotService {
         return;
       }
 
+      if (pendingState.action === 'decision_other') {
+        const customText = rawText.trim();
+        if (!customText) {
+          await this.sendMessage(chatId, 'Phương án không được để trống. Vui lòng nhập lại (hoặc /cancel để huỷ):');
+          return;
+        }
+        if (customText.length > 2000) {
+          await this.sendMessage(chatId, 'Phương án quá dài (tối đa 2000 ký tự). Vui lòng nhập lại (hoặc /cancel để huỷ):');
+          return;
+        }
+
+        const d = this.decisionTracker.getDecision(pendingState.decisionId);
+        if (!d || d.answered) {
+          this.chatStates.delete(chatId);
+          await this.sendMessage(chatId, 'Quyết định đã hết hạn hoặc đã trả lời.');
+          return;
+        }
+
+        this.chatStates.delete(chatId);
+        const updated = this.decisionTracker.answerDecision(
+          pendingState.decisionId,
+          'other',
+          this.now(),
+          customText,
+        );
+
+        if (this.chatService) {
+          forwardDecisionToBrain(
+            this.chatService,
+            pendingState.decisionId,
+            updated?.text || d.text,
+            'other',
+            updated?.taskId,
+            customText,
+          );
+        }
+
+        const escaped = this.escapeHtml(customText);
+        const keyboard: InlineKeyboardButton[][] = [
+          [{ text: '🌐 Xem dashboard', url: this.getDashboardUrl() }],
+        ];
+
+        let edited = false;
+        const targetChatId = pendingState.messageChatId || chatId;
+        if (pendingState.messageId && targetChatId) {
+          const originalText = pendingState.originalText ? this.escapeHtml(pendingState.originalText) : '';
+          const updatedText = originalText
+            ? `${originalText}\n\n✏️ <b>Đã phản hồi: Phương án khác — ${escaped}</b>`
+            : `✏️ <b>Đã phản hồi: Phương án khác — ${escaped}</b>`;
+          try {
+            await this.editMessage(targetChatId, pendingState.messageId, updatedText, {
+              inline_keyboard: keyboard,
+            });
+            edited = true;
+          } catch {
+            edited = false;
+          }
+        }
+
+        if (!edited) {
+          await this.sendMessage(chatId, `✏️ <b>Đã phản hồi: Phương án khác — ${escaped}</b>`);
+        }
+
+        this.eventBus.emit('decision.answered', undefined, {
+          decisionId: pendingState.decisionId,
+          action: 'other',
+          answer: 'other',
+          text: updated?.text || d.text,
+          customAnswer: customText,
+        });
+        return;
+      }
+
       if (pendingState.action === 'reject_feedback') {
         const taskId = pendingState.taskId;
         this.chatStates.delete(chatId);
@@ -1379,11 +1462,17 @@ export class TelegramBotService {
       }
 
       case '/restart': {
-        if (args[0]?.toLowerCase() === 'now') {
+        const killWorkers = args.some((a) => a.toLowerCase() === '--kill-workers' || a.toLowerCase() === 'kill-workers');
+        const isNow = args[0]?.toLowerCase() === 'now' || (killWorkers && args[1]?.toLowerCase() === 'now');
+        if (isNow) {
           const status = this.service.getStatus();
           const running = status.tasks.running + status.tasks.checking;
-          await this.sendMessage(chatId, `⚠️ <b>Khởi động lại ngay?</b> ${running} worker/check đang chạy sẽ bị dừng.`, { inline_keyboard: [[
-            { text: '✅ Xác nhận', callback_data: 'hubrestart:confirm' },
+          const text = killWorkers
+            ? `⚠️ <b>Khởi động lại ngay?</b> ${running} worker/check đang chạy sẽ bị dừng.`
+            : `🔄 <b>Khởi động lại ngay?</b> Worker đang chạy sẽ được giữ nguyên (handoff).`;
+          const confirmData = killWorkers ? 'hubrestart:confirm:kill' : 'hubrestart:confirm';
+          await this.sendMessage(chatId, text, { inline_keyboard: [[
+            { text: '✅ Xác nhận', callback_data: confirmData },
             { text: '❌ Hủy', callback_data: 'hubrestart:cancel' },
           ]] });
         } else {
@@ -2507,9 +2596,15 @@ export class TelegramBotService {
         await this.answerCallbackQuery(query.id, 'Đã hủy.');
         return;
       }
+      const killWorkers = taskIdOrParam === 'kill';
       await this.answerCallbackQuery(query.id, 'Đang khởi động lại...');
-      this.service.shutdownForUser('hub_restart');
-      await this.sendMessage(chatId, '🔄 Đang khởi động lại AgentHub; worker đã được đưa về hàng chờ.');
+      if (killWorkers) {
+        this.service.shutdownForUser('hub_restart');
+        await this.sendMessage(chatId, '🔄 Đang khởi động lại AgentHub; worker đã được đưa về hàng chờ.');
+      } else {
+        this.service.shutdownForUser('hub_handoff');
+        await this.sendMessage(chatId, '🔄 Đang khởi động lại AgentHub; worker tiếp tục chạy và sẽ được nhận lại sau khi khởi động.');
+      }
       this.service.triggerRestart();
       return;
     }
@@ -2624,7 +2719,7 @@ export class TelegramBotService {
       }
       case 'decision': {
         const decisionId = taskIdOrParam;
-        if (action !== 'agree' && action !== 'reject') {
+        if (action !== 'agree' && action !== 'reject' && action !== 'other') {
           await this.answerCallbackQuery(query.id, 'Lựa chọn không hợp lệ.');
           return;
         }
@@ -2633,10 +2728,27 @@ export class TelegramBotService {
           await this.answerCallbackQuery(query.id, 'Quyết định đã hết hạn hoặc đã trả lời.');
           return;
         }
+
+        if (action === 'other') {
+          await this.answerCallbackQuery(query.id);
+          this.chatStates.set(chatId, {
+            action: 'decision_other',
+            decisionId,
+            messageId: query.message?.message_id,
+            messageChatId: query.message?.chat?.id || chatId,
+            originalText: query.message?.text,
+          });
+          await this.sendMessage(
+            chatId,
+            '✏️ Nhập phương án của bạn cho quyết định này (hoặc /cancel để huỷ):',
+          );
+          return;
+        }
+
         const answer = action;
         const updated = this.decisionTracker.answerDecision(decisionId, answer, this.now());
-        const label = answer === 'agree' ? 'Đồng ý' : 'Không';
-        const icon = answer === 'agree' ? '✅' : '❌';
+        const label = answer === 'agree' ? 'Đồng ý' : answer === 'reject' ? 'Không' : 'Phương án khác';
+        const icon = answer === 'agree' ? '✅' : answer === 'reject' ? '❌' : '✏️';
         await this.answerCallbackQuery(query.id, `Bạn đã chọn: ${label}`);
 
         if (this.chatService) {
@@ -4180,6 +4292,7 @@ export class TelegramBotService {
             [
               { text: '✅ Đồng ý', callback_data: `decision:agree:${decisionId}` },
               { text: '❌ Không', callback_data: `decision:reject:${decisionId}` },
+              { text: '✏️ Khác', callback_data: `decision:other:${decisionId}` },
             ],
             [{ text: '🌐 Xem dashboard', url: dashboardUrl }],
           ];

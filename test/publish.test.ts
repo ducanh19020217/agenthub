@@ -194,8 +194,10 @@ describe('Publish Service (t-auto-push-after-done)', () => {
     execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
     execFileSync('git', ['commit', '-m', 'feat: feature dirty'], { cwd: repoPath, env: testEnv });
 
-    // Switch repo back to main and make it DIRTY (uncommitted change)
+    // Switch repo back to main and make it DIRTY (modify tracked file and untracked file)
     execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+    const initialHead = execFileSync('git', ['rev-parse', 'main'], { cwd: repoPath, env: testEnv, encoding: 'utf8' }).trim();
+    fs.writeFileSync(path.join(repoPath, 'README.md'), '# modified tracked work\n');
     fs.writeFileSync(path.join(repoPath, 'uncommitted.txt'), 'dirty uncommitted work\n');
 
     ctx.service.createProject({
@@ -221,15 +223,139 @@ describe('Publish Service (t-auto-push-after-done)', () => {
 
     const result = await ctx.service.publishTask(task.id);
     expect(result.ok).toBe(true);
+    expect((result as any).localUpdate).toBe('skipped_dirty');
 
-    // Verify task is pushed
+    // Verify task is pushed with skipped_dirty
     const updated = ctx.taskRepo.get(task.id);
     expect(updated?.status).toBe('pushed');
+    const pushResult = JSON.parse(updated!.pushResult!);
+    expect(pushResult.localUpdate).toBe('skipped_dirty');
 
-    // Verify user repo is STILL dirty and uncommitted work is intact
-    expect(fs.existsSync(path.join(repoPath, 'uncommitted.txt'))).toBe(true);
-    const uncommittedContent = fs.readFileSync(path.join(repoPath, 'uncommitted.txt'), 'utf8');
-    expect(uncommittedContent).toBe('dirty uncommitted work\n');
+    // Remote received the commit
+    const remoteHead = execFileSync('git', ['--git-dir', remotePath, 'rev-parse', 'main'], { encoding: 'utf8', env: testEnv }).trim();
+    expect(remoteHead).toBe(pushResult.commit);
+    expect(remoteHead).not.toBe(initialHead);
+
+    // Local main branch pointer was NOT touched
+    const localHead = execFileSync('git', ['rev-parse', 'main'], { cwd: repoPath, env: testEnv, encoding: 'utf8' }).trim();
+    expect(localHead).toBe(initialHead);
+
+    // User's uncommitted work is intact
+    expect(fs.readFileSync(path.join(repoPath, 'README.md'), 'utf8')).toBe('# modified tracked work\n');
+    expect(fs.readFileSync(path.join(repoPath, 'uncommitted.txt'), 'utf8')).toBe('dirty uncommitted work\n');
+  });
+
+  it('nhánh đích đang checkout và sạch → sau publish, HEAD và file trong thư mục đều khớp commit đã push', async () => {
+    const remotePath = path.join(tmpDir, 'remote-clean-checkout.git');
+    initBareRemote(remotePath);
+
+    const repoPath = path.join(tmpDir, 'local-repo-clean-checkout');
+    initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+    // Create a feature branch
+    execFileSync('git', ['checkout', '-b', 'agenthub/clean-feat'], { cwd: repoPath, env: testEnv });
+    fs.writeFileSync(path.join(repoPath, 'clean-file.txt'), 'feature content\n');
+    execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+    execFileSync('git', ['commit', '-m', 'feat: clean commit'], { cwd: repoPath, env: testEnv });
+
+    // Switch repo back to main; add an untracked file (which should be ignored by -uno)
+    execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+    fs.writeFileSync(path.join(repoPath, 'ignored-untracked.txt'), 'untracked note\n');
+
+    ctx.service.createProject({
+      id: 'proj-clean-checkout',
+      name: 'Project Clean Checkout',
+      path: repoPath,
+      defaultBranch: 'main',
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj-clean-checkout/t1',
+      projectId: 'proj-clean-checkout',
+      slug: 'clean-feat',
+      title: 'Clean Feature',
+      status: 'done',
+      branch: 'agenthub/clean-feat',
+      baseRef: 'main',
+    });
+    const task = ctx.taskRepo.get('proj-clean-checkout/t1')!;
+
+    const result = await ctx.service.publishTask(task.id);
+    expect(result.ok).toBe(true);
+    expect((result as any).localUpdate).toBe('updated');
+
+    const updated = ctx.taskRepo.get(task.id);
+    expect(updated?.status).toBe('pushed');
+    const pushResult = JSON.parse(updated!.pushResult!);
+    expect(pushResult.localUpdate).toBe('updated');
+
+    // Local HEAD updated to pushed commit
+    const localHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, env: testEnv, encoding: 'utf8' }).trim();
+    expect(localHead).toBe(pushResult.commit);
+
+    // Files on disk match the new commit
+    expect(fs.existsSync(path.join(repoPath, 'clean-file.txt'))).toBe(true);
+    expect(fs.readFileSync(path.join(repoPath, 'clean-file.txt'), 'utf8')).toBe('feature content\n');
+
+    // Untracked file remains untouched
+    expect(fs.existsSync(path.join(repoPath, 'ignored-untracked.txt'))).toBe(true);
+
+    // Tracked git status is completely clean
+    const status = execFileSync('git', ['status', '--porcelain', '-uno'], { cwd: repoPath, env: testEnv, encoding: 'utf8' }).trim();
+    expect(status).toBe('');
+  });
+
+  it('nhánh đích không checkout → update-ref như cũ', async () => {
+    const remotePath = path.join(tmpDir, 'remote-not-checkout.git');
+    initBareRemote(remotePath);
+
+    const repoPath = path.join(tmpDir, 'local-repo-not-checkout');
+    initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+    // Create a feature branch
+    execFileSync('git', ['checkout', '-b', 'agenthub/feat-not-checkout'], { cwd: repoPath, env: testEnv });
+    fs.writeFileSync(path.join(repoPath, 'file-nc.txt'), 'not checkout\n');
+    execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+    execFileSync('git', ['commit', '-m', 'feat: nc commit'], { cwd: repoPath, env: testEnv });
+
+    // Switch repo to a completely different branch (develop)
+    execFileSync('git', ['checkout', '-b', 'develop'], { cwd: repoPath, env: testEnv });
+    const developHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, env: testEnv, encoding: 'utf8' }).trim();
+
+    ctx.service.createProject({
+      id: 'proj-not-checkout',
+      name: 'Project Not Checkout',
+      path: repoPath,
+      defaultBranch: 'main',
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj-not-checkout/t1',
+      projectId: 'proj-not-checkout',
+      slug: 'feat-not-checkout',
+      title: 'Feat Not Checkout',
+      status: 'done',
+      branch: 'agenthub/feat-not-checkout',
+      baseRef: 'main',
+    });
+    const task = ctx.taskRepo.get('proj-not-checkout/t1')!;
+
+    const result = await ctx.service.publishTask(task.id);
+    expect(result.ok).toBe(true);
+    expect((result as any).localUpdate).toBe('updated');
+
+    const pushResult = JSON.parse(ctx.taskRepo.get(task.id)!.pushResult!);
+    expect(pushResult.localUpdate).toBe('updated');
+
+    // main ref was updated
+    const mainRef = execFileSync('git', ['rev-parse', 'refs/heads/main'], { cwd: repoPath, env: testEnv, encoding: 'utf8' }).trim();
+    expect(mainRef).toBe(pushResult.commit);
+
+    // Current branch remains develop and unchanged
+    const currentBranch = execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: repoPath, env: testEnv, encoding: 'utf8' }).trim();
+    expect(currentBranch).toBe('develop');
+    const currentHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, env: testEnv, encoding: 'utf8' }).trim();
+    expect(currentHead).toBe(developHead);
   });
 
   it('đẩy cả nhánh integration lên remote khi pushIntegrationBranch = true', async () => {

@@ -1165,5 +1165,26 @@ describe('TaskDetailPage', () => {
     expect(auditingBadge).toBeInTheDocument();
     expect(auditingBadge.textContent).toContain('Đang audit');
   });
+
+  it('32. Task với localUpdate="skipped_dirty": hiển thị banner cảnh báo nhánh local chưa cập nhật', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'pushed',
+      pushedAt: '2026-11-07T03:30:00Z',
+      pushResult: JSON.stringify({
+        remote: 'origin',
+        branch: 'main',
+        commit: 'abcdef1234567890',
+        localUpdate: 'skipped_dirty',
+      }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const skippedBanner = await screen.findByTestId('publish-skipped-dirty-banner');
+    expect(skippedBanner).toBeInTheDocument();
+    expect(skippedBanner).toHaveTextContent('main');
+  });
 });
 

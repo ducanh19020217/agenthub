@@ -319,12 +319,21 @@ export async function mergeTaskIntoBase(
   }
 
   const branch = task.branch || renderTaskBranch(project, task);
+  const hubHome = options?.hubHome || process.env.AGENTHUB_HOME || path.join(process.env.HOME || process.cwd(), '.agenthub');
+  const env = workerEnvironment(hubHome, process.env, { project, cwd: repo, guards: false });
+
+  // If a previous merge was killed in-flight during handoff, abort it cleanly before status check
+  try {
+    await execFileAsync('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd: repo });
+    await execFileAsync('git', ['merge', '--abort'], { cwd: repo, env });
+  } catch {
+    // Not in middle of a merge, ignore
+  }
+
   const status = await git(repo, ['status', '--porcelain']);
   if (status) throw new MergeError(409, 'conflict', 'worktree tích hợp có thay đổi chưa commit');
 
   const before = await git(repo, ['rev-parse', 'HEAD']);
-  const hubHome = options?.hubHome || process.env.AGENTHUB_HOME || path.join(process.env.HOME || process.cwd(), '.agenthub');
-  const env = workerEnvironment(hubHome, process.env, { project, cwd: repo, guards: false });
   const identity = await gitIdentityArgs(repo, env);
   try {
     const message = renderCommitTemplate(settings.commitConvention.mergeMessageTemplate, { branch, target: targetBranch });

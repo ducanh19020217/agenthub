@@ -50,6 +50,7 @@ import {
   CheckCircle2,
   XCircle,
   AlertCircle,
+  AlertTriangle,
   Terminal,
   FileText,
   GitCommit,
@@ -139,6 +140,18 @@ export const TaskDetailPage: React.FC = () => {
     }
     return t('taskDetail.noLog');
   }, [task?.status, task?.runs, t]);
+
+  const showLastRunHint = React.useMemo(() => {
+    if (task?.status !== 'review' && task?.status !== 'checking') return false;
+    if (!liveLog) return false;
+    const lastHeaderIndex = liveLog.lastIndexOf('── Run #');
+    if (lastHeaderIndex === -1) {
+      return liveLog.trim() === '';
+    }
+    const newlineAfterHeader = liveLog.indexOf('\n', lastHeaderIndex);
+    const contentAfterHeader = newlineAfterHeader === -1 ? '' : liveLog.slice(newlineAfterHeader).trim();
+    return contentAfterHeader === '';
+  }, [task?.status, liveLog]);
 
   const [runParams, setRunParams] = useSearchParams();
   const [runsPage, setRunsPage] = useState(Math.max(1, Number(runParams.get('runsPage') || 1)));
@@ -1025,6 +1038,15 @@ export const TaskDetailPage: React.FC = () => {
             )}
           </div>
 
+          {parsedPushResult?.localUpdate === 'skipped_dirty' && (
+            <div data-testid="publish-skipped-dirty-banner" className="rounded-lg p-3 bg-[color-mix(in_srgb,var(--t-warn)_12%,transparent)] border border-[var(--t-warn)] text-xs text-[var(--t-warn)] space-y-1">
+              <div className="font-semibold flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{t('taskDetail.publishSkippedDirty', { branch: parsedPushResult.branch || project?.defaultBranch || 'main' })}</span>
+              </div>
+            </div>
+          )}
+
           {parsedPushResult?.error ? (
             <div data-testid="publish-error-banner" className="rounded-lg p-3 bg-[color-mix(in_srgb,var(--t-crit)_12%,transparent)] border border-[var(--t-crit)] text-xs text-[var(--t-crit)] space-y-1">
               <div className="font-semibold flex items-center gap-1.5">
@@ -1273,14 +1295,19 @@ export const TaskDetailPage: React.FC = () => {
             onScroll={handleScroll}
             className="w-full h-[520px] bg-[var(--t-log-bg)] text-[var(--t-log-text)] font-mono text-xs p-4 rounded-xl overflow-y-auto border border-[var(--t-border)] shadow-inner whitespace-pre-wrap leading-relaxed select-text"
           >
-            {liveLog ? (
-              logVirtualized ? (
-                <div style={{ height: `${logLines.length * 18}px`, position: 'relative' }}>
-                  <div style={{ position: 'absolute', top: `${logStart * 18}px`, left: 0, right: 0 }}>
-                    {logLines.slice(logStart, logEnd).map((line, index) => <div key={logStart + index} className="h-[18px]">{line || '\u00a0'}</div>)}
+            {liveLog.trim() ? (
+              <>
+                {logVirtualized ? (
+                  <div style={{ height: `${logLines.length * 18}px`, position: 'relative' }}>
+                    <div style={{ position: 'absolute', top: `${logStart * 18}px`, left: 0, right: 0 }}>
+                      {logLines.slice(logStart, logEnd).map((line, index) => <div key={logStart + index} className="h-[18px]">{line || '\u00a0'}</div>)}
+                    </div>
                   </div>
-                </div>
-              ) : liveLog
+                ) : liveLog}
+                {showLastRunHint && (
+                  <div className="text-[var(--t-log-muted)] mt-1">{emptyLogMessage}</div>
+                )}
+              </>
             ) : <span className="text-[var(--t-log-muted)]">{emptyLogMessage}</span>}
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2">

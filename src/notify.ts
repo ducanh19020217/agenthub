@@ -336,6 +336,14 @@ export class NotificationService {
         break;
       }
 
+      case 'decision.answered': {
+        const answer = p.answer as string | undefined;
+        const label = answer === 'agree' ? 'Đồng ý' : answer === 'reject' ? 'Không' : 'Phương án khác';
+        const customText = typeof p.customAnswer === 'string' && p.customAnswer ? ` — ${p.customAnswer}` : '';
+        this.notify(`Đã phản hồi quyết định: ${label}${customText}`, 'normal');
+        break;
+      }
+
       case 'batch.created': {
         const count = typeof p.taskCount === 'number' ? p.taskCount : 0;
         const who = typeof p.createdBy === 'string' && p.createdBy ? p.createdBy : 'Claude';
@@ -768,7 +776,12 @@ export class NotificationService {
       case 'task.pushed': {
         const branchStr = typeof p.branch === 'string' ? ` vào ${p.branch}` : '';
         const title = this.resolveTaskTitle(taskId, p);
-        this.notify(`🚀 Đã đẩy lên git${branchStr}: ${title}`, 'normal');
+        if (p.localUpdate === 'skipped_dirty') {
+          const target = typeof p.branch === 'string' ? p.branch : 'target';
+          this.notify(`Đã đẩy lên remote; nhánh local ${target} chưa cập nhật vì thư mục đang có thay đổi chưa commit`, 'warning');
+        } else {
+          this.notify(`🚀 Đã đẩy lên git${branchStr}: ${title}`, 'normal');
+        }
         break;
       }
 

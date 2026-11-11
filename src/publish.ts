@@ -142,6 +142,8 @@ export interface PublishTaskDeps {
   };
 }
 
+export type LocalBranchUpdateStatus = 'updated' | 'skipped_dirty';
+
 export interface PublishSuccessResult {
   ok: true;
   remote: string;
@@ -152,6 +154,7 @@ export interface PublishSuccessResult {
   auditPassed?: boolean;
   auditSkipped?: boolean;
   findings?: PrePublishAuditFinding[];
+  localUpdate?: LocalBranchUpdateStatus;
 }
 
 export interface PublishFailedResult {
@@ -626,6 +629,54 @@ async function runAuditAgentForTask(
   }
 
   return { ok: true, result: parsed, engineId: chosenProfile.engine, profileName: chosenProfile.name };
+}
+
+/**
+ * Updates the local branch to the pushed commit.
+ * If the target branch is currently checked out in repoPath:
+ * - If the tracked working tree is clean (ignoring untracked files): updates using `merge --ff-only` so files on disk match the branch.
+ * - If the tracked working tree is dirty or ff-only fails: leaves the local branch untouched and returns 'skipped_dirty'.
+ * If the target branch is not checked out: updates using `update-ref` directly and returns 'updated'.
+ */
+export async function updateLocalBranchSafely(
+  repoPath: string,
+  targetBranch: string,
+  pushedCommit: string,
+  env: NodeJS.ProcessEnv,
+): Promise<LocalBranchUpdateStatus> {
+  let currentCheckedOut: string | null = null;
+  try {
+    const out = await execFileAsync('git', ['-C', repoPath, 'symbolic-ref', '--short', 'HEAD'], { env });
+    currentCheckedOut = out.stdout.trim() || null;
+  } catch {
+    currentCheckedOut = null;
+  }
+
+  if (currentCheckedOut === targetBranch) {
+    let isDirty = false;
+    try {
+      const statusOut = await execFileAsync('git', ['-C', repoPath, 'status', '--porcelain', '-uno'], { env });
+      if (statusOut.stdout.trim().length > 0) {
+        isDirty = true;
+      }
+    } catch {
+      isDirty = true;
+    }
+
+    if (isDirty) {
+      return 'skipped_dirty';
+    }
+
+    try {
+      await runGit(['-C', repoPath, 'merge', '--ff-only', pushedCommit], repoPath, env);
+      return 'updated';
+    } catch {
+      return 'skipped_dirty';
+    }
+  } else {
+    await runGit(['-C', repoPath, 'update-ref', `refs/heads/${targetBranch}`, pushedCommit], repoPath, env);
+    return 'updated';
+  }
 }
 
 /**
@@ -1176,8 +1227,12 @@ export async function publishTask(
       // 5. Push target branch to remote
       await runGit(['-C', worktreePath, 'push', remote, `HEAD:refs/heads/${targetBranch}`], worktreePath, env);
 
-      // 6. Update local branch ref to match pushed commit
-      await runGit(['-C', repoPath, 'update-ref', `refs/heads/${targetBranch}`, pushedCommit], repoPath, env);
+      // 6. Update local branch ref to match pushed commit safely
+      const localUpdate = await updateLocalBranchSafely(repoPath, targetBranch, pushedCommit, env);
+      if (localUpdate === 'skipped_dirty') {
+        const dirtyWarningMsg = `Đã đẩy lên remote; nhánh local ${targetBranch} chưa cập nhật vì thư mục đang có thay đổi chưa commit`;
+        deps.notifyService?.notify(dirtyWarningMsg, 'warning');
+      }
 
       // 7. Push integration branch if enabled
       let pushedIntegrationBranch = false;
@@ -1196,7 +1251,6 @@ export async function publishTask(
       // 8. Generate URLs and update tasks
       const { compareUrl } = buildGitUrls(remoteUrl, pushedCommit, prevRemoteSha);
       const pushedAt = new Date().toISOString();
-
       // Update all tasks included in this pushed range
       for (const t of tasksToAudit) {
         const auditRes = auditedResults.get(t.id);
@@ -1212,6 +1266,7 @@ export async function publishTask(
           auditSkipped: isSkipAudit,
           findings: p3Findings,
           summary: auditRes?.summary,
+          localUpdate,
         };
 
         deps.taskRepo.update(t.id, {
@@ -1228,6 +1283,7 @@ export async function publishTask(
             branch: targetBranch,
             commit: pushedCommit,
             compareUrl,
+            localUpdate,
           });
         }
       }
@@ -1235,7 +1291,7 @@ export async function publishTask(
       // Ensure root taskId is updated even if not in tasksToAudit
       const rootAuditRes = auditedResults.get(taskId);
       const rootP3Findings = rootAuditRes?.findings?.filter((f) => f.severity === 'P3') ?? [];
-      const pushResultObj = {
+      const pushResultObj: Record<string, unknown> = {
         state: 'pushed',
         remote,
         branch: targetBranch,
@@ -1246,6 +1302,7 @@ export async function publishTask(
         auditSkipped: isSkipAudit,
         findings: rootP3Findings,
         summary: rootAuditRes?.summary,
+        localUpdate,
       };
 
       deps.taskRepo.update(taskId, {
@@ -1261,6 +1318,7 @@ export async function publishTask(
         branch: targetBranch,
         commit: pushedCommit,
         compareUrl,
+        localUpdate,
       });
 
       return {
@@ -1273,6 +1331,7 @@ export async function publishTask(
         auditPassed: !isSkipAudit && isAuditConfigEnabled,
         auditSkipped: isSkipAudit,
         findings: rootP3Findings,
+        localUpdate,
       };
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);

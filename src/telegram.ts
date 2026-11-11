@@ -1469,7 +1469,7 @@ export class TelegramBotService {
           const text = killWorkers
             ? `⚠️ <b>Khởi động lại ngay?</b> ${running} worker/check đang chạy sẽ bị dừng.`
             : `🔄 <b>Khởi động lại ngay?</b> Worker đang chạy sẽ được giữ nguyên (handoff).`;
-          const confirmData = killWorkers ? 'hubrestart:confirm:kill' : 'hubrestart:confirm:handoff';
+          const confirmData = killWorkers ? 'hubrestart:confirm:kill' : 'hubrestart:confirm';
           await this.sendMessage(chatId, text, { inline_keyboard: [[
             { text: '✅ Xác nhận', callback_data: confirmData },
             { text: '❌ Hủy', callback_data: 'hubrestart:cancel' },

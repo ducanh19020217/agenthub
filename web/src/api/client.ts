@@ -935,11 +935,12 @@ export async function deleteWorktree(id: string): Promise<{ ok: boolean }> {
 
 export async function getTaskLog(
   id: string,
-  params?: { run?: string; tail?: number },
+  params?: { run?: string; tail?: number; scope?: string },
 ): Promise<string> {
   const query = new URLSearchParams();
   if (params?.run) query.set('run', params.run);
   if (params?.tail) query.set('tail', String(params.tail));
+  if (params?.scope) query.set('scope', params.scope);
   const qStr = query.toString();
   return apiFetch<string>(`/api/tasks/${encodeURIComponent(id)}/log${qStr ? `?${qStr}` : ''}`);
 }

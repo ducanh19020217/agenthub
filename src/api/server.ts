@@ -739,7 +739,7 @@ export async function createServer(
 
   fastify.get('/api/tasks/:id/log', async (req: FastifyRequest, reply: FastifyReply) => {
     const { id } = req.params as { id: string };
-    const query = req.query as { run?: string; tail?: string };
+    const query = req.query as { run?: string; tail?: string; scope?: string };
     const log = service.getTaskLog(id, query);
     return reply.type('text/plain; charset=utf-8').send(log);
   });

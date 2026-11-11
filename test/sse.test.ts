@@ -235,6 +235,103 @@ describe('AgentHub SSE /api/events', () => {
     }
   });
 
+  it('streams run.output for active reviewer runs with unified envelope', async () => {
+    const logDir = path.join(tmpDir, 'logs', 'p_rev');
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, 'r_rev.log');
+    fs.writeFileSync(logPath, 'initial reviewer output\n');
+
+    ctx.projectRepo.insert({
+      id: 'p',
+      name: 'Project P',
+      path: '/tmp',
+      defaultBranch: 'main',
+      envTemplate: null,
+      maxParallel: 1,
+    });
+
+    ctx.taskRepo.insert({
+      id: 'p/rev',
+      projectId: 'p',
+      slug: 'rev',
+      title: 'Review Task',
+      status: 'review',
+    });
+
+    ctx.runRepo.insert({
+      id: 'r_rev',
+      taskId: 'p/rev',
+      engine: 'claude',
+      model: 'claude:sonnet',
+      profileName: 'claude-may',
+      kind: 'reviewer',
+      logPath,
+    });
+
+    const fakeEngine = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    ctx.scheduler.getReviewerRuns().set('p/rev', {
+      taskId: 'p/rev',
+      runId: 'r_rev',
+      pid: 9998,
+      profileName: 'claude-may',
+      engine: fakeEngine,
+      actor: 'claude-reviewer',
+      outputPath: path.join(logDir, 'r_rev.out.json'),
+      startedAt: Date.now(),
+      timeout: setTimeout(() => {}, 100000),
+    });
+
+    const receivedOutputs: Array<Record<string, unknown>> = [];
+
+    const req = http.request(
+      `http://127.0.0.1:${port}/api/events?token=${token}`,
+      { headers: { host: `127.0.0.1:${port}` } },
+      (res) => {
+        let buffer = '';
+        res.on('data', (chunk) => {
+          buffer += chunk.toString();
+          const parts = buffer.split('\n\n');
+          while (parts.length > 1) {
+            const rawEvent = parts.shift()!;
+            const lines = rawEvent.split('\n');
+            let eventName = '';
+            let dataStr = '';
+            for (const line of lines) {
+              if (line.startsWith('event: ')) eventName = line.slice(7).trim();
+              if (line.startsWith('data: ')) dataStr = line.slice(6).trim();
+            }
+            if (eventName === 'run.output' && dataStr) {
+              receivedOutputs.push(JSON.parse(dataStr));
+            }
+          }
+          buffer = parts[0] || '';
+        });
+      },
+    );
+    req.end();
+
+    try {
+      // Append reviewer progress to log file
+      fs.appendFileSync(logPath, 'Bắt đầu duyệt code reviewer\n');
+
+      // Wait for SSE interval to stream reviewer output
+      await vi.waitFor(() => {
+        expect(receivedOutputs.length).toBeGreaterThan(0);
+        const revOutput = receivedOutputs.find((o) => o.taskId === 'p/rev');
+        expect(revOutput).toBeDefined();
+        expect(revOutput?.type).toBe('run.output');
+        const payload = revOutput?.payload as { runId: string; chunk: string };
+        expect(payload.runId).toBe('r_rev');
+        expect(payload.chunk).toContain('Bắt đầu duyệt code reviewer');
+      }, { timeout: 5000 });
+    } finally {
+      req.destroy();
+      const r = ctx.scheduler.getReviewerRuns().get('p/rev');
+      if (r) clearTimeout(r.timeout);
+      ctx.scheduler.getReviewerRuns().delete('p/rev');
+    }
+  });
+
   it('replays missed bus events when Last-Event-ID header is provided (up to 200, strictly in order)', async () => {
     // Insert 5 events in DB
     ctx.service.eventRepo.insert('task.queued', 'p/t1', { step: 1 });

@@ -104,10 +104,19 @@ export function registerSseRoute(fastify: FastifyInstance, service: AppService):
     const outputInterval = setInterval(() => {
       try {
         const runningMap = service.scheduler.getRunning();
+        const reviewerMap = service.scheduler.getReviewerRuns();
+        const activeRuns: Array<{ taskId: string; runId: string }> = [];
+        for (const runningTask of runningMap.values()) {
+          activeRuns.push({ taskId: runningTask.taskId, runId: runningTask.runId });
+        }
+        for (const reviewerRun of reviewerMap.values()) {
+          activeRuns.push({ taskId: reviewerRun.taskId, runId: reviewerRun.runId });
+        }
+
         const activeRunIds = new Set<string>();
 
-        for (const runningTask of runningMap.values()) {
-          const runId = runningTask.runId;
+        for (const activeItem of activeRuns) {
+          const runId = activeItem.runId;
           activeRunIds.add(runId);
 
           const run = service.runRepo.get(runId);
@@ -142,7 +151,7 @@ export function registerSseRoute(fastify: FastifyInstance, service: AppService):
               const envelope = {
                 type: 'run.output',
                 ts: new Date().toISOString(),
-                taskId: runningTask.taskId,
+                taskId: activeItem.taskId,
                 payload: {
                   runId,
                   chunk,

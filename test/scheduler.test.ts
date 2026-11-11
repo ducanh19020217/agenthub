@@ -723,6 +723,19 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
+  it('does not crash a successful reviewer run when feedback or log mentions 401 or rate limit', async () => {
+    const { scheduler, reviewRepo } = makeReviewer('reviewer-auth-word-approved');
+    scheduler.tick();
+    await vi.waitFor(() => {
+      expect(taskRepo.get('test-project/review')?.status).toBe('done');
+    });
+    expect(reviewRepo.getByTask('test-project/review')[0]?.verdict).toBe('approved');
+    const reviewerRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
+    expect(reviewerRun?.outcome).toBe('done');
+    expect(profileRepo.get('codex-1')?.authState).not.toBe('not_logged_in');
+    scheduler.stop();
+  });
+
   it('routes changes_requested back to queued with feedback', async () => {
     const { scheduler, reviewRepo } = makeReviewer('reviewer-changes');
     scheduler.tick();
@@ -774,6 +787,26 @@ describe('Codex reviewer failover lifecycle', () => {
     });
     expect(taskRepo.get('test-project/review')?.status).toBe('review');
     expect(new QuotaService(quotaMarkRepo, profileRepo).isExhausted('codex-1', 'codex')).toBe(true);
+    const reviewerRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
+    expect(reviewerRun?.logPath).toBeDefined();
+    if (reviewerRun?.logPath && fs.existsSync(reviewerRun.logPath)) {
+      const logContent = fs.readFileSync(reviewerRun.logPath, 'utf8');
+      expect(logContent).toContain('[agenthub] reviewer codex-1 hết quota');
+    }
+    scheduler.stop();
+  });
+
+  it('appends failover reason with target reviewer when quota is exhausted', async () => {
+    const { scheduler } = makeReviewer('reviewer-quota');
+    profileRepo.upsert({ name: 'codex-2', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    scheduler.tick();
+    await vi.waitFor(() => {
+      expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).toBe('quota');
+    });
+    const firstRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
+    expect(firstRun?.logPath).toBeDefined();
+    const logContent = fs.readFileSync(firstRun!.logPath!, 'utf8');
+    expect(logContent).toContain('[agenthub] reviewer codex-1 hết quota, chuyển sang codex-2');
     scheduler.stop();
   });
 

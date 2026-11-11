@@ -18,6 +18,7 @@ import {
   QuotaMarkRepo,
   TaskRepo,
   RunRepo,
+  RunRow,
   ReviewRepo,
   EventRepo,
   TaskNoteRepo,
@@ -739,6 +740,23 @@ export function toRouteId(taskId: string): string {
   return taskId.replace('/', '~');
 }
 
+export function formatRunLogHeader(run: RunRow, index: number): string {
+  let timeStr = '';
+  if (run.startedAt) {
+    try {
+      const d = new Date(run.startedAt);
+      if (!isNaN(d.getTime())) {
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        timeStr = `${hh}:${mm}`;
+      }
+    } catch { /* fallback */ }
+  }
+  const kind = run.kind || 'worker';
+  const timePart = timeStr ? ` · ${timeStr}` : '';
+  return `── Run #${index + 1} · ${kind} · ${run.engine}/${run.profileName}${timePart} ──`;
+}
+
 export function readLogTail(filePath: string, tailKB = 512): string {
   if (!fs.existsSync(filePath)) return '';
   try {
@@ -749,6 +767,35 @@ export function readLogTail(filePath: string, tailKB = 512): string {
       const bytesToRead = Math.min(stat.size, maxBytes);
       const buffer = Buffer.alloc(bytesToRead);
       fs.readSync(fd, buffer, 0, bytesToRead, stat.size - bytesToRead);
+      return buffer.toString('utf-8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return '';
+  }
+}
+
+export function readRunLogTailSafe(filePath: string, maxBytes: number): string {
+  if (!fs.existsSync(filePath) || maxBytes <= 0) return '';
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const stat = fs.fstatSync(fd);
+      if (stat.size === 0) return '';
+      const bytesToRead = Math.min(stat.size, maxBytes);
+      const buffer = Buffer.alloc(bytesToRead);
+      fs.readSync(fd, buffer, 0, bytesToRead, stat.size - bytesToRead);
+      if (bytesToRead < stat.size) {
+        // Discard up to the first newline to start at a clean line boundary and avoid split UTF-8
+        const nl = buffer.indexOf(0x0a);
+        if (nl !== -1 && nl + 1 < buffer.length) {
+          return buffer.subarray(nl + 1).toString('utf-8');
+        }
+        let start = 0;
+        while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start++;
+        return buffer.subarray(start).toString('utf-8');
+      }
       return buffer.toString('utf-8');
     } finally {
       fs.closeSync(fd);
@@ -5563,7 +5610,7 @@ export class AppService {
     );
   }
 
-  getTaskLog(idParam: string, query?: { run?: string; tail?: string | number }): string {
+  getTaskLog(idParam: string, query?: { run?: string; tail?: string | number; scope?: string }): string {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) {
@@ -5572,13 +5619,73 @@ export class AppService {
 
     const runs = this.runRepo.getByTask(taskId);
     const runId = query?.run;
-    const targetRun = runId ? runs.find((r) => r.id === runId) : runs[runs.length - 1];
+    const tailKB = query?.tail ? parseInt(String(query.tail), 10) : 512;
+    const maxBytes = Math.min(Math.max(1, isNaN(tailKB) ? 512 : tailKB), 512) * 1024;
 
+    if (runId) {
+      const targetRun = runs.find((r) => r.id === runId);
+      if (!targetRun?.logPath || !fs.existsSync(targetRun.logPath)) {
+        return '';
+      }
+      return readLogTail(targetRun.logPath, isNaN(tailKB) ? 512 : tailKB);
+    }
+
+    if (query?.scope === 'all') {
+      if (runs.length === 0) return '';
+      // We process runs from latest to oldest so recent logs are prioritized
+      // without loading entire giant log files into memory.
+      const sections: string[] = [];
+      let totalBytes = 0;
+
+      for (let i = runs.length - 1; i >= 0; i--) {
+        const r = runs[i];
+        const header = formatRunLogHeader(r, i);
+        const headerBytes = Buffer.byteLength(header, 'utf8') + 1; // +1 for newline
+
+        // If even the header cannot fit in the remaining budget, stop
+        if (totalBytes + headerBytes > maxBytes) {
+          break;
+        }
+
+        const remainingLogBudget = maxBytes - totalBytes - headerBytes - (sections.length > 0 ? 2 : 0);
+        let logContent = '';
+        if (r.logPath && fs.existsSync(r.logPath) && remainingLogBudget > 0) {
+          logContent = readRunLogTailSafe(r.logPath, remainingLogBudget);
+          // If logContent in bytes exceeds remainingLogBudget, trim from the beginning by lines
+          if (Buffer.byteLength(logContent, 'utf8') > remainingLogBudget) {
+            const lines = logContent.split('\n');
+            const kept: string[] = [];
+            let keptBytes = 0;
+            for (let l = lines.length - 1; l >= 0; l--) {
+              const lineBytes = Buffer.byteLength(lines[l], 'utf8') + 1;
+              if (keptBytes + lineBytes > remainingLogBudget) break;
+              kept.unshift(lines[l]);
+              keptBytes += lineBytes;
+            }
+            logContent = kept.join('\n');
+          }
+        }
+
+        let section = header;
+        if (logContent.trim()) {
+          section = `${header}\n${logContent.trimEnd()}`;
+        }
+        const sectionBytes = Buffer.byteLength(section, 'utf8') + (sections.length > 0 ? 2 : 0);
+        sections.unshift(section);
+        totalBytes += sectionBytes;
+
+        if (totalBytes >= maxBytes) {
+          break;
+        }
+      }
+
+      return sections.length > 0 ? sections.join('\n\n') + '\n' : '';
+    }
+
+    const targetRun = runs[runs.length - 1];
     if (!targetRun?.logPath || !fs.existsSync(targetRun.logPath)) {
       return '';
     }
-
-    const tailKB = query?.tail ? parseInt(String(query.tail), 10) : 512;
     return readLogTail(targetRun.logPath, isNaN(tailKB) ? 512 : tailKB);
   }
 

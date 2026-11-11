@@ -75,6 +75,14 @@ async function run() {
       console.log('Codex banner: finished');
       return;
     }
+    if (mode === 'reviewer-auth-word-approved') {
+      console.log('Inspecting auth module: handling 401 unauthenticated and rate limit 429');
+      fs.writeFileSync(process.env.FAKE_OUTPUT_PATH, JSON.stringify({
+        verdict: 'approved',
+        feedback: 'Reviewed auth module: 401 unauthenticated and 429 rate limit errors handled properly.',
+      }));
+      return;
+    }
     if (mode === 'reviewer-quota') {
       console.error('usage limit exceeded; try again in 2h 3m');
       process.exit(1);

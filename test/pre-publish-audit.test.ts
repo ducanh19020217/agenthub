@@ -106,6 +106,30 @@ describe('Pre-publish audit prompt and parser', () => {
     expect(isAuditPassed(parsed!)).toBe(true);
   });
 
+  it('isAuditPassed returns false for verdict fail with empty findings (fail-closed, not passed)', () => {
+    const emptyFail: PrePublishAuditResult = {
+      verdict: 'fail',
+      findings: [],
+      summary: 'Thất bại không rõ lý do',
+    };
+    expect(isAuditPassed(emptyFail)).toBe(false);
+
+    const p3OnlyFail: PrePublishAuditResult = {
+      verdict: 'fail',
+      findings: [
+        {
+          severity: 'P3',
+          kind: 'out_of_scope',
+          file: 'README.md',
+          line: 5,
+          detail: 'Minor typo',
+        },
+      ],
+      summary: 'Fail with only P3',
+    };
+    expect(isAuditPassed(p3OnlyFail)).toBe(false);
+  });
+
   it('parsePrePublishAuditOutput returns null on malformed output or invalid schema', () => {
     expect(parsePrePublishAuditOutput('not json at all')).toBeNull();
     expect(parsePrePublishAuditOutput('{"verdict": "unknown"}')).toBeNull();

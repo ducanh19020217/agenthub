@@ -854,6 +854,51 @@ export async function publishTask(
             summary: auditResult.summary,
           });
         } else {
+          // Task failed audit
+          const hasCriticalOrMajor = auditResult.findings.some((f) => f.severity === 'P1' || f.severity === 'P2');
+          if (!hasCriticalOrMajor) {
+            // Verdict fail without P1/P2 findings -> indeterminate: fail-closed, retryable, no push, DO NOT return task to worker
+            const failedAt = new Date().toISOString();
+            const errorMsg = `Audit trả về verdict 'fail' nhưng không có lỗi P1/P2: ${auditResult.summary || 'kết quả không xác định'}`;
+            deps.taskRepo.update(t.id, {
+              pushResult: JSON.stringify({
+                state: 'push_failed',
+                error: errorMsg,
+                failedAt,
+                retryable: true,
+                auditFailed: true,
+                findings: auditResult.findings,
+                summary: auditResult.summary,
+              }),
+            });
+            if (taskId !== t.id) {
+              deps.taskRepo.update(taskId, {
+                pushResult: JSON.stringify({
+                  blockedByTask: t.slug,
+                  blockedByTaskId: t.id,
+                  error: `Bị chặn bởi task ${t.slug}: ${errorMsg}`,
+                  failedAt,
+                  retryable: true,
+                }),
+              });
+            }
+            deps.eventBus.emit('task.push_failed', t.id, {
+              taskId: t.id,
+              projectId: currentProject.id,
+              error: errorMsg,
+              remote,
+              branch: targetBranch,
+            });
+            return {
+              ok: false,
+              error: errorMsg,
+              remote,
+              branch: targetBranch,
+              auditFailed: true,
+              retryable: true,
+            };
+          }
+
           // Task failed audit (P1 or P2)
           const maxFixRounds = currentSettings.publish?.audit?.maxFixRounds ?? 2;
           const currentAuditRounds = getTaskAuditRounds(t, deps);

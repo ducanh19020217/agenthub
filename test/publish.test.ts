@@ -1188,5 +1188,62 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(diffB.diff).toContain('content B');
       expect(diffB.diff).not.toContain('content A');
     });
+
+    it('verdict fail + findings rỗng -> không push, retryable, task không bị trả về', async () => {
+      const remotePath = path.join(tmpDir, 'remote-fail-empty.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-fail-empty');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/fail-empty-task'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'empty.txt'), 'fail empty\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: fail empty task'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/fail-empty-task', '-m', "Merge branch 'agenthub/fail-empty-task' into main"], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-fail-empty',
+        name: 'Project Fail Empty',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 2 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-fail-empty/task-1',
+        projectId: 'proj-fail-empty',
+        slug: 'fail-empty-task',
+        title: 'Fail Empty Task',
+        status: 'done',
+        branch: 'agenthub/fail-empty-task',
+        baseRef: 'main',
+      });
+
+      process.env.FAKE_MODE = 'audit-fail-empty';
+      const res = await ctx.service.publishTask('proj-fail-empty/task-1');
+      expect(res.ok).toBe(false);
+      expect((res as any).auditFailed).toBe(true);
+      expect((res as any).retryable).toBe(true);
+
+      const taskAfter = ctx.taskRepo.get('proj-fail-empty/task-1');
+      // Task must NOT be returned to worker (must remain 'done', not 'running' or 'queued')
+      expect(taskAfter?.status).toBe('done');
+      const pushResult = JSON.parse(taskAfter!.pushResult!);
+      expect(pushResult.retryable).toBe(true);
+      expect(pushResult.auditFailed).toBe(true);
+
+      // Verify remote branch was not pushed
+      const remoteCommits = execFileSync('git', ['--git-dir', remotePath, 'log', '--oneline', 'main'], { encoding: 'utf8', env: testEnv });
+      expect(remoteCommits).not.toContain('feat: fail empty task');
+    });
   });
 });

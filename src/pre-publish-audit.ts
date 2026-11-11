@@ -184,7 +184,7 @@ export function parsePrePublishAuditOutput(output: string): PrePublishAuditResul
 export function isAuditPassed(result: PrePublishAuditResult): boolean {
   const hasCriticalOrMajor = result.findings.some((f) => f.severity === 'P1' || f.severity === 'P2');
   if (hasCriticalOrMajor) return false;
-  return result.verdict === 'pass' || result.findings.every((f) => f.severity === 'P3');
+  return result.verdict === 'pass';
 }
 
 /**

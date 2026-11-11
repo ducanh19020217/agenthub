@@ -151,6 +151,7 @@ export interface PublishSuccessResult {
   pushedIntegrationBranch: boolean;
   auditPassed?: boolean;
   auditSkipped?: boolean;
+  findings?: PrePublishAuditFinding[];
 }
 
 export interface PublishFailedResult {
@@ -747,6 +748,8 @@ export async function publishTask(
     const isManual = Boolean(options?.manual);
     const isSkipAudit = isManual && Boolean(options?.skipAudit);
     const isAuditConfigEnabled = currentSettings.publish?.audit?.enabled !== false;
+    let tasksToAudit: TaskRow[] = [];
+    const auditedResults = new Map<string, PrePublishAuditResult>();
 
     if (isSkipAudit) {
       deps.eventBus.emit('task.audit_skipped', taskId, {
@@ -755,7 +758,7 @@ export async function publishTask(
         manual: true,
       });
     } else if (isAuditConfigEnabled) {
-      const tasksToAudit = await findTasksToAudit(
+      tasksToAudit = await findTasksToAudit(
         taskId,
         currentProject.id,
         sourceBranch,
@@ -778,6 +781,7 @@ export async function publishTask(
 
         const cached = getCachedAuditPass(t.id, commitSha) || (branchSha ? getCachedAuditPass(t.id, branchSha) : undefined);
         if (cached) {
+          auditedResults.set(t.id, cached);
           continue;
         }
 
@@ -843,10 +847,11 @@ export async function publishTask(
           if (taskId !== t.id) {
             deps.taskRepo.update(taskId, {
               pushResult: JSON.stringify({
-                error: `Audit thất bại ở task ${t.slug}: ${errorMsg}`,
+                blockedByTask: t.slug,
+                blockedByTaskId: t.id,
+                error: `Bị chặn bởi task ${t.slug} do audit lỗi: ${errorMsg}`,
                 failedAt,
                 retryable: true,
-                auditFailed: true,
               }),
             });
           }
@@ -864,6 +869,7 @@ export async function publishTask(
         const passed = isAuditPassed(auditResult);
 
         if (passed) {
+          auditedResults.set(t.id, auditResult);
           setCachedAuditPass(t.id, commitSha, auditResult);
           if (branchSha && branchSha !== commitSha) {
             setCachedAuditPass(t.id, branchSha, auditResult);
@@ -954,7 +960,8 @@ export async function publishTask(
             if (taskId !== t.id) {
               deps.taskRepo.update(taskId, {
                 pushResult: JSON.stringify({
-                  auditFailed: true,
+                  blockedByTask: t.slug,
+                  blockedByTaskId: t.id,
                   error: `Chặn publish do task ${t.slug} vượt quá số vòng sửa audit (${maxFixRounds})`,
                   failedAt,
                   retryable: false,
@@ -991,8 +998,9 @@ export async function publishTask(
           if (taskId !== t.id) {
             deps.taskRepo.update(taskId, {
               pushResult: JSON.stringify({
-                auditFailed: true,
-                error: `Chặn publish do task ${t.slug} không vượt qua audit`,
+                blockedByTask: t.slug,
+                blockedByTaskId: t.id,
+                error: `Bị chặn bởi task ${t.slug} do audit không đạt`,
                 failedAt,
                 retryable: false,
               }),
@@ -1160,9 +1168,48 @@ export async function publishTask(
         }
       }
 
-      // 8. Generate URLs and update task
+      // 8. Generate URLs and update tasks
       const { compareUrl } = buildGitUrls(remoteUrl, pushedCommit, prevRemoteSha);
       const pushedAt = new Date().toISOString();
+
+      // Update all tasks included in this pushed range
+      for (const t of tasksToAudit) {
+        const auditRes = auditedResults.get(t.id);
+        const p3Findings = auditRes?.findings?.filter((f) => f.severity === 'P3') ?? [];
+        const tPushResultObj = {
+          state: 'pushed',
+          remote,
+          branch: targetBranch,
+          commit: pushedCommit,
+          compareUrl,
+          pushedIntegrationBranch,
+          auditPassed: !isSkipAudit && isAuditConfigEnabled,
+          auditSkipped: isSkipAudit,
+          findings: p3Findings,
+          summary: auditRes?.summary,
+        };
+
+        deps.taskRepo.update(t.id, {
+          status: 'pushed',
+          pushedAt,
+          pushResult: JSON.stringify(tPushResultObj),
+        });
+
+        if (t.id !== taskId) {
+          deps.eventBus.emit('task.pushed', t.id, {
+            taskId: t.id,
+            projectId: currentProject.id,
+            remote,
+            branch: targetBranch,
+            commit: pushedCommit,
+            compareUrl,
+          });
+        }
+      }
+
+      // Ensure root taskId is updated even if not in tasksToAudit
+      const rootAuditRes = auditedResults.get(taskId);
+      const rootP3Findings = rootAuditRes?.findings?.filter((f) => f.severity === 'P3') ?? [];
       const pushResultObj = {
         state: 'pushed',
         remote,
@@ -1172,6 +1219,8 @@ export async function publishTask(
         pushedIntegrationBranch,
         auditPassed: !isSkipAudit && isAuditConfigEnabled,
         auditSkipped: isSkipAudit,
+        findings: rootP3Findings,
+        summary: rootAuditRes?.summary,
       };
 
       deps.taskRepo.update(taskId, {
@@ -1198,6 +1247,7 @@ export async function publishTask(
         pushedIntegrationBranch,
         auditPassed: !isSkipAudit && isAuditConfigEnabled,
         auditSkipped: isSkipAudit,
+        findings: rootP3Findings,
       };
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);

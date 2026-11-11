@@ -765,6 +765,83 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       // Task 2 was returned to worker
       const updatedT2 = ctx.taskRepo.get('proj-multi-audit/t2');
       expect(updatedT2?.status).toBe('queued');
+
+      // Task 1 was the one being published: must be marked blocked by task 2 without auditFailed
+      const updatedT1 = ctx.taskRepo.get('proj-multi-audit/t1');
+      expect(updatedT1?.status).toBe('done');
+      const pr1 = JSON.parse(updatedT1!.pushResult!);
+      expect(pr1.auditFailed).toBeUndefined();
+      expect(pr1.blockedByTask).toBe('multi-2');
+      expect(pr1.error).toContain('multi-2');
+
+      // Now fix task 2 and publish again: both task 1 and task 2 should become 'pushed'
+      process.env.FAKE_MODE = 'audit-pass';
+      ctx.taskRepo.update('proj-multi-audit/t2', { status: 'done', reviewerChangesRequested: 0 });
+      const retryRes = await ctx.service.publishTask('proj-multi-audit/t2');
+      expect(retryRes.ok).toBe(true);
+
+      const pushedT1 = ctx.taskRepo.get('proj-multi-audit/t1');
+      const pushedT2 = ctx.taskRepo.get('proj-multi-audit/t2');
+      expect(pushedT1?.status).toBe('pushed');
+      expect(pushedT2?.status).toBe('pushed');
+      const pr1After = JSON.parse(pushedT1!.pushResult!);
+      expect(pr1After.state).toBe('pushed');
+      expect(pr1After.blockedByTask).toBeUndefined();
+      expect(pr1After.error).toBeUndefined();
+    });
+
+    it('ghi các finding P3 của audit pass vào pushResult khi push thành công', async () => {
+      const remotePath = path.join(tmpDir, 'remote-p3-findings.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-p3-findings');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/p3-task'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'p3.txt'), 'p3 feature\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: p3 feature'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/p3-task', '-m', "Merge branch 'agenthub/p3-task' into main"], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-p3',
+        name: 'Project P3 Findings',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 2 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-p3/task-p3',
+        projectId: 'proj-p3',
+        slug: 'p3-task',
+        title: 'P3 Task',
+        status: 'done',
+        branch: 'agenthub/p3-task',
+        baseRef: 'main',
+      });
+
+      process.env.FAKE_MODE = 'audit-p3';
+      const res = await ctx.service.publishTask('proj-p3/task-p3');
+      expect(res.ok).toBe(true);
+      expect((res as any).findings).toHaveLength(1);
+      expect((res as any).findings[0].severity).toBe('P3');
+
+      const updated = ctx.taskRepo.get('proj-p3/task-p3');
+      expect(updated?.status).toBe('pushed');
+      const pr = JSON.parse(updated!.pushResult!);
+      expect(pr.auditPassed).toBe(true);
+      expect(pr.findings).toHaveLength(1);
+      expect(pr.findings[0].severity).toBe('P3');
+      expect(pr.findings[0].file).toBe('README.md');
     });
 
     it('cached pass avoids re-running audit engine for same commitSha', async () => {

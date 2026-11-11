@@ -26,6 +26,7 @@ import { isTriageTaskSlug, parseTriageAnalysis } from '../integrations/openproje
 import { renderCommitTemplate, renderTaskBranch, taskCommitRef } from '../commit-convention.js';
 import { isProjectWorktreeRootAccessible, projectWorktreeRoot, projectWorktreeRoots } from '../projects/paths.js';
 import { Engine, AgyEngine, CodexEngine } from '../engines/index.js';
+import { findAgyBin } from '../agy.js';
 import { getModelFamily, getModelEngine, isKnownModel, QuotaService } from '../quota/index.js';
 import { DependencyContext, isDeletableWorktreePath, WorktreeService } from '../worktrees/index.js';
 import { ensureWorktreeNodeModules, nodeModulesCacheSummary, pruneNodeModulesCache } from '../cache.js';
@@ -966,15 +967,54 @@ export class Scheduler {
     try { return fs.statSync(logPath).size; } catch { return 0; }
   }
 
-  private isWorkerProcessForRun(pid: number, task: TaskRow, engineId: string): boolean {
+  private getEngineBinaryTokens(engine: Engine): string[] {
+    const tokens = new Set<string>();
+    const engineWithBin = engine as unknown as { scriptPath?: string; agyPath?: string };
+    if (engineWithBin.scriptPath) {
+      tokens.add(path.basename(engineWithBin.scriptPath));
+      tokens.add(path.basename(engineWithBin.scriptPath, path.extname(engineWithBin.scriptPath)));
+    }
+    if (engineWithBin.agyPath) {
+      tokens.add(path.basename(engineWithBin.agyPath));
+      tokens.add(path.basename(engineWithBin.agyPath, path.extname(engineWithBin.agyPath)));
+    }
+    if (engine.id === 'agy') {
+      const configured = process.env.AGENTHUB_AGY_BIN?.trim() || findAgyBin();
+      if (configured) {
+        tokens.add(path.basename(configured));
+        tokens.add(path.basename(configured, path.extname(configured)));
+      }
+      tokens.add('agy');
+    } else if (engine.id === 'codex') {
+      const configured = process.env.AGENTHUB_CODEX_BIN?.trim() || CodexEngine.findCodexPath();
+      if (configured) {
+        tokens.add(path.basename(configured));
+        tokens.add(path.basename(configured, path.extname(configured)));
+      }
+      tokens.add('codex');
+    } else {
+      tokens.add(engine.id);
+    }
+    return [...tokens].filter(Boolean);
+  }
+
+  private isWorkerProcessForRun(pid: number, task: TaskRow, engine: Engine): boolean {
     if (!task.worktreePath) return false;
     const worktree = path.resolve(task.worktreePath);
-    const token = engineId === 'agy' ? '(?:agy|fake-agent(?:\\.mjs)?)' : engineId;
+    const tokens = this.getEngineBinaryTokens(engine);
+    const pattern = tokens.map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
     const commandMatches = (command: string): boolean =>
-      new RegExp(`(?:^|[\\s/])${token}(?:$|[\\s/])`, 'i').test(command);
+      pattern.length > 0 && new RegExp(`(?:^|[\\s/])(?:${pattern})(?:$|[\\s/])`, 'i').test(command);
     try {
-      const cwd = fs.realpathSync(`/proc/${pid}/cwd`);
-      if (cwd !== fs.realpathSync(worktree)) return false;
+      let realCwd: string;
+      let realWorktree: string;
+      try {
+        realCwd = fs.realpathSync(`/proc/${pid}/cwd`);
+        realWorktree = fs.realpathSync(worktree);
+      } catch {
+        return false;
+      }
+      if (realCwd !== realWorktree) return false;
       const command = fs.readFileSync(`/proc/${pid}/cmdline`).toString('utf8').replaceAll('\0', ' ');
       // The recorded PID may be the flock/nice/ionice wrapper, so match the
       // engine token anywhere in argv rather than assuming a fixed argv[0].
@@ -985,9 +1025,18 @@ export class Scheduler {
       if (process.platform !== 'darwin') return false;
       try {
         const command = execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' }).trim();
-        const cwd = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8' })
+        const cwdLine = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8' })
           .split('\n').find((line) => line.startsWith('n'))?.slice(1);
-        return Boolean(cwd && path.resolve(cwd) === worktree && commandMatches(command));
+        if (!cwdLine) return false;
+        let realCwd: string;
+        let realWorktree: string;
+        try {
+          realCwd = fs.realpathSync(cwdLine);
+          realWorktree = fs.realpathSync(worktree);
+        } catch {
+          return false;
+        }
+        return Boolean(realCwd === realWorktree && commandMatches(command));
       } catch {
         return false;
       }
@@ -1027,6 +1076,13 @@ export class Scheduler {
     for (const entry of [...this.checkingActive.values(), ...this.checkingQueue]) {
       const task = this.taskRepo.get(entry.taskId);
       if (task && (task.status === 'checking' || task.status === 'running')) {
+        if (reason === 'hub_handoff') {
+          // Keep task in 'checking' status so recoverOnStartup re-runs only the check step
+          if (task.status !== 'checking') {
+            this.taskRepo.update(entry.taskId, { status: 'checking' });
+          }
+          continue;
+        }
         this.taskRepo.update(entry.taskId, { status: 'queued', resume: 1 });
         this.eventBus.emit('task.queued', entry.taskId, { reason, note: reason === 'hub_restart' ? 'hub khởi động lại' : 'dừng bởi người dùng' });
         queued++;
@@ -1084,6 +1140,22 @@ export class Scheduler {
       });
     }
 
+    // Tasks in review where the review chain is empty (direct auto-merge) re-emit review_ready on startup
+    for (const task of this.taskRepo.getByStatus('review')) {
+      if (!this.projectRepo.get(task.projectId)) continue;
+      const chain = this.reviewChainForTask(task);
+      if (chain.length === 0) {
+        const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
+        if (lastWorker?.outcome === 'done') {
+          const checks = this.getCheckResults(task.id);
+          this.emitReviewReadyIfReview(task.id, {
+            reviewChainComplete: true,
+            checksPassed: checks.length > 0 ? checks.every((c) => c.ok) : true,
+          });
+        }
+      }
+    }
+
     const shutdownRuns = this.runRepo.getShutdownRuns();
     for (const run of shutdownRuns) {
       const task = this.taskRepo.get(run.taskId);
@@ -1110,7 +1182,7 @@ export class Scheduler {
         const task = this.taskRepo.get(run.taskId);
         if (!task || !this.projectRepo.get(task.projectId)) continue;
         if (this.recoverFinishedWork(run)) continue;
-        this.runRepo.finish(run.id, 'crashed');
+        this.runRepo.finish(run.id, 'crashed', undefined, 'worker_crashed_during_restart');
         // Terminal tasks must remain terminal even when an old worker row is
         // found during daemon recovery.
         if (task.status === 'done' || task.status === 'pushed' || task.status === 'cancelled') continue;
@@ -1121,7 +1193,7 @@ export class Scheduler {
           engine: run.engine,
           profile: run.profileName,
         });
-        this.eventBus.emit('task.queued', run.taskId);
+        this.eventBus.emit('task.queued', run.taskId, { reason: 'worker_crashed_during_restart' });
         continue;
       }
 
@@ -1132,16 +1204,19 @@ export class Scheduler {
       // exception is an old pre-identity row with no handoff and no pidStart.
       const legacyRun = !run.handoff && run.pidStart == null;
       const processMatchesRun = legacyRun || (run.kind === 'worker' && Boolean(task && engine)
-        ? this.isWorkerProcessForRun(run.pid || 0, task!, engine!.id)
+        ? this.isWorkerProcessForRun(run.pid || 0, task!, engine!)
         : false);
       if (!task || !engine || !run.pid || !processMatchesRun) {
         // A PID can be reused between daemon instances. Never adopt a process
         // unless both its worktree cwd and command identify this run's engine.
+        // Block the task instead of immediately requeuing into the same worktree
+        // so an unknown live process cannot clash with new worker execution.
         if (task && run.pid && run.kind === 'worker') {
           this.runRepo.finish(run.id, 'crashed', undefined, 'pid_reused_during_handoff');
           if (task.status === 'running') {
-            this.taskRepo.update(run.taskId, { status: 'queued', resume: 1 });
-            this.eventBus.emit('task.queued', run.taskId, { reason: 'pid_reused_during_handoff' });
+            const blockedReport = 'Tiến trình worker không khớp danh tính sau khi khởi động lại (PID có thể đã bị tái sử dụng). Cần kiểm tra trước khi tiếp tục.';
+            this.taskRepo.update(run.taskId, { status: 'blocked', blockedReport, transientRetries: 0, notBefore: null });
+            this.eventBus.emit('task.blocked', run.taskId, { reason: 'pid_reused_during_handoff' });
           }
         }
         continue;

@@ -1461,11 +1461,17 @@ export class TelegramBotService {
       }
 
       case '/restart': {
-        if (args[0]?.toLowerCase() === 'now') {
+        const killWorkers = args.some((a) => a.toLowerCase() === '--kill-workers' || a.toLowerCase() === 'kill-workers');
+        const isNow = args[0]?.toLowerCase() === 'now' || (killWorkers && args[1]?.toLowerCase() === 'now');
+        if (isNow) {
           const status = this.service.getStatus();
           const running = status.tasks.running + status.tasks.checking;
-          await this.sendMessage(chatId, `⚠️ <b>Khởi động lại ngay?</b> ${running} worker/check đang chạy sẽ bị dừng.`, { inline_keyboard: [[
-            { text: '✅ Xác nhận', callback_data: 'hubrestart:confirm' },
+          const text = killWorkers
+            ? `⚠️ <b>Khởi động lại ngay?</b> ${running} worker/check đang chạy sẽ bị dừng.`
+            : `🔄 <b>Khởi động lại ngay?</b> Worker đang chạy sẽ được giữ nguyên (handoff).`;
+          const confirmData = killWorkers ? 'hubrestart:confirm:kill' : 'hubrestart:confirm';
+          await this.sendMessage(chatId, text, { inline_keyboard: [[
+            { text: '✅ Xác nhận', callback_data: confirmData },
             { text: '❌ Hủy', callback_data: 'hubrestart:cancel' },
           ]] });
         } else {
@@ -2589,9 +2595,15 @@ export class TelegramBotService {
         await this.answerCallbackQuery(query.id, 'Đã hủy.');
         return;
       }
+      const killWorkers = taskIdOrParam === 'kill';
       await this.answerCallbackQuery(query.id, 'Đang khởi động lại...');
-      this.service.shutdownForUser('hub_restart');
-      await this.sendMessage(chatId, '🔄 Đang khởi động lại AgentHub; worker đã được đưa về hàng chờ.');
+      if (killWorkers) {
+        this.service.shutdownForUser('hub_restart');
+        await this.sendMessage(chatId, '🔄 Đang khởi động lại AgentHub; worker đã được đưa về hàng chờ.');
+      } else {
+        this.service.shutdownForUser('hub_handoff');
+        await this.sendMessage(chatId, '🔄 Đang khởi động lại AgentHub; worker tiếp tục chạy và sẽ được nhận lại sau khi khởi động.');
+      }
       this.service.triggerRestart();
       return;
     }

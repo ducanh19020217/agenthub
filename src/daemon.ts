@@ -121,6 +121,7 @@ export interface DaemonContext {
   timesheetService: OpenProjectTimesheetService;
   giteaSyncService: GiteaSyncService;
   perfCollector: PerfCollector;
+  userShutdownRequested?: boolean;
 }
 
 export interface CreateContextOptions {
@@ -511,10 +512,11 @@ export function createContext(
     timesheetManualRepo,
     giteaSyncService,
     perfCollector,
+    userShutdownRequested: false,
   };
 }
 
-export function closeContext(ctx: DaemonContext, preserveWorkerProcesses = false): void {
+export function closeContext(ctx: DaemonContext, _preserveWorkerProcesses = false): void {
   try {
     ctx.perfCollector?.stop();
   } catch {
@@ -566,7 +568,7 @@ export function closeContext(ctx: DaemonContext, preserveWorkerProcesses = false
     // ignore
   }
   try {
-    if (!preserveWorkerProcesses) stopProcessGroups('SIGTERM');
+    stopProcessGroups('SIGTERM');
   } catch {
     // ignore
   }
@@ -687,6 +689,8 @@ export async function startDaemon(
     openProjectTimesheetPreview: (sourceId, date) => ctx.timesheetService.preview(sourceId, date),
     openProjectTimesheetRun: (sourceId, date, hours) => ctx.timesheetService.run(sourceId, date, hours),
     onShutdown: (disable) => {
+      ctx.userShutdownRequested = true;
+      ctx.service.setUserShutdownRequested(true);
       if (disable) {
         try {
           const command = process.platform === 'darwin' ? (process.env.AGENTHUB_LAUNCHCTL || 'launchctl') : (process.env.AGENTHUB_SYSTEMCTL_BIN || process.env.AGENTHUB_SYSTEMCTL || 'systemctl');
@@ -758,18 +762,30 @@ export async function startDaemon(
   };
 
   const onTerm = () => {
-    const workersRunning = ctx.scheduler.getRunning().size > 0 || ctx.scheduler.getReviewerStatus().running.length > 0;
+    if (ctx.userShutdownRequested || ctx.service?.isUserShutdownRequested?.()) {
+      void shutdown(false);
+      return;
+    }
+    const hasActiveWork = ctx.scheduler.getRunning().size > 0
+      || ctx.scheduler.getReviewerStatus().running.length > 0
+      || ctx.scheduler.getRestartState().waitingFor.length > 0;
     // A signal termination is a daemon handoff by default. Persist the outcome
     // before closing resources, and keep detached workers outside the daemon's
     // process-group cleanup so the next daemon can adopt them.
-    if (workersRunning) ctx.scheduler.shutdownForUser('hub_handoff');
-    if (workersRunning) ctx.eventRepo.insert('daemon.stop_requested', undefined, { senderPid: process.ppid || null });
+    if (hasActiveWork) ctx.scheduler.shutdownForUser('hub_handoff');
+    if (hasActiveWork) ctx.eventRepo.insert('daemon.stop_requested', undefined, { senderPid: process.ppid || null });
     void shutdown(true);
   };
 
   const onInt = () => {
-    const workersRunning = ctx.scheduler.getRunning().size > 0 || ctx.scheduler.getReviewerStatus().running.length > 0;
-    if (workersRunning) ctx.scheduler.shutdownForUser('hub_handoff');
+    if (ctx.userShutdownRequested || ctx.service?.isUserShutdownRequested?.()) {
+      void shutdown(false);
+      return;
+    }
+    const hasActiveWork = ctx.scheduler.getRunning().size > 0
+      || ctx.scheduler.getReviewerStatus().running.length > 0
+      || ctx.scheduler.getRestartState().waitingFor.length > 0;
+    if (hasActiveWork) ctx.scheduler.shutdownForUser('hub_handoff');
     void shutdown(true);
   };
 

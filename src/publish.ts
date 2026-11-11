@@ -184,7 +184,7 @@ async function isAncestor(repoPath: string, commit: string, base: string, env: N
 /**
  * Find the merge commit that merged a task's branch into the integration or target branch.
  */
-async function findMergeCommitForTask(
+export async function findMergeCommitForTask(
   repoPath: string,
   task: TaskRow,
   candidateBranches: string[],
@@ -213,11 +213,12 @@ async function findMergeCommitForTask(
       try {
         const tip = await runGit(['-C', repoPath, 'rev-parse', branchRef], repoPath, env);
         const out = await runGit(
-          ['-C', repoPath, 'log', '--merges', '--first-parent', '--ancestry-path', `${tip}..${searchRef}`, '--reverse', '-n', '1', '--format=%H'],
+          ['-C', repoPath, 'log', '--merges', '--first-parent', '--ancestry-path', `${tip}..${searchRef}`, '--reverse', '--format=%H'],
           repoPath,
           env,
         );
-        if (out.trim()) return out.trim();
+        const firstLine = out.split('\n').map((l) => l.trim()).filter(Boolean)[0];
+        if (firstLine) return firstLine;
       } catch {
         // ignore
       }
@@ -228,11 +229,12 @@ async function findMergeCommitForTask(
       if (!pattern) continue;
       try {
         const out = await runGit(
-          ['-C', repoPath, 'log', '--merges', '--first-parent', '-n', '1', `--grep=${pattern}`, '--format=%H', searchRef],
+          ['-C', repoPath, 'log', '--merges', '--first-parent', `--grep=${pattern}`, '--reverse', '--format=%H', searchRef],
           repoPath,
           env,
         );
-        if (out.trim()) return out.trim();
+        const firstLine = out.split('\n').map((l) => l.trim()).filter(Boolean)[0];
+        if (firstLine) return firstLine;
       } catch {
         // ignore
       }
@@ -270,7 +272,7 @@ function getTaskAuditRounds(task: TaskRow, deps: PublishTaskDeps): number {
  * Extracts diff and changed files for a specific task.
  * Prioritizes merge commit diff (<merge>^1 <merge>) to capture conflict resolution.
  */
-async function getTaskDiff(
+export async function getTaskDiff(
   repoPath: string,
   task: TaskRow,
   sourceBranch: string,

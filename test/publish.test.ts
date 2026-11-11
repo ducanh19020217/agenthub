@@ -1114,5 +1114,79 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       const pushResult = JSON.parse(updated!.pushResult!);
       expect(pushResult.auditFixRounds).toBe(1);
     });
+
+    it('2 task merge tuần tự (A rồi B, nhánh task vẫn còn) -> A được audit bằng diff của merge A', async () => {
+      const { findMergeCommitForTask, getTaskDiff } = await import('../src/publish.js');
+      const remotePath = path.join(tmpDir, 'remote-seq-merges.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-seq-merges');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      // Create integration branch from main
+      execFileSync('git', ['checkout', '-b', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+
+      // Task A: create branch, commit, merge into integration
+      execFileSync('git', ['checkout', '-b', 'agenthub/seq-a'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'file-a.txt'), 'content A\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: seq A'], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/seq-a', '-m', "Merge branch 'agenthub/seq-a' into agenthub/integration"], { cwd: repoPath, env: testEnv });
+      const mergeASha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+      // Task B: create branch from integration, commit, merge into integration
+      execFileSync('git', ['checkout', '-b', 'agenthub/seq-b'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'file-b.txt'), 'content B\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: seq B'], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/seq-b', '-m', "Merge branch 'agenthub/seq-b' into agenthub/integration"], { cwd: repoPath, env: testEnv });
+      const mergeBSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+      expect(mergeASha).not.toBe(mergeBSha);
+
+      // Verify task branches still exist
+      const branchesOut = execFileSync('git', ['-C', repoPath, 'branch'], { encoding: 'utf8', env: testEnv });
+      expect(branchesOut).toContain('agenthub/seq-a');
+      expect(branchesOut).toContain('agenthub/seq-b');
+
+      const taskA: any = {
+        id: 'proj/task-a',
+        projectId: 'proj',
+        slug: 'seq-a',
+        title: 'Task A',
+        branch: 'agenthub/seq-a',
+      };
+      const taskB: any = {
+        id: 'proj/task-b',
+        projectId: 'proj',
+        slug: 'seq-b',
+        title: 'Task B',
+        branch: 'agenthub/seq-b',
+      };
+
+      // 1. findMergeCommitForTask for Task A must return mergeA, NOT mergeB
+      const foundMergeA = await findMergeCommitForTask(repoPath, taskA, ['agenthub/integration'], testEnv);
+      expect(foundMergeA).toBe(mergeASha);
+
+      // 2. getTaskDiff for Task A must use mergeA diff
+      const diffA = await getTaskDiff(repoPath, taskA, 'agenthub/integration', 'main', 'main', testEnv);
+      expect(diffA.commitSha).toBe(mergeASha);
+      expect(diffA.changedFiles).toEqual(['file-a.txt']);
+      expect(diffA.diff).toContain('content A');
+      expect(diffA.diff).not.toContain('content B');
+
+      // 3. findMergeCommitForTask and getTaskDiff for Task B must return mergeB
+      const foundMergeB = await findMergeCommitForTask(repoPath, taskB, ['agenthub/integration'], testEnv);
+      expect(foundMergeB).toBe(mergeBSha);
+      const diffB = await getTaskDiff(repoPath, taskB, 'agenthub/integration', 'main', 'main', testEnv);
+      expect(diffB.commitSha).toBe(mergeBSha);
+      expect(diffB.changedFiles).toEqual(['file-b.txt']);
+      expect(diffB.diff).toContain('content B');
+      expect(diffB.diff).not.toContain('content A');
+    });
   });
 });

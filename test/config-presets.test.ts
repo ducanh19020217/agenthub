@@ -491,6 +491,7 @@ describe('Config Presets, Priority, and Effective Config', () => {
       expect(proj.settings.publish.audit).toEqual({
         enabled: false,
         maxFixRounds: 5,
+        maxTasks: 10,
       });
     });
 

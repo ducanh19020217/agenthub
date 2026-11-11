@@ -1,7 +1,22 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { ArrowUpRight, CircleCheck, CircleX, Clock, FilePen, Flame, FlaskConical, Hourglass, OctagonAlert, Play, Rocket, ScanEye, Zap, type LucideIcon } from 'lucide-react';
+import {
+  ArrowUpRight,
+  CircleCheck,
+  CircleX,
+  Clock,
+  FilePen,
+  Flame,
+  FlaskConical,
+  Hourglass,
+  OctagonAlert,
+  Play,
+  Rocket,
+  ScanEye,
+  Zap,
+  type LucideIcon,
+} from 'lucide-react';
 import { getProjects, getTasksPage, type PageResponse } from '../api/client';
 import { useLocale } from '../context/LocaleContext';
 import type { Task, TaskStatus } from '../types/api';
@@ -20,13 +35,6 @@ export function getFlowRefetchInterval(activeCount: number): number {
   return activeCount > 0 ? FLOW_ACTIVE_REFETCH_INTERVAL : FLOW_IDLE_REFETCH_INTERVAL;
 }
 
-const NODE_W = 172;
-const NODE_H = 80;
-const TOP_Y = 64;
-const BOTTOM_Y = 248;
-const LANE_Y = 372;
-const VIEW_W = 1440;
-const VIEW_H = 400;
 const EDGE_STYLE = { stroke: 'var(--t-text-3)', strokeOpacity: 0.6 } as const;
 
 const STATUS_ICON: Record<TaskStatus, LucideIcon> = {
@@ -42,28 +50,49 @@ const STATUS_ICON: Record<TaskStatus, LucideIcon> = {
   pushed: Rocket,
   cancelled: CircleX,
 };
-const COL_X = [20, 224, 428, 632, 836, 1040, 1244];
 
-interface FlowNode { status: TaskStatus; x: number; y: number }
+interface FlowNodeDef {
+  status: TaskStatus;
+  col: number;
+  row: number;
+  gridClass: string;
+}
 
-const NODES: FlowNode[] = [
-  { status: 'draft', x: COL_X[0], y: TOP_Y },
-  { status: 'queued', x: COL_X[1], y: TOP_Y },
-  { status: 'running', x: COL_X[2], y: TOP_Y },
-  { status: 'checking', x: COL_X[3], y: TOP_Y },
-  { status: 'review', x: COL_X[4], y: TOP_Y },
-  { status: 'done', x: COL_X[5], y: TOP_Y },
-  { status: 'pushed', x: COL_X[6], y: TOP_Y },
-  { status: 'waiting_quota', x: COL_X[2], y: BOTTOM_Y },
-  { status: 'failed', x: COL_X[3], y: BOTTOM_Y },
-  { status: 'blocked', x: COL_X[4], y: BOTTOM_Y },
+const NODE_DEFS: FlowNodeDef[] = [
+  // Hàng chính (row 1): 7 cột
+  { status: 'draft', col: 0, row: 1, gridClass: 'col-start-1 row-start-1' },
+  { status: 'queued', col: 1, row: 1, gridClass: 'col-start-2 row-start-1' },
+  { status: 'running', col: 2, row: 1, gridClass: 'col-start-3 row-start-1' },
+  { status: 'checking', col: 3, row: 1, gridClass: 'col-start-4 row-start-1' },
+  { status: 'review', col: 4, row: 1, gridClass: 'col-start-5 row-start-1' },
+  { status: 'done', col: 5, row: 1, gridClass: 'col-start-6 row-start-1' },
+  { status: 'pushed', col: 6, row: 1, gridClass: 'col-start-7 row-start-1' },
+  // Hàng nhánh lỗi (row 2): dưới running, checking, review
+  { status: 'waiting_quota', col: 2, row: 2, gridClass: 'col-start-3 row-start-2' },
+  { status: 'failed', col: 3, row: 2, gridClass: 'col-start-4 row-start-2' },
+  { status: 'blocked', col: 4, row: 2, gridClass: 'col-start-5 row-start-2' },
 ];
 
-export const FLOW_STATUSES = NODES.map((node) => node.status);
+export const FLOW_STATUSES: readonly TaskStatus[] = NODE_DEFS.map((node) => node.status);
 
-const nodeOf = (status: TaskStatus) => NODES.find((node) => node.status === status)!;
 const statusColor = (status: TaskStatus) => `var(--status-${status}-color, var(--t-accent))`;
 const taskHref = (task: Task) => `/tasks/${encodeURIComponent(task.id.replace('/', '~'))}`;
+
+interface NodeRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+const getFallbackBox = (status: TaskStatus): NodeRect => {
+  const def = NODE_DEFS.find((n) => n.status === status) || NODE_DEFS[0];
+  const colW = 160;
+  const gapX = 32;
+  const x = 24 + def.col * (colW + gapX);
+  const y = def.row === 1 ? 52 : 240;
+  return { x, y, w: colW, h: 88 };
+};
 
 export function useStatusTotal(
   project: string,
@@ -92,15 +121,16 @@ export function useStatusTotal(
   });
 }
 
-const FlowNodeView: React.FC<{
-  node: FlowNode;
+const FlowNodeCard: React.FC<{
+  node: FlowNodeDef;
   project: string;
   search: string;
   onOpen: (status: TaskStatus) => void;
   total?: number;
   isLoading?: boolean;
   refetchInterval?: number;
-}> = ({ node, project, search, onOpen, total: propTotal, isLoading: propIsLoading, refetchInterval }) => {
+  registerRef: (status: TaskStatus, el: HTMLDivElement | null) => void;
+}> = ({ node, project, search, onOpen, total: propTotal, isLoading: propIsLoading, refetchInterval, registerRef }) => {
   const { t } = useLocale();
   const query = useStatusTotal(project, node.status, search, refetchInterval);
   const total = propTotal !== undefined ? propTotal : (query.data?.total ?? 0);
@@ -112,7 +142,7 @@ const FlowNodeView: React.FC<{
   const Icon = STATUS_ICON[node.status];
   const open = () => onOpen(node.status);
 
-  // Requirement 3: Count bounce effect on change between fetches
+  // Count bounce effect on change between fetches
   const isInitialLoadRef = useRef(true);
   const prevTotalRef = useRef<number | null>(null);
   const [isBouncing, setIsBouncing] = useState(false);
@@ -135,10 +165,9 @@ const FlowNodeView: React.FC<{
     prevTotalRef.current = total;
   }, [total, isLoading]);
 
-  // Requirement 5: Details of running tasks inside the 'running' node
+  // Details of running tasks inside the 'running' node
   const isRunning = node.status === 'running';
   const showRunningDetails = isRunning && hasTasks;
-  const nodeHeight = showRunningDetails ? 116 : NODE_H;
 
   const { data: runningData } = useQuery({
     queryKey: ['tasks-kanban', 'flow-running-tasks', project, search],
@@ -158,14 +187,14 @@ const FlowNodeView: React.FC<{
   const getProjectName = (pId: string) => projects.find((p) => p.id === pId)?.name || pId;
 
   return (
-    <g
+    <div
+      ref={(el) => registerRef(node.status, el)}
       role="button"
       tabIndex={0}
       data-testid={`flow-node-${node.status}`}
       data-count={isLoading ? '' : String(total)}
       data-active={isNodeActive ? 'true' : undefined}
       aria-label={t('tasks.flow.nodeAria', { status: label, count: String(total) })}
-      className="group cursor-pointer outline-hidden [&:focus-visible>rect.flow-node-frame]:stroke-[3]"
       onClick={open}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -173,120 +202,92 @@ const FlowNodeView: React.FC<{
           open();
         }
       }}
+      style={{
+        '--node-color': color,
+        borderColor: isNodeActive ? color : hasTasks ? `color-mix(in srgb, ${color} 65%, var(--t-border))` : 'var(--t-border)',
+        backgroundColor: `color-mix(in srgb, ${color} ${hasTasks ? 12 : 4}%, var(--t-surface-2))`,
+      } as React.CSSProperties}
+      className={`group relative flex flex-col justify-between self-start rounded-2xl border p-3.5 transition-all duration-150 outline-hidden select-none cursor-pointer focus-visible:ring-2 focus-visible:ring-[var(--t-accent)] ${
+        isNodeActive
+          ? 'flow-node-pulse border-2 shadow-sm'
+          : hasTasks
+            ? 'border-2 hover:border-[var(--t-accent)] shadow-xs'
+            : 'hover:border-[var(--t-border-hover)]'
+      } ${node.gridClass}`}
     >
-      <title>{label}</title>
-      {hasTasks && (
-        <rect
-          x={node.x - 4}
-          y={node.y - 4}
-          width={NODE_W + 8}
-          height={nodeHeight + 8}
-          rx={18}
-          fill="none"
-          style={{ stroke: color }}
-          strokeWidth={2}
-          className={isNodeActive ? 'flow-node-pulse' : undefined}
-          opacity={isNodeActive ? undefined : 0.35}
-        />
-      )}
-      <rect
-        className="flow-node-frame transition-[stroke-width] group-hover:stroke-[2.5]"
-        x={node.x}
-        y={node.y}
-        width={NODE_W}
-        height={nodeHeight}
-        rx={14}
-        style={{
-          fill: `color-mix(in srgb, ${color} ${hasTasks ? 12 : 4}%, var(--t-surface-2))`,
-          stroke: color,
-        }}
-        strokeWidth={hasTasks ? 2 : 1.25}
-        strokeOpacity={hasTasks ? 1 : 0.45}
-      />
-      <rect
-        x={node.x + 14}
-        y={node.y + 18}
-        width={44}
-        height={44}
-        rx={12}
-        style={{ fill: `color-mix(in srgb, ${color} ${hasTasks ? 26 : 14}%, transparent)` }}
-      />
-      <Icon
-        x={node.x + 25}
-        y={node.y + 29}
-        width={22}
-        height={22}
-        strokeWidth={2.2}
-        style={{ color }}
-        className={isNodeActive ? `flow-icon-${node.status}` : undefined}
-        aria-hidden="true"
-      />
-      <text x={node.x + 70} y={node.y + 34} fontSize={13.5} fontWeight={600} style={{ fill: hasTasks ? 'var(--t-text)' : 'var(--t-text-2)' }}>
-        {label}
-      </text>
-      <text
-        x={node.x + 70}
-        y={node.y + 64}
-        fontSize={24}
-        fontWeight={700}
-        fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-        className={isBouncing ? 'flow-count-bounce' : undefined}
-        style={{ fill: hasTasks ? color : 'var(--t-text-3)' }}
-      >
-        {isLoading ? '…' : total}
-      </text>
-      <text
-        x={node.x + 70 + Math.round((isLoading ? 1 : String(total).length) * 14.5 + 6)}
-        y={node.y + 64}
-        fontSize={12}
-        style={{ fill: 'var(--t-text-3)' }}
-      >
-        {t('tasks.flow.taskUnit')}
-      </text>
+      {/* Top Section: Icon + Label & Count */}
+      <div className="flex items-start gap-3">
+        {/* Icon wrapper (animation class placed on span wrapper, NOT on SVG) */}
+        <div
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl"
+          style={{
+            backgroundColor: `color-mix(in srgb, ${color} ${hasTasks ? 28 : 14}%, transparent)`,
+          }}
+        >
+          <span
+            className={isNodeActive ? `flow-icon-${node.status}` : undefined}
+            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            <Icon className="h-5 w-5" strokeWidth={2.2} style={{ color }} aria-hidden="true" />
+          </span>
+        </div>
 
-      {/* Requirement 5: Details of running tasks */}
+        {/* Label & Count */}
+        <div className="min-w-0 flex-1">
+          <div
+            className="truncate text-[15px] font-semibold"
+            style={{ color: hasTasks ? 'var(--t-text)' : 'var(--t-text-2)' }}
+            title={label}
+          >
+            {label}
+          </div>
+          <div className="mt-1 flex items-baseline gap-1.5">
+            <span
+              className={`inline-block tabular-nums font-mono text-[28px] font-bold leading-none ${isBouncing ? 'flow-count-bounce' : ''}`}
+              style={{ color: hasTasks ? color : 'var(--t-text-3)' }}
+            >
+              {isLoading ? '…' : total}
+            </span>
+            <span className="text-xs font-normal text-[var(--t-text-3)]">
+              {t('tasks.flow.taskUnit')}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Details of running tasks */}
       {showRunningDetails && (
-        <g data-testid="flow-running-tasks">
-          {runningTasks[0] && (
-            <>
-              <circle cx={node.x + 20} cy={node.y + 78} r={3} fill="var(--t-ok)" className="flow-dot-pulse" />
-              <text x={node.x + 28} y={node.y + 81} fontSize={10} style={{ fill: 'var(--t-text-2)' }}>
-                <tspan fontWeight={600} style={{ fill: 'var(--t-text)' }}>
-                  {getProjectName(runningTasks[0].projectId)}
-                </tspan>
-                <tspan style={{ fill: 'var(--t-text-3)' }}> · </tspan>
-                <tspan fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">
-                  {runningTasks[0].slug}
-                </tspan>
-              </text>
-            </>
-          )}
-          {runningTasks[1] ? (
-            <>
-              <circle cx={node.x + 20} cy={node.y + 98} r={3} fill="var(--t-ok)" className="flow-dot-pulse" />
-              <text x={node.x + 28} y={node.y + 101} fontSize={10} style={{ fill: 'var(--t-text-2)' }}>
-                <tspan fontWeight={600} style={{ fill: 'var(--t-text)' }}>
-                  {getProjectName(runningTasks[1].projectId)}
-                </tspan>
-                <tspan style={{ fill: 'var(--t-text-3)' }}> · </tspan>
-                <tspan fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">
-                  {runningTasks[1].slug}
-                </tspan>
-                {total > 2 && (
-                  <tspan dx={4} fontWeight={600} style={{ fill: 'var(--t-accent)' }}>
-                    {t('tasks.flow.runningMore', { count: String(total - 2) })}
-                  </tspan>
-                )}
-              </text>
-            </>
-          ) : runningTasks[0] && total > 1 ? (
-            <text x={node.x + 28} y={node.y + 101} fontSize={10} fontWeight={600} style={{ fill: 'var(--t-accent)' }}>
+        <div
+          data-testid="flow-running-tasks"
+          className="mt-3 space-y-1.5 border-t border-[var(--t-border)] pt-2"
+        >
+          {runningTasks.slice(0, 2).map((task) => (
+            <div key={task.id} className="flex items-center gap-1.5 min-w-0">
+              <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--t-ok)] flow-dot-pulse" />
+              <Link
+                to={taskHref(task)}
+                onClick={(e) => e.stopPropagation()}
+                title={`${getProjectName(task.projectId)} · ${task.slug}`}
+                className="truncate font-mono text-xs text-[var(--t-text-2)] hover:text-[var(--t-accent)] hover:underline"
+              >
+                <span className="font-semibold text-[var(--t-text)]">{getProjectName(task.projectId)}</span>
+                <span className="text-[var(--t-text-3)]"> · </span>
+                <span className="truncate">{task.slug}</span>
+              </Link>
+            </div>
+          ))}
+          {runningTasks.length > 0 && total > 2 ? (
+            <div className="text-xs font-semibold text-[var(--t-accent)] pl-3.5">
+              {t('tasks.flow.runningMore', { count: String(total - 2) })}
+            </div>
+          ) : runningTasks.length === 1 && total > 1 ? (
+            <div className="text-xs font-semibold text-[var(--t-accent)] pl-3.5">
               {t('tasks.flow.runningMore', { count: String(total - 1) })}
-            </text>
+            </div>
           ) : null}
-        </g>
+        </div>
       )}
-    </g>
+    </div>
   );
 };
 
@@ -311,19 +312,30 @@ const Edge: React.FC<{
       data-animated={animated ? 'true' : undefined}
     />
     {label && lx !== undefined && ly !== undefined && (
-      <text x={lx} y={ly} fontSize={11.5} textAnchor={anchor} style={{ fill: 'var(--t-text-3)' }}>
+      <text
+        x={lx}
+        y={ly}
+        fontSize={11.5}
+        textAnchor={anchor}
+        className="select-none fill-[var(--t-text-3)] font-medium"
+        style={{
+          paintOrder: 'stroke fill',
+          stroke: 'var(--t-surface)',
+          strokeWidth: 3,
+          strokeLinejoin: 'round',
+        }}
+      >
         {label}
       </text>
     )}
   </g>
 );
 
-const FlowEdges: React.FC<{ counts: Record<TaskStatus, number> }> = ({ counts }) => {
+const FlowEdges: React.FC<{
+  counts: Record<TaskStatus, number>;
+  getNodeBox: (status: TaskStatus) => NodeRect;
+}> = ({ counts, getNodeBox }) => {
   const { t } = useLocale();
-  const midY = TOP_Y + NODE_H / 2;
-  const right = (s: TaskStatus) => nodeOf(s).x + NODE_W;
-  const left = (s: TaskStatus) => nodeOf(s).x;
-  const cx = (s: TaskStatus) => nodeOf(s).x + NODE_W / 2;
 
   const isStatusActive = (s: TaskStatus) =>
     (s === 'running' || s === 'checking' || s === 'review') && (counts[s] ?? 0) > 0;
@@ -337,58 +349,123 @@ const FlowEdges: React.FC<{ counts: Record<TaskStatus, number> }> = ({ counts })
     ['done', 'pushed'],
   ];
 
-  const runningH = (counts.running ?? 0) > 0 ? 116 : NODE_H;
-  const downY = (from: TaskStatus) => TOP_Y + (from === 'running' ? runningH : NODE_H) + 2;
-
   const down: Array<{ from: TaskStatus; to: TaskStatus; label: string }> = [
     { from: 'running', to: 'waiting_quota', label: t('tasks.flow.edgeQuota') },
     { from: 'checking', to: 'failed', label: t('tasks.flow.edgeFailed') },
     { from: 'review', to: 'blocked', label: t('tasks.flow.edgeBlocked') },
   ];
-  const queuedX = cx('queued');
-  const laneStart = cx('blocked') + 24;
+
+  const bWaiting = getNodeBox('waiting_quota');
+  const bFailed = getNodeBox('failed');
+  const bBlocked = getNodeBox('blocked');
+  const maxBottom = Math.max(
+    bWaiting.y + bWaiting.h,
+    bFailed.y + bFailed.h,
+    bBlocked.y + bBlocked.h,
+  );
+  const laneY = maxBottom + 28;
+
+  const bQueued = getNodeBox('queued');
+  const queuedX = bQueued.x + bQueued.w / 2;
+  const queuedBottom = bQueued.y + bQueued.h + 6;
+  const laneStart = bBlocked.x + bBlocked.w / 2 + 24;
 
   const retryAnimated = (counts.waiting_quota ?? 0) > 0 || (counts.failed ?? 0) > 0 || (counts.blocked ?? 0) > 0;
   const reworkAnimated = (counts.review ?? 0) > 0;
 
+  const bReview = getNodeBox('review');
+  const bRunning = getNodeBox('running');
+  const reworkStartX = bReview.x + bReview.w / 2;
+  const reworkStartY = bReview.y - 2;
+  const reworkEndX = bRunning.x + bRunning.w / 2;
+  const reworkEndY = bRunning.y - 8;
+  const reworkArchY = Math.min(bReview.y, bRunning.y) - 38;
+
   return (
     <g data-testid="flow-edges">
+      {/* 1. Main flow edges */}
       {main.map(([from, to]) => {
+        const bFrom = getNodeBox(from);
+        const bTo = getNodeBox(to);
+        const startX = bFrom.x + bFrom.w + 2;
+        const endX = bTo.x - 6;
+        const midY = bFrom.y + 28; // Align horizontally with icon center
         const animated = isStatusActive(from) || isStatusActive(to);
         const isDoneToPushed = from === 'done' && to === 'pushed';
+        const gapWidth = endX - startX;
+
         return (
-          <Edge
-            key={`${from}-${to}`}
-            d={`M ${right(from) + 2} ${midY} L ${left(to) - 6} ${midY}`}
-            animated={animated}
-            label={isDoneToPushed ? t('tasks.flow.edgeAutoMergePush') : undefined}
-            lx={isDoneToPushed ? (right(from) + left(to)) / 2 : undefined}
-            ly={isDoneToPushed ? midY - 10 : undefined}
-          />
+          <g key={`${from}-${to}`}>
+            <Edge
+              d={`M ${startX} ${midY} L ${endX} ${midY}`}
+              animated={animated}
+            />
+            {isDoneToPushed && (
+              <text
+                x={(startX + endX) / 2}
+                y={midY - 10}
+                fontSize={11.5}
+                textAnchor="middle"
+                className="select-none fill-[var(--t-text-3)] font-medium"
+                style={{
+                  paintOrder: 'stroke fill',
+                  stroke: 'var(--t-surface)',
+                  strokeWidth: 3,
+                  strokeLinejoin: 'round',
+                }}
+              >
+                {gapWidth < 85 ? (
+                  <>
+                    <tspan x={(startX + endX) / 2} dy="-0.2em">
+                      {t('tasks.flow.edgeAutoMergePush').split('+')[0]?.trim() || t('tasks.flow.edgeAutoMergePush')}
+                    </tspan>
+                    <tspan x={(startX + endX) / 2} dy="1.2em">
+                      {`+ ${t('tasks.flow.edgeAutoMergePush').split('+')[1]?.trim() || ''}`}
+                    </tspan>
+                  </>
+                ) : (
+                  t('tasks.flow.edgeAutoMergePush')
+                )}
+              </text>
+            )}
+          </g>
         );
       })}
+
+      {/* 2. Downward branch edges */}
       {down.map(({ from, to, label }) => {
+        const bFrom = getNodeBox(from);
+        const bTo = getNodeBox(to);
+        const startX = bFrom.x + bFrom.w / 2 - 24;
+        const startY = bFrom.y + bFrom.h + 2;
+        const endX = bTo.x + bTo.w / 2 - 24;
+        const endY = bTo.y - 6;
         const animated = isStatusActive(from);
-        const startY = downY(from);
+
         return (
           <Edge
             key={`${from}-${to}`}
-            d={`M ${cx(from) - 24} ${startY} L ${cx(to) - 24} ${BOTTOM_Y - 6}`}
+            d={`M ${startX} ${startY} L ${endX} ${endY}`}
             label={label}
-            lx={cx(from) - 16}
-            ly={(startY + BOTTOM_Y) / 2 + 4}
+            lx={startX + 8}
+            ly={(startY + endY) / 2 + 4}
             anchor="start"
             animated={animated}
           />
         );
       })}
-      {/* Nhánh quay lại: các trạng thái dưới đi xuống "làn" chung rồi về Chờ chạy. */}
+
+      {/* 3. Drop lines to bottom return lane */}
       {(['waiting_quota', 'failed', 'blocked'] as TaskStatus[]).map((status) => {
+        const b = getNodeBox(status);
+        const dropX = b.x + b.w / 2 + 24;
+        const dropStartY = b.y + b.h + 2;
         const animated = (counts[status] ?? 0) > 0;
+
         return (
           <path
             key={`lane-${status}`}
-            d={`M ${cx(status) + 24} ${BOTTOM_Y + NODE_H + 2} L ${cx(status) + 24} ${LANE_Y}`}
+            d={`M ${dropX} ${dropStartY} L ${dropX} ${laneY}`}
             fill="none"
             strokeWidth={animated ? 2 : 1.75}
             strokeDasharray="6 5"
@@ -398,23 +475,26 @@ const FlowEdges: React.FC<{ counts: Record<TaskStatus, number> }> = ({ counts })
           />
         );
       })}
+
+      {/* 4. Bottom return lane to queued */}
       <Edge
-        d={`M ${laneStart} ${LANE_Y} L ${queuedX} ${LANE_Y} L ${queuedX} ${TOP_Y + NODE_H + 6}`}
+        d={`M ${laneStart} ${laneY} L ${queuedX} ${laneY} L ${queuedX} ${queuedBottom}`}
         dashed
         animated={retryAnimated}
         label={t('tasks.flow.edgeRetry')}
         lx={queuedX + 10}
-        ly={LANE_Y - 8}
+        ly={laneY - 8}
         anchor="start"
       />
-      {/* Reviewer yêu cầu sửa: quay lại Đang chạy. */}
+
+      {/* 5. Reviewer rework curve back to running */}
       <Edge
-        d={`M ${cx('review')} ${TOP_Y - 2} C ${cx('review')} ${TOP_Y - 46}, ${cx('running')} ${TOP_Y - 46}, ${cx('running')} ${TOP_Y - 8}`}
+        d={`M ${reworkStartX} ${reworkStartY} C ${reworkStartX} ${reworkArchY}, ${reworkEndX} ${reworkArchY}, ${reworkEndX} ${reworkEndY}`}
         dashed
         animated={reworkAnimated}
         label={t('tasks.flow.edgeRework')}
-        lx={(cx('review') + cx('running')) / 2}
-        ly={TOP_Y - 40}
+        lx={(reworkStartX + reworkEndX) / 2}
+        ly={reworkArchY + 6}
       />
     </g>
   );
@@ -547,34 +627,126 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
 
   const openTotal = openStatus ? counts[openStatus] : 0;
 
+  // Measurement and ResizeObserver for edge coordinates
+  const boardRef = useRef<HTMLDivElement>(null);
+  const nodeEls = useRef<Partial<Record<TaskStatus, HTMLDivElement>>>({});
+  const [coords, setCoords] = useState<Partial<Record<TaskStatus, NodeRect>>>({});
+
+  const registerRef = (status: TaskStatus, el: HTMLDivElement | null) => {
+    if (el) {
+      nodeEls.current[status] = el;
+    } else {
+      delete nodeEls.current[status];
+    }
+  };
+
+  const updateCoords = () => {
+    if (!boardRef.current) return;
+    const boardRect = boardRef.current.getBoundingClientRect();
+    if (boardRect.width === 0) return;
+
+    const next: Partial<Record<TaskStatus, NodeRect>> = {};
+    for (const def of NODE_DEFS) {
+      const el = nodeEls.current[def.status];
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        next[def.status] = {
+          x: rect.left - boardRect.left + boardRef.current.scrollLeft,
+          y: rect.top - boardRect.top + boardRef.current.scrollTop,
+          w: rect.width,
+          h: rect.height,
+        };
+      }
+    }
+    setCoords(next);
+  };
+
+  useLayoutEffect(() => {
+    updateCoords();
+  });
+
+  useEffect(() => {
+    updateCoords();
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => {
+        updateCoords();
+      });
+      if (boardRef.current) {
+        ro.observe(boardRef.current);
+      }
+      for (const def of NODE_DEFS) {
+        const el = nodeEls.current[def.status];
+        if (el) ro.observe(el);
+      }
+    }
+
+    window.addEventListener('resize', updateCoords);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener('resize', updateCoords);
+    };
+  }, []);
+
+  const getNodeBox = (status: TaskStatus): NodeRect => {
+    const measured = coords[status];
+    if (measured && measured.w > 0 && measured.h > 0) {
+      return measured;
+    }
+    return getFallbackBox(status);
+  };
+
   return (
     <div className="pb-8" data-testid="flow-view-wrapper">
-      <div className="overflow-x-auto rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-3" data-tour="task-columns">
-        <svg
-          viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
-          className="block h-auto w-full min-w-[900px]"
+      <div
+        className="overflow-x-auto rounded-2xl border border-[var(--t-border)] bg-[var(--t-surface)] p-4 sm:p-6 shadow-xs"
+        data-tour="task-columns"
+      >
+        <div
+          ref={boardRef}
+          className="relative min-w-[1080px] min-h-[440px] lg:min-h-[480px]"
           role="group"
           aria-label={t('tasks.flow.ariaLabel')}
         >
-          <defs>
-            <marker id="flow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-              <path d="M 0 0 L 10 5 L 0 10 z" style={{ fill: 'var(--t-text-3)', fillOpacity: 0.6 }} />
-            </marker>
-          </defs>
-          <FlowEdges counts={counts} />
-          {NODES.map((node) => (
-            <FlowNodeView
-              key={node.status}
-              node={node}
-              project={project}
-              search={search}
-              total={counts[node.status]}
-              isLoading={loading[node.status]}
-              refetchInterval={refetchInterval}
-              onOpen={setOpenStatus}
-            />
-          ))}
-        </svg>
+          {/* Background SVG for arrow edges */}
+          <svg
+            className="pointer-events-none absolute inset-0 h-full w-full overflow-visible"
+            aria-hidden="true"
+          >
+            <defs>
+              <marker
+                id="flow-arrow"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" style={{ fill: 'var(--t-text-3)', fillOpacity: 0.6 }} />
+              </marker>
+            </defs>
+            <FlowEdges counts={counts} getNodeBox={getNodeBox} />
+          </svg>
+
+          {/* HTML / CSS Grid for nodes */}
+          <div className="relative z-1 grid grid-cols-7 gap-x-6 gap-y-20 lg:gap-x-8 lg:gap-y-24 pt-12 pb-16">
+            {NODE_DEFS.map((def) => (
+              <FlowNodeCard
+                key={def.status}
+                node={def}
+                project={project}
+                search={search}
+                total={counts[def.status]}
+                isLoading={loading[def.status]}
+                refetchInterval={refetchInterval}
+                onOpen={setOpenStatus}
+                registerRef={registerRef}
+              />
+            ))}
+          </div>
+        </div>
       </div>
       <p className="mt-2 text-xs text-[var(--t-text-3)]">{t('tasks.flow.hint')}</p>
 
@@ -596,4 +768,3 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
     </div>
   );
 };
-

@@ -79,7 +79,7 @@ import type { PageResult } from '../pagination.js';
 import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
 import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
-import { publishTask as executePublishTask, type PublishResult } from '../publish.js';
+import { publishTask as executePublishTask, isProjectPublishing, type PublishResult } from '../publish.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
@@ -5601,6 +5601,62 @@ export class AppService {
     }
 
     return { ok: true };
+  }
+
+  startPublishTask(idParam: string, options?: { manual?: boolean; skipAudit?: boolean }): { started: true } {
+    const taskId = toTaskId(idParam);
+    const initialTask = this.taskRepo.get(taskId);
+    if (!initialTask) {
+      throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    }
+
+    if (initialTask.status !== 'done' && initialTask.status !== 'pushed') {
+      throw new HttpError(
+        400,
+        'bad_request',
+        `Task đang ở trạng thái "${initialTask.status}", chỉ có thể publish task "done" hoặc "pushed"`,
+      );
+    }
+
+    const project = this.projectRepo.get(initialTask.projectId);
+    if (!project) {
+      throw new HttpError(404, 'not_found', `Project "${initialTask.projectId}" không tồn tại`);
+    }
+
+    if (isProjectPublishing(project.id)) {
+      throw new HttpError(409, 'conflict', `Dự án đang trong quá trình publish`);
+    }
+
+    const isManual = Boolean(options?.manual);
+    const isSkipAudit = isManual && Boolean(options?.skipAudit);
+    const projSettings = projectSettings(project);
+    const isAuditConfigEnabled = projSettings.publish?.audit?.enabled !== false;
+    const willAudit = !isSkipAudit && isAuditConfigEnabled;
+
+    this.taskRepo.update(taskId, {
+      pushResult: JSON.stringify({
+        state: willAudit ? 'auditing' : 'pushing',
+        startedAt: new Date().toISOString(),
+        auditSkipped: isSkipAudit,
+      }),
+    });
+
+    if (willAudit) {
+      this.scheduler.getEventBus().emit('task.auditing', taskId, {
+        taskId,
+        projectId: project.id,
+      });
+      this.scheduler.getEventBus().emit('task.audit_started', taskId, {
+        taskId,
+        projectId: project.id,
+      });
+    }
+
+    void this.publishTask(taskId, options).catch((err) => {
+      console.error(`[publish] Background publish failed for task ${taskId}:`, err);
+    });
+
+    return { started: true };
   }
 
   async publishTask(idParam: string, options?: { manual?: boolean; skipAudit?: boolean }): Promise<PublishResult> {

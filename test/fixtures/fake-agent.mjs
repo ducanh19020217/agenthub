@@ -41,6 +41,11 @@ async function run() {
       findings: [{ severity: 'P1', kind: 'wrong_requirement', file: 'src/main.ts', line: 10, detail: 'Missing required feature X' }],
       summary: 'Audit failed due to missing requirements.',
     },
+    'audit-fail-empty': {
+      verdict: 'fail',
+      findings: [],
+      summary: 'Fail without findings.',
+    },
     'audit-malformed': 'not valid json {',
   };
   if (mode.startsWith('audit-')) {

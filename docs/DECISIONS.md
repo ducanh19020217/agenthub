@@ -298,3 +298,17 @@
      - Project Settings Drawer hiển thị toggle publish bật mặc định.
      - TaskDetailPage hiển thị banner cảnh báo `publish-skipped-dirty-banner` khi `localUpdate === 'skipped_dirty'`.
      - Thêm đầy đủ chuỗi bản dịch `publishSkippedDirty` cho cả tiếng Việt và tiếng Anh.
+
+## DEC-025: Audit tất cả task tồn đọng trên integration và giới hạn số task trong một lần publish
+
+- **Bối cảnh**:
+  - Khi một project kích hoạt publish sau khi đã có nhiều task hoàn thành (`done`) và được merge vào nhánh tích hợp (`agenthub/integration`), hoặc khi tính năng publish audit được bật lần đầu tiên, dải commit chưa đẩy lên remote (`remote/target..source`) sẽ bao gồm tất cả các task đã tích hợp nhưng chưa được push trước đó.
+  - Lần publish đầu tiên (hoặc sau một đợt tích hợp nhiều task) sẽ thực hiện audit toàn bộ các task tồn đọng trong dải commit này để đảm bảo chất lượng toàn diện của code được đưa lên remote. Nếu một task cũ trong dải audit bị phát hiện lỗi (finding P1 hoặc P2), nó có thể bị chuyển trạng thái và trả về worker tương ứng để sửa đổi.
+- **Quyết định thiết kế**:
+  1. **Audit tất cả task done chưa push trên integration**:
+     - Hàm `findTasksToAudit` rà soát toàn bộ các task hoàn thành có commit nằm trong dải chuẩn bị push. Khi một task cũ bị audit fail, nó được trả về worker để sửa nếu chưa vượt quá số vòng tối đa (`maxFixRounds`); task hiện tại đang kích hoạt publish được đánh dấu trạng thái "bị chặn bởi task X" (không gắn nhầm cờ `auditFailed: true`).
+     - Khi một lượt publish sau đó thành công, tất cả các task nằm trong dải được đẩy lên đều được chuyển sang trạng thái `pushed` và xoá bỏ trạng thái audit lỗi tạm thời.
+  2. **Giới hạn số task audit trong một lần (`maxTasks`)**:
+     - Để ngăn ngừa việc khoá tài nguyên (lock publish) quá lâu và tốn lượng lớn token / quota khi tích luỹ quá nhiều commit chưa push, hệ thống áp dụng giới hạn số task được audit trong một lần publish: `publish.audit.maxTasks`.
+     - Giá trị mặc định là 10 (cấu hình được trong settings của project hoặc preset, giá trị số nguyên tối thiểu là 1).
+     - Nếu số task cần audit vượt quá giới hạn (`tasksToAudit.length > maxTasks`), tiến trình publish sẽ huỷ bỏ ngay lập tức (`abort`), không thực hiện push, đánh dấu `pushResult` với lỗi vượt quá giới hạn (`exceededMaxTasks: true`) và phát sự kiện `task.push_failed` để thông báo cho người dùng qua Telegram và desktop notification.

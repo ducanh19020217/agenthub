@@ -899,7 +899,8 @@ export async function publishTask(
   id: string,
   options?: { skipAudit?: boolean },
 ): Promise<{
-  ok: boolean;
+  started?: boolean;
+  ok?: boolean;
   error?: string;
   remote?: string;
   branch?: string;

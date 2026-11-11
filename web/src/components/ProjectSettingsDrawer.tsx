@@ -2802,31 +2802,60 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 </div>
 
                 {draftSettings.publish?.audit?.enabled !== false && (
-                  <div className="pl-6 space-y-1">
-                    <label className="block text-xs font-semibold text-[var(--t-text)]">
-                      {t('projects.publishAuditMaxFixRounds')}
-                    </label>
-                    <input
-                      type="number"
-                      min={0}
-                      max={10}
-                      data-testid="publish-audit-max-fix-rounds"
-                      value={draftSettings.publish?.audit?.maxFixRounds ?? 2}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value, 10);
-                        setDraftSettings((prev) => ({
-                          ...prev,
-                          publish: {
-                            ...prev.publish!,
-                            audit: {
-                              ...prev.publish?.audit,
-                              maxFixRounds: Number.isNaN(val) ? 2 : Math.max(0, val),
+                  <div className="pl-6 space-y-3">
+                    <div className="space-y-1">
+                      <label className="block text-xs font-semibold text-[var(--t-text)]">
+                        {t('projects.publishAuditMaxFixRounds')}
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={10}
+                        data-testid="publish-audit-max-fix-rounds"
+                        value={draftSettings.publish?.audit?.maxFixRounds ?? 2}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value, 10);
+                          setDraftSettings((prev) => ({
+                            ...prev,
+                            publish: {
+                              ...prev.publish!,
+                              audit: {
+                                ...prev.publish?.audit,
+                                maxFixRounds: Number.isNaN(val) ? 2 : Math.max(1, val),
+                              },
                             },
-                          },
-                        }));
-                      }}
-                      className="w-24 text-xs font-mono px-3 py-1.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] text-[var(--t-text)] focus:outline-none focus:border-[var(--t-accent)]"
-                    />
+                          }));
+                        }}
+                        className="w-24 text-xs font-mono px-3 py-1.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] text-[var(--t-text)] focus:outline-none focus:border-[var(--t-accent)]"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="block text-xs font-semibold text-[var(--t-text)]">
+                        {t('projects.publishAuditMaxTasks')}
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        data-testid="publish-audit-max-tasks"
+                        value={draftSettings.publish?.audit?.maxTasks ?? 10}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value, 10);
+                          setDraftSettings((prev) => ({
+                            ...prev,
+                            publish: {
+                              ...prev.publish!,
+                              audit: {
+                                ...prev.publish?.audit,
+                                maxTasks: Number.isNaN(val) ? 10 : Math.max(1, val),
+                              },
+                            },
+                          }));
+                        }}
+                        className="w-24 text-xs font-mono px-3 py-1.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] text-[var(--t-text)] focus:outline-none focus:border-[var(--t-accent)]"
+                      />
+                    </div>
                   </div>
                 )}
               </div>

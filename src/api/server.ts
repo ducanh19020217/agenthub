@@ -729,10 +729,11 @@ export async function createServer(
     return service.retryReviewer(id);
   });
 
-  fastify.post('/api/tasks/:id/publish', async (req: FastifyRequest) => {
+  fastify.post('/api/tasks/:id/publish', async (req: FastifyRequest, reply: FastifyReply) => {
     const { id } = req.params as { id: string };
     const body = (req.body as { skipAudit?: boolean } | undefined) || {};
-    return service.publishTask(id, { manual: true, skipAudit: Boolean(body.skipAudit) });
+    const res = service.startPublishTask(id, { manual: true, skipAudit: Boolean(body.skipAudit) });
+    return reply.status(202).send(res);
   });
 
   fastify.delete('/api/tasks/:id/worktree', async (req: FastifyRequest) => {

@@ -239,6 +239,7 @@ export interface DeployStatus {
 export interface PublishAuditSettings {
   enabled?: boolean;
   maxFixRounds?: number;
+  maxTasks?: number;
 }
 
 export interface PublishSettings {

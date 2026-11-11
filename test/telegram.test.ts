@@ -3170,7 +3170,7 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     expect(publishSpy).toHaveBeenCalledWith('pub-proj/t-failed', { manual: true });
     const edits = recordedCalls.filter((c) => c.url.includes('/editMessageText'));
     expect(edits.length).toBeGreaterThanOrEqual(1);
-    expect(edits[edits.length - 1].body?.text).toContain('Đã đẩy task');
+    expect(edits[edits.length - 1].body?.text).toContain('Đã bắt đầu audit + publish');
   });
 
   it('1. khi brain.mode = auto: chan cac thong bao tho theo tung task, chi gui hub_notify va su co he thong', async () => {

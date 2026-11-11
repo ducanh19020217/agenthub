@@ -27,6 +27,7 @@ import { reviewerSettingsFromLegacy } from './reviewer-config.js';
 import { QuotaService, QuotaCapacitySnapshot } from './quota/index.js';
 import { autoMergeReasonLabel, firstCheckError } from './auto-merge-notify.js';
 import { formatYYYYMMDD } from './integrations/openproject/daily-report.js';
+import { isProjectPublishing } from './publish.js';
 
 export interface TelegramTimesheetCommand { ticket: string | 'new'; activeHours: number; waitHours: number; pinned: boolean; description: string; }
 export function parseTimesheetCommand(text: string): TelegramTimesheetCommand {
@@ -2930,20 +2931,23 @@ export class TelegramBotService {
           );
         } else if (action === 'publish') {
           try {
-            await this.answerCallbackQuery(query.id, 'Đang đẩy lên git...');
-            const res = await this.service.publishTask(resolved.id, { manual: true });
-            if (res.ok && 'commit' in res) {
-              const successText = `🚀 Đã đẩy task <b>${this.escapeHtml(resolved.id)}</b> lên <code>${this.escapeHtml(res.remote)}/${this.escapeHtml(res.branch)}</code> (commit <code>${this.escapeHtml(res.commit.slice(0, 7))}</code>).`;
-              if (query.message) {
-                const prev = this.escapeHtml(query.message.text || '');
-                await this.editMessage(chatId, query.message.message_id, `${prev}\n\n${successText}`, { inline_keyboard: [] });
-              } else {
-                await this.sendMessage(chatId, successText);
-              }
-            } else if (!res.ok) {
-              const failText = `❌ Đẩy task <b>${this.escapeHtml(resolved.id)}</b> thất bại: ${this.escapeHtml(res.error)}`;
-              await this.sendMessage(chatId, failText);
+            const project = this.projectRepo.get(resolved.projectId);
+            if (project && isProjectPublishing(project.id)) {
+              await this.answerCallbackQuery(query.id, 'Dự án đang publish');
+              await this.sendMessage(chatId, `⏳ Dự án <b>${this.escapeHtml(project.id)}</b> đang trong quá trình publish.`);
+              return;
             }
+            await this.answerCallbackQuery(query.id, 'Đã bắt đầu audit + publish');
+            const startText = `🚀 Đã bắt đầu audit + publish cho task <b>${this.escapeHtml(resolved.id)}</b>. Kết quả sẽ được thông báo sau khi hoàn thành.`;
+            if (query.message) {
+              const prev = this.escapeHtml(query.message.text || '');
+              await this.editMessage(chatId, query.message.message_id, `${prev}\n\n${startText}`, { inline_keyboard: [] });
+            } else {
+              await this.sendMessage(chatId, startText);
+            }
+            void this.service.publishTask(resolved.id, { manual: true }).catch((err) => {
+              console.error(`[telegram] Publish task ${resolved.id} failed:`, err);
+            });
           } catch (err: unknown) {
             const errMsg = err instanceof Error ? err.message : String(err);
             await this.answerCallbackQuery(query.id, 'Lỗi đẩy git.');

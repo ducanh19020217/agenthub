@@ -44,6 +44,7 @@ describe('project settings parsing', () => {
         audit: {
           enabled: true,
           maxFixRounds: 2,
+          maxTasks: 10,
         },
       },
     });
@@ -95,14 +96,14 @@ describe('project settings parsing', () => {
       },
     });
     expect(updated.publish.enabled).toBe(true);
-    expect(updated.publish.audit).toEqual({ enabled: true, maxFixRounds: 3 });
+    expect(updated.publish.audit).toEqual({ enabled: true, maxFixRounds: 3, maxTasks: 10 });
 
     const disabledAudit = mergeProjectSettings(updated, {
       publish: {
         audit: { enabled: false },
       },
     });
-    expect(disabledAudit.publish.audit).toEqual({ enabled: false, maxFixRounds: 3 });
+    expect(disabledAudit.publish.audit).toEqual({ enabled: false, maxFixRounds: 3, maxTasks: 10 });
   });
 
   it('clears reviewer order and fallback overrides when set to null in mergeProjectSettings', () => {

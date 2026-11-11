@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -8,7 +8,7 @@ import { createContext } from '../src/daemon.js';
 import { createServer } from '../src/api/server.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { FakeEngine, type Engine } from '../src/engines/index.js';
-import { buildGitUrls } from '../src/publish.js';
+import { buildGitUrls, clearPublishLocks } from '../src/publish.js';
 import { clearAuditPassCache } from '../src/pre-publish-audit.js';
 import { toRouteId } from '../src/services/index.js';
 
@@ -61,6 +61,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
   beforeEach(async () => {
     delete process.env.FAKE_MODE;
     clearAuditPassCache();
+    clearPublishLocks();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-publish-test-'));
     const agyHomesDir = path.join(tmpDir, 'agy-homes');
     fs.mkdirSync(agyHomesDir, { recursive: true });
@@ -484,22 +485,24 @@ describe('Publish Service (t-auto-push-after-done)', () => {
     });
     const task = ctx.taskRepo.get('proj-api/task-manual')!;
 
-    // Manual POST /api/tasks/:id/publish succeeds even if publish.enabled is false
+    // Manual POST /api/tasks/:id/publish returns 202 and starts background publish
     const res = await server.inject({
       method: 'POST',
       url: `/api/tasks/${toRouteId(task.id)}/publish`,
       headers: authHeaders(),
     });
 
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(202);
     const body = JSON.parse(res.body);
-    expect(body.ok).toBe(true);
+    expect(body.started).toBe(true);
 
-    const updated = ctx.taskRepo.get(task.id);
-    expect(updated?.status).toBe('pushed');
+    await vi.waitFor(() => {
+      const updated = ctx.taskRepo.get(task.id);
+      expect(updated?.status).toBe('pushed');
+    });
   });
 
-  it('chạy tuần tự các lượt publish cho cùng một project để tránh xung đột', async () => {
+  it('từ chối publish đồng thời cho cùng một project mà không xếp hàng thêm', async () => {
     const remotePath = path.join(tmpDir, 'remote-seq.git');
     initBareRemote(remotePath);
 
@@ -550,16 +553,16 @@ describe('Publish Service (t-auto-push-after-done)', () => {
     const task2 = ctx.taskRepo.get('proj-seq/t2')!;
 
     // Launch both concurrently
-    const [res1, res2] = await Promise.all([
+    const results = await Promise.allSettled([
       ctx.service.publishTask(task1.id),
       ctx.service.publishTask(task2.id),
     ]);
 
-    expect(res1.ok).toBe(true);
-    expect(res2.ok).toBe(true);
-
-    expect(ctx.taskRepo.get(task1.id)?.status).toBe('pushed');
-    expect(ctx.taskRepo.get(task2.id)?.status).toBe('pushed');
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason.message).toContain('đang trong quá trình publish');
   });
 
   it('publish tắt: tự động bỏ qua, status giữ nguyên done và không phát task.pushed', async () => {
@@ -888,6 +891,83 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       // Task 2 was returned to worker
       const updatedT2 = ctx.taskRepo.get('proj-multi-audit/t2');
       expect(updatedT2?.status).toBe('queued');
+
+      // Task 1 was the one being published: must be marked blocked by task 2 without auditFailed
+      const updatedT1 = ctx.taskRepo.get('proj-multi-audit/t1');
+      expect(updatedT1?.status).toBe('done');
+      const pr1 = JSON.parse(updatedT1!.pushResult!);
+      expect(pr1.auditFailed).toBeUndefined();
+      expect(pr1.blockedByTask).toBe('multi-2');
+      expect(pr1.error).toContain('multi-2');
+
+      // Now fix task 2 and publish again: both task 1 and task 2 should become 'pushed'
+      process.env.FAKE_MODE = 'audit-pass';
+      ctx.taskRepo.update('proj-multi-audit/t2', { status: 'done', reviewerChangesRequested: 0 });
+      const retryRes = await ctx.service.publishTask('proj-multi-audit/t2');
+      expect(retryRes.ok).toBe(true);
+
+      const pushedT1 = ctx.taskRepo.get('proj-multi-audit/t1');
+      const pushedT2 = ctx.taskRepo.get('proj-multi-audit/t2');
+      expect(pushedT1?.status).toBe('pushed');
+      expect(pushedT2?.status).toBe('pushed');
+      const pr1After = JSON.parse(pushedT1!.pushResult!);
+      expect(pr1After.state).toBe('pushed');
+      expect(pr1After.blockedByTask).toBeUndefined();
+      expect(pr1After.error).toBeUndefined();
+    });
+
+    it('ghi các finding P3 của audit pass vào pushResult khi push thành công', async () => {
+      const remotePath = path.join(tmpDir, 'remote-p3-findings.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-p3-findings');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/p3-task'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'p3.txt'), 'p3 feature\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: p3 feature'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/p3-task', '-m', "Merge branch 'agenthub/p3-task' into main"], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-p3',
+        name: 'Project P3 Findings',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 2 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-p3/task-p3',
+        projectId: 'proj-p3',
+        slug: 'p3-task',
+        title: 'P3 Task',
+        status: 'done',
+        branch: 'agenthub/p3-task',
+        baseRef: 'main',
+      });
+
+      process.env.FAKE_MODE = 'audit-p3';
+      const res = await ctx.service.publishTask('proj-p3/task-p3');
+      expect(res.ok).toBe(true);
+      expect((res as any).findings).toHaveLength(1);
+      expect((res as any).findings[0].severity).toBe('P3');
+
+      const updated = ctx.taskRepo.get('proj-p3/task-p3');
+      expect(updated?.status).toBe('pushed');
+      const pr = JSON.parse(updated!.pushResult!);
+      expect(pr.auditPassed).toBe(true);
+      expect(pr.findings).toHaveLength(1);
+      expect(pr.findings[0].severity).toBe('P3');
+      expect(pr.findings[0].file).toBe('README.md');
     });
 
     it('cached pass avoids re-running audit engine for same commitSha', async () => {
@@ -1120,15 +1200,16 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         headers: authHeaders(),
         payload: { skipAudit: true },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(202);
       const body = JSON.parse(res.body);
-      expect(body.ok).toBe(true);
-      expect(body.auditSkipped).toBe(true);
+      expect(body.started).toBe(true);
 
-      const updated = ctx.taskRepo.get('proj-skip/task-skip');
-      expect(updated?.status).toBe('pushed');
-      const pushResult = JSON.parse(updated!.pushResult!);
-      expect(pushResult.auditSkipped).toBe(true);
+      await vi.waitFor(() => {
+        const updated = ctx.taskRepo.get('proj-skip/task-skip');
+        expect(updated?.status).toBe('pushed');
+        const pushResult = JSON.parse(updated!.pushResult!);
+        expect(pushResult.auditSkipped).toBe(true);
+      });
 
       expect(events.some((e) => e.type === 'task.audit_skipped')).toBe(true);
       expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
@@ -1239,6 +1320,302 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(updated?.status).toBe('queued');
       const pushResult = JSON.parse(updated!.pushResult!);
       expect(pushResult.auditFixRounds).toBe(1);
+    });
+
+    it('2 task merge tuần tự (A rồi B, nhánh task vẫn còn) -> A được audit bằng diff của merge A', async () => {
+      const { findMergeCommitForTask, getTaskDiff } = await import('../src/publish.js');
+      const remotePath = path.join(tmpDir, 'remote-seq-merges.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-seq-merges');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      // Create integration branch from main
+      execFileSync('git', ['checkout', '-b', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+
+      // Task A: create branch, commit, merge into integration
+      execFileSync('git', ['checkout', '-b', 'agenthub/seq-a'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'file-a.txt'), 'content A\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: seq A'], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/seq-a', '-m', "Merge branch 'agenthub/seq-a' into agenthub/integration"], { cwd: repoPath, env: testEnv });
+      const mergeASha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+      // Task B: create branch from integration, commit, merge into integration
+      execFileSync('git', ['checkout', '-b', 'agenthub/seq-b'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'file-b.txt'), 'content B\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: seq B'], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/seq-b', '-m', "Merge branch 'agenthub/seq-b' into agenthub/integration"], { cwd: repoPath, env: testEnv });
+      const mergeBSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+      expect(mergeASha).not.toBe(mergeBSha);
+
+      // Verify task branches still exist
+      const branchesOut = execFileSync('git', ['-C', repoPath, 'branch'], { encoding: 'utf8', env: testEnv });
+      expect(branchesOut).toContain('agenthub/seq-a');
+      expect(branchesOut).toContain('agenthub/seq-b');
+
+      const taskA: any = {
+        id: 'proj/task-a',
+        projectId: 'proj',
+        slug: 'seq-a',
+        title: 'Task A',
+        branch: 'agenthub/seq-a',
+      };
+      const taskB: any = {
+        id: 'proj/task-b',
+        projectId: 'proj',
+        slug: 'seq-b',
+        title: 'Task B',
+        branch: 'agenthub/seq-b',
+      };
+
+      // 1. findMergeCommitForTask for Task A must return mergeA, NOT mergeB
+      const foundMergeA = await findMergeCommitForTask(repoPath, taskA, ['agenthub/integration'], testEnv);
+      expect(foundMergeA).toBe(mergeASha);
+
+      // 2. getTaskDiff for Task A must use mergeA diff
+      const diffA = await getTaskDiff(repoPath, taskA, 'agenthub/integration', 'main', 'main', testEnv);
+      expect(diffA.commitSha).toBe(mergeASha);
+      expect(diffA.changedFiles).toEqual(['file-a.txt']);
+      expect(diffA.diff).toContain('content A');
+      expect(diffA.diff).not.toContain('content B');
+
+      // 3. findMergeCommitForTask and getTaskDiff for Task B must return mergeB
+      const foundMergeB = await findMergeCommitForTask(repoPath, taskB, ['agenthub/integration'], testEnv);
+      expect(foundMergeB).toBe(mergeBSha);
+      const diffB = await getTaskDiff(repoPath, taskB, 'agenthub/integration', 'main', 'main', testEnv);
+      expect(diffB.commitSha).toBe(mergeBSha);
+      expect(diffB.changedFiles).toEqual(['file-b.txt']);
+      expect(diffB.diff).toContain('content B');
+      expect(diffB.diff).not.toContain('content A');
+    });
+
+    it('verdict fail + findings rỗng -> không push, retryable, task không bị trả về', async () => {
+      const remotePath = path.join(tmpDir, 'remote-fail-empty.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-fail-empty');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/fail-empty-task'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'empty.txt'), 'fail empty\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: fail empty task'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/fail-empty-task', '-m', "Merge branch 'agenthub/fail-empty-task' into main"], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-fail-empty',
+        name: 'Project Fail Empty',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 2 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-fail-empty/task-1',
+        projectId: 'proj-fail-empty',
+        slug: 'fail-empty-task',
+        title: 'Fail Empty Task',
+        status: 'done',
+        branch: 'agenthub/fail-empty-task',
+        baseRef: 'main',
+      });
+
+      process.env.FAKE_MODE = 'audit-fail-empty';
+      const res = await ctx.service.publishTask('proj-fail-empty/task-1');
+      expect(res.ok).toBe(false);
+      expect((res as any).auditFailed).toBe(true);
+      expect((res as any).retryable).toBe(true);
+
+      const taskAfter = ctx.taskRepo.get('proj-fail-empty/task-1');
+      // Task must NOT be returned to worker (must remain 'done', not 'running' or 'queued')
+      expect(taskAfter?.status).toBe('done');
+      const pushResult = JSON.parse(taskAfter!.pushResult!);
+      expect(pushResult.retryable).toBe(true);
+      expect(pushResult.auditFailed).toBe(true);
+
+      // Verify remote branch was not pushed
+      const remoteCommits = execFileSync('git', ['--git-dir', remotePath, 'log', '--oneline', 'main'], { encoding: 'utf8', env: testEnv });
+      expect(remoteCommits).not.toContain('feat: fail empty task');
+    });
+
+    it('API publish trả 202 ngay, trạng thái được cập nhật qua DB/SSE và chặn publish trùng', async () => {
+      const remotePath = path.join(tmpDir, 'remote-async-pub.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-async-pub');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/async-pub-task'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'async.txt'), 'async publish\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: async publish task'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/async-pub-task', '-m', "Merge branch 'agenthub/async-pub-task' into main"], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-async',
+        name: 'Project Async Pub',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 2 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-async/task-1',
+        projectId: 'proj-async',
+        slug: 'async-pub-task',
+        title: 'Async Pub Task',
+        status: 'done',
+        branch: 'agenthub/async-pub-task',
+        baseRef: 'main',
+      });
+
+      const events: Array<{ type: string; payload: any }> = [];
+      ctx.scheduler.getEventBus().on('task.auditing', (_id, p) => events.push({ type: 'task.auditing', payload: p }));
+      ctx.scheduler.getEventBus().on('task.audit_passed', (_id, p) => events.push({ type: 'task.audit_passed', payload: p }));
+      ctx.scheduler.getEventBus().on('task.pushed', (_id, p) => events.push({ type: 'task.pushed', payload: p }));
+
+      process.env.FAKE_MODE = 'audit-pass';
+
+      // 1. POST /api/tasks/:id/publish returns 202 immediately
+      const res = await server.inject({
+        method: 'POST',
+        url: '/api/tasks/proj-async~task-1/publish',
+        headers: authHeaders(),
+      });
+      expect(res.statusCode).toBe(202);
+      const body = JSON.parse(res.body);
+      expect(body.started).toBe(true);
+
+      // 2. DB has state: 'auditing' and SSE emitted task.auditing
+      const immediateTask = ctx.taskRepo.get('proj-async/task-1');
+      const immediatePr = JSON.parse(immediateTask?.pushResult || '{}');
+      expect(immediatePr.state).toBe('auditing');
+      expect(events.some((e) => e.type === 'task.auditing')).toBe(true);
+
+      // 3. Subsequent publish request while project is publishing returns 409 conflict
+      const dupRes = await server.inject({
+        method: 'POST',
+        url: '/api/tasks/proj-async~task-1/publish',
+        headers: authHeaders(),
+      });
+      // Either 409 because it is publishing or background task already completed
+      if (dupRes.statusCode === 409) {
+        expect(JSON.parse(dupRes.body).message || JSON.parse(dupRes.body).error).toContain('đang trong quá trình publish');
+      }
+
+      // 4. Background execution completes and updates state to pushed
+      await vi.waitFor(() => {
+        const finishedTask = ctx.taskRepo.get('proj-async/task-1');
+        expect(finishedTask?.status).toBe('pushed');
+      });
+
+      expect(events.some((e) => e.type === 'task.audit_passed')).toBe(true);
+      expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
+    });
+
+    it('huỷ bỏ publish khi số lượng task cần audit vượt quá maxTasks và phát sự kiện push_failed', async () => {
+      const remotePath = path.join(tmpDir, 'remote-max-tasks.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-max-tasks');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+
+      // Task 1
+      execFileSync('git', ['checkout', '-b', 'agenthub/mt-1'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'file1.txt'), 'Task 1 content\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: task 1'], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/mt-1', '-m', "Merge branch 'agenthub/mt-1' into agenthub/integration"], { cwd: repoPath, env: testEnv });
+
+      // Task 2
+      execFileSync('git', ['checkout', '-b', 'agenthub/mt-2'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'file2.txt'), 'Task 2 content\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: task 2'], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/mt-2', '-m', "Merge branch 'agenthub/mt-2' into agenthub/integration"], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-max-tasks',
+        name: 'Max Tasks Test Project',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            pushIntegrationBranch: false,
+            audit: { enabled: true, maxTasks: 1 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-max-tasks/task-1',
+        projectId: 'proj-max-tasks',
+        slug: 'mt-1',
+        title: 'Task 1',
+        status: 'done',
+        branch: 'agenthub/mt-1',
+        baseRef: 'main',
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-max-tasks/task-2',
+        projectId: 'proj-max-tasks',
+        slug: 'mt-2',
+        title: 'Task 2',
+        status: 'done',
+        branch: 'agenthub/mt-2',
+        baseRef: 'main',
+      });
+
+      const failedEvents: Array<{ type: string; payload: any }> = [];
+      ctx.scheduler.getEventBus().on('task.push_failed', (_id, p) => failedEvents.push({ type: 'task.push_failed', payload: p }));
+
+      const res = await ctx.service.publishTask('proj-max-tasks/task-2', { manual: true });
+      expect(res.ok).toBe(false);
+      expect(res.retryable).toBe(false);
+      expect(res.error).toContain('vượt quá giới hạn tối đa cho phép');
+
+      const task2 = ctx.taskRepo.get('proj-max-tasks/task-2');
+      const pr = JSON.parse(task2?.pushResult || '{}');
+      expect(pr.state).toBe('push_failed');
+      expect(pr.exceededMaxTasks).toBe(true);
+      expect(pr.maxTasks).toBe(1);
+      expect(pr.tasksCount).toBe(2);
+
+      expect(failedEvents.length).toBeGreaterThan(0);
+      expect(failedEvents[0].payload.error).toContain('vượt quá giới hạn');
     });
   });
 });

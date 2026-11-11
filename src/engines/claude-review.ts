@@ -201,6 +201,61 @@ export class ClaudeReviewStreamFormatter {
  * Read-only reviewer on the Claude CLI, used when every Codex account is unavailable.
  * Writes the final answer (the reviewer JSON verdict) to outputPath and human-readable progress to logPath.
  */
+/**
+ * Filters log or result text to only lines originating from trusted error sources:
+ * - Result events where is_error is true
+ * - Error events
+ * - Formatter [error] lines
+ * - Stderr / fatal CLI messages (e.g. Error:, 401, 429, limit reached, ECONNRESET)
+ *
+ * Discards assistant prose, tool calls, and successful result verdicts so mentions of
+ * error codes in review feedback or code discussions are never misinterpreted as process crashes.
+ */
+export function extractTrustedErrorText(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+
+  // 1. If text is a single JSON payload (e.g. from result event or outputPath)
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      if (parsed.type === 'result') {
+        if (parsed.is_error) {
+          return typeof parsed.result === 'string' ? parsed.result : JSON.stringify(parsed);
+        }
+        // Successful result event
+        return '';
+      }
+      if (parsed.type === 'error') {
+        const err = parsed.error;
+        return typeof err === 'string' ? err : JSON.stringify(err);
+      }
+      // Valid reviewer verdict JSON { verdict: 'approved', feedback: '...' }
+      if (parsed.verdict === 'approved' || parsed.verdict === 'changes_requested') {
+        return '';
+      }
+    } catch {
+      // Not single JSON, treat as multiline text
+    }
+  }
+
+  // 2. Scan lines for trusted error patterns
+  const lines = text.split('\n');
+  const errorLines: string[] = [];
+  for (const line of lines) {
+    const l = line.trim();
+    if (!l) continue;
+    if (l.startsWith('[error]')) {
+      errorLines.push(l.slice('[error]'.length).trim());
+    } else if (
+      /^(?:error\b|fatal\b|claude ai usage limit|you(?:'ve| have) hit your|authentication failed|not logged in|invalid api key|please run \/login|unauthenticated|\b401\b|\b429\b|\b5\d\d\b|econnreset|etimedout|socket hang up|overloaded)/i.test(l)
+    ) {
+      errorLines.push(l);
+    }
+  }
+  return errorLines.join('\n');
+}
+
 export class ClaudeReviewEngine implements Engine {
   id = 'claude' as const;
 
@@ -267,7 +322,9 @@ export class ClaudeReviewEngine implements Engine {
   }
 
   detectQuota(logTail: string): QuotaDetection {
-    const tail = lastNLines(logTail, 50);
+    const errorText = extractTrustedErrorText(logTail);
+    if (!errorText) return { exhausted: false };
+    const tail = lastNLines(errorText, 8);
     const isQuota = /usage limit|limit reached|rate limit|rate_limit|insufficient_quota|hit your (?:session|usage|weekly|daily) limit|exhausted.*(?:usage|quota|limit)|(?:usage|quota|limit).*exhausted|\b429\b/i.test(tail);
     if (isQuota) {
       return { exhausted: true, resetSeconds: parseResetTime(tail) };
@@ -276,14 +333,18 @@ export class ClaudeReviewEngine implements Engine {
   }
 
   detectAuthError(logTail: string): AuthDetection {
-    const tail = lastNLines(logTail, 50);
+    const errorText = extractTrustedErrorText(logTail);
+    if (!errorText) return { expired: false };
+    const tail = lastNLines(errorText, 8);
     return {
       expired: /not logged in|invalid api key|please run \/login|authentication failed|unauthenticated|\b401\b/i.test(tail),
     };
   }
 
   detectTransientError(logTail: string): boolean {
-    const tail = lastNLines(logTail, 50);
+    const errorText = extractTrustedErrorText(logTail);
+    if (!errorText) return false;
+    const tail = lastNLines(errorText, 8);
     return /overloaded|ECONNRESET|ETIMEDOUT|socket hang up|\b5\d\d\b/i.test(tail);
   }
 }

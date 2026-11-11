@@ -3394,10 +3394,6 @@ export class Scheduler {
       try { logOutput = fs.readFileSync(run.logPath, 'utf8'); } catch { logOutput = ''; }
     }
     try { output = fs.readFileSync(active.outputPath, 'utf8'); } catch { output = ''; }
-    // The Claude CLI prints its limit notice on stdout, which lands in the output file, not the log.
-    const combinedLog = `${logOutput}\n${output}`;
-    const quota = active.engine.detectQuota(combinedLog).exhausted;
-    const authExpired = active.engine.detectAuthError(combinedLog).expired;
     const duration = Date.now() - active.startedAt;
     const isLockBusy = duration < 3000 && logOutput.trim() === '' && Boolean(active.lockFile) && exitCode === 1;
 
@@ -3419,43 +3415,59 @@ export class Scheduler {
       if (!this.stopped) this.triggerTick();
       return;
     }
-    if (authExpired) {
-      this.profileRepo.updateAuthState(profileName, 'not_logged_in', 'Phiên đăng nhập hết hạn (401) – cần đăng nhập lại', null);
-      this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
-      this.runRepo.finish(runId, 'crashed', undefined, 'auth_error');
-      const task = this.taskRepo.get(taskId);
-      const nextReviewer = task ? this.getNextReviewerProfile(task) : undefined;
-      appendFailoverReason(nextReviewer ? `reviewer ${profileName} lỗi đăng nhập, chuyển sang ${nextReviewer}` : `reviewer ${profileName} lỗi đăng nhập`);
-      this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: 'auth_error' });
-      if (!this.stopped) this.triggerTick();
-      return;
-    }
-    if (reason === 'timeout' || reason === 'error' || exitCode !== 0 || quota) {
-      if (!quota) this.reviewerErrorCounts.set(taskId, (this.reviewerErrorCounts.get(taskId) || 0) + 1);
-      this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
-      this.runRepo.finish(runId, quota ? 'quota' : reason === 'timeout' ? 'timeout' : 'crashed');
-      if (quota) this.quotaService.mark(profileName, active.actor === 'claude-reviewer' ? 'claude' : 'codex', this.config.reviewer?.failoverSec || 5 * 60 * 60, `${active.actor} quota`);
+
+    const result = parseReviewerOutput(output);
+    const hasValidVerdict = reason === 'exit' && exitCode === 0 && result !== null;
+
+    if (!hasValidVerdict) {
+      const combinedLog = `${logOutput}\n${output}`;
+      const authExpired = active.engine.detectAuthError(combinedLog).expired;
+      if (authExpired) {
+        this.profileRepo.updateAuthState(profileName, 'not_logged_in', 'Phiên đăng nhập hết hạn (401) – cần đăng nhập lại', null);
+        this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
+        this.runRepo.finish(runId, 'crashed', undefined, 'auth_error');
+        const task = this.taskRepo.get(taskId);
+        const nextReviewer = task ? this.getNextReviewerProfile(task) : undefined;
+        appendFailoverReason(nextReviewer ? `reviewer ${profileName} lỗi đăng nhập, chuyển sang ${nextReviewer}` : `reviewer ${profileName} lỗi đăng nhập`);
+        this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: 'auth_error' });
+        if (!this.stopped) this.triggerTick();
+        return;
+      }
+
+      const quota = active.engine.detectQuota(combinedLog).exhausted;
       if (quota) {
+        this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
+        this.runRepo.finish(runId, 'quota');
+        if (quota) this.quotaService.mark(profileName, active.actor === 'claude-reviewer' ? 'claude' : 'codex', this.config.reviewer?.failoverSec || 5 * 60 * 60, `${active.actor} quota`);
         const task = this.taskRepo.get(taskId);
         const nextReviewer = task ? this.getNextReviewerProfile(task) : undefined;
         appendFailoverReason(nextReviewer ? `reviewer ${profileName} hết quota, chuyển sang ${nextReviewer}` : `reviewer ${profileName} hết quota`);
+        this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: 'quota' });
+        if (!this.stopped) this.triggerTick();
+        return;
       }
-      this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: quota ? 'quota' : reason === 'timeout' ? 'timeout' : 'crash' });
-      if (!this.stopped) this.triggerTick();
+
+      if (reason === 'timeout' || reason === 'error' || exitCode !== 0) {
+        this.reviewerErrorCounts.set(taskId, (this.reviewerErrorCounts.get(taskId) || 0) + 1);
+        this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
+        this.runRepo.finish(runId, reason === 'timeout' ? 'timeout' : 'crashed');
+        this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: reason === 'timeout' ? 'timeout' : 'crash' });
+        if (!this.stopped) this.triggerTick();
+        return;
+      }
+
+      // Process exited 0 but reviewer output had no valid verdict
+      this.reviewerErrorCounts.set(taskId, (this.reviewerErrorCounts.get(taskId) || 0) + 1);
+      this.runRepo.finish(runId, 'crashed', undefined, 'malformed reviewer output');
+      this.eventBus.emit('review.failed', taskId, { actor: active.actor, reason: 'malformed_output' });
       return;
     }
+
     const task = this.taskRepo.get(taskId);
     const checks = this.getCheckResults(taskId);
     if (checks.length === 0) {
       this.runRepo.finish(runId, 'done', undefined, 'reviewer had no persisted autocheck results');
       this.escalateReview(taskId, 'missing_autocheck_results', 'Không có kết quả autocheck đã lưu; cần người xác minh trước khi tiếp tục.');
-      return;
-    }
-    const result = parseReviewerOutput(output);
-    if (!result) {
-      this.reviewerErrorCounts.set(taskId, (this.reviewerErrorCounts.get(taskId) || 0) + 1);
-      this.runRepo.finish(runId, 'crashed', undefined, 'malformed reviewer output');
-      this.eventBus.emit('review.failed', taskId, { actor: active.actor, reason: 'malformed_output' });
       return;
     }
     if (this.isReadOnlyEnvironmentFeedback(result.verdict, result.feedback)) {

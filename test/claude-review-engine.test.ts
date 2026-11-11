@@ -159,4 +159,37 @@ process.stdin.on('end', () => {
     expect(engine.detectTransientError('ECONNRESET while connecting to Claude API')).toBe(true);
     expect(engine.detectTransientError('All checks passed')).toBe(false);
   });
+
+  it('negative: assistant prose mentioning rate limit, 429 or 401 does not trigger quota or auth error', () => {
+    const engine = new ClaudeReviewEngine();
+    const assistantLog = [
+      'Bắt đầu duyệt code.',
+      'Tôi đang kiểm tra cơ chế xử lý rate limit và trả về 429 khi người dùng gọi API quá nhiều.',
+      'Đồng thời kiểm tra hàm verifyToken trả về 401 unauthenticated nếu token không hợp lệ.',
+      'Tất cả đã xử lý đúng theo tài liệu.',
+    ].join('\n');
+
+    expect(engine.detectQuota(assistantLog).exhausted).toBe(false);
+    expect(engine.detectAuthError(assistantLog).expired).toBe(false);
+
+    // Also verify successful verdict JSON is not parsed as quota or auth error
+    const approvedVerdict = JSON.stringify({
+      verdict: 'approved',
+      feedback: 'Code xử lý tốt rate limit, 429 và 401 unauthenticated.',
+    });
+    expect(engine.detectQuota(approvedVerdict).exhausted).toBe(false);
+    expect(engine.detectAuthError(approvedVerdict).expired).toBe(false);
+  });
+
+  it('negative: tool summary with line count such as 512 dòng does not trigger transient error', () => {
+    const engine = new ClaudeReviewEngine();
+    const log = [
+      'Read src/index.ts',
+      '→ (512 dòng)',
+      'Const HTTP_STATUS_500 = 500;',
+      'Code looks good.',
+    ].join('\n');
+
+    expect(engine.detectTransientError(log)).toBe(false);
+  });
 });

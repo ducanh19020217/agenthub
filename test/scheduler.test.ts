@@ -723,6 +723,19 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
+  it('does not crash a successful reviewer run when feedback or log mentions 401 or rate limit', async () => {
+    const { scheduler, reviewRepo } = makeReviewer('reviewer-auth-word-approved');
+    scheduler.tick();
+    await vi.waitFor(() => {
+      expect(taskRepo.get('test-project/review')?.status).toBe('done');
+    });
+    expect(reviewRepo.getByTask('test-project/review')[0]?.verdict).toBe('approved');
+    const reviewerRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
+    expect(reviewerRun?.outcome).toBe('done');
+    expect(profileRepo.get('codex-1')?.authState).not.toBe('not_logged_in');
+    scheduler.stop();
+  });
+
   it('routes changes_requested back to queued with feedback', async () => {
     const { scheduler, reviewRepo } = makeReviewer('reviewer-changes');
     scheduler.tick();

@@ -1,6 +1,7 @@
 import { ChildProcess, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { lastNLines, type AuthDetection, type Engine, type QuotaDetection, type SpawnOpts, parseResetTime } from './index.js';
 import { lowPriority } from '../priority.js';
 import { lockCommand } from '../profiles/locks.js';
@@ -62,6 +63,7 @@ export function formatReviewerToolResult(output?: string, isError?: boolean): st
  */
 export class ClaudeReviewStreamFormatter {
   private buffer = '';
+  private decoder = new StringDecoder('utf8');
 
   constructor(
     private onLogLine: (line: string) => void,
@@ -69,7 +71,8 @@ export class ClaudeReviewStreamFormatter {
   ) {}
 
   feed(chunk: string | Buffer): void {
-    this.buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+    const text = typeof chunk === 'string' ? chunk : this.decoder.write(chunk);
+    this.buffer += text;
     const lines = this.buffer.split('\n');
     this.buffer = lines.pop() ?? '';
     for (const line of lines) {
@@ -78,6 +81,10 @@ export class ClaudeReviewStreamFormatter {
   }
 
   flush(): void {
+    const remaining = this.decoder.end();
+    if (remaining) {
+      this.buffer += remaining;
+    }
     if (this.buffer.trim()) {
       this.processLine(this.buffer);
       this.buffer = '';
@@ -239,7 +246,7 @@ export function extractTrustedErrorText(text: string): string {
     }
   }
 
-  // 2. Scan lines for trusted error patterns
+  // 2. Scan lines for trusted error patterns: [error], [stderr], and CLI usage limit lines
   const lines = text.split('\n');
   const errorLines: string[] = [];
   for (const line of lines) {
@@ -247,8 +254,10 @@ export function extractTrustedErrorText(text: string): string {
     if (!l) continue;
     if (l.startsWith('[error]')) {
       errorLines.push(l.slice('[error]'.length).trim());
+    } else if (l.startsWith('[stderr]')) {
+      errorLines.push(l.slice('[stderr]'.length).trim());
     } else if (
-      /^(?:error\b|fatal\b|claude ai usage limit|you(?:'ve| have) hit your|authentication failed|not logged in|invalid api key|please run \/login|unauthenticated|\b401\b|\b429\b|\b5\d\d\b|econnreset|etimedout|socket hang up|overloaded)/i.test(l)
+      /^(?:claude ai usage limit|you(?:'ve| have) hit your (?:session|usage|weekly|daily) limit)/i.test(l)
     ) {
       errorLines.push(l);
     }
@@ -305,15 +314,49 @@ export class ClaudeReviewEngine implements Engine {
       },
     );
 
+    const stderrDecoder = new StringDecoder('utf8');
+    let stderrBuffer = '';
+    const writeStderrLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      try {
+        fs.appendFileSync(opts.logPath, `[stderr] ${trimmed}\n`, 'utf8');
+      } catch { /* ignore write error */ }
+    };
+
+    child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (chunk) => formatter.feed(chunk));
     child.stdout?.on('end', () => formatter.flush());
-    child.stderr?.on('data', (chunk) => {
-      try {
-        fs.appendFileSync(opts.logPath, chunk.toString('utf-8'), 'utf8');
-      } catch { /* ignore */ }
+
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (chunk: string | Buffer) => {
+      const text = typeof chunk === 'string' ? chunk : stderrDecoder.write(chunk);
+      stderrBuffer += text;
+      const lines = stderrBuffer.split('\n');
+      stderrBuffer = lines.pop() ?? '';
+      for (const line of lines) {
+        writeStderrLine(line);
+      }
     });
-    child.on('error', () => formatter.flush());
-    child.on('close', () => formatter.flush());
+
+    const flushStderr = () => {
+      const remaining = stderrDecoder.end();
+      if (remaining) stderrBuffer += remaining;
+      if (stderrBuffer.trim()) {
+        writeStderrLine(stderrBuffer);
+        stderrBuffer = '';
+      }
+    };
+
+    child.stderr?.on('end', () => flushStderr());
+    child.on('error', () => {
+      flushStderr();
+      formatter.flush();
+    });
+    child.on('close', () => {
+      flushStderr();
+      formatter.flush();
+    });
 
     // The prompt goes through stdin so task text can never be parsed as CLI flags.
     child.stdin?.on('error', () => { /* child exited before reading */ });

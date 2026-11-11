@@ -395,7 +395,7 @@ export const vi = {
     publishSkippedDirty: 'Đã đẩy lên remote; nhánh local {{branch}} chưa cập nhật vì thư mục đang có thay đổi chưa commit',
     publishError: 'Không thể đẩy lên git',
     noLog: 'Chưa có log từ worker...',
-    reviewingWithProfile: 'Reviewer {{profile}} đang duyệt…',
+    reviewingWithProfile: 'Reviewer {profile} đang duyệt…',
     reviewing: 'Đang duyệt…',
     checkingLog: 'Đang chạy kiểm tra…',
     scrollToBottom: 'Cuộn xuống cuối',

@@ -127,6 +127,90 @@ describe('TaskDetailPage - Live log of running task', () => {
     expect(await screen.findByText(/Worker finished work cleanly/)).toBeInTheDocument();
     expect(screen.getByText(/Run #1 · worker/)).toBeInTheDocument();
     expect(screen.getByText(/Run #2 · reviewer · claude\/claude-may/)).toBeInTheDocument();
+    // Also asserts hint is visible under the last run header
+    expect(screen.getByText(/Reviewer claude-may (?:đang duyệt|is reviewing)/)).toBeInTheDocument();
+  });
+
+  it('displays reviewer hint when last run has header only even if previous runs have logs', async () => {
+    const mockTask: TaskDetail = {
+      id: 'demo/task-multi-hint',
+      projectId: 'demo',
+      slug: 'task-multi-hint',
+      title: 'Task Multi Hint',
+      level: 'easy',
+      status: 'review',
+      dependsOn: '[]',
+      attempt: 0,
+      resume: 0,
+      createdAt: '2026-10-15T08:00:00Z',
+      updatedAt: '2026-10-15T08:00:00Z',
+      runs: [
+        { id: 'r1', taskId: 'demo/task-multi-hint', engine: 'agy', model: 'gemini', profileName: 'p1', kind: 'worker', startedAt: '2026-10-15T08:00:00Z' },
+        { id: 'r2', taskId: 'demo/task-multi-hint', engine: 'claude', model: 'claude:sonnet', profileName: 'claude-may', kind: 'reviewer', startedAt: '2026-10-15T08:30:00Z' },
+      ],
+      reviews: [],
+    };
+
+    const logWithHeaderOnlyForLastRun = [
+      '── Run #1 · worker · agy/p1 · 15:00 ──',
+      'Worker finished work cleanly',
+      '',
+      '── Run #2 · reviewer · claude/claude-may · 15:30 ──',
+      '',
+    ].join('\n');
+
+    vi.spyOn(client, 'getTask').mockResolvedValue(mockTask);
+    vi.spyOn(client, 'getTaskLog').mockResolvedValue(logWithHeaderOnlyForLastRun);
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/tasks/demo~task-multi-hint']}>
+          <Routes>
+            <Route path="/tasks/:id" element={<TaskDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    expect(await screen.findByText(/Run #2 · reviewer · claude\/claude-may/)).toBeInTheDocument();
+    // Hint displayed under the last run header
+    expect(screen.getByText(/Reviewer claude-may (?:đang duyệt|is reviewing)/)).toBeInTheDocument();
+  });
+
+  it('displays checking hint when task is checking and last run has header only', async () => {
+    const mockTask: TaskDetail = {
+      id: 'demo/task-chk-header',
+      projectId: 'demo',
+      slug: 'task-chk-header',
+      title: 'Task In Checking With Header',
+      level: 'easy',
+      status: 'checking',
+      dependsOn: '[]',
+      attempt: 0,
+      resume: 0,
+      createdAt: '2026-10-15T08:00:00Z',
+      updatedAt: '2026-10-15T08:00:00Z',
+      runs: [],
+      reviews: [],
+    };
+
+    const logWithHeader = '── Run #1 · checker · 15:30 ──\n';
+
+    vi.spyOn(client, 'getTask').mockResolvedValue(mockTask);
+    vi.spyOn(client, 'getTaskLog').mockResolvedValue(logWithHeader);
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/tasks/demo~task-chk-header']}>
+          <Routes>
+            <Route path="/tasks/:id" element={<TaskDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    expect(await screen.findByText(/Run #1 · checker/)).toBeInTheDocument();
+    expect(screen.getByText(/Đang chạy kiểm tra|Running checks/i)).toBeInTheDocument();
   });
 
   it('displays reviewer status when task is in review and log is empty', async () => {

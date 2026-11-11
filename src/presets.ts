@@ -382,7 +382,12 @@ export function presetProjectPatch(project: ProjectRow, preset: PresetLevel, cod
   const cleanCodexModel = codexModel.startsWith('codex:') ? codexModel.slice('codex:'.length) : codexModel;
   const chain = getPresetChain(preset, cleanCodexModel);
   const enableIntegration = def.config.review.autoMerge && !projectHasMergeTarget(project);
-  const current = projectSettings(project).integration;
+  const currentSettings = projectSettings(project);
+  const current = currentSettings.integration;
+  const existingPublish = currentSettings.publish;
+  const audit = existingPublish?.audit !== undefined
+    ? existingPublish.audit
+    : (def.config.publish.audit || { enabled: true, maxFixRounds: 2 });
   return {
     settings: {
       preset,
@@ -393,8 +398,9 @@ export function presetProjectPatch(project: ProjectRow, preset: PresetLevel, cod
         ? { enabled: true, branch: current.branch || 'agenthub/integration', autoMerge: true }
         : { autoMerge: def.config.review.autoMerge },
       publish: {
+        ...existingPublish,
         enabled: def.config.publish.enabled,
-        audit: def.config.publish.audit || { enabled: true, maxFixRounds: 2 },
+        audit,
       },
     },
     review: { chain, maxRounds: def.config.review.maxRounds },
@@ -569,29 +575,17 @@ export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput)
     }
 
     if (!dryRun) {
+      const patch = presetProjectPatch(project, preset, codexModel);
       service.updateProject(projectId, {
         settings: {
-          preset,
-          autoFixOnFail: def.config.autoFixOnFail,
-          planning: def.config.planning,
+          ...patch.settings,
           brain: {
             mode: def.config.brain.mode,
             permissions: def.config.brain.permissions,
           },
-          review: {
-            autoMerge: def.config.review.autoMerge,
-          },
-          integration: presetProjectPatch(project, preset, codexModel).settings.integration,
-          publish: {
-            enabled: def.config.publish.enabled,
-            audit: def.config.publish.audit || { enabled: true, maxFixRounds: 2 },
-          },
         },
-        review: {
-          chain,
-          maxRounds: def.config.review.maxRounds,
-        },
-        reviewChain: chain,
+        review: patch.review,
+        reviewChain: patch.reviewChain,
       });
     }
 

@@ -2807,7 +2807,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                     </label>
                     <input
                       type="number"
-                      min={0}
+                      min={1}
                       max={10}
                       data-testid="publish-audit-max-fix-rounds"
                       value={draftSettings.publish?.audit?.maxFixRounds ?? 2}
@@ -2819,7 +2819,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                             ...prev.publish!,
                             audit: {
                               ...prev.publish?.audit,
-                              maxFixRounds: Number.isNaN(val) ? 2 : Math.max(0, val),
+                              maxFixRounds: Number.isNaN(val) ? 2 : Math.max(1, val),
                             },
                           },
                         }));

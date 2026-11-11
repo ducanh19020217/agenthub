@@ -77,7 +77,7 @@ export const PublishAuditSettingsInputSchema = z.object({
 });
 
 export const PublishSettingsSchema = z.object({
-  enabled: z.boolean().default(false),
+  enabled: z.boolean().default(true),
   remote: z.string().trim().min(1).default('origin'),
   branch: z.string().trim().min(1, 'Tên nhánh không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
   pushIntegrationBranch: z.boolean().default(true),

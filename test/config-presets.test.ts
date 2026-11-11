@@ -328,10 +328,10 @@ describe('Config Presets, Priority, and Effective Config', () => {
       expect(autoPreset.config.publish.enabled).toBe(true);
 
       const safePreset = presets.find((p: { id: string }) => p.id === 'safe');
-      expect(safePreset.config.publish.enabled).toBe(false);
+      expect(safePreset.config.publish.enabled).toBe(true);
 
       const balancedPreset = presets.find((p: { id: string }) => p.id === 'balanced');
-      expect(balancedPreset.config.publish.enabled).toBe(false);
+      expect(balancedPreset.config.publish.enabled).toBe(true);
     });
 
     it('dryRun=true tính toán diff nhưng không ghi xuống dữ liệu', async () => {

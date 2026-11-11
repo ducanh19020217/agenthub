@@ -38,7 +38,7 @@ describe('project settings parsing', () => {
       reviewChecklist: [],
       notifications: { telegramContent: 'full' },
       publish: {
-        enabled: false,
+        enabled: true,
         remote: 'origin',
         pushIntegrationBranch: true,
         audit: {

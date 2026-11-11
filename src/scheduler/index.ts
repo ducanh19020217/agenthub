@@ -562,6 +562,10 @@ export class Scheduler {
     return this.reviewerRuns.get(taskId);
   }
 
+  getReviewerRuns(): Map<string, ReviewerRun> {
+    return this.reviewerRuns;
+  }
+
   getRestartSnapshot(projectId?: string): { checks: number; editing: number } {
     const editing = projectId
       ? [...this.running.values()].filter((running) => running.projectId === projectId).length

@@ -405,4 +405,115 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     expect(grid?.className).toContain('content-between');
     expect(grid?.className).toContain('min-h-[max(480px,calc(100vh-280px))]');
   });
+
+  it('does not cause an infinite render loop when getBoundingClientRect returns non-zero dimensions', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // Mock ResizeObserver
+    let roCallback: ResizeObserverCallback | null = null;
+    class MockResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        roCallback = callback;
+      }
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    }
+    const origResizeObserver = window.ResizeObserver;
+    window.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
+
+    // Mock getBoundingClientRect on elements
+    const origGetBoundingClientRect = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function () {
+      return {
+        width: 160,
+        height: 90,
+        top: 50,
+        left: 100,
+        bottom: 140,
+        right: 260,
+        x: 100,
+        y: 50,
+        toJSON: () => {},
+      };
+    };
+
+    try {
+      renderPage('/tasks?view=flow');
+      await waitFor(() => {
+        expect(screen.getByTestId('flow-view-wrapper')).toBeInTheDocument();
+      });
+
+      // Simulate ResizeObserver triggering
+      const trigger = roCallback as ResizeObserverCallback | null;
+      if (trigger) {
+        trigger([], {} as unknown as ResizeObserver);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Assert no "Maximum update depth exceeded" error
+      const depthErrors = errorSpy.mock.calls.filter((call) =>
+        call.some((arg) => typeof arg === 'string' && arg.includes('Maximum update depth exceeded')),
+      );
+      expect(depthErrors).toHaveLength(0);
+    } finally {
+      window.ResizeObserver = origResizeObserver;
+      Element.prototype.getBoundingClientRect = origGetBoundingClientRect;
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('renders merge label in an area not covered by nodes (above node boundary)', async () => {
+    renderPage('/tasks?view=flow');
+    const label = await screen.findByTestId('flow-merge-label');
+    expect(label).toBeInTheDocument();
+    expect(label).toHaveAttribute('data-placement', 'above-node');
+
+    // Label should be positioned above node top boundary (in fallback box, row 1 node y is 52)
+    const yAttr = Number(label.getAttribute('y'));
+    expect(yAttr).toBeLessThan(52);
+
+    // Label text is visible in both vi and en
+    expect(label.textContent).toMatch(/merge.*push/i);
+  });
+
+  it('pressing Enter on a running task link does not open the status modal', async () => {
+    const singleRunning = [makeTask('task-key-enter-test', 'running')];
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      const matching = singleRunning.filter((t) => !params?.status || params.status === 'all' || t.status === params.status);
+      return {
+        items: matching,
+        total: matching.length,
+        nextCursor: null,
+      };
+    });
+
+    renderPage('/tasks?view=flow');
+    const runningNode = await screen.findByTestId('flow-node-running');
+    await waitFor(() => expect(runningNode).toHaveAttribute('data-count', '1'));
+
+    const link = within(runningNode).getByRole('link', { name: /task-key-enter-test/ });
+    expect(link).toBeInTheDocument();
+
+    // Fire Enter on the link
+    fireEvent.keyDown(link, { key: 'Enter' });
+
+    // Modal dialog must NOT be opened
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    // In contrast, pressing Enter directly on the node card DOES open the modal
+    fireEvent.keyDown(runningNode, { key: 'Enter' });
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('enforces min-w-[1240px] and minmax(150px, 1fr) column width for flow nodes', async () => {
+    renderPage('/tasks?view=flow');
+    const wrapper = await screen.findByTestId('flow-view-wrapper');
+    const board = wrapper.querySelector('[role="group"]');
+    expect(board?.className).toContain('min-w-[1240px]');
+
+    const grid = board?.querySelector('.grid');
+    expect(grid?.className).toContain('grid-cols-[repeat(7,minmax(150px,1fr))]');
+  });
 });

@@ -394,6 +394,7 @@ export const en: typeof vi = {
     publishCommit: 'Commit',
     publishTime: 'Published At',
     viewCommit: 'View commit',
+    publishSkippedDirty: 'Pushed to remote; local branch {{branch}} was not updated because the directory has uncommitted changes',
     publishError: 'Failed to publish to git',
     noLog: 'No log output from worker yet...',
     reviewingWithProfile: 'Reviewer {{profile}} is reviewing…',

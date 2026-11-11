@@ -50,6 +50,7 @@ import {
   CheckCircle2,
   XCircle,
   AlertCircle,
+  AlertTriangle,
   Terminal,
   FileText,
   GitCommit,
@@ -1022,6 +1023,15 @@ export const TaskDetailPage: React.FC = () => {
               </div>
             )}
           </div>
+
+          {parsedPushResult?.localUpdate === 'skipped_dirty' && (
+            <div data-testid="publish-skipped-dirty-banner" className="rounded-lg p-3 bg-[color-mix(in_srgb,var(--t-warn)_12%,transparent)] border border-[var(--t-warn)] text-xs text-[var(--t-warn)] space-y-1">
+              <div className="font-semibold flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{t('taskDetail.publishSkippedDirty', { branch: parsedPushResult.branch || project?.defaultBranch || 'main' })}</span>
+              </div>
+            </div>
+          )}
 
           {parsedPushResult?.error ? (
             <div data-testid="publish-error-banner" className="rounded-lg p-3 bg-[color-mix(in_srgb,var(--t-crit)_12%,transparent)] border border-[var(--t-crit)] text-xs text-[var(--t-crit)] space-y-1">

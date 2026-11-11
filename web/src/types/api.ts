@@ -432,6 +432,7 @@ export interface Task {
     error?: string | null;
     reason?: string | null;
     outputTail?: string | null;
+    localUpdate?: 'updated' | 'skipped_dirty';
     auditPassed?: boolean;
     auditSkipped?: boolean;
     auditFailed?: boolean;

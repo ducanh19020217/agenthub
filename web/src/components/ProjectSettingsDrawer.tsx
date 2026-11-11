@@ -184,7 +184,7 @@ export const defaultProjectSettings = (): NonNullable<Project['settings']> => ({
   brain: { mode: 'inherit' },
   worktree: { install: 'auto', gitHooks: 'run' },
   integration: { enabled: false },
-  publish: { enabled: false, remote: 'origin', branch: '', pushIntegrationBranch: true, audit: { enabled: true, maxFixRounds: 2 } },
+  publish: { enabled: true, remote: 'origin', branch: '', pushIntegrationBranch: true, audit: { enabled: true, maxFixRounds: 2 } },
   ci: {},
   references: [],
   reviewChecklist: [],
@@ -767,10 +767,11 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
         review: { ...prev.review, autoMerge: preset === 'auto' },
         integration: { ...prev.integration, autoMerge: preset === 'auto' },
         publish: {
-          enabled: preset === 'auto',
+          enabled: true,
           remote: prev.publish?.remote || 'origin',
           branch: prev.publish?.branch || '',
           pushIntegrationBranch: prev.publish?.pushIntegrationBranch ?? true,
+          audit: prev.publish?.audit || { enabled: true, maxFixRounds: 2 },
         },
         autoFixOnFail: preset !== 'safe',
       }));

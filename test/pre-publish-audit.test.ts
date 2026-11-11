@@ -130,4 +130,19 @@ describe('Pre-publish audit prompt and parser', () => {
     clearAuditPassCache();
     expect(getCachedAuditPass('task-1', 'sha-123')).toBeUndefined();
   });
+
+  it('truncates diff exceeding 40,000 characters and provides notice to agent', () => {
+    const largeDiff = 'a'.repeat(50_000);
+    const prompt = buildPrePublishAuditPrompt({
+      taskId: 'proj/large-diff',
+      taskTitle: 'Large Diff Task',
+      taskBody: 'Large diff test',
+      diff: largeDiff,
+      changedFiles: ['src/large.ts'],
+      repoPath: '/tmp/repo',
+      commitSha: 'commit-sha-abc',
+    });
+    expect(prompt).toContain('DIFF BỊ CẮT VÌ VƯỢT QUÁ 40000 KÝ TỰ');
+    expect(prompt).toContain('git show commit-sha-abc');
+  });
 });

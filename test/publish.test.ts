@@ -9,7 +9,7 @@ import { createServer } from '../src/api/server.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { FakeEngine, type Engine } from '../src/engines/index.js';
 import { buildGitUrls } from '../src/publish.js';
-import { clearPrePublishAuditCache } from '../src/pre-publish-audit.js';
+import { clearAuditPassCache } from '../src/pre-publish-audit.js';
 import { toRouteId } from '../src/services/index.js';
 
 let tmpDir: string;
@@ -60,7 +60,7 @@ function initGitRepoWithRemote(repoPath: string, remotePath: string, branch = 'm
 describe('Publish Service (t-auto-push-after-done)', () => {
   beforeEach(async () => {
     delete process.env.FAKE_MODE;
-    clearPrePublishAuditCache();
+    clearAuditPassCache();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-publish-test-'));
     const agyHomesDir = path.join(tmpDir, 'agy-homes');
     fs.mkdirSync(agyHomesDir, { recursive: true });
@@ -91,7 +91,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
 
   afterEach(async () => {
     delete process.env.FAKE_MODE;
-    clearPrePublishAuditCache();
+    clearAuditPassCache();
     ctx?.scheduler?.stop();
     await server?.close();
     ctx?.db?.close();
@@ -905,7 +905,22 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         branch: 'agenthub/maxrounds-task',
         baseRef: 'main',
       });
-      ctx.taskRepo.update('proj-maxrounds/task-max', { reviewerChangesRequested: 2 });
+      ctx.reviewRepo.insert({
+        id: 'rev-audit-1',
+        taskId: 'proj-maxrounds/task-max',
+        verdict: 'changes_requested',
+        actor: 'audit-prepublish',
+      });
+      ctx.reviewRepo.insert({
+        id: 'rev-audit-2',
+        taskId: 'proj-maxrounds/task-max',
+        verdict: 'changes_requested',
+        actor: 'audit-prepublish',
+      });
+      ctx.taskRepo.update('proj-maxrounds/task-max', {
+        reviewerChangesRequested: 2,
+        pushResult: JSON.stringify({ auditFixRounds: 2 }),
+      });
 
       process.env.FAKE_MODE = 'audit-fail';
       const res = await ctx.service.publishTask('proj-maxrounds/task-max');
@@ -991,6 +1006,113 @@ describe('Publish Service (t-auto-push-after-done)', () => {
 
       expect(events.some((e) => e.type === 'task.audit_skipped')).toBe(true);
       expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
+    });
+
+    it('audit uses merge commit diff and commitSha when task branch is deleted', async () => {
+      const remotePath = path.join(tmpDir, 'remote-deleted-branch.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-deleted-branch');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/deleted-branch-task'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'del-feature.txt'), 'feature content\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: feature with deleted branch'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/deleted-branch-task', '-m', "Merge branch 'agenthub/deleted-branch-task' into main"], { cwd: repoPath, env: testEnv });
+      const mergeCommitSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+      // Delete the branch completely
+      execFileSync('git', ['branch', '-D', 'agenthub/deleted-branch-task'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-deleted-branch',
+        name: 'Project Deleted Branch',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 2 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-deleted-branch/task-del',
+        projectId: 'proj-deleted-branch',
+        slug: 'deleted-branch-task',
+        title: 'Deleted Branch Task',
+        status: 'done',
+        branch: 'agenthub/deleted-branch-task',
+        baseRef: 'main',
+      });
+
+      process.env.FAKE_MODE = 'audit-pass';
+      const res = await ctx.service.publishTask('proj-deleted-branch/task-del');
+      expect(res.ok).toBe(true);
+
+      // Verify that audit result was cached under the merge commit SHA!
+      const { getCachedAuditPass } = await import('../src/pre-publish-audit.js');
+      const cached = getCachedAuditPass('proj-deleted-branch/task-del', mergeCommitSha);
+      expect(cached).toBeDefined();
+      expect(cached?.verdict).toBe('pass');
+    });
+
+    it('independent audit fix rounds: task with prior reviewer changes still gets audit fix chances', async () => {
+      const remotePath = path.join(tmpDir, 'remote-indep-rounds.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-indep-rounds');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/indep-task'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'indep.txt'), 'indep feature\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: indep feature'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/indep-task', '-m', "Merge branch 'agenthub/indep-task' into main"], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-indep',
+        name: 'Project Indep Rounds',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 2 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-indep/task-indep',
+        projectId: 'proj-indep',
+        slug: 'indep-task',
+        title: 'Indep Task',
+        status: 'done',
+        branch: 'agenthub/indep-task',
+        baseRef: 'main',
+      });
+      // Task already had 2 rounds of standard reviewer changes
+      ctx.taskRepo.update('proj-indep/task-indep', { reviewerChangesRequested: 2 });
+
+      process.env.FAKE_MODE = 'audit-fail';
+      const res = await ctx.service.publishTask('proj-indep/task-indep');
+      expect(res.ok).toBe(false);
+      expect((res as any).auditFailed).toBe(true);
+
+      const updated = ctx.taskRepo.get('proj-indep/task-indep');
+      // Must be returned to worker (queued) for its FIRST audit fix round despite reviewerChangesRequested == 2
+      expect(updated?.status).toBe('queued');
+      const pushResult = JSON.parse(updated!.pushResult!);
+      expect(pushResult.auditFixRounds).toBe(1);
     });
   });
 });

@@ -80,6 +80,12 @@ describe('safe restart API', () => {
     const now = await server.inject({ method: 'POST', url: '/api/system/restart', headers: headers(), payload: { mode: 'now' } });
     expect(now.statusCode).toBe(200);
     expect(JSON.parse(now.body).mode).toBe('now');
+    expect(JSON.parse(now.body).killWorkers).toBe(false);
+
+    const nowKill = await server.inject({ method: 'POST', url: '/api/system/restart', headers: headers(), payload: { mode: 'now', killWorkers: true } });
+    expect(nowKill.statusCode).toBe(200);
+    expect(JSON.parse(nowKill.body).mode).toBe('now');
+    expect(JSON.parse(nowKill.body).killWorkers).toBe(true);
   });
 });
 
@@ -181,12 +187,15 @@ esac
     const script = path.join(process.cwd(), 'scripts', 'run-prod.sh');
     const idle = runFile('bash', [script, '--restart'], { cwd: process.cwd(), env, encoding: 'utf8' });
     const force = runFile('bash', [script, '--restart', '--force'], { cwd: process.cwd(), env, encoding: 'utf8' });
+    const forceKill = runFile('bash', [script, '--restart', '--force', '--kill-workers'], { cwd: process.cwd(), env, encoding: 'utf8' });
     const stop = runFile('bash', [path.join(process.cwd(), 'scripts', 'stop-prod.sh')], { cwd: process.cwd(), env, encoding: 'utf8' });
     const output = fs.readFileSync(calls, 'utf8');
     expect(output).toContain('"mode":"when-idle"');
-    expect(output).toContain('"mode":"now"');
+    expect(output).toContain('"mode":"now","killWorkers":false');
+    expect(output).toContain('"mode":"now","killWorkers":true');
     expect(idle).toContain('Sẽ khởi động lại khi 1 task chạy xong');
-    expect(force).toContain('worker đang chạy sẽ bị dừng');
+    expect(force).toContain('handoff: worker tiếp tục chạy');
+    expect(forceKill).toContain('worker đang chạy sẽ bị dừng');
     expect(stop).toContain('Sẽ dừng an toàn sau khi 1 task chạy xong');
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -322,7 +331,7 @@ describe('worker survival across daemon restart (handoff & adoption)', () => {
     exitSpy.mockRestore();
   });
 
-  it('does not adopt a reused PID from an unrelated process and returns task to queue', async () => {
+  it('does not adopt a reused PID from an unrelated process and marks task blocked', async () => {
     taskRepo.insert({ id: 'p/t2', projectId: 'p', slug: 't2', title: 'T2', status: 'running', worktreePath: path.join(tmpDir, 'repo') });
     runRepo.insert({
       id: 'run-reused',
@@ -349,8 +358,8 @@ describe('worker survival across daemon restart (handoff & adoption)', () => {
     expect(run.reason).toBe('pid_reused_during_handoff');
 
     const task = taskRepo.get('p/t2')!;
-    expect(task.status).toBe('queued');
-    expect(task.resume).toBe(1);
+    expect(task.status).toBe('blocked');
+    expect(task.blockedReport).toContain('không khớp danh tính');
 
     scheduler.stop();
   });
@@ -391,40 +400,57 @@ describe('worker survival across daemon restart (handoff & adoption)', () => {
   });
 
   it('holds profile lock for adopted run and avoids duplicate dispatch', async () => {
-    taskRepo.insert({ id: 'p/t4', projectId: 'p', slug: 't4', title: 'T4', status: 'running', worktreePath: path.join(tmpDir, 'repo') });
-    runRepo.insert({
-      id: 'run-lock',
-      taskId: 'p/t4',
-      engine: 'agy',
-      model: 'gemini-3.8-flash-high',
-      profileName: 'p1',
-      pid: process.pid,
-      pidStart: null,
-    });
-    db.prepare("UPDATE runs SET lockFile = 'p1.lock' WHERE id = 'run-lock'").run();
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+    process.env.FAKE_MODE = 'sleep-loop';
+    delete process.env.STOP_SLEEP;
 
-    // Use legacyRun exception (run.handoff = 0 and pidStart = null) so adoption accepts process.pid
-    const scheduler = new Scheduler(
-      config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
-      new Map<string, Engine>([['agy', fakeEngine]]), undefined, undefined, undefined, db,
-    );
-    activeSchedulers.push(scheduler);
-    scheduler.start();
+    taskRepo.insert({ id: 'p/t4', projectId: 'p', slug: 't4', title: 'T4', status: 'queued', level: 'easy' });
 
-    expect(scheduler.getRunning().has('p/t4')).toBe(true);
+    // Start daemon A to spawn real worker with real profile lock
+    const daemonA = await startDaemon(config, new Map<string, Engine>([['agy', fakeEngine]]));
+    activeDaemons.push(daemonA);
+    await vi.waitFor(() => {
+      expect(daemonA.ctx.scheduler.getRunning().has('p/t4')).toBe(true);
+    }, { timeout: 10_000 });
+
+    const rt = daemonA.ctx.scheduler.getRunning().get('p/t4')!;
+    const workerPid = rt.pid;
+    expect(workerPid).toBeGreaterThan(0);
+    expect(process.kill(workerPid, 0)).toBe(true);
+
+    // Hand off worker on daemon A (handoff = 1, real pidStart, real worktree)
+    daemonA.ctx.scheduler.shutdownForUser('hub_handoff');
+    await daemonA.shutdown(true);
+    activeDaemons = activeDaemons.filter((d) => d !== daemonA);
+
+    // Verify worker is alive and has real handoff record in DB
+    expect(process.kill(workerPid, 0)).toBe(true);
+    const runInDb = runRepo.getByTask('p/t4')[0];
+    expect(runInDb.handoff).toBe(1);
+    expect(runInDb.pidStart).toBeTruthy();
+    expect(runInDb.lockFile).toBeTruthy();
+
+    // Start daemon B - adopts real handoff worker without legacy exception
+    const daemonB = await startDaemon(config, new Map<string, Engine>([['agy', fakeEngine]]));
+    activeDaemons.push(daemonB);
+
+    expect(daemonB.ctx.scheduler.getRunning().has('p/t4')).toBe(true);
+    expect(daemonB.ctx.scheduler.getRunning().get('p/t4')!.adopted).toBe(true);
 
     // Queue another task on profile p1
     taskRepo.insert({ id: 'p/t5', projectId: 'p', slug: 't5', title: 'T5', status: 'queued', level: 'easy' });
-    scheduler.tick();
+    daemonB.ctx.scheduler.tick();
 
     // p/t5 should not run because p1 lock slot is held by adopted run
-    expect(scheduler.getRunning().has('p/t5')).toBe(false);
+    expect(daemonB.ctx.scheduler.getRunning().has('p/t5')).toBe(false);
 
     // p/t4 should not have duplicate runs
     const runsForT4 = runRepo.getByTask('p/t4').filter((r) => r.outcome === null);
     expect(runsForT4).toHaveLength(1);
 
-    scheduler.stop();
+    await daemonB.shutdown(false);
+    activeDaemons = activeDaemons.filter((d) => d !== daemonB);
+    exitSpy.mockRestore();
   });
 
   it('user shutdown kills worker processes', async () => {
@@ -461,6 +487,231 @@ describe('worker survival across daemon restart (handoff & adoption)', () => {
     expect(run.outcome).toBe('crashed');
     expect(run.reason).toBe('user_stop');
 
+    exitSpy.mockRestore();
+  });
+
+  it('SIGTERM via real onTerm handler kills checking process group, new daemon only reruns check without rerunning worker', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+
+    const worktreePath = path.join(tmpDir, 'worktree-check-test');
+    fs.mkdirSync(path.join(worktreePath, '.agenthub'), { recursive: true });
+    execFileSync('git', ['init', '--template='], { cwd: worktreePath });
+    execFileSync('git', ['checkout', '-b', 'agenthub/tcheck'], { cwd: worktreePath });
+    fs.writeFileSync(path.join(worktreePath, 'file.txt'), 'worker work\n');
+    execFileSync('git', ['add', '.'], { cwd: worktreePath });
+    execFileSync('git', ['commit', '-m', 'worker commit'], {
+      cwd: worktreePath,
+      env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@example.com' },
+    });
+    const workerCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktreePath, encoding: 'utf8' }).trim();
+    fs.writeFileSync(path.join(worktreePath, '.agenthub', 'DONE'), 'Worker finished');
+
+    const slowCheckScript = path.join(tmpDir, 'slow-check.mjs');
+    const checkPidFile = path.join(tmpDir, 'check.pid');
+    fs.writeFileSync(slowCheckScript, `import fs from 'node:fs';
+fs.writeFileSync(${JSON.stringify(checkPidFile)}, String(process.pid));
+const interval = setInterval(() => {}, 1000);
+process.on('SIGTERM', () => { clearInterval(interval); process.exit(143); });
+`);
+    projectRepo.update('p', {
+      checks: JSON.stringify([{ name: 'slow-check', cmd: ['node', slowCheckScript], timeoutSec: 60 }]),
+    });
+
+    taskRepo.insert({
+      id: 'p/tcheck',
+      projectId: 'p',
+      slug: 'tcheck',
+      title: 'TCheck',
+      status: 'checking',
+      worktreePath,
+      branch: 'agenthub/tcheck',
+    });
+    runRepo.insert({
+      id: 'run-worker-done',
+      taskId: 'p/tcheck',
+      engine: 'agy',
+      model: 'gemini-3.8-flash-high',
+      profileName: 'p1',
+      startedAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    runRepo.finish('run-worker-done', 'done');
+
+    const daemonA = await startDaemon(config, new Map<string, Engine>([['agy', fakeEngine]]));
+    activeDaemons.push(daemonA);
+
+    void daemonA.ctx.scheduler.runChecksForTask('p/tcheck', 'run-worker-done');
+
+    await vi.waitFor(() => {
+      expect(fs.existsSync(checkPidFile)).toBe(true);
+    }, { timeout: 10_000 });
+    const checkPid = parseInt(fs.readFileSync(checkPidFile, 'utf8').trim(), 10);
+    expect(checkPid).toBeGreaterThan(0);
+    expect(process.kill(checkPid, 0)).toBe(true);
+
+    // Call real onTerm listener
+    const sigtermListeners = process.listeners('SIGTERM') as Array<() => void>;
+    expect(sigtermListeners.length).toBeGreaterThan(0);
+    sigtermListeners[sigtermListeners.length - 1]();
+
+    // Verify check process group was killed
+    await vi.waitFor(() => {
+      let alive = true;
+      try { process.kill(checkPid, 0); } catch { alive = false; }
+      expect(alive).toBe(false);
+    }, { timeout: 5000 });
+
+    activeDaemons = activeDaemons.filter((d) => d !== daemonA);
+
+    const taskAfterHandoff = taskRepo.get('p/tcheck')!;
+    expect(taskAfterHandoff.status).toBe('checking');
+
+    // Configure passing check for daemon B
+    projectRepo.update('p', {
+      checks: JSON.stringify([{ name: 'fast-check', cmd: ['node', '-e', 'process.exit(0)'], timeoutSec: 10 }]),
+    });
+
+    const daemonB = await startDaemon(config, new Map<string, Engine>([['agy', fakeEngine]]));
+    activeDaemons.push(daemonB);
+
+    await vi.waitFor(() => {
+      const currentTask = taskRepo.get('p/tcheck')!;
+      expect(['review', 'done']).toContain(currentTask.status);
+    }, { timeout: 10_000 });
+
+    const workerRuns = runRepo.getByTask('p/tcheck').filter((r) => r.kind === 'worker');
+    expect(workerRuns).toHaveLength(1);
+    expect(workerRuns[0].id).toBe('run-worker-done');
+
+    const commitAfter = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktreePath, encoding: 'utf8' }).trim();
+    expect(commitAfter).toBe(workerCommit);
+
+    await daemonB.shutdown(true);
+    activeDaemons = activeDaemons.filter((d) => d !== daemonB);
+    exitSpy.mockRestore();
+  });
+
+  it('Telegram shutdown kills worker processes and process groups', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+    process.env.FAKE_MODE = 'sleep-loop';
+    delete process.env.STOP_SLEEP;
+
+    config.telegram = { enabled: true, botToken: 'fake-token', allowedChatIds: [123] };
+    taskRepo.insert({ id: 'p/ttg', projectId: 'p', slug: 'ttg', title: 'TTG', status: 'queued', level: 'easy' });
+
+    const daemon = await startDaemon(config, new Map<string, Engine>([['agy', fakeEngine]]));
+    activeDaemons.push(daemon);
+    await vi.waitFor(() => {
+      expect(daemon.ctx.scheduler.getRunning().has('p/ttg')).toBe(true);
+    }, { timeout: 10_000 });
+
+    const rt = daemon.ctx.scheduler.getRunning().get('p/ttg')!;
+    const workerPid = rt.pid;
+    expect(workerPid).toBeGreaterThan(0);
+    expect(process.kill(workerPid, 0)).toBe(true);
+
+    // Telegram shutdown callback from allowed chat
+    await (daemon.ctx.telegramService as any).handleCallbackQuery({
+      id: 'cb-shutdown',
+      from: { id: 123 },
+      message: { message_id: 1, chat: { id: 123 } },
+      data: 'hubshutdown:confirm',
+    });
+
+    // Wait for worker process to be killed
+    await vi.waitFor(() => {
+      let alive = true;
+      try { process.kill(workerPid, 0); } catch { alive = false; }
+      expect(alive).toBe(false);
+    }, { timeout: 5000 });
+
+    const run = runRepo.getByTask('p/ttg')[0];
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toBe('user_stop');
+
+    const task = taskRepo.get('p/ttg')!;
+    expect(task.status).toBe('queued');
+    expect(task.resume).toBe(1);
+
+    activeDaemons = activeDaemons.filter((d) => d !== daemon);
+    exitSpy.mockRestore();
+  });
+
+  it('restart now default preserves worker; killWorkers: true kills worker', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+    process.env.FAKE_MODE = 'sleep-loop';
+    delete process.env.STOP_SLEEP;
+
+    taskRepo.insert({ id: 'p/tr1', projectId: 'p', slug: 'tr1', title: 'TR1', status: 'queued', level: 'easy' });
+    const daemon1 = await startDaemon(config, new Map<string, Engine>([['agy', fakeEngine]]));
+    activeDaemons.push(daemon1);
+    await vi.waitFor(() => {
+      expect(daemon1.ctx.scheduler.getRunning().has('p/tr1')).toBe(true);
+    }, { timeout: 10_000 });
+    const rt1 = daemon1.ctx.scheduler.getRunning().get('p/tr1')!;
+    const workerPid1 = rt1.pid;
+    expect(process.kill(workerPid1, 0)).toBe(true);
+
+    const addr1 = daemon1.fastify.server.address() as any;
+    const port1 = addr1 ? addr1.port : config.port;
+    const token1 = getOrCreateToken(config.tokenPath);
+    const headers1 = { host: `127.0.0.1:${port1}`, authorization: `Bearer ${token1}` };
+    const resDefault = await daemon1.fastify.inject({
+      method: 'POST',
+      url: '/api/system/restart',
+      headers: headers1,
+      payload: { mode: 'now' },
+    });
+    expect(resDefault.statusCode).toBe(200);
+    expect(JSON.parse(resDefault.body).killWorkers).toBe(false);
+
+    // Worker must still be alive!
+    expect(process.kill(workerPid1, 0)).toBe(true);
+    const run1 = runRepo.getByTask('p/tr1')[0];
+    expect(run1.handoff).toBe(1);
+    expect(run1.outcome).toBeNull();
+
+    await daemon1.shutdown(true);
+    activeDaemons = activeDaemons.filter((d) => d !== daemon1);
+    try { process.kill(-workerPid1, 'SIGKILL'); } catch { /* ignore */ }
+
+    // Test restart now with killWorkers: true
+    taskRepo.insert({ id: 'p/tr2', projectId: 'p', slug: 'tr2', title: 'TR2', status: 'queued', level: 'easy' });
+    const daemon2 = await startDaemon(config, new Map<string, Engine>([['agy', fakeEngine]]));
+    activeDaemons.push(daemon2);
+    await vi.waitFor(() => {
+      expect(daemon2.ctx.scheduler.getRunning().has('p/tr2')).toBe(true);
+    }, { timeout: 10_000 });
+    const rt2 = daemon2.ctx.scheduler.getRunning().get('p/tr2')!;
+    const workerPid2 = rt2.pid;
+    expect(process.kill(workerPid2, 0)).toBe(true);
+
+    const addr2 = daemon2.fastify.server.address() as any;
+    const port2 = addr2 ? addr2.port : config.port;
+    const token2 = getOrCreateToken(config.tokenPath);
+    const headers2 = { host: `127.0.0.1:${port2}`, authorization: `Bearer ${token2}` };
+    const resKill = await daemon2.fastify.inject({
+      method: 'POST',
+      url: '/api/system/restart',
+      headers: headers2,
+      payload: { mode: 'now', killWorkers: true },
+    });
+    expect(resKill.statusCode).toBe(200);
+    expect(JSON.parse(resKill.body).killWorkers).toBe(true);
+
+    // Worker must be killed!
+    await vi.waitFor(() => {
+      let alive = true;
+      try { process.kill(workerPid2, 0); } catch { alive = false; }
+      expect(alive).toBe(false);
+    }, { timeout: 5000 });
+
+    const run2 = runRepo.getByTask('p/tr2')[0];
+    expect(run2.outcome).toBe('crashed');
+    expect(run2.reason).toBe('hub_restart');
+    expect(taskRepo.get('p/tr2')!.status).toBe('queued');
+
+    await daemon2.shutdown(false);
+    activeDaemons = activeDaemons.filter((d) => d !== daemon2);
     exitSpy.mockRestore();
   });
 });

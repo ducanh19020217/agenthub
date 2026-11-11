@@ -198,6 +198,7 @@ const FlowNodeCard: React.FC<{
       aria-label={t('tasks.flow.nodeAria', { status: label, count: String(total) })}
       onClick={open}
       onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           open();

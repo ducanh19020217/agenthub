@@ -477,4 +477,33 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     // Label text is visible in both vi and en
     expect(label.textContent).toMatch(/merge.*push/i);
   });
+
+  it('pressing Enter on a running task link does not open the status modal', async () => {
+    const singleRunning = [makeTask('task-key-enter-test', 'running')];
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      const matching = singleRunning.filter((t) => !params?.status || params.status === 'all' || t.status === params.status);
+      return {
+        items: matching,
+        total: matching.length,
+        nextCursor: null,
+      };
+    });
+
+    renderPage('/tasks?view=flow');
+    const runningNode = await screen.findByTestId('flow-node-running');
+    await waitFor(() => expect(runningNode).toHaveAttribute('data-count', '1'));
+
+    const link = within(runningNode).getByRole('link', { name: /task-key-enter-test/ });
+    expect(link).toBeInTheDocument();
+
+    // Fire Enter on the link
+    fireEvent.keyDown(link, { key: 'Enter' });
+
+    // Modal dialog must NOT be opened
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    // In contrast, pressing Enter directly on the node card DOES open the modal
+    fireEvent.keyDown(runningNode, { key: 'Enter' });
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+  });
 });

@@ -580,6 +580,7 @@ export function closeContext(ctx: DaemonContext, preserveWorkerProcesses = false
     ctx.usageService?.stop();
     ctx.service?.stopWakeupTimer();
     ctx.service?.stopCockpitAutoSyncTimer();
+    ctx.service?.stopClaudeAuthRecovery();
   } catch {
     // ignore
   }

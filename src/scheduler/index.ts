@@ -32,6 +32,7 @@ import { ensureWorktreeNodeModules, nodeModulesCacheSummary, pruneNodeModulesCac
 import { AgentHubConfig, DEFAULT_SCHEDULER_LIMITS } from '../config.js';
 import { ProfileLockService } from '../profiles/locks.js';
 import { sameAccount } from '../profiles/account.js';
+import { markClaudeProfileAuthExpired } from '../profiles/auth.js';
 import { QuotaUsageService } from '../quota/usage.js';
 import { CheckRunner, getCheckResults } from '../checks.js';
 import { parseDbTime } from '../db/time.js';
@@ -3637,12 +3638,23 @@ export class Scheduler {
   private markProfileAuthExpired(profileName: string): void {
     const profile = this.profileRepo.get(profileName);
     if (!profile) return;
+    if (profile.engine === 'claude') {
+      markClaudeProfileAuthExpired(this.profileRepo, (type, taskId, payload) => this.eventBus.emit(type, taskId, payload), profileName);
+      return;
+    }
     const related = profile.email
       ? this.profileRepo.getAll().filter((candidate) => sameAccount(candidate, profile))
       : [profile];
     for (const candidate of related) {
+      if (candidate.authState === 'not_logged_in') continue;
       this.profileRepo.updateAuthState(candidate.name, 'not_logged_in', 'Phiên đăng nhập hết hạn (401) – cần đăng nhập lại', null);
-      this.eventBus.emit('profile.auth_expired', undefined, { name: candidate.name, email: candidate.email });
+      const home = candidate.home || undefined;
+      this.eventBus.emit('profile.auth_expired', undefined, {
+        name: candidate.name,
+        email: candidate.email,
+        engine: candidate.engine,
+        home,
+      });
     }
   }
 

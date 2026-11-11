@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import './orphan-guard.mjs';
 
+console.log = (...values) => fs.writeSync(1, `${values.map(String).join(' ')}\n`);
+console.error = (...values) => fs.writeSync(2, `${values.map(String).join(' ')}\n`);
+
 const args = process.argv.slice(2);
 
 if (args.includes('--help')) {
@@ -60,7 +63,9 @@ for (let i = 0; i < args.length; i++) {
 
 // If task review is requested via prompt or env
 const reviewMatch = prompt.match(/hub_review\s+([a-zA-Z0-9_/-]+)/) || prompt.match(/task\s+([a-zA-Z0-9_/-]+)/);
-const taskId = process.env.FAKE_CODEX_TASK_ID || (reviewMatch ? reviewMatch[1] : undefined);
+const taskId = process.env.FAKE_CODEX_NO_TOOLS === '1'
+  ? undefined
+  : (process.env.FAKE_CODEX_TASK_ID || (reviewMatch ? reviewMatch[1] : undefined));
 
 async function run() {
   if (taskId && (mcpEnv.AGENTHUB_PORT || process.env.AGENTHUB_PORT)) {

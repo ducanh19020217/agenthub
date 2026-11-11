@@ -4867,9 +4867,9 @@ export class TelegramBotService {
       }
 
       case 'profile.auth_expired': {
-        if (!notify.fallback) return;
         const name = typeof p.name === 'string' ? p.name : 'tài khoản';
-        this.broadcastMessage(`🔑 <b>Tài khoản ${this.escapeHtml(name)}</b> cần đăng nhập lại.`);
+        const command = typeof p.loginCommand === 'string' ? p.loginCommand : 'claude /login';
+        this.broadcastMessage(`🔑 <b>Tài khoản ${this.escapeHtml(name)}</b> cần đăng nhập lại. Chạy <code>${this.escapeHtml(command)}</code>.`);
         break;
       }
 

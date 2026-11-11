@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import readline from 'node:readline';
 import './orphan-guard.mjs';
 
+console.log = (...values) => fs.writeSync(1, `${values.map(String).join(' ')}\n`);
+console.error = (...values) => fs.writeSync(2, `${values.map(String).join(' ')}\n`);
+
 const args = process.argv.slice(2);
 
 // Support --help
@@ -34,6 +37,25 @@ const resumeIdx = args.indexOf('--resume');
 const resumeSessionId = resumeIdx >= 0 ? args[resumeIdx + 1] : 'sess-default-123';
 
 async function handlePrompt(prompt) {
+  if (process.env.FAKE_CLAUDE_PROFILE_LOG) {
+    fs.appendFileSync(process.env.FAKE_CLAUDE_PROFILE_LOG, `${process.env.CLAUDE_CONFIG_DIR || 'system'}\n`);
+  }
+
+  if (process.env.FAKE_CLAUDE_AUTH_FAIL_HOME && process.env.FAKE_CLAUDE_AUTH_FAIL_HOME === process.env.CLAUDE_CONFIG_DIR) {
+    fs.writeSync(1, `${JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-auth-expired' })}\n`);
+    fs.writeSync(1, `${JSON.stringify({ type: 'result', session_id: 'sess-auth-expired', is_error: true, result: 'Failed to authenticate: OAuth session expired and could not be refreshed' })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    process.exitCode = 1;
+    return;
+  }
+
+  if (prompt.includes('mention-auth-phrases')) {
+    fs.writeSync(1, `${JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-auth-phrase-success' })}\n`);
+    fs.writeSync(1, `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'The guide mentions HTTP 401 and says not logged in as examples.' }] } })}\n`);
+    fs.writeSync(1, `${JSON.stringify({ type: 'result', session_id: 'sess-auth-phrase-success', is_error: false, result: 'The guide mentions HTTP 401 and says not logged in as examples.' })}\n`);
+    return;
+  }
+
   if (prompt.includes('sleep')) {
     console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-sleep' }));
     await new Promise((resolve) => setTimeout(resolve, 30000));

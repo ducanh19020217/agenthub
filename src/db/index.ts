@@ -2374,6 +2374,12 @@ export class EventRepo {
       .all(afterId) as EventRow[];
   }
 
+  getLatestProfileAuthExpired(profileName: string): EventRow | undefined {
+    return this.db.prepare(`SELECT * FROM events
+      WHERE type = 'profile.auth_expired' AND json_extract(payload, '$.name') = ?
+      ORDER BY id DESC LIMIT 1`).get(profileName) as EventRow | undefined;
+  }
+
   getByTask(taskId: string): EventRow[] {
     return this.db
       .prepare('SELECT * FROM events WHERE taskId = ? ORDER BY id')

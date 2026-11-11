@@ -365,6 +365,9 @@ export class Scheduler {
   private reviewWaitingNotified = new Map<string, { reason: string; at: number }>();
   private failoverWasActive = false;
   private reviewerErrorCounts = new Map<string, number>();
+  private reviewerTaskBackoffUntil = new Map<string, number>();
+  private reviewerLastCrash = new Map<string, string>();
+  private dirtyReviewAttempts = new Map<string, number>();
   private reviewerFallbackNotified = new Set<string>();
   private lastOrphanScan = 0;
   private lastMergedTasksCheck = 0;
@@ -474,9 +477,10 @@ export class Scheduler {
         }
       }
     });
-    this.eventBus.on('task.done', (taskId) => this.onTaskDoneOrCancelled(taskId));
-    this.eventBus.on('task.cancelled', (taskId) => this.onTaskDoneOrCancelled(taskId));
+    this.eventBus.on('task.done', (taskId) => { this.clearReviewerTaskState(taskId); this.dirtyReviewAttempts.delete(taskId); this.onTaskDoneOrCancelled(taskId); });
+    this.eventBus.on('task.cancelled', (taskId) => { this.clearReviewerTaskState(taskId); this.dirtyReviewAttempts.delete(taskId); this.onTaskDoneOrCancelled(taskId); });
     this.eventBus.on('task.queued', (taskId) => {
+      this.clearReviewerTaskState(taskId);
       this.invalidateChecks(taskId);
       if (this.restartState.draining) this.markRestartWaiter(taskId);
     });
@@ -487,6 +491,14 @@ export class Scheduler {
 
   private schedulerLimits() {
     return this.config.scheduler || this.config.schedulerLimits;
+  }
+
+  private clearReviewerTaskState(taskId: string): void {
+    this.reviewerErrorCounts.delete(taskId);
+    this.reviewerTaskBackoffUntil.delete(taskId);
+    this.reviewerLastCrash.delete(taskId);
+    // dirtyReviewAttempts survives task.queued on purpose: the dirty-worktree requeue itself (and
+    // autofix/lock_busy requeues during the worker rerun) emit it, and the second dirty review must block.
   }
 
   private isProfileCooling(profile: ProfileRow, now = Date.now()): boolean {
@@ -2704,6 +2716,7 @@ export class Scheduler {
       const focus = this.getFocus();
       if (focus.projectId && task.projectId !== focus.projectId) continue;
       if (this.reviewerRuns.has(task.id)) continue;
+      if ((this.reviewerTaskBackoffUntil.get(task.id) || 0) > Date.now()) continue;
       if (task.reviewerEscalated) {
         const last = this.reviewRepo.getByTask(task.id).at(-1);
         if (last && isAutoReviewer(last.actor) && last.verdict === 'approved') {
@@ -3194,10 +3207,53 @@ export class Scheduler {
     return path.join(this.config.logsDir, task.id.replace('/', '_'));
   }
 
+  private reviewerDirtyPaths(worktreePath: string): string[] | null {
+    try {
+      const status = execFileSync('git', ['-C', worktreePath, 'status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' });
+      return status.split('\n').filter(Boolean).map((line) => line.slice(3).replace(/^.* -> /, '')).filter((file) => file !== '.agenthub' && !file.startsWith('.agenthub/'));
+    } catch { return null; }
+  }
+
+  private handleDirtyReview(task: TaskRow, paths: string[], reason: 'uncommitted changes' | 'unable to read git status'): void {
+    const attempt = (this.dirtyReviewAttempts.get(task.id) || 0) + 1;
+    this.dirtyReviewAttempts.set(task.id, attempt);
+    const listing = paths.slice(0, 20).map((file) => `- ${file}`).join('\n');
+    const extra = paths.length > 20 ? `\n- …và ${paths.length - 20} đường dẫn khác` : '';
+    const detail = listing ? `\n${listing}${extra}` : '';
+    if (attempt === 1) {
+      this.reviewTask(task.id, 'changes_requested', `Worktree chưa sạch (${reason}). Hãy commit các thay đổi sau hoặc xóa nếu là file tạm:${detail}`, 'uncommitted-changes');
+      return;
+    }
+    const message = `Worktree vẫn chưa sạch sau khi worker đã chạy lại (${reason}).${detail}`;
+    this.taskRepo.update(task.id, { status: 'blocked', waitReason: null, notBefore: null });
+    this.eventBus.emit('task.blocked', task.id, { reason: 'uncommitted_changes', message });
+  }
+
+  private recordReviewerCrash(taskId: string, reason: string): void {
+    const crashes = (this.reviewerErrorCounts.get(taskId) || 0) + 1;
+    this.reviewerErrorCounts.set(taskId, crashes);
+    this.reviewerLastCrash.set(taskId, reason);
+    const delays = [30_000, 120_000, 600_000, 1_800_000];
+    this.reviewerTaskBackoffUntil.set(taskId, Date.now() + delays[Math.min(crashes - 1, delays.length - 1)]);
+    // Deterministic launch failures such as E2BIG/ENOENT are task configuration failures;
+    // retain the normal five-crash limit, but never cool or rotate a healthy profile.
+    if (crashes >= 5) {
+      const message = `Reviewer bị lỗi liên tiếp ${crashes} lần; lỗi cuối: ${reason}`;
+      this.taskRepo.update(taskId, { status: 'blocked', waitReason: null, notBefore: null });
+      this.eventBus.emit('task.blocked', taskId, { reason: 'reviewer_crash_limit', message, consecutiveCrashes: crashes });
+    }
+  }
+
   private startReview(task: TaskRow, profileName: string, engine: Engine, reviewerModel: string, reviewerActor = 'codex-reviewer'): void {
     const actor: ReviewerActor = engine.id === 'claude' ? 'claude-reviewer' : 'codex-reviewer';
     const profile = this.profileRepo.get(profileName);
     if (!profile || !task.worktreePath || this.reviewerRuns.has(task.id)) return;
+    if ((this.reviewerTaskBackoffUntil.get(task.id) || 0) > Date.now()) return;
+    const dirtyPaths = this.reviewerDirtyPaths(task.worktreePath);
+    if (dirtyPaths === null || dirtyPaths.length > 0) {
+      this.handleDirtyReview(task, dirtyPaths || [], dirtyPaths === null ? 'unable to read git status' : 'uncommitted changes');
+      return;
+    }
     const lockSlot = this.locks.findFreeSlotSync(profile);
     if (lockSlot === null) return;
     const lockFile = this.locks.lockPath(profile, lockSlot);
@@ -3252,7 +3308,9 @@ export class Scheduler {
       this.runRepo.updatePid(runId, child.pid, this.getProcessStartTime(child.pid));
     } catch (error) {
       this.locks.release(profile.name, lockFile);
-      this.runRepo.finish(runId, 'crashed', undefined, String(error));
+      const crashReason = String(error);
+      this.runRepo.finish(runId, 'crashed', undefined, crashReason);
+      this.recordReviewerCrash(task.id, crashReason);
       this.eventBus.emit('review.failed', task.id, { actor, reason: 'spawn_failed' });
       return;
     }
@@ -3266,8 +3324,8 @@ export class Scheduler {
     child.unref();
     const actualEngine = engine.id;
     this.eventBus.emit('review.started', task.id, { actor: reviewerActor, model: reviewerModel, profile: profileName, engine: actualEngine, runId });
-    child.once('error', () => {
-      if (!this.stopped) this.finishReview(task.id, runId, profileName, 'error', null);
+    child.once('error', (error) => {
+      if (!this.stopped) this.finishReview(task.id, runId, profileName, 'error', null, String(error));
     });
     child.once('exit', (code) => {
       if (this.stopped) return;
@@ -3277,7 +3335,7 @@ export class Scheduler {
     });
   }
 
-  private finishReview(taskId: string, runId: string, profileName: string, reason: 'exit' | 'timeout' | 'error', exitCode: number | null = 0): void {
+  private finishReview(taskId: string, runId: string, profileName: string, reason: 'exit' | 'timeout' | 'error', exitCode: number | null = 0, errorDetail?: string): void {
     if (this.stopped) return;
     const active = this.reviewerRuns.get(taskId);
     if (!active || active.runId !== runId) return;
@@ -3308,9 +3366,10 @@ export class Scheduler {
       return;
     }
     if (reason === 'timeout' || reason === 'error' || exitCode !== 0 || quota) {
-      if (!quota) this.reviewerErrorCounts.set(taskId, (this.reviewerErrorCounts.get(taskId) || 0) + 1);
-      this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
-      this.runRepo.finish(runId, quota ? 'quota' : reason === 'timeout' ? 'timeout' : 'crashed');
+      const crashReason = errorDetail || (reason === 'timeout' ? 'reviewer timeout' : `reviewer exited with code ${exitCode}`);
+      if (!quota) this.recordReviewerCrash(taskId, crashReason);
+      else this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
+      this.runRepo.finish(runId, quota ? 'quota' : reason === 'timeout' ? 'timeout' : 'crashed', undefined, quota ? undefined : crashReason);
       if (quota) this.quotaService.mark(profileName, active.actor === 'claude-reviewer' ? 'claude' : 'codex', this.config.reviewer?.failoverSec || 5 * 60 * 60, `${active.actor} quota`);
       this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: quota ? 'quota' : reason === 'timeout' ? 'timeout' : 'crash' });
       return;
@@ -3324,7 +3383,7 @@ export class Scheduler {
     }
     const result = parseReviewerOutput(output);
     if (!result) {
-      this.reviewerErrorCounts.set(taskId, (this.reviewerErrorCounts.get(taskId) || 0) + 1);
+      this.recordReviewerCrash(taskId, 'malformed reviewer output');
       this.runRepo.finish(runId, 'crashed', undefined, 'malformed reviewer output');
       this.eventBus.emit('review.failed', taskId, { actor: active.actor, reason: 'malformed_output' });
       return;
@@ -3335,16 +3394,11 @@ export class Scheduler {
       return;
     }
     if (result.verdict === 'approved' && task?.worktreePath) {
-      try {
-        const status = execFileSync('git', ['-C', task.worktreePath, 'status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' }).trim();
-        if (status) {
-          this.runRepo.finish(runId, 'crashed', undefined, 'uncommitted changes');
-          this.eventBus.emit('review.failed', taskId, { actor: active.actor, reason: 'uncommitted_changes' });
-          return;
-        }
-      } catch {
-        this.runRepo.finish(runId, 'crashed', undefined, 'unable to read git status');
-        this.eventBus.emit('review.failed', taskId, { actor: active.actor, reason: 'git_unreadable' });
+      const dirtyPaths = this.reviewerDirtyPaths(task.worktreePath);
+      if (dirtyPaths === null || dirtyPaths.length > 0) {
+        const dirtyReason = dirtyPaths === null ? 'unable to read git status' : 'uncommitted changes';
+        this.runRepo.finish(runId, 'crashed', undefined, dirtyReason);
+        this.handleDirtyReview(task, dirtyPaths || [], dirtyReason);
         return;
       }
     }
@@ -3352,6 +3406,9 @@ export class Scheduler {
     const reviewerProfile = run?.profileName || active.profileName;
     this.runRepo.finish(runId, 'done');
     this.reviewerErrorCounts.delete(taskId);
+    this.reviewerTaskBackoffUntil.delete(taskId);
+    this.reviewerLastCrash.delete(taskId);
+    this.dirtyReviewAttempts.delete(taskId);
     this.reviewTask(taskId, result.verdict, result.feedback, active.actor, 'content', {
       engine: reviewerEngine,
       profileName: reviewerProfile,
@@ -4105,7 +4162,7 @@ export class Scheduler {
       });
     } catch (e) {
       this.locks.release(profile.name, lockFile);
-      this.runRepo.finish(runId, 'crashed');
+      this.runRepo.finish(runId, 'crashed', undefined, String(e));
       this.taskRepo.updateStatus(task.id, 'failed');
       this.eventBus.emit('task.failed', task.id, { error: String(e) });
     }

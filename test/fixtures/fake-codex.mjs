@@ -15,9 +15,13 @@ if (args.includes('--help')) {
   process.exit(0);
 }
 
-// Find prompt (last argument that doesn't start with -)
+// Like the real CLI, a trailing `-` means the prompt arrives on stdin (AgentHub always does this).
 let prompt = '';
-for (let i = args.length - 1; i >= 0; i--) {
+if (args.at(-1) === '-') {
+  try { prompt = fs.readFileSync(0, 'utf8'); } catch { prompt = ''; }
+}
+// Otherwise find prompt (last argument that doesn't start with -)
+if (!prompt) for (let i = args.length - 1; i >= 0; i--) {
   if (!args[i].startsWith('-') && (i === 0 || !args[i - 1].startsWith('-m') && !args[i - 1].startsWith('-C'))) {
     prompt = args[i];
     break;

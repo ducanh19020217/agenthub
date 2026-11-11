@@ -1027,6 +1027,13 @@ export class Scheduler {
     for (const entry of [...this.checkingActive.values(), ...this.checkingQueue]) {
       const task = this.taskRepo.get(entry.taskId);
       if (task && (task.status === 'checking' || task.status === 'running')) {
+        if (reason === 'hub_handoff') {
+          // Keep task in 'checking' status so recoverOnStartup re-runs only the check step
+          if (task.status !== 'checking') {
+            this.taskRepo.update(entry.taskId, { status: 'checking' });
+          }
+          continue;
+        }
         this.taskRepo.update(entry.taskId, { status: 'queued', resume: 1 });
         this.eventBus.emit('task.queued', entry.taskId, { reason, note: reason === 'hub_restart' ? 'hub khởi động lại' : 'dừng bởi người dùng' });
         queued++;
@@ -1082,6 +1089,22 @@ export class Scheduler {
       void this.runChecksForTask(task.id, lastWorker.id).catch((error) => {
         if (!this.stopped) console.error(`[scheduler] re-check after restart failed for ${task.id}:`, error);
       });
+    }
+
+    // Tasks in review where the review chain is empty (direct auto-merge) re-emit review_ready on startup
+    for (const task of this.taskRepo.getByStatus('review')) {
+      if (!this.projectRepo.get(task.projectId)) continue;
+      const chain = this.reviewChainForTask(task);
+      if (chain.length === 0) {
+        const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
+        if (lastWorker?.outcome === 'done') {
+          const checks = this.getCheckResults(task.id);
+          this.emitReviewReadyIfReview(task.id, {
+            reviewChainComplete: true,
+            checksPassed: checks.length > 0 ? checks.every((c) => c.ok) : true,
+          });
+        }
+      }
     }
 
     const shutdownRuns = this.runRepo.getShutdownRuns();

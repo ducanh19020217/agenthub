@@ -566,7 +566,7 @@ export function closeContext(ctx: DaemonContext, preserveWorkerProcesses = false
     // ignore
   }
   try {
-    if (!preserveWorkerProcesses) stopProcessGroups('SIGTERM');
+    stopProcessGroups('SIGTERM');
   } catch {
     // ignore
   }

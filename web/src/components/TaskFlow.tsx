@@ -74,6 +74,7 @@ const NODE_DEFS: FlowNodeDef[] = [
 ];
 
 export const FLOW_STATUSES: readonly TaskStatus[] = NODE_DEFS.map((node) => node.status);
+export const MAX_RUNNING_PREVIEW = 3;
 
 const statusColor = (status: TaskStatus) => `var(--status-${status}-color, var(--t-accent))`;
 const taskHref = (task: Task) => `/tasks/${encodeURIComponent(task.id.replace('/', '~'))}`;
@@ -171,7 +172,7 @@ const FlowNodeCard: React.FC<{
 
   const { data: runningData } = useQuery({
     queryKey: ['tasks-kanban', 'flow-running-tasks', project, search],
-    queryFn: () => getTasksPage({ project, status: 'running', search, limit: 3, sort: 'createdAt', order: 'desc' }),
+    queryFn: () => getTasksPage({ project, status: 'running', search, limit: MAX_RUNNING_PREVIEW, sort: 'createdAt', order: 'desc' }),
     enabled: showRunningDetails,
     refetchInterval: refetchInterval ?? FLOW_ACTIVE_REFETCH_INTERVAL,
     refetchIntervalInBackground: false,
@@ -261,7 +262,7 @@ const FlowNodeCard: React.FC<{
           data-testid="flow-running-tasks"
           className="mt-3 space-y-1.5 border-t border-[var(--t-border)] pt-2"
         >
-          {runningTasks.slice(0, 2).map((task) => (
+          {runningTasks.slice(0, MAX_RUNNING_PREVIEW).map((task) => (
             <div key={task.id} className="flex items-center gap-1.5 min-w-0">
               <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--t-ok)] flow-dot-pulse" />
               <Link
@@ -276,15 +277,14 @@ const FlowNodeCard: React.FC<{
               </Link>
             </div>
           ))}
-          {runningTasks.length > 0 && total > 2 ? (
-            <div className="text-xs font-semibold text-[var(--t-accent)] pl-3.5">
-              {t('tasks.flow.runningMore', { count: String(total - 2) })}
-            </div>
-          ) : runningTasks.length === 1 && total > 1 ? (
-            <div className="text-xs font-semibold text-[var(--t-accent)] pl-3.5">
-              {t('tasks.flow.runningMore', { count: String(total - 1) })}
-            </div>
-          ) : null}
+          {runningTasks.length > 0 && (() => {
+            const shown = Math.min(runningTasks.length, MAX_RUNNING_PREVIEW);
+            return total > shown ? (
+              <div className="text-xs font-semibold text-[var(--t-accent)] pl-3.5">
+                {t('tasks.flow.runningMore', { count: String(total - shown) })}
+              </div>
+            ) : null;
+          })()}
         </div>
       )}
     </div>
@@ -705,7 +705,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
       >
         <div
           ref={boardRef}
-          className="relative min-w-[1080px] min-h-[440px] lg:min-h-[480px]"
+          className="relative min-w-[1080px] min-h-[max(480px,calc(100vh-280px))]"
           role="group"
           aria-label={t('tasks.flow.ariaLabel')}
         >
@@ -731,7 +731,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
           </svg>
 
           {/* HTML / CSS Grid for nodes */}
-          <div className="relative z-1 grid grid-cols-7 gap-x-6 gap-y-20 lg:gap-x-8 lg:gap-y-24 pt-12 pb-16">
+          <div className="relative z-1 grid min-h-[max(480px,calc(100vh-280px))] grid-cols-7 content-between gap-x-6 gap-y-16 lg:gap-x-8 lg:gap-y-20 pt-12 pb-16">
             {NODE_DEFS.map((def) => (
               <FlowNodeCard
                 key={def.status}

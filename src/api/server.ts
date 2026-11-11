@@ -728,7 +728,8 @@ export async function createServer(
 
   fastify.post('/api/tasks/:id/publish', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
-    return service.publishTask(id, { manual: true });
+    const body = (req.body as { skipAudit?: boolean } | undefined) || {};
+    return service.publishTask(id, { manual: true, skipAudit: Boolean(body.skipAudit) });
   });
 
   fastify.delete('/api/tasks/:id/worktree', async (req: FastifyRequest) => {

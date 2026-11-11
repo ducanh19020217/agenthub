@@ -29,6 +29,44 @@ async function run() {
     'reviewer-changes': { verdict: 'changes_requested', feedback: 'Please fix the failing check.' },
     'reviewer-malformed': 'not a reviewer result',
   };
+  const auditResults = {
+    'audit-pass': { verdict: 'pass', findings: [], summary: 'Pre-publish audit passed.' },
+    'audit-p3': {
+      verdict: 'pass',
+      findings: [{ severity: 'P3', kind: 'out_of_scope', file: 'README.md', line: 1, detail: 'Minor typo in doc' }],
+      summary: 'Pass with P3 notice.',
+    },
+    'audit-fail': {
+      verdict: 'fail',
+      findings: [{ severity: 'P1', kind: 'wrong_requirement', file: 'src/main.ts', line: 10, detail: 'Missing required feature X' }],
+      summary: 'Audit failed due to missing requirements.',
+    },
+    'audit-malformed': 'not valid json {',
+  };
+  if (mode.startsWith('audit-')) {
+    if (mode === 'audit-error') {
+      process.stderr.write('audit spawn failed');
+      process.exit(1);
+    }
+    if (mode === 'audit-quota') {
+      console.error('usage limit exceeded; try again in 2h 3m');
+      process.exit(1);
+    }
+    if (mode === 'audit-malformed') {
+      if (process.env.FAKE_OUTPUT_PATH) {
+        fs.writeFileSync(process.env.FAKE_OUTPUT_PATH, 'malformed json {{{');
+      }
+      return;
+    }
+    if (process.env.FAKE_OUTPUT_PATH) {
+      fs.writeFileSync(process.env.FAKE_OUTPUT_PATH, JSON.stringify(auditResults[mode] || auditResults['audit-pass']));
+    }
+    return;
+  }
+  if (process.env.FAKE_OUTPUT_PATH && (process.env.FAKE_PROMPT || '').includes('Pre-Publish Audit Agent')) {
+    fs.writeFileSync(process.env.FAKE_OUTPUT_PATH, JSON.stringify(auditResults['audit-pass']));
+    return;
+  }
   if (mode.startsWith('reviewer-')) {
     if (mode === 'reviewer-chatter') {
       console.log('Codex banner: starting read-only review');

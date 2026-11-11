@@ -236,11 +236,17 @@ export interface DeployStatus {
   logPath?: string;
 }
 
+export interface PublishAuditSettings {
+  enabled?: boolean;
+  maxFixRounds?: number;
+}
+
 export interface PublishSettings {
   enabled: boolean;
   remote: string;
   branch?: string;
   pushIntegrationBranch: boolean;
+  audit?: PublishAuditSettings;
 }
 
 /** Mirrors src/projects/settings.ts. */
@@ -426,6 +432,19 @@ export interface Task {
     error?: string | null;
     reason?: string | null;
     outputTail?: string | null;
+    auditPassed?: boolean;
+    auditSkipped?: boolean;
+    auditFailed?: boolean;
+    findings?: Array<{
+      severity: 'P1' | 'P2' | 'P3';
+      kind: string;
+      file: string;
+      line: number;
+      detail: string;
+    }>;
+    summary?: string;
+    failedAt?: string;
+    retryable?: boolean;
   };
   reviewer?: 'codex' | 'claude';
   currentRun?: {

@@ -285,6 +285,7 @@ export class NotificationService {
         type === 'merge.failed' ||
         type === 'task.pushed' ||
         type === 'task.push_failed' ||
+        type === 'task.audit_failed' ||
         type.startsWith('remote_deploy.') ||
         type.startsWith('tracker.') ||
         type === 'quota.exhausted' ||
@@ -775,6 +776,14 @@ export class NotificationService {
         const err = typeof p.error === 'string' ? `: ${p.error}` : '';
         const title = this.resolveTaskTitle(taskId, p);
         this.notify(`❌ Đẩy git thất bại: ${title}${err}`, 'critical');
+        break;
+      }
+
+      case 'task.audit_failed': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const count = Array.isArray(p.findings) ? ` (${p.findings.length} vấn đề)` : '';
+        const reason = p.exceededMaxRounds ? ' - Vượt quá số vòng sửa cho phép, chờ người xử lý' : '';
+        this.notify(`⚠️ Audit trước khi publish thất bại: ${title}${count}${reason}`, 'critical');
         break;
       }
     }

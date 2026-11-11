@@ -5544,7 +5544,7 @@ export class AppService {
     return { ok: true };
   }
 
-  async publishTask(idParam: string, options?: { manual?: boolean }): Promise<PublishResult> {
+  async publishTask(idParam: string, options?: { manual?: boolean; skipAudit?: boolean }): Promise<PublishResult> {
     const taskId = toTaskId(idParam);
     return executePublishTask(
       taskId,
@@ -5553,6 +5553,11 @@ export class AppService {
         projectRepo: this.projectRepo,
         eventBus: this.scheduler.getEventBus(),
         hubHome: this.config.hubHome,
+        engines: this.scheduler.getEngines(),
+        profileRepo: this.profileRepo,
+        quotaService: this.scheduler.getQuotaService(),
+        reviewRepo: this.reviewRepo,
+        config: this.config,
       },
       options,
     );

@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { TaskRow, ProjectRow, ProfileRow, RunRow } from './db/index.js';
+import type { TaskRow, ProjectRow, ProfileRow } from './db/index.js';
 import type { AgentHubConfig } from './config.js';
 import type { Engine } from './engines/index.js';
 import { CLAUDE_REVIEW_ENGINE_KEY } from './engines/claude-review.js';

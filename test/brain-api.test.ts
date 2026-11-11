@@ -405,6 +405,31 @@ describe('Brain API Endpoints (/api/brain)', () => {
     expect(response.statusCode).toBe(200);
     expect(getOrCreateSpy).toHaveBeenCalledWith('brain:p1', { title: 'Bộ não · p1', kind: 'brain', projectId: 'p1' });
     expect(sendSpy).toHaveBeenCalledWith('brain:p1', expect.stringContaining('Không'), { queueIfBusy: true });
+
+    // Answering with "other" and customAnswer
+    tracker.recordDecision('dec-api-other', 'Chọn phương án triển khai?', [], Date.now(), 'p1/task-2');
+    const otherResponse = await server.inject({
+      method: 'POST',
+      url: '/api/brain/decisions/dec-api-other/answer',
+      headers: authHeaders(),
+      payload: { answer: 'other', customAnswer: 'Triển khai staging trước' },
+    });
+    expect(otherResponse.statusCode).toBe(200);
+    const otherData = JSON.parse(otherResponse.body);
+    expect(otherData.ok).toBe(true);
+    expect(otherData.decision.answered).toBe(true);
+    expect(otherData.decision.answer).toBe('other');
+    expect(otherData.decision.customAnswer).toBe('Triển khai staging trước');
+    expect(sendSpy).toHaveBeenCalledWith(
+      'brain:p1',
+      expect.stringContaining('Phương án khác — Triển khai staging trước'),
+      { queueIfBusy: true },
+    );
+    expect(sendSpy).toHaveBeenCalledWith(
+      'brain:p1',
+      expect.stringContaining('Đây là phương án người dùng tự đưa ra, cần làm theo hoặc hỏi lại nếu chưa rõ.'),
+      { queueIfBusy: true },
+    );
   });
 
   it('PATCH /api/projects/:id with permissions=full requires confirm and emits event', async () => {

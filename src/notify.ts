@@ -336,6 +336,14 @@ export class NotificationService {
         break;
       }
 
+      case 'decision.answered': {
+        const answer = p.answer as string | undefined;
+        const label = answer === 'agree' ? 'Đồng ý' : answer === 'reject' ? 'Không' : 'Phương án khác';
+        const customText = typeof p.customAnswer === 'string' && p.customAnswer ? ` — ${p.customAnswer}` : '';
+        this.notify(`Đã phản hồi quyết định: ${label}${customText}`, 'normal');
+        break;
+      }
+
       case 'batch.created': {
         const count = typeof p.taskCount === 'number' ? p.taskCount : 0;
         const who = typeof p.createdBy === 'string' && p.createdBy ? p.createdBy : 'Claude';

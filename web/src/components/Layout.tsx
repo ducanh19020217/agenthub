@@ -29,6 +29,8 @@ import {
 import { CircleHelp } from 'lucide-react';
 import { HelpPanel } from './tour/HelpPanel';
 
+const DEFAULT_AGENTHUB_LOGO = '/branding/agenthub-logo-v3.png';
+
 const PlansBadgeInner: React.FC = () => {
   const { data: batches = [] } = useQuery({
     queryKey: ['batches', 'draft-count'],
@@ -211,6 +213,13 @@ export const Layout: React.FC = () => {
                   alt=""
                   data-testid="branding-logo"
                   onError={() => setLogoImgFailed(true)}
+                  className="w-full h-full rounded-lg object-contain"
+                />
+              ) : !branding.logo ? (
+                <img
+                  src={DEFAULT_AGENTHUB_LOGO}
+                  alt=""
+                  data-testid="branding-logo"
                   className="w-full h-full rounded-lg object-contain"
                 />
               ) : (

@@ -769,6 +769,31 @@ export async function publishTask(
         deps,
       );
 
+      const maxTasks = currentSettings.publish?.audit?.maxTasks ?? 10;
+      if (tasksToAudit.length > maxTasks) {
+        const errorMsg = `Số lượng task cần audit (${tasksToAudit.length}) vượt quá giới hạn tối đa cho phép (${maxTasks}). Vui lòng kiểm tra hoặc điều chỉnh maxTasks.`;
+        const failedAt = new Date().toISOString();
+        deps.taskRepo.update(taskId, {
+          pushResult: JSON.stringify({
+            state: 'push_failed',
+            error: errorMsg,
+            failedAt,
+            retryable: false,
+            exceededMaxTasks: true,
+            tasksCount: tasksToAudit.length,
+            maxTasks,
+          }),
+        });
+        deps.eventBus.emit('task.push_failed', taskId, {
+          taskId,
+          projectId: currentProject.id,
+          error: errorMsg,
+          remote,
+          branch: targetBranch,
+        });
+        return { ok: false, error: errorMsg, remote, branch: targetBranch, retryable: false };
+      }
+
       for (const t of tasksToAudit) {
         const { diff, changedFiles, commitSha, branchSha } = await getTaskDiff(
           repoPath,

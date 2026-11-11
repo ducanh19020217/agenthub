@@ -32,6 +32,7 @@ export interface PresetDetails {
       audit?: {
         enabled: boolean;
         maxFixRounds: number;
+        maxTasks?: number;
       };
     };
   };
@@ -387,7 +388,7 @@ export function presetProjectPatch(project: ProjectRow, preset: PresetLevel, cod
   const existingPublish = currentSettings.publish;
   const audit = existingPublish?.audit !== undefined
     ? existingPublish.audit
-    : (def.config.publish.audit || { enabled: true, maxFixRounds: 2 });
+    : (def.config.publish.audit || { enabled: true, maxFixRounds: 2, maxTasks: 10 });
   return {
     settings: {
       preset,

@@ -1409,5 +1409,87 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(events.some((e) => e.type === 'task.audit_passed')).toBe(true);
       expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
     });
+
+    it('huỷ bỏ publish khi số lượng task cần audit vượt quá maxTasks và phát sự kiện push_failed', async () => {
+      const remotePath = path.join(tmpDir, 'remote-max-tasks.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-max-tasks');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+
+      // Task 1
+      execFileSync('git', ['checkout', '-b', 'agenthub/mt-1'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'file1.txt'), 'Task 1 content\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: task 1'], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/mt-1', '-m', "Merge branch 'agenthub/mt-1' into agenthub/integration"], { cwd: repoPath, env: testEnv });
+
+      // Task 2
+      execFileSync('git', ['checkout', '-b', 'agenthub/mt-2'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'file2.txt'), 'Task 2 content\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: task 2'], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/mt-2', '-m', "Merge branch 'agenthub/mt-2' into agenthub/integration"], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-max-tasks',
+        name: 'Max Tasks Test Project',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            pushIntegrationBranch: false,
+            audit: { enabled: true, maxTasks: 1 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-max-tasks/task-1',
+        projectId: 'proj-max-tasks',
+        slug: 'mt-1',
+        title: 'Task 1',
+        status: 'done',
+        branch: 'agenthub/mt-1',
+        baseRef: 'main',
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-max-tasks/task-2',
+        projectId: 'proj-max-tasks',
+        slug: 'mt-2',
+        title: 'Task 2',
+        status: 'done',
+        branch: 'agenthub/mt-2',
+        baseRef: 'main',
+      });
+
+      const failedEvents: Array<{ type: string; payload: any }> = [];
+      ctx.scheduler.getEventBus().on('task.push_failed', (_id, p) => failedEvents.push({ type: 'task.push_failed', payload: p }));
+
+      const res = await ctx.service.publishTask('proj-max-tasks/task-2', { manual: true });
+      expect(res.ok).toBe(false);
+      expect(res.retryable).toBe(false);
+      expect(res.error).toContain('vượt quá giới hạn tối đa cho phép');
+
+      const task2 = ctx.taskRepo.get('proj-max-tasks/task-2');
+      const pr = JSON.parse(task2?.pushResult || '{}');
+      expect(pr.state).toBe('push_failed');
+      expect(pr.exceededMaxTasks).toBe(true);
+      expect(pr.maxTasks).toBe(1);
+      expect(pr.tasksCount).toBe(2);
+
+      expect(failedEvents.length).toBeGreaterThan(0);
+      expect(failedEvents[0].payload.error).toContain('vượt quá giới hạn');
+    });
   });
 });

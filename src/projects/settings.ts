@@ -68,12 +68,14 @@ export type RemoteDeploySettings = z.infer<typeof RemoteDeploySettingsSchema>;
 export const PublishAuditSettingsSchema = z.object({
   enabled: z.boolean().default(true),
   maxFixRounds: z.number().int().min(1).max(10).default(2),
+  maxTasks: z.number().int().min(1).default(10),
 });
 export type PublishAuditSettings = z.infer<typeof PublishAuditSettingsSchema>;
 
 export const PublishAuditSettingsInputSchema = z.object({
   enabled: z.boolean().optional(),
   maxFixRounds: z.number().int().min(1).max(10).optional(),
+  maxTasks: z.number().int().min(1).optional(),
 });
 
 export const PublishSettingsSchema = z.object({

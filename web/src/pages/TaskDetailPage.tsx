@@ -1030,9 +1030,9 @@ export const TaskDetailPage: React.FC = () => {
                 {parsedPushResult.findings.map((f: any, i: number) => (
                   <li key={i} className="flex items-start gap-2 text-[var(--t-text)]">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold shrink-0 ${
-                      f.severity === 'P1' ? 'bg-[var(--t-crit)] text-white' :
-                      f.severity === 'P2' ? 'bg-[var(--t-warn)] text-black' :
-                      'bg-[var(--t-surface-2)] text-[var(--t-text-2)]'
+                      f.severity === 'P1' ? 'bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)] border border-[color-mix(in_srgb,var(--t-crit)_30%,transparent)]' :
+                      f.severity === 'P2' ? 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)] border border-[color-mix(in_srgb,var(--t-warn)_30%,transparent)]' :
+                      'bg-[var(--t-surface-2)] text-[var(--t-text-2)] border border-[var(--t-border)]'
                     }`}>
                       {f.severity}
                     </span>

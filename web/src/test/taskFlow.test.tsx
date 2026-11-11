@@ -405,4 +405,62 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     expect(grid?.className).toContain('content-between');
     expect(grid?.className).toContain('min-h-[max(480px,calc(100vh-280px))]');
   });
+
+  it('does not cause an infinite render loop when getBoundingClientRect returns non-zero dimensions', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // Mock ResizeObserver
+    let roCallback: ResizeObserverCallback | null = null;
+    class MockResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        roCallback = callback;
+      }
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    }
+    const origResizeObserver = window.ResizeObserver;
+    window.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
+
+    // Mock getBoundingClientRect on elements
+    const origGetBoundingClientRect = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function () {
+      return {
+        width: 160,
+        height: 90,
+        top: 50,
+        left: 100,
+        bottom: 140,
+        right: 260,
+        x: 100,
+        y: 50,
+        toJSON: () => {},
+      };
+    };
+
+    try {
+      renderPage('/tasks?view=flow');
+      await waitFor(() => {
+        expect(screen.getByTestId('flow-view-wrapper')).toBeInTheDocument();
+      });
+
+      // Simulate ResizeObserver triggering
+      const trigger = roCallback as ResizeObserverCallback | null;
+      if (trigger) {
+        trigger([], {} as unknown as ResizeObserver);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Assert no "Maximum update depth exceeded" error
+      const depthErrors = errorSpy.mock.calls.filter((call) =>
+        call.some((arg) => typeof arg === 'string' && arg.includes('Maximum update depth exceeded')),
+      );
+      expect(depthErrors).toHaveLength(0);
+    } finally {
+      window.ResizeObserver = origResizeObserver;
+      Element.prototype.getBoundingClientRect = origGetBoundingClientRect;
+      errorSpy.mockRestore();
+    }
+  });
 });

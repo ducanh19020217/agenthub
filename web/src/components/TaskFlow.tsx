@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -576,7 +576,7 @@ const FlowTaskList: React.FC<{ status: TaskStatus; project: string; search: stri
 };
 
 export const TaskFlow: React.FC<{ project: string; search: string }> = ({ project, search }) => {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const [openStatus, setOpenStatus] = useState<TaskStatus | null>(null);
 
   // Queries for each status count
@@ -630,64 +630,98 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
   // Measurement and ResizeObserver for edge coordinates
   const boardRef = useRef<HTMLDivElement>(null);
   const nodeEls = useRef<Partial<Record<TaskStatus, HTMLDivElement>>>({});
+  const roRef = useRef<ResizeObserver | null>(null);
   const [coords, setCoords] = useState<Partial<Record<TaskStatus, NodeRect>>>({});
 
-  const registerRef = (status: TaskStatus, el: HTMLDivElement | null) => {
-    if (el) {
-      nodeEls.current[status] = el;
-    } else {
-      delete nodeEls.current[status];
-    }
+  const isSameCoord = (a?: NodeRect, b?: NodeRect) => {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    return (
+      Math.abs(a.x - b.x) < 0.5 &&
+      Math.abs(a.y - b.y) < 0.5 &&
+      Math.abs(a.w - b.w) < 0.5 &&
+      Math.abs(a.h - b.h) < 0.5
+    );
   };
 
-  const updateCoords = () => {
+  const updateCoords = useCallback(() => {
     if (!boardRef.current) return;
     const boardRect = boardRef.current.getBoundingClientRect();
     if (boardRect.width === 0) return;
 
+    const snap = (v: number) => Math.round(v * 2) / 2;
     const next: Partial<Record<TaskStatus, NodeRect>> = {};
     for (const def of NODE_DEFS) {
       const el = nodeEls.current[def.status];
       if (el) {
         const rect = el.getBoundingClientRect();
         next[def.status] = {
-          x: rect.left - boardRect.left + boardRef.current.scrollLeft,
-          y: rect.top - boardRect.top + boardRef.current.scrollTop,
-          w: rect.width,
-          h: rect.height,
+          x: snap(rect.left - boardRect.left + boardRef.current.scrollLeft),
+          y: snap(rect.top - boardRect.top + boardRef.current.scrollTop),
+          w: snap(rect.width),
+          h: snap(rect.height),
         };
       }
     }
-    setCoords(next);
-  };
+
+    setCoords((prev) => {
+      let changed = false;
+      for (const def of NODE_DEFS) {
+        if (!isSameCoord(prev[def.status], next[def.status])) {
+          changed = true;
+          break;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, []);
+
+  const registerRef = useCallback(
+    (status: TaskStatus, el: HTMLDivElement | null) => {
+      const prevEl = nodeEls.current[status];
+      if (prevEl === el) return;
+      if (prevEl && roRef.current) {
+        roRef.current.unobserve(prevEl);
+      }
+      if (el) {
+        nodeEls.current[status] = el;
+        if (roRef.current) {
+          roRef.current.observe(el);
+        }
+      } else {
+        delete nodeEls.current[status];
+      }
+    },
+    [],
+  );
 
   useLayoutEffect(() => {
     updateCoords();
-  });
+  }, [counts, locale, updateCoords]);
 
   useEffect(() => {
-    updateCoords();
-
     let ro: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined') {
       ro = new ResizeObserver(() => {
         updateCoords();
       });
+      roRef.current = ro;
       if (boardRef.current) {
         ro.observe(boardRef.current);
       }
-      for (const def of NODE_DEFS) {
-        const el = nodeEls.current[def.status];
+      for (const el of Object.values(nodeEls.current)) {
         if (el) ro.observe(el);
       }
     }
 
+    updateCoords();
     window.addEventListener('resize', updateCoords);
     return () => {
       ro?.disconnect();
+      roRef.current = null;
       window.removeEventListener('resize', updateCoords);
     };
-  }, []);
+  }, [updateCoords]);
 
   const getNodeBox = (status: TaskStatus): NodeRect => {
     const measured = coords[status];

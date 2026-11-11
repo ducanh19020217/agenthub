@@ -29,6 +29,10 @@ export interface PresetDetails {
     };
     publish: {
       enabled: boolean;
+      audit?: {
+        enabled: boolean;
+        maxFixRounds: number;
+      };
     };
   };
 }
@@ -64,6 +68,7 @@ export const PRESET_DEFINITIONS: Record<PresetLevel, PresetDetails> = {
       },
       publish: {
         enabled: false,
+        audit: { enabled: true, maxFixRounds: 2 },
       },
     },
   },
@@ -97,6 +102,7 @@ export const PRESET_DEFINITIONS: Record<PresetLevel, PresetDetails> = {
       },
       publish: {
         enabled: false,
+        audit: { enabled: true, maxFixRounds: 2 },
       },
     },
   },
@@ -130,6 +136,7 @@ export const PRESET_DEFINITIONS: Record<PresetLevel, PresetDetails> = {
       },
       publish: {
         enabled: true,
+        audit: { enabled: true, maxFixRounds: 2 },
       },
     },
   },
@@ -387,6 +394,7 @@ export function presetProjectPatch(project: ProjectRow, preset: PresetLevel, cod
         : { autoMerge: def.config.review.autoMerge },
       publish: {
         enabled: def.config.publish.enabled,
+        audit: def.config.publish.audit || { enabled: true, maxFixRounds: 2 },
       },
     },
     review: { chain, maxRounds: def.config.review.maxRounds },
@@ -576,6 +584,7 @@ export function applyPreset(service: ServiceForPresets, input: ApplyPresetInput)
           integration: presetProjectPatch(project, preset, codexModel).settings.integration,
           publish: {
             enabled: def.config.publish.enabled,
+            audit: def.config.publish.audit || { enabled: true, maxFixRounds: 2 },
           },
         },
         review: {

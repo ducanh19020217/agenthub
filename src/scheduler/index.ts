@@ -3343,7 +3343,8 @@ export class Scheduler {
     this.locks.invalidate(profileName);
     child.unref();
     const actualEngine = engine.id;
-    this.eventBus.emit('review.started', task.id, { actor: reviewerActor, model: reviewerModel, profile: profileName, engine: actualEngine, runId });
+    const runNumber = this.runRepo.getByTask(task.id).length;
+    this.eventBus.emit('review.started', task.id, { actor: reviewerActor, model: reviewerModel, profile: profileName, engine: actualEngine, runId, runNumber });
     child.once('error', () => {
       if (!this.stopped) this.finishReview(task.id, runId, profileName, 'error', null);
     });
@@ -4223,7 +4224,8 @@ export class Scheduler {
       // Unref so the child doesn't prevent daemon from exiting
       child.unref();
 
-      this.eventBus.emit('task.running', task.id, { runId, model, profile: profileName, engine: engine.id });
+      const runNumber = this.runRepo.getByTask(task.id).length;
+      this.eventBus.emit('task.running', task.id, { runId, model, profile: profileName, engine: engine.id, runNumber });
 
       // Listen for exit
       child.on('exit', (code) => {

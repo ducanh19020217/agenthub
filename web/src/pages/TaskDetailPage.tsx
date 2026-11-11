@@ -201,19 +201,39 @@ export const TaskDetailPage: React.FC = () => {
         setLiveEvents((prev) => [event, ...prev.filter((e) => e.id !== event.id)]);
         if (event.type === 'review.started' || event.type === 'task.running') {
           setLiveLog((prev) => {
-            const matches = prev.match(/── Run #(\d+)/g);
-            const runNum = (matches ? matches.length : (task?.runs?.length || 0)) + 1;
+            const p = (event.payload || {}) as Record<string, any>;
+            const runId = p.runId;
+            const matchingRun = task?.runs?.find((r) => r.id === runId);
+
+            // Determine run sequence number:
+            // 1. Explicit runNumber from SSE event payload
+            // 2. Index in task.runs if matchingRun exists
+            // 3. Highest run number already present in prev + 1
+            // 4. task.runs.length + 1
+            let runNum = typeof p.runNumber === 'number' && p.runNumber > 0 ? p.runNumber : 0;
+            if (!runNum && matchingRun && task?.runs) {
+              const idx = task.runs.findIndex((r) => r.id === runId);
+              if (idx !== -1) runNum = idx + 1;
+            }
+            if (!runNum) {
+              const lastMatch = [...prev.matchAll(/── Run #(\d+)/g)].pop();
+              const lastNum = lastMatch ? parseInt(lastMatch[1], 10) : 0;
+              runNum = Math.max(lastNum + 1, (task?.runs?.length || 0) + 1);
+            }
+
             const d = new Date(event.ts || Date.now());
             const hh = String(d.getHours()).padStart(2, '0');
             const mm = String(d.getMinutes()).padStart(2, '0');
             const timeStr = `${hh}:${mm}`;
             const kind = event.type === 'review.started' ? 'reviewer' : 'worker';
-            const p = (event.payload || {}) as Record<string, any>;
-            const engine = p.engine || (p.model?.startsWith('claude') ? 'claude' : p.model?.startsWith('codex') ? 'codex' : 'worker');
-            const profile = p.profile || p.profileName || '';
+
+            // Consistent engine/profile formatting matching server formatRunLogHeader
+            const engine = matchingRun?.engine || p.engine || (p.model?.startsWith('claude') ? 'claude' : p.model?.startsWith('codex') ? 'codex' : 'worker');
+            const profile = matchingRun?.profileName || p.profile || p.profileName || '';
             const agent = profile ? `${engine}/${profile}` : engine;
+
             const header = `── Run #${runNum} · ${kind} · ${agent} · ${timeStr} ──`;
-            if (prev.includes(header)) return prev;
+            if (prev.includes(`── Run #${runNum} ·`)) return prev;
             return prev ? `${prev.trimEnd()}\n\n${header}\n` : `${header}\n`;
           });
         }

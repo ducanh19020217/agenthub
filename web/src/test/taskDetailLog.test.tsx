@@ -254,4 +254,66 @@ describe('TaskDetailPage - Live log of running task', () => {
     expect(screen.getByText(/Worker output finished\./)).toBeInTheDocument();
     expect(screen.getByText(/reviewer · claude\/claude-may/)).toBeInTheDocument();
   });
+
+  it('calculates correct run number when earlier run headers have been tail-truncated', async () => {
+    const mockTask: TaskDetail = {
+      id: 'demo/task-truncated',
+      projectId: 'demo',
+      slug: 'task-truncated',
+      title: 'Task Truncated',
+      level: 'easy',
+      status: 'review',
+      dependsOn: '[]',
+      attempt: 0,
+      resume: 0,
+      createdAt: '2026-10-15T08:00:00Z',
+      updatedAt: '2026-10-15T08:00:00Z',
+      runs: [
+        { id: 'r1', taskId: 'demo/task-truncated', engine: 'agy', model: 'gemini', profileName: 'p1', kind: 'worker', startedAt: '2026-10-15T08:00:00Z' },
+        { id: 'r2', taskId: 'demo/task-truncated', engine: 'agy', model: 'gemini', profileName: 'p1', kind: 'worker', startedAt: '2026-10-15T09:00:00Z' },
+        { id: 'r3', taskId: 'demo/task-truncated', engine: 'agy', model: 'gemini', profileName: 'p1', kind: 'worker', startedAt: '2026-10-15T10:00:00Z' },
+        { id: 'r4', taskId: 'demo/task-truncated', engine: 'agy', model: 'gemini', profileName: 'p1', kind: 'worker', startedAt: '2026-10-15T11:00:00Z' },
+      ],
+      reviews: [],
+    };
+
+    // Notice initial log only contains Run #4 because Run 1, 2, 3 were truncated off by tail
+    const truncatedLog = '── Run #4 · worker · agy/p1 · 16:00 ──\nLog of run 4\n';
+
+    vi.spyOn(client, 'getTask').mockResolvedValue(mockTask);
+    vi.spyOn(client, 'getTaskLog').mockResolvedValue(truncatedLog);
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/tasks/demo~task-truncated']}>
+          <Routes>
+            <Route path="/tasks/:id" element={<TaskDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    expect(await screen.findByText(/Log of run 4/)).toBeInTheDocument();
+
+    // Emit review.started SSE event for Run #5
+    act(() => {
+      eventListener!({
+        id: 102,
+        type: 'review.started',
+        taskId: 'demo/task-truncated',
+        ts: new Date().toISOString(),
+        payload: {
+          engine: 'claude',
+          profile: 'claude-may',
+          model: 'claude:sonnet',
+          actor: 'claude-reviewer',
+          runId: 'r5',
+          runNumber: 5,
+        },
+      });
+    });
+
+    // Run header must be Run #5, NOT Run #2 (which would happen if only counting occurrences of "── Run #" in truncatedLog)
+    expect(screen.getByText(/── Run #5 · reviewer · claude\/claude-may/)).toBeInTheDocument();
+  });
 });

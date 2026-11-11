@@ -1243,7 +1243,7 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
         continue;
       }
 
-      let parsed: Record<string, any>;
+      let parsed: Record<string, unknown>;
       try {
         parsed = JSON.parse(project.settings);
         if (!parsed || typeof parsed !== 'object') {
@@ -1253,11 +1253,12 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
         parsed = {};
       }
 
-      if (parsed.publish === undefined || parsed.publish === null) {
+      const publishVal = parsed.publish as Record<string, unknown> | undefined;
+      if (publishVal === undefined || publishVal === null) {
         parsed.publish = defaultPublish;
         updateStmt.run(JSON.stringify(parsed), project.id);
         migrated.push(project.id);
-      } else if (parsed.publish.enabled === false) {
+      } else if (publishVal.enabled === false) {
         explicitlyDisabled.push(project.id);
       }
     }

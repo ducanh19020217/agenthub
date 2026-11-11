@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { openDatabase, ensureProjectPublishMigration } from '../src/db/index.js';
+import { openDatabase, ensureProjectPublishMigration, type ProjectRow } from '../src/db/index.js';
 import { projectSettings } from '../src/projects/settings.js';
 
 describe('Publish default-on migration', () => {
@@ -52,14 +52,14 @@ describe('Publish default-on migration', () => {
     expect(result.explicitlyDisabled).not.toContain('proj-already-enabled');
 
     // Verify row 1
-    const p1 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-no-settings') as any;
+    const p1 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-no-settings') as ProjectRow;
     const s1 = projectSettings(p1);
     expect(s1.publish.enabled).toBe(true);
     expect(s1.publish.remote).toBe('origin');
     expect(s1.publish.audit?.enabled).toBe(true);
 
     // Verify row 2 (kept existing settings + added publish)
-    const p2 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-existing-settings') as any;
+    const p2 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-existing-settings') as ProjectRow;
     const s2 = projectSettings(p2);
     expect(s2.brain.mode).toBe('auto');
     expect(s2.integration.enabled).toBe(true);
@@ -67,21 +67,21 @@ describe('Publish default-on migration', () => {
     expect(s2.publish.remote).toBe('origin');
 
     // Verify row 3 (explicitly disabled kept as is)
-    const p3 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-explicit-disabled') as any;
+    const p3 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-explicit-disabled') as ProjectRow;
     const s3 = projectSettings(p3);
     expect(s3.publish.enabled).toBe(false);
 
     // Verify row 4 (custom remote kept as is)
-    const p4 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-already-enabled') as any;
+    const p4 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-already-enabled') as ProjectRow;
     const s4 = projectSettings(p4);
     expect(s4.publish.enabled).toBe(true);
     expect(s4.publish.remote).toBe('upstream');
 
     // Verify meta table
-    const metaMigration = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_default_on'").get() as any;
+    const metaMigration = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_default_on'").get() as { value: string };
     expect(metaMigration.value).toBe('1');
 
-    const metaDisabled = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_disabled_projects'").get() as any;
+    const metaDisabled = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_disabled_projects'").get() as { value: string };
     expect(JSON.parse(metaDisabled.value)).toEqual(['proj-explicit-disabled']);
 
     // Running again does nothing

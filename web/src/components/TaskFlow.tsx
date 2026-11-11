@@ -730,7 +730,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
       >
         <div
           ref={boardRef}
-          className="relative min-w-[1080px] min-h-[max(480px,calc(100vh-280px))]"
+          className="relative min-w-[1240px] min-h-[max(480px,calc(100vh-280px))]"
           role="group"
           aria-label={t('tasks.flow.ariaLabel')}
         >
@@ -756,7 +756,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
           </svg>
 
           {/* HTML / CSS Grid for nodes */}
-          <div className="relative z-1 grid min-h-[max(480px,calc(100vh-280px))] grid-cols-7 content-between gap-x-6 gap-y-16 lg:gap-x-8 lg:gap-y-20 pt-12 pb-16">
+          <div className="relative z-1 grid min-h-[max(480px,calc(100vh-280px))] grid-cols-[repeat(7,minmax(150px,1fr))] content-between gap-x-6 gap-y-16 lg:gap-x-8 lg:gap-y-20 pt-12 pb-16">
             {NODE_DEFS.map((def) => (
               <FlowNodeCard
                 key={def.status}

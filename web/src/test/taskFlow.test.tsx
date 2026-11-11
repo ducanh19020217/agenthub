@@ -506,4 +506,14 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     fireEvent.keyDown(runningNode, { key: 'Enter' });
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
   });
+
+  it('enforces min-w-[1240px] and minmax(150px, 1fr) column width for flow nodes', async () => {
+    renderPage('/tasks?view=flow');
+    const wrapper = await screen.findByTestId('flow-view-wrapper');
+    const board = wrapper.querySelector('[role="group"]');
+    expect(board?.className).toContain('min-w-[1240px]');
+
+    const grid = board?.querySelector('.grid');
+    expect(grid?.className).toContain('grid-cols-[repeat(7,minmax(150px,1fr))]');
+  });
 });

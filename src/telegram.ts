@@ -4114,6 +4114,7 @@ export class TelegramBotService {
         (type === 'task.done' && (this.config.telegram.notify.taskDone !== false || this.config.telegram.notify.projectIdle !== false)) ||
         (type === 'task.pushed' && this.config.telegram.notify.taskDone !== false) ||
         (type === 'task.push_failed' && this.config.telegram.notify.failed !== false) ||
+        (type === 'task.audit_failed' && this.config.telegram.notify.failed !== false) ||
         (TelegramBotService.INTERRUPT_EVENTS.has(type) && this.config.telegram.notify.interrupted !== false);
 
         if (!isAllowedInAuto) {
@@ -4508,6 +4509,31 @@ export class TelegramBotService {
           body += `\nTiêu đề: <b>${this.escapeHtml(title)}</b>`;
         }
         body += `\nLý do: ${this.escapeHtml(errorMsg)}`;
+
+        this.broadcastMessage(
+          body,
+          { inline_keyboard: keyboard },
+        );
+        break;
+      }
+
+      case 'task.audit_failed': {
+        if (notify.failed === false) return;
+        const title = this.resolveTaskTitle(taskId, p);
+        const count = Array.isArray(p.findings) ? p.findings.length : 0;
+        const reason = p.exceededMaxRounds ? '\nĐã vượt quá số vòng sửa cho phép, dừng chờ người xử lý.' : '\nĐã tự động trả về worker để sửa.';
+
+        const keyboard: InlineKeyboardButton[][] = [
+          [
+            { text: '🌐 Xem task', url: this.getDashboardUrl(taskId ? `#/tasks/${toRouteId(taskId)}` : '') },
+          ],
+        ];
+
+        let body = `${prefix}⚠️ <b>Audit trước khi publish thất bại</b>\nID: <code>${taskId}</code>`;
+        if (!minimal && title) {
+          body += `\nTiêu đề: <b>${this.escapeHtml(title)}</b>`;
+        }
+        body += `\nPhát hiện: ${count} vấn đề${reason}`;
 
         this.broadcastMessage(
           body,

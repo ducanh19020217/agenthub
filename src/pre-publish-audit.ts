@@ -204,3 +204,5 @@ export function setCachedAuditPass(taskId: string, commitSha: string, result: Pr
 export function clearAuditPassCache(): void {
   auditPassCache.clear();
 }
+
+export const clearPrePublishAuditCache = clearAuditPassCache;

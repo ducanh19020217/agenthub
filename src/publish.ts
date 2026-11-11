@@ -1,11 +1,24 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import crypto from 'node:crypto';
+import { execFile, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { TaskRow, ProjectRow } from './db/index.js';
+import type { TaskRow, ProjectRow, ProfileRow, RunRow } from './db/index.js';
+import type { AgentHubConfig } from './config.js';
+import type { Engine } from './engines/index.js';
+import { CLAUDE_REVIEW_ENGINE_KEY } from './engines/claude-review.js';
 import { projectSettings } from './projects/settings.js';
 import { parseRemote } from './integrations/gitea/client.js';
 import { HttpError } from './services/index.js';
+import {
+  buildPrePublishAuditPrompt,
+  parsePrePublishAuditOutput,
+  isAuditPassed,
+  getCachedAuditPass,
+  setCachedAuditPass,
+  type PrePublishAuditResult,
+  type PrePublishAuditFinding,
+} from './pre-publish-audit.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -99,6 +112,7 @@ export interface PublishTaskDeps {
   taskRepo: {
     get(id: string): TaskRow | undefined;
     update(id: string, patch: Partial<TaskRow>): void;
+    getByProject?(projectId: string): TaskRow[];
   };
   projectRepo: {
     get(id: string): ProjectRow | undefined;
@@ -107,6 +121,27 @@ export interface PublishTaskDeps {
     emit(event: string, ...args: unknown[]): void;
   };
   hubHome: string;
+  engines?: Map<string, Engine>;
+  profileRepo?: {
+    get(name: string): ProfileRow | undefined;
+    getEnabled(): ProfileRow[];
+  };
+  quotaService?: {
+    isExhausted(profileName: string, family: string): boolean;
+    mark(profileName: string, family: string, durationSec: number, reason: string): void;
+  };
+  runRepo?: {
+    insert(run: Partial<RunRow>): void;
+    finish(id: string, outcome: string, logPath?: string, error?: string): void;
+  };
+  reviewRepo?: {
+    insert(review: Record<string, unknown>): void;
+    getByTask(taskId: string): Array<{ verdict: string; feedback?: string | null; actor?: string | null }>;
+  };
+  config?: AgentHubConfig;
+  notifyService?: {
+    notify(message: string, level?: string): void;
+  };
 }
 
 export interface PublishSuccessResult {
@@ -116,6 +151,8 @@ export interface PublishSuccessResult {
   commit: string;
   compareUrl?: string;
   pushedIntegrationBranch: boolean;
+  auditPassed?: boolean;
+  auditSkipped?: boolean;
 }
 
 export interface PublishFailedResult {
@@ -123,6 +160,8 @@ export interface PublishFailedResult {
   error: string;
   remote: string;
   branch: string;
+  auditFailed?: boolean;
+  findings?: PrePublishAuditFinding[];
 }
 
 export interface PublishSkippedResult {
@@ -134,12 +173,291 @@ export interface PublishSkippedResult {
 export type PublishResult = PublishSuccessResult | PublishFailedResult | PublishSkippedResult;
 
 /**
- * Execute the publish workflow for a completed task.
+ * Extracts diff and changed files for a specific task.
+ */
+async function getTaskDiff(
+  repoPath: string,
+  task: TaskRow,
+  baseRef: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ diff: string; changedFiles: string[]; commitSha: string }> {
+  let commitSha = '';
+  let diff = '';
+  let changedFiles: string[] = [];
+
+  const taskBranch = task.branch || `agenthub/${task.slug}`;
+  const branchExists = await refExists(repoPath, `refs/heads/${taskBranch}`, env);
+
+  if (branchExists) {
+    try {
+      commitSha = await runGit(['-C', repoPath, 'rev-parse', `refs/heads/${taskBranch}`], repoPath, env);
+      const mergeBase = await runGit(['-C', repoPath, 'merge-base', baseRef, `refs/heads/${taskBranch}`], repoPath, env);
+      diff = await runGit(['-C', repoPath, 'diff', `${mergeBase}..refs/heads/${taskBranch}`], repoPath, env);
+      const filesOut = await runGit(['-C', repoPath, 'diff', '--name-only', `${mergeBase}..refs/heads/${taskBranch}`], repoPath, env);
+      changedFiles = filesOut.split('\n').map((s) => s.trim()).filter(Boolean);
+    } catch {
+      // Fallback
+    }
+  }
+
+  if (!commitSha) {
+    try {
+      commitSha = await runGit(['-C', repoPath, 'rev-parse', 'HEAD'], repoPath, env);
+    } catch {
+      commitSha = 'HEAD';
+    }
+  }
+
+  if (!diff && task.diffStat) {
+    diff = task.diffStat;
+  }
+
+  return { diff, changedFiles, commitSha };
+}
+
+/**
+ * Identifies tasks merged into sourceBranch but not yet pushed.
+ */
+async function findTasksToAudit(
+  taskId: string,
+  projectId: string,
+  sourceBranch: string,
+  targetBranch: string,
+  repoPath: string,
+  env: NodeJS.ProcessEnv,
+  deps: PublishTaskDeps,
+): Promise<TaskRow[]> {
+  const mainTask = deps.taskRepo.get(taskId);
+  const allTasks = deps.taskRepo.getByProject
+    ? deps.taskRepo.getByProject(projectId)
+    : (deps.taskRepo as unknown as { list?: (f: { project: string }) => TaskRow[] }).list?.({ project: projectId }) || (mainTask ? [mainTask] : []);
+
+  const doneTasks = allTasks.filter((t) => t.status === 'done');
+  const tasksToAudit: TaskRow[] = [];
+
+  for (const t of doneTasks) {
+    if (t.id === taskId) {
+      tasksToAudit.push(t);
+      continue;
+    }
+    const tBranch = t.branch || `agenthub/${t.slug}`;
+    const branchExists = await refExists(repoPath, `refs/heads/${tBranch}`, env);
+    if (branchExists) {
+      const isMergedToSource = await execFileAsync(
+        'git',
+        ['-C', repoPath, 'merge-base', '--is-ancestor', `refs/heads/${tBranch}`, `refs/heads/${sourceBranch}`],
+        { env },
+      )
+        .then(() => true)
+        .catch(() => false);
+
+      const isMergedToTarget =
+        sourceBranch !== targetBranch
+          ? await execFileAsync(
+              'git',
+              ['-C', repoPath, 'merge-base', '--is-ancestor', `refs/heads/${tBranch}`, `refs/heads/${targetBranch}`],
+              { env },
+            )
+              .then(() => true)
+              .catch(() => false)
+          : false;
+
+      if (isMergedToSource || isMergedToTarget) {
+        tasksToAudit.push(t);
+      }
+    }
+  }
+
+  if (tasksToAudit.length === 0 && mainTask && (mainTask.status === 'done' || mainTask.status === 'pushed')) {
+    tasksToAudit.push(mainTask);
+  }
+
+  return tasksToAudit;
+}
+
+/**
+ * Runs the read-only pre-publish audit agent using reviewer engine infrastructure.
+ */
+async function runAuditAgentForTask(
+  task: TaskRow,
+  project: ProjectRow,
+  repoPath: string,
+  deps: PublishTaskDeps,
+  diff: string,
+  changedFiles: string[],
+  doneReport: string,
+): Promise<
+  | { ok: true; result: PrePublishAuditResult; engineId: string; profileName: string }
+  | { ok: false; error: string; retryable: boolean; isQuota?: boolean }
+> {
+  const currentSettings = projectSettings(project);
+  const reviewerOrder = (currentSettings.review?.order && currentSettings.review.order.length > 0)
+    ? currentSettings.review.order
+    : (deps.config?.reviewer?.order && deps.config.reviewer.order.length > 0)
+      ? deps.config.reviewer.order
+      : [
+          { engine: 'codex', model: 'gpt-5.6-luna', profiles: [] },
+          { engine: 'claude', model: 'sonnet', profiles: [] },
+        ];
+
+  let chosenEngine: Engine | undefined;
+  let chosenProfile: ProfileRow | undefined;
+  let chosenModel = 'gpt-5.6-luna';
+
+  const enabledProfiles = deps.profileRepo?.getEnabled() || [];
+
+  for (const item of reviewerOrder) {
+    const engineKey = item.engine === 'claude' ? CLAUDE_REVIEW_ENGINE_KEY : 'codex';
+    const engine = deps.engines?.get(engineKey) || (item.engine === 'codex' ? deps.engines?.get('codex') : undefined);
+    if (!engine) continue;
+
+    const family = item.engine === 'claude' ? 'claude' : 'codex';
+    const candidates = enabledProfiles.filter((p) => {
+      if (p.engine !== item.engine) return false;
+      if (item.profiles && item.profiles.length > 0 && !item.profiles.includes(p.name)) return false;
+      if (p.authState != null && p.authState !== 'ok') return false;
+      if (deps.quotaService?.isExhausted(p.name, family)) return false;
+      return true;
+    });
+
+    if (candidates.length > 0) {
+      chosenEngine = engine;
+      chosenProfile = candidates[0];
+      chosenModel = item.model || (item.engine === 'claude' ? 'sonnet' : 'gpt-5.6-luna');
+      break;
+    }
+  }
+
+  // Fallback: search any engine in deps.engines that has an enabled profile
+  if (!chosenEngine || !chosenProfile) {
+    if (deps.engines) {
+      for (const [key, engine] of deps.engines.entries()) {
+        const engName = key === CLAUDE_REVIEW_ENGINE_KEY ? 'claude' : 'codex';
+        const p = enabledProfiles.find(
+          (prof) => prof.engine === engName && !deps.quotaService?.isExhausted(prof.name, engName),
+        );
+        if (p) {
+          chosenEngine = engine;
+          chosenProfile = p;
+          chosenModel = engName === 'claude' ? 'sonnet' : 'gpt-5.6-luna';
+          break;
+        }
+      }
+    }
+  }
+
+  if (!chosenEngine || !chosenProfile) {
+    return {
+      ok: false,
+      error: 'Không tìm thấy reviewer engine hoặc profile khả dụng để chạy audit',
+      retryable: true,
+    };
+  }
+
+  const prompt = buildPrePublishAuditPrompt({
+    taskId: task.id,
+    taskTitle: task.title,
+    taskBody: task.body || task.title,
+    diff,
+    changedFiles,
+    doneReport,
+    repoPath,
+  });
+
+  const tmpDir = path.join(deps.hubHome, 'tmp');
+  fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
+  const runId = crypto.randomUUID();
+  const logPath = path.join(tmpDir, `audit-${task.id.replace('/', '_')}-${runId}.log`);
+  const outputPath = path.join(tmpDir, `audit-${task.id.replace('/', '_')}-${runId}.final.json`);
+
+  let child: ChildProcess;
+  try {
+    child = chosenEngine.spawn({
+      profile: chosenProfile,
+      model: chosenModel,
+      cwd: repoPath,
+      prompt,
+      logPath,
+      outputPath,
+      readOnly: true,
+      env: { AGENTHUB_TASK_ID: task.id, AGENTHUB_AUDIT: '1' },
+      hubHome: deps.hubHome,
+      project,
+      workerCount: 1,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      error: `Không thể spawn audit process: ${err instanceof Error ? err.message : String(err)}`,
+      retryable: true,
+    };
+  }
+
+  const exitPromise = new Promise<{ code: number | null; error?: Error }>((resolve) => {
+    child.once('error', (err) => resolve({ code: null, error: err }));
+    child.once('exit', (code) => resolve({ code }));
+  });
+  const timeoutPromise = new Promise<{ code: number | null; error?: Error }>((resolve) => {
+    setTimeout(() => resolve({ code: null, error: new Error('Audit process timeout') }), 120_000);
+  });
+
+  const { code, error } = await Promise.race([exitPromise, timeoutPromise]);
+
+  let logOutput = '';
+  let fileOutput = '';
+  if (fs.existsSync(logPath)) {
+    try { logOutput = fs.readFileSync(logPath, 'utf8'); } catch { /* ignore */ }
+  }
+  if (fs.existsSync(outputPath)) {
+    try { fileOutput = fs.readFileSync(outputPath, 'utf8'); } catch { /* ignore */ }
+  }
+
+  try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch { /* ignore */ }
+  try { if (fs.existsSync(logPath)) fs.unlinkSync(logPath); } catch { /* ignore */ }
+
+  const quota = chosenEngine.detectQuota(`${logOutput}\n${fileOutput}`).exhausted;
+  if (quota) {
+    deps.quotaService?.mark(
+      chosenProfile.name,
+      chosenProfile.engine === 'claude' ? 'claude' : 'codex',
+      300,
+      'Pre-publish audit quota exhausted',
+    );
+    return {
+      ok: false,
+      error: 'Hết quota reviewer khi audit trước khi publish',
+      retryable: true,
+      isQuota: true,
+    };
+  }
+
+  if (error || code !== 0) {
+    return {
+      ok: false,
+      error: `Audit agent gặp lỗi (exit code: ${code}): ${error?.message || logOutput.slice(-300) || 'Lỗi không xác định'}`,
+      retryable: true,
+    };
+  }
+
+  const parsed = parsePrePublishAuditOutput(fileOutput || logOutput);
+  if (!parsed) {
+    return {
+      ok: false,
+      error: 'Output audit không đúng định dạng schema JSON',
+      retryable: true,
+    };
+  }
+
+  return { ok: true, result: parsed, engineId: chosenProfile.engine, profileName: chosenProfile.name };
+}
+
+/**
+ * Execute the publish workflow for a completed task with pre-publish audit gate.
  */
 export async function publishTask(
   taskId: string,
   deps: PublishTaskDeps,
-  options?: { manual?: boolean },
+  options?: { manual?: boolean; skipAudit?: boolean },
 ): Promise<PublishResult> {
   const initialTask = deps.taskRepo.get(taskId);
   if (!initialTask) {
@@ -227,6 +545,195 @@ export async function publishTask(
         branch: targetBranch,
       });
       return { ok: false, error: errorMsg, remote, branch: targetBranch };
+    }
+
+    // --- Pre-Publish Audit Gate ---
+    const isManual = Boolean(options?.manual);
+    const isSkipAudit = isManual && Boolean(options?.skipAudit);
+    const isAuditConfigEnabled = currentSettings.publish?.audit?.enabled !== false;
+
+    if (isSkipAudit) {
+      deps.eventBus.emit('task.audit_skipped', taskId, {
+        taskId,
+        projectId: currentProject.id,
+        manual: true,
+      });
+    } else if (isAuditConfigEnabled) {
+      const tasksToAudit = await findTasksToAudit(
+        taskId,
+        currentProject.id,
+        sourceBranch,
+        targetBranch,
+        repoPath,
+        env,
+        deps,
+      );
+
+      for (const t of tasksToAudit) {
+        const { diff, changedFiles, commitSha } = await getTaskDiff(repoPath, t, targetBranch, env);
+
+        const cached = getCachedAuditPass(t.id, commitSha);
+        if (cached) {
+          continue;
+        }
+
+        const doneReport = t.doneReport || (t.worktreePath && fs.existsSync(path.join(t.worktreePath, '.agenthub', 'DONE'))
+          ? fs.readFileSync(path.join(t.worktreePath, '.agenthub', 'DONE'), 'utf8')
+          : '');
+
+        deps.eventBus.emit('task.audit_started', t.id, {
+          taskId: t.id,
+          projectId: currentProject.id,
+        });
+
+        const auditExec = await runAuditAgentForTask(
+          t,
+          currentProject,
+          repoPath,
+          deps,
+          diff,
+          changedFiles,
+          doneReport,
+        );
+
+        if (!auditExec.ok) {
+          // Fail closed
+          const errorMsg = auditExec.error;
+          const failedAt = new Date().toISOString();
+          deps.taskRepo.update(t.id, {
+            pushResult: JSON.stringify({
+              error: errorMsg,
+              failedAt,
+              retryable: true,
+              auditFailed: true,
+            }),
+          });
+          deps.eventBus.emit('task.push_failed', t.id, {
+            taskId: t.id,
+            projectId: currentProject.id,
+            error: errorMsg,
+            remote,
+            branch: targetBranch,
+          });
+          return { ok: false, error: errorMsg, remote, branch: targetBranch, auditFailed: true };
+        }
+
+        const auditResult = auditExec.result;
+        const passed = isAuditPassed(auditResult);
+
+        if (passed) {
+          setCachedAuditPass(t.id, commitSha, auditResult);
+          deps.eventBus.emit('task.audit_passed', t.id, {
+            taskId: t.id,
+            projectId: currentProject.id,
+            findings: auditResult.findings,
+            summary: auditResult.summary,
+          });
+        } else {
+          // Task failed audit (P1 or P2)
+          deps.eventBus.emit('task.audit_failed', t.id, {
+            taskId: t.id,
+            projectId: currentProject.id,
+            findings: auditResult.findings,
+            summary: auditResult.summary,
+          });
+
+          const failedAt = new Date().toISOString();
+          const pushResultObj = {
+            auditFailed: true,
+            findings: auditResult.findings,
+            summary: auditResult.summary,
+            failedAt,
+            retryable: false,
+            error: `Audit trước khi publish thất bại: ${auditResult.summary}`,
+          };
+          deps.taskRepo.update(t.id, {
+            pushResult: JSON.stringify(pushResultObj),
+          });
+
+          const maxFixRounds = currentSettings.publish?.audit?.maxFixRounds ?? 2;
+          const currentRounds = t.reviewerChangesRequested || 0;
+
+          if (currentRounds >= maxFixRounds) {
+            // Exceeded maxFixRounds -> stop, do not return to worker
+            deps.eventBus.emit('task.audit_failed', t.id, {
+              taskId: t.id,
+              projectId: currentProject.id,
+              exceededMaxRounds: true,
+              maxFixRounds,
+              findings: auditResult.findings,
+              summary: auditResult.summary,
+            });
+            deps.notifyService?.notify(
+              `Task ${t.slug} vượt quá ${maxFixRounds} vòng sửa khi audit; dừng chờ xử lý`,
+              'critical',
+            );
+            return {
+              ok: false,
+              error: `Task ${t.slug} vượt quá số vòng sửa tối đa (${maxFixRounds})`,
+              remote,
+              branch: targetBranch,
+              auditFailed: true,
+              findings: auditResult.findings,
+            };
+          }
+
+          // Return task to worker
+          const nextRound = currentRounds + 1;
+          const feedback = [
+            '### Kết quả Audit trước khi publish thất bại',
+            auditResult.summary,
+            '\nCác vấn đề phát hiện:',
+            ...auditResult.findings.map(
+              (f, idx) => `${idx + 1}. [${f.severity}] [${f.kind}] ${f.file}:${f.line} - ${f.detail}`,
+            ),
+          ].join('\n');
+
+          deps.reviewRepo?.insert({
+            id: crypto.randomUUID(),
+            taskId: t.id,
+            verdict: 'changes_requested',
+            feedback,
+            actor: 'audit-prepublish',
+            engine: auditExec.engineId,
+            profileName: auditExec.profileName,
+          });
+
+          const newBody = `${t.body || ''}\n\n## Feedback audit trước khi publish\n\n${feedback}`;
+          deps.taskRepo.update(t.id, {
+            status: 'queued',
+            resume: 1,
+            reviewStep: 0,
+            reviewerChangesRequested: nextRound,
+            body: newBody,
+          });
+
+          if (t.worktreePath && fs.existsSync(t.worktreePath)) {
+            const doneFile = path.join(t.worktreePath, '.agenthub', 'DONE');
+            const blockedFile = path.join(t.worktreePath, '.agenthub', 'BLOCKED');
+            try { if (fs.existsSync(doneFile)) fs.unlinkSync(doneFile); } catch { /* ignore */ }
+            try { if (fs.existsSync(blockedFile)) fs.unlinkSync(blockedFile); } catch { /* ignore */ }
+            const taskMdFile = path.join(t.worktreePath, '.agenthub', 'task.md');
+            try { fs.writeFileSync(taskMdFile, newBody, 'utf8'); } catch { /* ignore */ }
+          }
+
+          deps.eventBus.emit('task.queued', t.id, {
+            reason: 'changes_requested',
+            by: 'audit-prepublish',
+            verdict: 'changes_requested',
+            feedback,
+          });
+
+          return {
+            ok: false,
+            error: 'Audit trước khi publish thất bại',
+            remote,
+            branch: targetBranch,
+            auditFailed: true,
+            findings: auditResult.findings,
+          };
+        }
+      }
     }
 
     // Prepare temp detached worktree
@@ -342,6 +849,8 @@ export async function publishTask(
         commit: pushedCommit,
         compareUrl,
         pushedIntegrationBranch,
+        auditPassed: !isSkipAudit && isAuditConfigEnabled,
+        auditSkipped: isSkipAudit,
       };
 
       deps.taskRepo.update(taskId, {
@@ -366,6 +875,8 @@ export async function publishTask(
         commit: pushedCommit,
         compareUrl,
         pushedIntegrationBranch,
+        auditPassed: !isSkipAudit && isAuditConfigEnabled,
+        auditSkipped: isSkipAudit,
       };
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);

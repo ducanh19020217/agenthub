@@ -573,6 +573,10 @@ export class Scheduler {
     return this.eventBus;
   }
 
+  getEngines(): Map<string, Engine> {
+    return this.engines;
+  }
+
   refreshEngines(): void {
     if (this.engines.has('codex')) return;
     const codexPath = CodexEngine.findCodexPath();

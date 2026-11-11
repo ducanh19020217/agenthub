@@ -184,7 +184,7 @@ export const defaultProjectSettings = (): NonNullable<Project['settings']> => ({
   brain: { mode: 'inherit' },
   worktree: { install: 'auto', gitHooks: 'run' },
   integration: { enabled: false },
-  publish: { enabled: false, remote: 'origin', branch: '', pushIntegrationBranch: true },
+  publish: { enabled: false, remote: 'origin', branch: '', pushIntegrationBranch: true, audit: { enabled: true, maxFixRounds: 2 } },
   ci: {},
   references: [],
   reviewChecklist: [],
@@ -214,6 +214,10 @@ function normalizeProjectSettings(settings?: Partial<NonNullable<Project['settin
       remote: settings?.publish?.remote || defaults.publish!.remote,
       branch: settings?.publish?.branch || defaults.publish!.branch,
       pushIntegrationBranch: settings?.publish?.pushIntegrationBranch ?? defaults.publish!.pushIntegrationBranch,
+      audit: {
+        enabled: settings?.publish?.audit?.enabled ?? defaults.publish!.audit?.enabled ?? true,
+        maxFixRounds: settings?.publish?.audit?.maxFixRounds ?? defaults.publish!.audit?.maxFixRounds ?? 2,
+      },
     },
     openproject: { ...defaults.openproject, ...settings?.openproject, enabled: settings?.openproject?.enabled ?? false, sourceId: settings?.openproject?.sourceId ?? null, role: settings?.openproject?.role ?? 'primary' },
     gitea: { ...defaults.gitea, ...settings?.gitea, enabled: settings?.gitea?.enabled ?? false, schedule: settings?.gitea?.schedule ?? defaults.gitea!.schedule, weekdaysOnly: settings?.gitea?.weekdaysOnly ?? false, checks: settings?.gitea?.checks ?? [], unionMergeGlobs: settings?.gitea?.unionMergeGlobs ?? [] },
@@ -2766,6 +2770,64 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                     {t('projects.publishPushIntegration')}
                   </label>
                 </div>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    id="publish-audit-enabled"
+                    data-testid="publish-audit-enabled"
+                    type="checkbox"
+                    checked={draftSettings.publish?.audit?.enabled !== false}
+                    onChange={(e) => {
+                      setApiError(null);
+                      setDraftSettings((prev) => ({
+                        ...prev,
+                        publish: {
+                          ...prev.publish!,
+                          audit: {
+                            ...prev.publish?.audit,
+                            enabled: e.target.checked,
+                          },
+                        },
+                      }));
+                    }}
+                    className="w-4 h-4 text-[var(--t-accent)] rounded border-[var(--t-border)]"
+                  />
+                  <label
+                    htmlFor="publish-audit-enabled"
+                    className="text-xs text-[var(--t-text)] cursor-pointer"
+                  >
+                    {t('projects.publishAuditEnabled')}
+                  </label>
+                </div>
+
+                {draftSettings.publish?.audit?.enabled !== false && (
+                  <div className="pl-6 space-y-1">
+                    <label className="block text-xs font-semibold text-[var(--t-text)]">
+                      {t('projects.publishAuditMaxFixRounds')}
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={10}
+                      data-testid="publish-audit-max-fix-rounds"
+                      value={draftSettings.publish?.audit?.maxFixRounds ?? 2}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value, 10);
+                        setDraftSettings((prev) => ({
+                          ...prev,
+                          publish: {
+                            ...prev.publish!,
+                            audit: {
+                              ...prev.publish?.audit,
+                              maxFixRounds: Number.isNaN(val) ? 2 : Math.max(0, val),
+                            },
+                          },
+                        }));
+                      }}
+                      className="w-24 text-xs font-mono px-3 py-1.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] text-[var(--t-text)] focus:outline-none focus:border-[var(--t-accent)]"
+                    />
+                  </div>
+                )}
               </div>
             )}
           </Card>

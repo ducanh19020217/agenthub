@@ -577,6 +577,10 @@ export class Scheduler {
     return this.engines;
   }
 
+  getQuotaService(): QuotaService {
+    return this.quotaService;
+  }
+
   refreshEngines(): void {
     if (this.engines.has('codex')) return;
     const codexPath = CodexEngine.findCodexPath();

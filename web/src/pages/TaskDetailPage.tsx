@@ -350,7 +350,12 @@ export const TaskDetailPage: React.FC = () => {
   });
 
   const publishMutation = useMutation({
-    mutationFn: () => publishTask(id),
+    mutationFn: (options?: { skipAudit?: boolean }) => {
+      if (options && typeof options.skipAudit === 'boolean') {
+        return publishTask(id, options);
+      }
+      return publishTask(id);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task', id] });
       queryClient.invalidateQueries({ queryKey: ['tasks'] });
@@ -838,16 +843,32 @@ export const TaskDetailPage: React.FC = () => {
 
           {/* Publish action button (if done and not pushed, or failed) */}
           {(task.status === 'done' || (task.status === 'pushed' && parsedPushResult?.error)) && (
-            <button
-              type="button"
-              data-testid="header-btn-publish"
-              onClick={() => publishMutation.mutate()}
-              disabled={publishMutation.isPending}
-              className="px-3.5 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
-            >
-              {parsedPushResult?.error ? <RotateCcw className="w-4 h-4" /> : <UploadCloud className="w-4 h-4" />}
-              <span>{publishMutation.isPending ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
-            </button>
+            <div className="inline-flex items-center gap-1.5">
+              <button
+                type="button"
+                data-testid="header-btn-publish"
+                onClick={() => publishMutation.mutate()}
+                disabled={publishMutation.isPending}
+                className="px-3.5 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                {parsedPushResult?.error ? <RotateCcw className="w-4 h-4" /> : <UploadCloud className="w-4 h-4" />}
+                <span>{publishMutation.isPending ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
+              </button>
+              <button
+                type="button"
+                data-testid="header-btn-publish-skip-audit"
+                onClick={() => {
+                  if (window.confirm(t('taskDetail.confirmPublishSkipAudit'))) {
+                    publishMutation.mutate({ skipAudit: true });
+                  }
+                }}
+                disabled={publishMutation.isPending}
+                className="px-2.5 py-1.5 rounded-lg border border-[var(--t-border)] text-[var(--t-text-3)] text-xs font-medium hover:bg-[var(--t-surface-2)] inline-flex items-center gap-1 cursor-pointer"
+                title={t('taskDetail.btnPublishSkipAudit')}
+              >
+                <span>{t('taskDetail.btnPublishSkipAudit')}</span>
+              </button>
+            </div>
           )}
 
           {/* Delete worktree (if done, pushed or cancelled and has worktreePath) */}
@@ -903,18 +924,50 @@ export const TaskDetailPage: React.FC = () => {
                   {t('status.pushed')}
                 </span>
               )}
+              {parsedPushResult?.auditSkipped ? (
+                <span data-testid="publish-audit-status-skipped" className="text-xs px-2 py-0.5 rounded-full font-medium bg-[color-mix(in_srgb,var(--t-text-3)_15%,transparent)] text-[var(--t-text-3)]">
+                  {t('taskDetail.auditStatusSkipped')}
+                </span>
+              ) : parsedPushResult?.auditPassed ? (
+                <span data-testid="publish-audit-status-passed" className="text-xs px-2 py-0.5 rounded-full font-medium bg-[color-mix(in_srgb,var(--status-pushed-color)_15%,transparent)] text-[var(--status-pushed-color)]">
+                  {t('taskDetail.auditStatusPassed')}
+                </span>
+              ) : parsedPushResult?.auditFailed ? (
+                <span data-testid="publish-audit-status-failed" className="text-xs px-2 py-0.5 rounded-full font-medium bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)]">
+                  {t('taskDetail.auditStatusFailed')}
+                </span>
+              ) : publishMutation.isPending ? (
+                <span data-testid="publish-audit-status-auditing" className="text-xs px-2 py-0.5 rounded-full font-medium bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)] animate-pulse">
+                  {t('taskDetail.auditStatusAuditing')}
+                </span>
+              ) : null}
             </div>
             {(parsedPushResult?.error || task.status === 'done') && (
-              <button
-                type="button"
-                data-testid="btn-publish-task"
-                onClick={() => publishMutation.mutate()}
-                disabled={publishMutation.isPending}
-                className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
-              >
-                {parsedPushResult?.error ? <RotateCcw className="w-3.5 h-3.5" /> : <UploadCloud className="w-3.5 h-3.5" />}
-                <span>{publishMutation.isPending ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  data-testid="btn-publish-task"
+                  onClick={() => publishMutation.mutate()}
+                  disabled={publishMutation.isPending}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
+                >
+                  {parsedPushResult?.error ? <RotateCcw className="w-3.5 h-3.5" /> : <UploadCloud className="w-3.5 h-3.5" />}
+                  <span>{publishMutation.isPending ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="btn-publish-skip-audit"
+                  onClick={() => {
+                    if (window.confirm(t('taskDetail.confirmPublishSkipAudit'))) {
+                      publishMutation.mutate({ skipAudit: true });
+                    }
+                  }}
+                  disabled={publishMutation.isPending}
+                  className="px-2.5 py-1.5 rounded-lg border border-[var(--t-border)] text-[var(--t-text-3)] text-xs font-medium hover:bg-[var(--t-surface-2)] inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <span>{t('taskDetail.btnPublishSkipAudit')}</span>
+                </button>
+              </div>
             )}
           </div>
 
@@ -964,6 +1017,31 @@ export const TaskDetailPage: React.FC = () => {
                   {formatDateTime(task.pushedAt, locale)}
                 </span>
               </div>
+            </div>
+          )}
+
+          {parsedPushResult?.findings && parsedPushResult.findings.length > 0 && (
+            <div data-testid="publish-audit-findings" className="rounded-lg p-3 bg-[color-mix(in_srgb,var(--t-crit)_8%,transparent)] border border-[color-mix(in_srgb,var(--t-crit)_30%,transparent)] space-y-2 text-xs">
+              <div className="font-semibold text-[var(--t-crit)] flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{t('taskDetail.auditFindingsTitle', { count: parsedPushResult.findings.length })}</span>
+              </div>
+              <ul className="space-y-1.5 list-none pl-0">
+                {parsedPushResult.findings.map((f: any, i: number) => (
+                  <li key={i} className="flex items-start gap-2 text-[var(--t-text)]">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold shrink-0 ${
+                      f.severity === 'P1' ? 'bg-[var(--t-crit)] text-white' :
+                      f.severity === 'P2' ? 'bg-[var(--t-warn)] text-black' :
+                      'bg-[var(--t-surface-2)] text-[var(--t-text-2)]'
+                    }`}>
+                      {f.severity}
+                    </span>
+                    <span className="font-mono text-[var(--t-text-3)] shrink-0">{f.kind}</span>
+                    <span className="font-mono text-[var(--t-accent)] shrink-0">{f.file}:{f.line}</span>
+                    <span className="text-[var(--t-text-2)]">- {f.detail}</span>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </section>

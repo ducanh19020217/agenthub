@@ -130,10 +130,6 @@ export interface PublishTaskDeps {
     isExhausted(profileName: string, family: string): boolean;
     mark(profileName: string, family: string, durationSec: number, reason: string): void;
   };
-  runRepo?: {
-    insert(run: Partial<RunRow>): void;
-    finish(id: string, outcome: string, logPath?: string, error?: string): void;
-  };
   reviewRepo?: {
     insert(review: Record<string, unknown>): void;
     getByTask(taskId: string): Array<{ verdict: string; feedback?: string | null; actor?: string | null }>;
@@ -314,7 +310,7 @@ async function runAuditAgentForTask(
     const family = item.engine === 'claude' ? 'claude' : 'codex';
     const candidates = enabledProfiles.filter((p) => {
       if (p.engine !== item.engine) return false;
-      if (item.profiles && item.profiles.length > 0 && !item.profiles.includes(p.name)) return false;
+      if (item.profiles && item.profiles.length > 0 && !(item.profiles as readonly string[]).includes(p.name)) return false;
       if (p.authState != null && p.authState !== 'ok') return false;
       if (deps.quotaService?.isExhausted(p.name, family)) return false;
       return true;

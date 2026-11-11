@@ -895,10 +895,36 @@ export async function retryReviewer(id: string): Promise<Task> {
   });
 }
 
-export async function publishTask(id: string): Promise<{ ok: boolean; error?: string; remote?: string; branch?: string; commit?: string; compareUrl?: string; skipped?: boolean; reason?: string }> {
-  return apiFetch<{ ok: boolean; error?: string; remote?: string; branch?: string; commit?: string; compareUrl?: string; skipped?: boolean; reason?: string }>(`/api/tasks/${encodeURIComponent(id)}/publish`, {
-    method: 'POST',
-  });
+export async function publishTask(
+  id: string,
+  options?: { skipAudit?: boolean },
+): Promise<{
+  ok: boolean;
+  error?: string;
+  remote?: string;
+  branch?: string;
+  commit?: string;
+  compareUrl?: string;
+  skipped?: boolean;
+  reason?: string;
+  auditPassed?: boolean;
+  auditSkipped?: boolean;
+  auditFailed?: boolean;
+  findings?: Array<{
+    severity: 'P1' | 'P2' | 'P3';
+    kind: string;
+    file: string;
+    line: number;
+    detail: string;
+  }>;
+}> {
+  return apiFetch(
+    `/api/tasks/${encodeURIComponent(id)}/publish`,
+    {
+      method: 'POST',
+      body: JSON.stringify(options || {}),
+    },
+  );
 }
 
 export async function deleteWorktree(id: string): Promise<{ ok: boolean }> {

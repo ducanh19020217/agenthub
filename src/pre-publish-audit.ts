@@ -1,11 +1,3 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import type { ChildProcess } from 'node:child_process';
-import type { Engine } from './engines/index.js';
-import type { ProfileRow, ProjectRow, TaskRow } from './db/index.js';
-import { CLAUDE_REVIEW_ENGINE_KEY } from './engines/claude-review.js';
-import { lockCommand } from './locks.js';
-
 export type PrePublishAuditSeverity = 'P1' | 'P2' | 'P3';
 export type PrePublishAuditKind = 'wrong_requirement' | 'out_of_scope' | 'regression_risk' | 'merge_loss';
 

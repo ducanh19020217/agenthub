@@ -187,16 +187,18 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
 
     await waitFor(() => {
-      const bounceEl = runningNode.querySelector('.flow-count-bounce');
+      const node = screen.getByTestId('flow-node-running');
+      const bounceEl = node.querySelector('.flow-count-bounce');
       expect(bounceEl).not.toBeNull();
-      // Ensure bounce class is on an SVG <text> graphics element rather than <tspan> so transforms apply
-      expect(bounceEl?.tagName.toLowerCase()).toBe('text');
+      // Ensure bounce class is on an HTML <span> element
+      expect(bounceEl?.tagName.toLowerCase()).toBe('span');
     });
 
     // After bounce duration, class disappears
     await waitFor(
       () => {
-        expect(runningNode.querySelector('.flow-count-bounce')).toBeNull();
+        const node = screen.getByTestId('flow-node-running');
+        expect(node.querySelector('.flow-count-bounce')).toBeNull();
       },
       { timeout: 1500 },
     );
@@ -276,5 +278,84 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     await waitFor(() => {
       expect(within(previewGroup).getByText('+1 nữa')).toBeInTheDocument();
     });
+  });
+
+  it('(g) renders long slug with truncate class and full title attribute', async () => {
+    const longSlug = 'targeting-no-payload-deduction-extended-slug-overflow-check';
+    const longSlugTask = [makeTask(longSlug, 'running')];
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      const matching = longSlugTask.filter((t) => !params?.status || params.status === 'all' || t.status === params.status);
+      const limit = params?.limit || 20;
+      return {
+        items: matching.slice(0, limit),
+        total: matching.length,
+        nextCursor: null,
+      };
+    });
+
+    renderPage('/tasks?view=flow');
+    const runningNode = await screen.findByTestId('flow-node-running');
+    await waitFor(() => expect(runningNode).toHaveAttribute('data-count', '1'));
+
+    const previewGroup = within(runningNode).getByTestId('flow-running-tasks');
+    expect(previewGroup).toBeInTheDocument();
+
+    const slugText = within(previewGroup).getByText(longSlug);
+    expect(slugText).toBeInTheDocument();
+
+    // Link and container have truncate class so text never overflows
+    const linkEl = slugText.closest('a');
+    expect(linkEl).not.toBeNull();
+    expect(linkEl).toHaveClass('truncate');
+    expect(slugText).toHaveClass('truncate');
+
+    // Link has full title attribute
+    expect(linkEl).toHaveAttribute('title', expect.stringContaining(longSlug));
+  });
+
+  it('(h) places icon animation classes on wrapping element instead of svg', async () => {
+    const activeTasks = [
+      makeTask('task-run', 'running'),
+      makeTask('task-check', 'checking'),
+      makeTask('task-rev', 'review'),
+    ];
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      const matching = activeTasks.filter((t) => !params?.status || params.status === 'all' || t.status === params.status);
+      const limit = params?.limit || 20;
+      return {
+        items: matching.slice(0, limit),
+        total: matching.length,
+        nextCursor: null,
+      };
+    });
+
+    renderPage('/tasks?view=flow');
+    const runningNode = await screen.findByTestId('flow-node-running');
+    const checkingNode = await screen.findByTestId('flow-node-checking');
+    const reviewNode = await screen.findByTestId('flow-node-review');
+
+    await waitFor(() => {
+      expect(runningNode).toHaveAttribute('data-active', 'true');
+      expect(checkingNode).toHaveAttribute('data-active', 'true');
+      expect(reviewNode).toHaveAttribute('data-active', 'true');
+    });
+
+    // Check running icon
+    const runningIconWrapper = runningNode.querySelector('.flow-icon-running');
+    expect(runningIconWrapper).not.toBeNull();
+    expect(runningIconWrapper?.tagName.toLowerCase()).not.toBe('svg');
+    expect(runningNode.querySelector('svg.flow-icon-running')).toBeNull();
+
+    // Check checking icon
+    const checkingIconWrapper = checkingNode.querySelector('.flow-icon-checking');
+    expect(checkingIconWrapper).not.toBeNull();
+    expect(checkingIconWrapper?.tagName.toLowerCase()).not.toBe('svg');
+    expect(checkingNode.querySelector('svg.flow-icon-checking')).toBeNull();
+
+    // Check review icon
+    const reviewIconWrapper = reviewNode.querySelector('.flow-icon-review');
+    expect(reviewIconWrapper).not.toBeNull();
+    expect(reviewIconWrapper?.tagName.toLowerCase()).not.toBe('svg');
+    expect(reviewNode.querySelector('svg.flow-icon-review')).toBeNull();
   });
 });

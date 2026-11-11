@@ -392,6 +392,7 @@ export const vi = {
     publishCommit: 'Commit',
     publishTime: 'Thời điểm',
     viewCommit: 'Xem commit',
+    publishSkippedDirty: 'Đã đẩy lên remote; nhánh local {{branch}} chưa cập nhật vì thư mục đang có thay đổi chưa commit',
     publishError: 'Không thể đẩy lên git',
     noLog: 'Chưa có log từ worker...',
     reviewingWithProfile: 'Reviewer {{profile}} đang duyệt…',

@@ -776,7 +776,12 @@ export class NotificationService {
       case 'task.pushed': {
         const branchStr = typeof p.branch === 'string' ? ` vào ${p.branch}` : '';
         const title = this.resolveTaskTitle(taskId, p);
-        this.notify(`🚀 Đã đẩy lên git${branchStr}: ${title}`, 'normal');
+        if (p.localUpdate === 'skipped_dirty') {
+          const target = typeof p.branch === 'string' ? p.branch : 'target';
+          this.notify(`Đã đẩy lên remote; nhánh local ${target} chưa cập nhật vì thư mục đang có thay đổi chưa commit`, 'warning');
+        } else {
+          this.notify(`🚀 Đã đẩy lên git${branchStr}: ${title}`, 'normal');
+        }
         break;
       }
 

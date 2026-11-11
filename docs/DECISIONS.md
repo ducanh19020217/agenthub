@@ -271,3 +271,30 @@
      - Giới hạn kích thước diff: diff nhúng vào prompt được cắt tối đa 40.000 ký tự kèm thông báo hướng dẫn agent tự chạy các lệnh đọc an toàn (`git show <commitSha>`, `git diff`) trong repo để tránh tràn context window hoặc timeout.
   4. **Chính sách Fail-Closed và Retryable**:
      - Khi reviewer engine gặp lỗi nội bộ, hết quota, timeout (mặc định 300s, tự động dọn timer và kill process group) hoặc trả về output JSON sai cú pháp, hệ thống dừng publish ngay lập tức (`fail-closed`), đánh dấu `retryable: true` trong `PublishFailedResult` và cập nhật vào `pushResult` của cả task đang audit lẫn task yêu cầu publish mà không tự ý trả task về worker sửa.
+
+## DEC-024: Mặc định bật Publish cho mọi project và cập nhật an toàn working tree local
+
+- **Bối cảnh**:
+  - Ban đầu (DEC-019), publish chỉ được bật mặc định cho preset `auto`, còn `safe`, `balanced` và `DEFAULT_PROJECT_SETTINGS.publish` đặt tắt (`enabled: false`).
+  - Khi thực tế triển khai, hầu hết project chưa có cấu hình `settings.publish` nên tính năng publish không hoạt động theo kỳ vọng của người dùng.
+  - Ngoài ra, việc cập nhật con trỏ nhánh local bằng `git update-ref refs/heads/<target>` khi thư mục làm việc chính (`project.path`) đang checkout đúng nhánh đích sẽ làm lệch giữa con trỏ nhánh và các file thực tế trong working tree, khiến `git status` báo người dùng sửa ngược toàn bộ thay đổi.
+- **Quyết định thiết kế**:
+  1. **Mặc định bật publish toàn diện**:
+     - `DEFAULT_PROJECT_SETTINGS.publish.enabled = true`, cấu hình mặc định kèm `audit: { enabled: true, maxFixRounds: 2 }`, remote `origin`, nhánh đích fallback theo `project.defaultBranch`.
+     - Cả 3 preset (`safe`, `balanced`, `auto`) đều đặt `publish.enabled: true`. Riêng `safe` vẫn duy trì yêu cầu duyệt và merge thủ công trước khi publish.
+     - Mọi project mới đăng ký (UI, MCP `hub_register_project`, CLI, setup import) đều được bật publish mặc định.
+  2. **Migration một lần cho các project hiện hữu**:
+     - Hàm `ensureProjectPublishMigration` chạy một lần khi khởi tạo database: duyệt qua toàn bộ project chưa có `settings.publish` để bật mặc định.
+     - Project nào đã đặt rõ ràng `publish.enabled = false` (như drone-strike-online) được giữ nguyên tuyệt đối không ghi đè, đồng thời lưu danh sách vào `meta` và phát thông báo qua event/log để người dùng chủ động kiểm tra.
+     - Các project không có remote `origin` vẫn bật cấu hình nhưng khi publish sẽ báo lỗi rõ ràng, retryable và không làm crash hệ thống.
+     - Việc đồng bộ `publish.enabled: true` ở cả 3 preset và default settings đảm bảo cơ chế `detectProjectPreset` và `effective-config` tính toán chính xác, không biến các project thành `custom`.
+  3. **An toàn khi cập nhật nhánh local đang checkout**:
+     - Kiểm tra nhánh đang checkout tại `project.path` qua `git symbolic-ref --short HEAD`.
+     - Nếu đang ở chính nhánh đích (`targetBranch`):
+       - Thư mục sạch (kiểm tra `git status --porcelain -uno`, bỏ qua file untracked): cập nhật bằng `git merge --ff-only <pushedCommit>` thay vì `update-ref`, giúp file trong working tree khớp hoàn toàn với con trỏ nhánh.
+       - Thư mục bẩn (có thay đổi tracked đã sửa hoặc staged), hoặc lệnh `merge --ff-only` thất bại: không đụng vào nhánh local, chỉ đẩy lên remote, đánh dấu `pushResult.localUpdate = 'skipped_dirty'` và gửi thông báo cảnh báo đến người dùng.
+     - Nếu nhánh đích không được checkout (ở nhánh khác hoặc detached HEAD): tiếp tục dùng `git update-ref` trực tiếp như trước.
+  4. **Giao diện & i18n**:
+     - Project Settings Drawer hiển thị toggle publish bật mặc định.
+     - TaskDetailPage hiển thị banner cảnh báo `publish-skipped-dirty-banner` khi `localUpdate === 'skipped_dirty'`.
+     - Thêm đầy đủ chuỗi bản dịch `publishSkippedDirty` cho cả tiếng Việt và tiếng Anh.

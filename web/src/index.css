@@ -728,14 +728,12 @@ em,
 }
 
 /* TaskFlow live animation (components/TaskFlow.tsx) */
-@keyframes flow-pulse {
+@keyframes flow-node-glow {
   0%, 100% {
-    opacity: 0.35;
-    stroke-width: 2px;
+    box-shadow: 0 0 0 1px var(--node-color, var(--t-accent)), 0 0 8px 1px color-mix(in srgb, var(--node-color, var(--t-accent)) 30%, transparent);
   }
   50% {
-    opacity: 0.9;
-    stroke-width: 3px;
+    box-shadow: 0 0 0 2px var(--node-color, var(--t-accent)), 0 0 16px 3px color-mix(in srgb, var(--node-color, var(--t-accent)) 55%, transparent);
   }
 }
 
@@ -753,8 +751,8 @@ em,
     transform: scale(1);
   }
   50% {
-    transform: scale(1.25);
-    fill: var(--t-accent);
+    transform: scale(1.22);
+    color: var(--t-accent);
   }
   100% {
     transform: scale(1);
@@ -805,7 +803,7 @@ em,
 }
 
 .flow-node-pulse {
-  animation: flow-pulse 1.8s ease-in-out infinite;
+  animation: flow-node-glow 1.8s ease-in-out infinite;
 }
 
 .flow-edge-animated {
@@ -815,40 +813,44 @@ em,
 }
 
 .flow-count-bounce {
-  transform-origin: center;
-  transform-box: fill-box;
+  display: inline-block;
+  transform-origin: left center;
   animation: flow-count-bounce 400ms ease-in-out;
 }
 
 .flow-dot-pulse {
   animation: flow-dot-pulse 1.2s ease-in-out infinite;
   transform-origin: center;
-  transform-box: fill-box;
 }
 
 .flow-icon-running {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   transform-origin: center;
-  transform-box: fill-box;
   animation: flow-icon-play 1.6s ease-in-out infinite;
 }
 
 .flow-icon-checking {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   transform-origin: center;
-  transform-box: fill-box;
   animation: flow-icon-flask 1.8s ease-in-out infinite;
 }
 
 .flow-icon-review {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   transform-origin: center;
-  transform-box: fill-box;
   animation: flow-icon-review 2.4s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .flow-node-pulse {
     animation: none;
-    opacity: 0.55;
-    stroke-width: 2px;
+    box-shadow: 0 0 0 1px var(--node-color, var(--t-accent));
   }
   .flow-edge-animated {
     animation: none;

@@ -187,16 +187,18 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
 
     await waitFor(() => {
-      const bounceEl = runningNode.querySelector('.flow-count-bounce');
+      const node = screen.getByTestId('flow-node-running');
+      const bounceEl = node.querySelector('.flow-count-bounce');
       expect(bounceEl).not.toBeNull();
-      // Ensure bounce class is on an SVG <text> graphics element rather than <tspan> so transforms apply
-      expect(bounceEl?.tagName.toLowerCase()).toBe('text');
+      // Ensure bounce class is on an HTML <span> element
+      expect(bounceEl?.tagName.toLowerCase()).toBe('span');
     });
 
     // After bounce duration, class disappears
     await waitFor(
       () => {
-        expect(runningNode.querySelector('.flow-count-bounce')).toBeNull();
+        const node = screen.getByTestId('flow-node-running');
+        expect(node.querySelector('.flow-count-bounce')).toBeNull();
       },
       { timeout: 1500 },
     );
@@ -210,11 +212,47 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     expect(getFlowRefetchInterval(0)).toBe(30_000);
   });
 
-  it('(e) displays preview of running tasks with project name, slug, and +N more when > 2', async () => {
-    const threeRunning = [
+  it('(e) displays preview of running tasks up to 3 lines and +N more when total > 3', async () => {
+    const fiveRunning = [
       makeTask('slug-alpha', 'running'),
       makeTask('slug-beta', 'running'),
       makeTask('slug-gamma', 'running'),
+      makeTask('slug-delta', 'running'),
+      makeTask('slug-epsilon', 'running'),
+    ];
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      const matching = fiveRunning.filter((t) => !params?.status || params.status === 'all' || t.status === params.status);
+      const limit = params?.limit || 20;
+      return {
+        items: matching.slice(0, limit),
+        total: matching.length,
+        nextCursor: null,
+      };
+    });
+
+    renderPage('/tasks?view=flow');
+    const runningNode = await screen.findByTestId('flow-node-running');
+    await waitFor(() => expect(runningNode).toHaveAttribute('data-count', '5'));
+
+    const previewGroup = within(runningNode).getByTestId('flow-running-tasks');
+    expect(previewGroup).toBeInTheDocument();
+    // Tối đa 3 dòng: alpha, beta, gamma được hiển thị
+    expect(within(previewGroup).getByText('slug-alpha')).toBeInTheDocument();
+    expect(within(previewGroup).getByText('slug-beta')).toBeInTheDocument();
+    expect(within(previewGroup).getByText('slug-gamma')).toBeInTheDocument();
+    expect(within(previewGroup).queryByText('slug-delta')).toBeNull();
+    // +2 nữa hiển thị
+    expect(within(previewGroup).getByText('+2 nữa')).toBeInTheDocument();
+
+    const dots = previewGroup.querySelectorAll('.flow-dot-pulse');
+    expect(dots.length).toBe(3);
+  });
+
+  it('displays up to 3 running tasks without +N more label when total is 3', async () => {
+    const threeRunning = [
+      makeTask('slug-1', 'running'),
+      makeTask('slug-2', 'running'),
+      makeTask('slug-3', 'running'),
     ];
     vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
       const matching = threeRunning.filter((t) => !params?.status || params.status === 'all' || t.status === params.status);
@@ -232,12 +270,10 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
 
     const previewGroup = within(runningNode).getByTestId('flow-running-tasks');
     expect(previewGroup).toBeInTheDocument();
-    expect(within(previewGroup).getByText('slug-alpha')).toBeInTheDocument();
-    expect(within(previewGroup).getByText('slug-beta')).toBeInTheDocument();
-    expect(within(previewGroup).getByText('+1 nữa')).toBeInTheDocument();
-
-    const dots = previewGroup.querySelectorAll('.flow-dot-pulse');
-    expect(dots.length).toBeGreaterThanOrEqual(1);
+    expect(within(previewGroup).getByText('slug-1')).toBeInTheDocument();
+    expect(within(previewGroup).getByText('slug-2')).toBeInTheDocument();
+    expect(within(previewGroup).getByText('slug-3')).toBeInTheDocument();
+    expect(within(previewGroup).queryByText(/\+.*nữa/)).toBeNull();
   });
 
   it('(f) does not display +N more placeholder before runningTasks data finishes loading', async () => {
@@ -249,17 +285,17 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
           resolveRunningTasks = resolve;
         });
       }
-      // Status query returns total = 3
+      // Status query returns total = 4
       return {
         items: [],
-        total: 3,
+        total: 4,
         nextCursor: null,
       };
     });
 
     renderPage('/tasks?view=flow');
     const runningNode = await screen.findByTestId('flow-node-running');
-    await waitFor(() => expect(runningNode).toHaveAttribute('data-count', '3'));
+    await waitFor(() => expect(runningNode).toHaveAttribute('data-count', '4'));
 
     const previewGroup = within(runningNode).getByTestId('flow-running-tasks');
     // While runningTasks is loading, no +N more label should be visible
@@ -267,14 +303,106 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
 
     // Now resolve the running tasks query
     resolveRunningTasks!({
-      items: [makeTask('run-1', 'running'), makeTask('run-2', 'running')],
-      total: 3,
+      items: [makeTask('run-1', 'running'), makeTask('run-2', 'running'), makeTask('run-3', 'running')],
+      total: 4,
       nextCursor: null,
     });
 
-    // After loading completes, +1 nữa is rendered
+    // After loading completes, +1 nữa is rendered (total 4 - shown 3)
     await waitFor(() => {
       expect(within(previewGroup).getByText('+1 nữa')).toBeInTheDocument();
     });
+  });
+
+  it('(g) renders long slug with truncate class and full title attribute', async () => {
+    const longSlug = 'targeting-no-payload-deduction-extended-slug-overflow-check';
+    const longSlugTask = [makeTask(longSlug, 'running')];
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      const matching = longSlugTask.filter((t) => !params?.status || params.status === 'all' || t.status === params.status);
+      const limit = params?.limit || 20;
+      return {
+        items: matching.slice(0, limit),
+        total: matching.length,
+        nextCursor: null,
+      };
+    });
+
+    renderPage('/tasks?view=flow');
+    const runningNode = await screen.findByTestId('flow-node-running');
+    await waitFor(() => expect(runningNode).toHaveAttribute('data-count', '1'));
+
+    const previewGroup = within(runningNode).getByTestId('flow-running-tasks');
+    expect(previewGroup).toBeInTheDocument();
+
+    const slugText = within(previewGroup).getByText(longSlug);
+    expect(slugText).toBeInTheDocument();
+
+    // Link and container have truncate class so text never overflows
+    const linkEl = slugText.closest('a');
+    expect(linkEl).not.toBeNull();
+    expect(linkEl).toHaveClass('truncate');
+    expect(slugText).toHaveClass('truncate');
+
+    // Link has full title attribute
+    expect(linkEl).toHaveAttribute('title', expect.stringContaining(longSlug));
+  });
+
+  it('(h) places icon animation classes on wrapping element instead of svg', async () => {
+    const activeTasks = [
+      makeTask('task-run', 'running'),
+      makeTask('task-check', 'checking'),
+      makeTask('task-rev', 'review'),
+    ];
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      const matching = activeTasks.filter((t) => !params?.status || params.status === 'all' || t.status === params.status);
+      const limit = params?.limit || 20;
+      return {
+        items: matching.slice(0, limit),
+        total: matching.length,
+        nextCursor: null,
+      };
+    });
+
+    renderPage('/tasks?view=flow');
+    const runningNode = await screen.findByTestId('flow-node-running');
+    const checkingNode = await screen.findByTestId('flow-node-checking');
+    const reviewNode = await screen.findByTestId('flow-node-review');
+
+    await waitFor(() => {
+      expect(runningNode).toHaveAttribute('data-active', 'true');
+      expect(checkingNode).toHaveAttribute('data-active', 'true');
+      expect(reviewNode).toHaveAttribute('data-active', 'true');
+    });
+
+    // Check running icon
+    const runningIconWrapper = runningNode.querySelector('.flow-icon-running');
+    expect(runningIconWrapper).not.toBeNull();
+    expect(runningIconWrapper?.tagName.toLowerCase()).not.toBe('svg');
+    expect(runningNode.querySelector('svg.flow-icon-running')).toBeNull();
+
+    // Check checking icon
+    const checkingIconWrapper = checkingNode.querySelector('.flow-icon-checking');
+    expect(checkingIconWrapper).not.toBeNull();
+    expect(checkingIconWrapper?.tagName.toLowerCase()).not.toBe('svg');
+    expect(checkingNode.querySelector('svg.flow-icon-checking')).toBeNull();
+
+    // Check review icon
+    const reviewIconWrapper = reviewNode.querySelector('.flow-icon-review');
+    expect(reviewIconWrapper).not.toBeNull();
+    expect(reviewIconWrapper?.tagName.toLowerCase()).not.toBe('svg');
+    expect(reviewNode.querySelector('svg.flow-icon-review')).toBeNull();
+  });
+
+  it('(i) uses viewport-based minimum height and content-between layout', async () => {
+    renderPage('/tasks?view=flow');
+    const wrapper = await screen.findByTestId('flow-view-wrapper');
+    const board = wrapper.querySelector('[role="group"]');
+    expect(board).not.toBeNull();
+    expect(board?.className).toContain('min-h-[max(480px,calc(100vh-280px))]');
+
+    const grid = board?.querySelector('.grid');
+    expect(grid).not.toBeNull();
+    expect(grid?.className).toContain('content-between');
+    expect(grid?.className).toContain('min-h-[max(480px,calc(100vh-280px))]');
   });
 });

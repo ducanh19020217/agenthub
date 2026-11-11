@@ -2842,7 +2842,7 @@ export class Scheduler {
   }
 
   /** Pick the first reviewer that can run, applying project overrides and fallback policy. */
-  private pickReviewer(task: TaskRow, avoidProfile?: string, preferDifferentEngine?: string): ReviewerPick {
+  private pickReviewer(task: TaskRow, avoidProfile?: string, preferDifferentEngine?: string, dryRun = false): ReviewerPick {
     const project = this.projectRepo.get(task.projectId);
     const settings = projectSettings(project);
     const legacy = reviewerSettingsFromLegacy(this.config.reviewer as unknown as Record<string, unknown>);
@@ -2877,7 +2877,7 @@ export class Scheduler {
         .filter((profile) => !(avoidProfile && profile.name === avoidProfile && candidates.length > 1))
         .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
       if (free.length > 0 && !(errorCount >= 2 && fallback.onError && index === 0)) {
-        if (index > 0) {
+        if (index > 0 && !dryRun) {
           const key = `${task.id}:${index}`;
           if (!this.reviewerFallbackNotified.has(key)) {
             this.reviewerFallbackNotified.add(key);
@@ -2899,7 +2899,7 @@ export class Scheduler {
         (busy && fallback.onBusyAfterMin > 0 && waitedMs >= fallback.onBusyAfterMin * 60_000) ||
         (errorCount >= 2 && fallback.onError);
       if (!canFallback) return { wait: true };
-      if (index < order.length - 1) {
+      if (index < order.length - 1 && !dryRun) {
         const key = `${task.id}:${index + 1}`;
         if (!this.reviewerFallbackNotified.has(key)) {
           this.reviewerFallbackNotified.add(key);
@@ -2916,26 +2916,26 @@ export class Scheduler {
     return { wait: true };
   }
 
-  private pickChainReviewer(task: TaskRow, step: ReviewChainStep | undefined, model: string, avoidProfile?: string): ReviewerPick {
+  private pickChainReviewer(task: TaskRow, step: ReviewChainStep | undefined, model: string, avoidProfile?: string, dryRun = false): ReviewerPick {
     if (step?.reviewer === 'claude') {
       if (!this.claudeBudgetAvailable(task)) {
-        this.emitReviewWaiting(task, 'claude_budget');
+        if (!dryRun) this.emitReviewWaiting(task, 'claude_budget');
         return { wait: true };
       }
       const engine = this.engines.get(CLAUDE_REVIEW_ENGINE_KEY);
       if (!engine) {
-        this.emitReviewWaiting(task, 'no_reviewer_profile');
+        if (!dryRun) this.emitReviewWaiting(task, 'no_reviewer_profile');
         return { wait: true };
       }
       const profiles = this.availableChainProfiles('claude', undefined);
       const profile = profiles.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))[0];
-      if (!profile) this.emitReviewWaiting(task, 'no_reviewer_profile');
+      if (!profile && !dryRun) this.emitReviewWaiting(task, 'no_reviewer_profile');
       return profile ? { engine, model, profile } : { wait: true };
     }
 
     const engine = this.engines.get('codex');
     if (!engine) {
-      this.emitReviewWaiting(task, 'no_reviewer_profile');
+      if (!dryRun) this.emitReviewWaiting(task, 'no_reviewer_profile');
       return { wait: true };
     }
     const eligibleCodexProfiles = this.availableChainProfiles('codex', undefined, false);
@@ -2952,12 +2952,14 @@ export class Scheduler {
       : errorCount >= 2 && settings.fallback.onError;
 
     if (shouldFallback) {
-      const fallback = this.pickChainClaudeFallback(task, settings);
+      const fallback = this.pickChainClaudeFallback(task, settings, dryRun);
       if (fallback) return fallback;
-      if (claudeBudgetUnavailable) this.emitReviewWaiting(task, 'claude_budget');
-      else if (workerOnly) this.emitReviewWaiting(task, 'only_worker_profile');
-      else if (!eligibleCodexProfiles.length) this.emitReviewWaiting(task, 'no_reviewer_profile');
-      else if (errorCount >= 2) this.emitReviewWaiting(task, 'no_reviewer_profile');
+      if (!dryRun) {
+        if (claudeBudgetUnavailable) this.emitReviewWaiting(task, 'claude_budget');
+        else if (workerOnly) this.emitReviewWaiting(task, 'only_worker_profile');
+        else if (!eligibleCodexProfiles.length) this.emitReviewWaiting(task, 'no_reviewer_profile');
+        else if (errorCount >= 2) this.emitReviewWaiting(task, 'no_reviewer_profile');
+      }
     }
 
     // The fallback attempt above is deliberately best-effort. If it is disabled, over budget,
@@ -2969,13 +2971,15 @@ export class Scheduler {
 
     const busy = eligibleNonWorkerProfiles.length > 0 && nonWorkerProfiles.length === 0;
     if (busy && waitedMs >= settings.fallback.onBusyAfterMin * 60_000 && settings.fallback.onBusyAfterMin >= 0) {
-      const fallback = this.pickChainClaudeFallback(task, settings);
+      const fallback = this.pickChainClaudeFallback(task, settings, dryRun);
       if (fallback) return fallback;
     }
-    if (claudeBudgetUnavailable) this.emitReviewWaiting(task, 'claude_budget');
-    else if (workerOnly) this.emitReviewWaiting(task, 'only_worker_profile');
-    else if (!eligibleCodexProfiles.length) this.emitReviewWaiting(task, 'no_reviewer_profile');
-    else if (errorCount >= 2 || busy) this.emitReviewWaiting(task, 'no_reviewer_profile');
+    if (!dryRun) {
+      if (claudeBudgetUnavailable) this.emitReviewWaiting(task, 'claude_budget');
+      else if (workerOnly) this.emitReviewWaiting(task, 'only_worker_profile');
+      else if (!eligibleCodexProfiles.length) this.emitReviewWaiting(task, 'no_reviewer_profile');
+      else if (errorCount >= 2 || busy) this.emitReviewWaiting(task, 'no_reviewer_profile');
+    }
     return { wait: true };
   }
 
@@ -2999,14 +3003,14 @@ export class Scheduler {
       && (!freeOnly || (!this.reviewerRunsForProfile(profile.name) && this.locks.findFreeSlotSync(profile) !== null)));
   }
 
-  private pickChainClaudeFallback(task: TaskRow, settings: { order: ReviewerOrderItem[]; fallback: ReviewerFallback }): ReviewerPick | null {
+  private pickChainClaudeFallback(task: TaskRow, settings: { order: ReviewerOrderItem[]; fallback: ReviewerFallback }, dryRun = false): ReviewerPick | null {
     const item = settings.order.find((candidate) => candidate.engine === 'claude') || {
       engine: 'claude' as const,
       model: 'sonnet',
       profiles: this.config.reviewer?.claudeProfiles || [],
     };
     if (!this.claudeBudgetAvailable(task)) {
-      this.emitReviewWaiting(task, 'claude_budget');
+      if (!dryRun) this.emitReviewWaiting(task, 'claude_budget');
       return null;
     }
     const engine = this.engines.get(CLAUDE_REVIEW_ENGINE_KEY);
@@ -3018,7 +3022,7 @@ export class Scheduler {
     const profile = profiles[0];
     if (!profile) return null;
     const key = `${task.id}:chain:codex:claude`;
-    if (!this.reviewerFallbackNotified.has(key)) {
+    if (!dryRun && !this.reviewerFallbackNotified.has(key)) {
       this.reviewerFallbackNotified.add(key);
       this.eventBus.emit('review.fallback', task.id, {
         from: 'codex',
@@ -3402,7 +3406,7 @@ export class Scheduler {
     });
   }
 
-  private getNextReviewerProfile(task: TaskRow): string | undefined {
+  getNextReviewerProfile(task: TaskRow): string | undefined {
     try {
       const chain = this.reviewChainForTask(task);
       const step = chain[task.reviewStep ?? 0];
@@ -3412,8 +3416,8 @@ export class Scheduler {
       const isPlan = task.slug.endsWith('-plan');
       const preferDifferentEngine = isPlan ? lastWorker?.engine : undefined;
       const picked = chain.length > 0
-        ? this.pickChainReviewer(task, step, model, lastWorker?.profileName)
-        : this.pickReviewer(task, lastWorker?.model === model ? lastWorker.profileName : undefined, preferDifferentEngine);
+        ? this.pickChainReviewer(task, step, model, lastWorker?.profileName, true)
+        : this.pickReviewer(task, lastWorker?.model === model ? lastWorker.profileName : undefined, preferDifferentEngine, true);
       if ('profile' in picked) {
         return picked.profile.name;
       }
@@ -3459,16 +3463,16 @@ export class Scheduler {
       const nextReviewer = task ? this.getNextReviewerProfile(task) : undefined;
       appendFailoverReason(nextReviewer ? `reviewer ${profileName} bận khóa, chuyển sang ${nextReviewer}` : `reviewer ${profileName} bận khóa`);
       this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: 'lock_busy' });
-      if (!this.stopped) this.triggerTick();
       return;
     }
 
-    const result = parseReviewerOutput(output);
-    const hasValidVerdict = reason === 'exit' && exitCode === 0 && result !== null;
+    const combinedLog = `${logOutput}\n${output}`;
+    const isClaudeReviewer = active.actor === 'claude-reviewer' || active.engine.id === 'claude';
+    const isFailedRun = reason === 'timeout' || reason === 'error' || exitCode !== 0;
 
-    if (!hasValidVerdict) {
-      const combinedLog = `${logOutput}\n${output}`;
-      const authExpired = active.engine.detectAuthError(combinedLog).expired;
+    if (isFailedRun) {
+      // Only detect auth error from trusted error sources for Claude reviewer; never for Codex reviewer
+      const authExpired = isClaudeReviewer && active.engine.detectAuthError(combinedLog).expired;
       if (authExpired) {
         this.profileRepo.updateAuthState(profileName, 'not_logged_in', 'Phiên đăng nhập hết hạn (401) – cần đăng nhập lại', null);
         this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
@@ -3477,7 +3481,6 @@ export class Scheduler {
         const nextReviewer = task ? this.getNextReviewerProfile(task) : undefined;
         appendFailoverReason(nextReviewer ? `reviewer ${profileName} lỗi đăng nhập, chuyển sang ${nextReviewer}` : `reviewer ${profileName} lỗi đăng nhập`);
         this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: 'auth_error' });
-        if (!this.stopped) this.triggerTick();
         return;
       }
 
@@ -3485,28 +3488,18 @@ export class Scheduler {
       if (quota) {
         this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
         this.runRepo.finish(runId, 'quota');
-        if (quota) this.quotaService.mark(profileName, active.actor === 'claude-reviewer' ? 'claude' : 'codex', this.config.reviewer?.failoverSec || 5 * 60 * 60, `${active.actor} quota`);
+        this.quotaService.mark(profileName, active.actor === 'claude-reviewer' ? 'claude' : 'codex', this.config.reviewer?.failoverSec || 5 * 60 * 60, `${active.actor} quota`);
         const task = this.taskRepo.get(taskId);
         const nextReviewer = task ? this.getNextReviewerProfile(task) : undefined;
         appendFailoverReason(nextReviewer ? `reviewer ${profileName} hết quota, chuyển sang ${nextReviewer}` : `reviewer ${profileName} hết quota`);
         this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: 'quota' });
-        if (!this.stopped) this.triggerTick();
         return;
       }
 
-      if (reason === 'timeout' || reason === 'error' || exitCode !== 0) {
-        this.reviewerErrorCounts.set(taskId, (this.reviewerErrorCounts.get(taskId) || 0) + 1);
-        this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
-        this.runRepo.finish(runId, reason === 'timeout' ? 'timeout' : 'crashed');
-        this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: reason === 'timeout' ? 'timeout' : 'crash' });
-        if (!this.stopped) this.triggerTick();
-        return;
-      }
-
-      // Process exited 0 but reviewer output had no valid verdict
       this.reviewerErrorCounts.set(taskId, (this.reviewerErrorCounts.get(taskId) || 0) + 1);
-      this.runRepo.finish(runId, 'crashed', undefined, 'malformed reviewer output');
-      this.eventBus.emit('review.failed', taskId, { actor: active.actor, reason: 'malformed_output' });
+      this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
+      this.runRepo.finish(runId, reason === 'timeout' ? 'timeout' : 'crashed');
+      this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: reason === 'timeout' ? 'timeout' : 'crash' });
       return;
     }
 
@@ -3515,6 +3508,35 @@ export class Scheduler {
     if (checks.length === 0) {
       this.runRepo.finish(runId, 'done', undefined, 'reviewer had no persisted autocheck results');
       this.escalateReview(taskId, 'missing_autocheck_results', 'Không có kết quả autocheck đã lưu; cần người xác minh trước khi tiếp tục.');
+      return;
+    }
+
+    const result = parseReviewerOutput(output);
+    if (!result) {
+      const authExpired = isClaudeReviewer && active.engine.detectAuthError(combinedLog).expired;
+      if (authExpired) {
+        this.profileRepo.updateAuthState(profileName, 'not_logged_in', 'Phiên đăng nhập hết hạn (401) – cần đăng nhập lại', null);
+        this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
+        this.runRepo.finish(runId, 'crashed', undefined, 'auth_error');
+        const nextReviewer = task ? this.getNextReviewerProfile(task) : undefined;
+        appendFailoverReason(nextReviewer ? `reviewer ${profileName} lỗi đăng nhập, chuyển sang ${nextReviewer}` : `reviewer ${profileName} lỗi đăng nhập`);
+        this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: 'auth_error' });
+        return;
+      }
+      const quota = active.engine.detectQuota(combinedLog).exhausted;
+      if (quota) {
+        this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
+        this.runRepo.finish(runId, 'quota');
+        this.quotaService.mark(profileName, active.actor === 'claude-reviewer' ? 'claude' : 'codex', this.config.reviewer?.failoverSec || 5 * 60 * 60, `${active.actor} quota`);
+        const nextReviewer = task ? this.getNextReviewerProfile(task) : undefined;
+        appendFailoverReason(nextReviewer ? `reviewer ${profileName} hết quota, chuyển sang ${nextReviewer}` : `reviewer ${profileName} hết quota`);
+        this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: 'quota' });
+        return;
+      }
+
+      this.reviewerErrorCounts.set(taskId, (this.reviewerErrorCounts.get(taskId) || 0) + 1);
+      this.runRepo.finish(runId, 'crashed', undefined, 'malformed reviewer output');
+      this.eventBus.emit('review.failed', taskId, { actor: active.actor, reason: 'malformed_output' });
       return;
     }
     if (this.isReadOnlyEnvironmentFeedback(result.verdict, result.feedback)) {

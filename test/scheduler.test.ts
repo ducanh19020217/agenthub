@@ -831,6 +831,44 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
+  it('does not change authState when Codex reviewer times out with 401 in log', async () => {
+    const { scheduler } = makeReviewer('reviewer-chatter');
+    profileRepo.updateAuthState('codex-1', 'ok', null, null);
+    const reviewerRun = runRepo.getByTask('test-project/review').find((r) => r.kind === 'reviewer');
+    const logPath = path.join(tmpDir, 'logs', 'codex-timeout.log');
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.writeFileSync(logPath, 'Examining src/auth.ts\nLine 42: return res.status(401).json({ error: "UNAUTHENTICATED" });\nStill analyzing...\n', 'utf8');
+
+    // Simulate timeout directly on the scheduler
+    const profile = profileRepo.get('codex-1')!;
+    expect(profile.authState).toBe('ok');
+
+    (scheduler as unknown as { finishReview: (taskId: string, runId: string, profileName: string, reason: string, code: number | null) => void })
+      .finishReview('test-project/review', reviewerRun?.id || 'fake-run', 'codex-1', 'timeout', null);
+
+    const afterProfile = profileRepo.get('codex-1');
+    expect(afterProfile?.authState).toBe('ok');
+
+    scheduler.stop();
+  });
+
+  it('getNextReviewerProfile is a pure function and emits no events', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    const task = taskRepo.get('test-project/review')!;
+
+    const emittedEvents: Array<{ event: string; taskId?: string }> = [];
+    scheduler.eventBus.on('review.fallback', (taskId) => emittedEvents.push({ event: 'review.fallback', taskId }));
+    scheduler.eventBus.on('review.waiting', (taskId) => emittedEvents.push({ event: 'review.waiting', taskId }));
+
+    const initialNotifiedSize = (scheduler as unknown as { reviewerFallbackNotified: Set<string> }).reviewerFallbackNotified.size;
+    const nextProfile = scheduler.getNextReviewerProfile(task);
+    expect(nextProfile).toBeDefined();
+    expect(emittedEvents).toEqual([]);
+    expect((scheduler as unknown as { reviewerFallbackNotified: Set<string> }).reviewerFallbackNotified.size).toBe(initialNotifiedSize);
+
+    scheduler.stop();
+  });
+
   it('cleans up a reviewer when the child emits an asynchronous spawn error', async () => {
     const { scheduler } = makeReviewer('reviewer-error');
     scheduler.tick();

@@ -131,4 +131,17 @@ describe('Codex reviewer output', () => {
     expect(prompt).toContain('bị từ chối');
     fs.rmSync(root, { recursive: true, force: true });
   });
+
+  it('includes the three mandatory review criteria for non-plan tasks and omits for plan tasks', () => {
+    const normalPrompt = buildReviewerPrompt('Đề bài', '/tmp/worktree', [], [], '/tmp/worktree', [], false);
+    expect(normalPrompt).toContain('TIÊU CHÍ BẮT BUỘC KHI REVIEW');
+    expect(normalPrompt).toContain('1. Đúng yêu cầu:');
+    expect(normalPrompt).toContain('2. Không lệch phạm vi:');
+    expect(normalPrompt).toContain('3. Không gây lỗi tiềm ẩn:');
+    expect(normalPrompt).toContain('Feedback phải có mục riêng cho từng tiêu chí trong ba tiêu chí trên');
+
+    const planPrompt = buildReviewerPrompt('Đề bài plan', '/tmp/worktree', [], [], '/tmp/worktree', [], true);
+    expect(planPrompt).not.toContain('TIÊU CHÍ BẮT BUỘC KHI REVIEW');
+    expect(planPrompt).not.toContain('1. Đúng yêu cầu:');
+  });
 });

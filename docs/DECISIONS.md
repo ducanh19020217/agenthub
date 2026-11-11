@@ -254,3 +254,20 @@
 - launchd dùng `AbandonProcessGroup=true` với cùng mục tiêu trên macOS.
 - `agenthub service upgrade` ghi lại unit/plist hiện hành và thực hiện thao tác reload/activate của platform thông qua luồng cài service. `scripts/run-prod.sh` gọi lệnh này sau mỗi build production.
 - Giữ `KillMode=process` thay vì `mixed`: mục tiêu handoff yêu cầu worker không bị SIGTERM/SIGKILL theo vòng đời service manager; scheduler chịu trách nhiệm kill worker chỉ trong luồng người dùng chọn dừng hẳn.
+
+## DEC-023: Cơ chế Pre-publish Audit Gate và quản lý kiểm tra trước khi push
+
+- **Bối cảnh**: Tính năng audit trước khi publish (`t-prepublish-audit`) đảm bảo các thay đổi code được rà soát nghiêm ngặt bằng agent chỉ đọc trước khi đẩy (`git push`) lên remote, tránh đẩy code sai đề bài, ngoài phạm vi, gây lỗi tiềm ẩn (hồi quy), hoặc mất code khi giải xung đột merge (`merge_loss`).
+- **Quyết định thiết kế**:
+  1. **Bộ nhớ đệm (Cache) audit trong bộ nhớ**:
+     - Kết quả audit pass được lưu trong `auditPassCache` dạng `Map<string, PrePublishAuditResult>` theo key `${taskId}:${commitSha}`.
+     - Quyết định lưu trong bộ nhớ (in-memory) thay vì database để tối ưu hiệu năng và giữ trạng thái nhẹ nhàng cho daemon. Khi daemon restart, cache được làm sạch tự nhiên; các task chưa push sẽ được audit lại với commit SHA hiện tại nếu cần.
+  2. **Bộ đếm vòng sửa audit độc lập**:
+     - Thay vì dùng chung và tiêu hao trực tiếp bộ đếm `reviewerChangesRequested` của quy trình review thông thường (vốn có thể khiến task đã qua review bị dừng ngay ở lần audit fail đầu tiên), hệ thống quản lý bộ đếm vòng sửa audit riêng biệt dựa trên bản ghi review `actor: 'audit-prepublish'` trong `reviewRepo` và `pushResult.auditFixRounds`.
+     - Cấu hình `maxFixRounds` được giới hạn trong khoảng `1..10` (mặc định 2) thông qua Zod schema nhằm ngăn ngừa worker lặp vô hạn khi không sửa được phát hiện của audit.
+  3. **Xác định dải task chưa push và trích xuất diff**:
+     - Danh sách task cần audit được xác định dựa trên dải commit chuẩn bị được đẩy lên remote: `remote/target..source` (với `refs/remotes/<remote>/<targetBranch>` được fetch sớm trước khi audit gate chạy). Bất kỳ task nào có commit hoặc branch tip đã là tổ tiên (`--is-ancestor`) của `remote/target` sẽ được bỏ qua vì đã tồn tại trên remote.
+     - Trích xuất diff và commit SHA: ưu tiên tìm merge commit của task trên nhánh tích hợp hoặc nhánh đích (`<merge>^1 <merge>`) thông qua `--ancestry-path` hoặc commit message grep. Việc dùng merge commit diff đảm bảo kiểm tra được toàn bộ thay đổi bao gồm cả phần giải xung đột merge (`merge_loss`), đồng thời cung cấp commit SHA ổn định cho cache ngay cả khi nhánh task đã bị xoá. Nếu không có merge commit (ví dụ rebase/fast-forward), fallback về `merge-base..branch`.
+     - Giới hạn kích thước diff: diff nhúng vào prompt được cắt tối đa 40.000 ký tự kèm thông báo hướng dẫn agent tự chạy các lệnh đọc an toàn (`git show <commitSha>`, `git diff`) trong repo để tránh tràn context window hoặc timeout.
+  4. **Chính sách Fail-Closed và Retryable**:
+     - Khi reviewer engine gặp lỗi nội bộ, hết quota, timeout (mặc định 300s, tự động dọn timer và kill process group) hoặc trả về output JSON sai cú pháp, hệ thống dừng publish ngay lập tức (`fail-closed`), đánh dấu `retryable: true` trong `PublishFailedResult` và cập nhật vào `pushResult` của cả task đang audit lẫn task yêu cầu publish mà không tự ý trả task về worker sửa.

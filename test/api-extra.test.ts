@@ -1371,6 +1371,29 @@ describe('AgentHub API Extra Endpoints', () => {
       expect(resTailed.statusCode).toBe(200);
       expect(Buffer.byteLength(resTailed.body, 'utf-8')).toBeLessThanOrEqual(1024);
       expect(resTailed.body).toContain('Reviewer checked the diff.');
+
+      // scope=all with multi-byte UTF-8 characters: never produces replacement character 
+      fs.writeFileSync(
+        path.join(tmpDir, 'run3.log'),
+        'Dòng 1: Khởi động quá trình kiểm tra.\n' +
+        'Dòng 2: Tiếng Việt có dấu kiểm tra mã hoá UTF-8 nhiều byte: 🚀 Ứng dụng hoạt động ổn định.\n'.repeat(30) +
+        'Dòng cuối: Hoàn thành duyệt mã nguồn.\n',
+        'utf-8',
+      );
+      const resUtf8 = await server.inject({
+        method: 'GET',
+        url: '/api/tasks/p-log-runs~t2/log?scope=all&tail=1',
+        headers: authHeaders(),
+      });
+      expect(resUtf8.statusCode).toBe(200);
+      expect(resUtf8.body).not.toContain('\uFFFD');
+      expect(resUtf8.body).toContain('Hoàn thành duyệt mã nguồn.');
+      // Headers in returned sections are intact
+      for (const line of resUtf8.body.split('\n')) {
+        if (line.startsWith('── Run #')) {
+          expect(line).toMatch(/^── Run #\d+ · .* ──$/);
+        }
+      }
     });
   });
 

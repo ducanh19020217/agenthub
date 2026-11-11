@@ -776,6 +776,35 @@ export function readLogTail(filePath: string, tailKB = 512): string {
   }
 }
 
+export function readRunLogTailSafe(filePath: string, maxBytes: number): string {
+  if (!fs.existsSync(filePath) || maxBytes <= 0) return '';
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const stat = fs.fstatSync(fd);
+      if (stat.size === 0) return '';
+      const bytesToRead = Math.min(stat.size, maxBytes);
+      const buffer = Buffer.alloc(bytesToRead);
+      fs.readSync(fd, buffer, 0, bytesToRead, stat.size - bytesToRead);
+      if (bytesToRead < stat.size) {
+        // Discard up to the first newline to start at a clean line boundary and avoid split UTF-8
+        const nl = buffer.indexOf(0x0a);
+        if (nl !== -1 && nl + 1 < buffer.length) {
+          return buffer.subarray(nl + 1).toString('utf-8');
+        }
+        let start = 0;
+        while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start++;
+        return buffer.subarray(start).toString('utf-8');
+      }
+      return buffer.toString('utf-8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return '';
+  }
+}
+
 export async function getGitCommits(
   repoPath: string,
   baseRef: string,
@@ -5598,30 +5627,54 @@ export class AppService {
 
     if (query?.scope === 'all') {
       if (runs.length === 0) return '';
+      // We process runs from latest to oldest so recent logs are prioritized
+      // without loading entire giant log files into memory.
       const sections: string[] = [];
-      for (let i = 0; i < runs.length; i++) {
+      let totalBytes = 0;
+
+      for (let i = runs.length - 1; i >= 0; i--) {
         const r = runs[i];
         const header = formatRunLogHeader(r, i);
+        const headerBytes = Buffer.byteLength(header, 'utf8') + 1; // +1 for newline
+
+        // If even the header cannot fit in the remaining budget, stop
+        if (totalBytes + headerBytes > maxBytes) {
+          break;
+        }
+
+        const remainingLogBudget = maxBytes - totalBytes - headerBytes - (sections.length > 0 ? 2 : 0);
         let logContent = '';
-        if (r.logPath && fs.existsSync(r.logPath)) {
-          try {
-            logContent = fs.readFileSync(r.logPath, 'utf8');
-          } catch {
-            logContent = '';
+        if (r.logPath && fs.existsSync(r.logPath) && remainingLogBudget > 0) {
+          logContent = readRunLogTailSafe(r.logPath, remainingLogBudget);
+          // If logContent in bytes exceeds remainingLogBudget, trim from the beginning by lines
+          if (Buffer.byteLength(logContent, 'utf8') > remainingLogBudget) {
+            const lines = logContent.split('\n');
+            const kept: string[] = [];
+            let keptBytes = 0;
+            for (let l = lines.length - 1; l >= 0; l--) {
+              const lineBytes = Buffer.byteLength(lines[l], 'utf8') + 1;
+              if (keptBytes + lineBytes > remainingLogBudget) break;
+              kept.unshift(lines[l]);
+              keptBytes += lineBytes;
+            }
+            logContent = kept.join('\n');
           }
         }
+
+        let section = header;
         if (logContent.trim()) {
-          sections.push(`${header}\n${logContent.trimEnd()}`);
-        } else {
-          sections.push(header);
+          section = `${header}\n${logContent.trimEnd()}`;
+        }
+        const sectionBytes = Buffer.byteLength(section, 'utf8') + (sections.length > 0 ? 2 : 0);
+        sections.unshift(section);
+        totalBytes += sectionBytes;
+
+        if (totalBytes >= maxBytes) {
+          break;
         }
       }
-      const combined = sections.join('\n\n') + '\n';
-      const buf = Buffer.from(combined, 'utf8');
-      if (buf.length > maxBytes) {
-        return buf.subarray(buf.length - maxBytes).toString('utf8');
-      }
-      return combined;
+
+      return sections.length > 0 ? sections.join('\n\n') + '\n' : '';
     }
 
     const targetRun = runs[runs.length - 1];

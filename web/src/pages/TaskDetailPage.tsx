@@ -418,6 +418,8 @@ export const TaskDetailPage: React.FC = () => {
     },
   });
 
+  const isPublishing = publishMutation.isPending || parsedPushResult?.state === 'auditing' || parsedPushResult?.state === 'pushing';
+
   const rerunChecksMutation = useMutation({
     mutationFn: () => rerunChecks(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['task', id] }),
@@ -900,11 +902,11 @@ export const TaskDetailPage: React.FC = () => {
                 type="button"
                 data-testid="header-btn-publish"
                 onClick={() => publishMutation.mutate()}
-                disabled={publishMutation.isPending}
+                disabled={isPublishing}
                 className="px-3.5 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
               >
                 {parsedPushResult?.error ? <RotateCcw className="w-4 h-4" /> : <UploadCloud className="w-4 h-4" />}
-                <span>{publishMutation.isPending ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
+                <span>{isPublishing ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
               </button>
               <button
                 type="button"
@@ -914,7 +916,7 @@ export const TaskDetailPage: React.FC = () => {
                     publishMutation.mutate({ skipAudit: true });
                   }
                 }}
-                disabled={publishMutation.isPending}
+                disabled={isPublishing}
                 className="px-2.5 py-1.5 rounded-lg border border-[var(--t-border)] text-[var(--t-text-3)] text-xs font-medium hover:bg-[var(--t-surface-2)] inline-flex items-center gap-1 cursor-pointer"
                 title={t('taskDetail.btnPublishSkipAudit')}
               >
@@ -988,7 +990,7 @@ export const TaskDetailPage: React.FC = () => {
                 <span data-testid="publish-audit-status-failed" className="text-xs px-2 py-0.5 rounded-full font-medium bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)]">
                   {t('taskDetail.auditStatusFailed')}
                 </span>
-              ) : publishMutation.isPending ? (
+              ) : (parsedPushResult?.state === 'auditing' || parsedPushResult?.auditing) ? (
                 <span data-testid="publish-audit-status-auditing" className="text-xs px-2 py-0.5 rounded-full font-medium bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)] animate-pulse">
                   {t('taskDetail.auditStatusAuditing')}
                 </span>
@@ -1000,11 +1002,11 @@ export const TaskDetailPage: React.FC = () => {
                   type="button"
                   data-testid="btn-publish-task"
                   onClick={() => publishMutation.mutate()}
-                  disabled={publishMutation.isPending}
+                  disabled={isPublishing}
                   className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
                 >
                   {parsedPushResult?.error ? <RotateCcw className="w-3.5 h-3.5" /> : <UploadCloud className="w-3.5 h-3.5" />}
-                  <span>{publishMutation.isPending ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
+                  <span>{isPublishing ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
                 </button>
                 <button
                   type="button"
@@ -1014,7 +1016,7 @@ export const TaskDetailPage: React.FC = () => {
                       publishMutation.mutate({ skipAudit: true });
                     }
                   }}
-                  disabled={publishMutation.isPending}
+                  disabled={isPublishing}
                   className="px-2.5 py-1.5 rounded-lg border border-[var(--t-border)] text-[var(--t-text-3)] text-xs font-medium hover:bg-[var(--t-surface-2)] inline-flex items-center gap-1 cursor-pointer"
                 >
                   <span>{t('taskDetail.btnPublishSkipAudit')}</span>

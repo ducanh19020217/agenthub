@@ -1137,5 +1137,33 @@ describe('TaskDetailPage', () => {
     expect(confirmSpy).toHaveBeenCalled();
     expect(publishSpy).toHaveBeenCalledWith('proj-1~t1', { skipAudit: true });
   });
+
+  it('31. Task với pushResult.state === "auditing": hiển thị badge "Đang audit…" từ trạng thái server', async () => {
+    vi.spyOn(client, 'getProject').mockResolvedValue({
+      id: 'proj-1',
+      name: 'Project 1',
+      path: '/tmp/proj-1',
+      defaultBranch: 'main',
+      settings: {
+        publish: { enabled: true, remote: 'origin', branch: 'main' },
+      },
+    } as any);
+
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      pushResult: JSON.stringify({
+        state: 'auditing',
+        startedAt: '2026-11-11T12:00:00.000Z',
+      }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const auditingBadge = await screen.findByTestId('publish-audit-status-auditing');
+    expect(auditingBadge).toBeInTheDocument();
+    expect(auditingBadge.textContent).toContain('Đang audit');
+  });
 });
 

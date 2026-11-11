@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -8,7 +8,7 @@ import { createContext } from '../src/daemon.js';
 import { createServer } from '../src/api/server.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { FakeEngine, type Engine } from '../src/engines/index.js';
-import { buildGitUrls } from '../src/publish.js';
+import { buildGitUrls, clearPublishLocks } from '../src/publish.js';
 import { clearAuditPassCache } from '../src/pre-publish-audit.js';
 import { toRouteId } from '../src/services/index.js';
 
@@ -61,6 +61,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
   beforeEach(async () => {
     delete process.env.FAKE_MODE;
     clearAuditPassCache();
+    clearPublishLocks();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-publish-test-'));
     const agyHomesDir = path.join(tmpDir, 'agy-homes');
     fs.mkdirSync(agyHomesDir, { recursive: true });
@@ -358,22 +359,24 @@ describe('Publish Service (t-auto-push-after-done)', () => {
     });
     const task = ctx.taskRepo.get('proj-api/task-manual')!;
 
-    // Manual POST /api/tasks/:id/publish succeeds even if publish.enabled is false
+    // Manual POST /api/tasks/:id/publish returns 202 and starts background publish
     const res = await server.inject({
       method: 'POST',
       url: `/api/tasks/${toRouteId(task.id)}/publish`,
       headers: authHeaders(),
     });
 
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(202);
     const body = JSON.parse(res.body);
-    expect(body.ok).toBe(true);
+    expect(body.started).toBe(true);
 
-    const updated = ctx.taskRepo.get(task.id);
-    expect(updated?.status).toBe('pushed');
+    await vi.waitFor(() => {
+      const updated = ctx.taskRepo.get(task.id);
+      expect(updated?.status).toBe('pushed');
+    });
   });
 
-  it('chạy tuần tự các lượt publish cho cùng một project để tránh xung đột', async () => {
+  it('từ chối publish đồng thời cho cùng một project mà không xếp hàng thêm', async () => {
     const remotePath = path.join(tmpDir, 'remote-seq.git');
     initBareRemote(remotePath);
 
@@ -424,16 +427,16 @@ describe('Publish Service (t-auto-push-after-done)', () => {
     const task2 = ctx.taskRepo.get('proj-seq/t2')!;
 
     // Launch both concurrently
-    const [res1, res2] = await Promise.all([
+    const results = await Promise.allSettled([
       ctx.service.publishTask(task1.id),
       ctx.service.publishTask(task2.id),
     ]);
 
-    expect(res1.ok).toBe(true);
-    expect(res2.ok).toBe(true);
-
-    expect(ctx.taskRepo.get(task1.id)?.status).toBe('pushed');
-    expect(ctx.taskRepo.get(task2.id)?.status).toBe('pushed');
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason.message).toContain('đang trong quá trình publish');
   });
 
   it('publish tắt: tự động bỏ qua, status giữ nguyên done và không phát task.pushed', async () => {
@@ -994,15 +997,16 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         headers: authHeaders(),
         payload: { skipAudit: true },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(202);
       const body = JSON.parse(res.body);
-      expect(body.ok).toBe(true);
-      expect(body.auditSkipped).toBe(true);
+      expect(body.started).toBe(true);
 
-      const updated = ctx.taskRepo.get('proj-skip/task-skip');
-      expect(updated?.status).toBe('pushed');
-      const pushResult = JSON.parse(updated!.pushResult!);
-      expect(pushResult.auditSkipped).toBe(true);
+      await vi.waitFor(() => {
+        const updated = ctx.taskRepo.get('proj-skip/task-skip');
+        expect(updated?.status).toBe('pushed');
+        const pushResult = JSON.parse(updated!.pushResult!);
+        expect(pushResult.auditSkipped).toBe(true);
+      });
 
       expect(events.some((e) => e.type === 'task.audit_skipped')).toBe(true);
       expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
@@ -1244,6 +1248,89 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       // Verify remote branch was not pushed
       const remoteCommits = execFileSync('git', ['--git-dir', remotePath, 'log', '--oneline', 'main'], { encoding: 'utf8', env: testEnv });
       expect(remoteCommits).not.toContain('feat: fail empty task');
+    });
+
+    it('API publish trả 202 ngay, trạng thái được cập nhật qua DB/SSE và chặn publish trùng', async () => {
+      const remotePath = path.join(tmpDir, 'remote-async-pub.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-async-pub');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/async-pub-task'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'async.txt'), 'async publish\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: async publish task'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/async-pub-task', '-m', "Merge branch 'agenthub/async-pub-task' into main"], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-async',
+        name: 'Project Async Pub',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 2 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-async/task-1',
+        projectId: 'proj-async',
+        slug: 'async-pub-task',
+        title: 'Async Pub Task',
+        status: 'done',
+        branch: 'agenthub/async-pub-task',
+        baseRef: 'main',
+      });
+
+      const events: Array<{ type: string; payload: any }> = [];
+      ctx.scheduler.getEventBus().on('task.auditing', (_id, p) => events.push({ type: 'task.auditing', payload: p }));
+      ctx.scheduler.getEventBus().on('task.audit_passed', (_id, p) => events.push({ type: 'task.audit_passed', payload: p }));
+      ctx.scheduler.getEventBus().on('task.pushed', (_id, p) => events.push({ type: 'task.pushed', payload: p }));
+
+      process.env.FAKE_MODE = 'audit-pass';
+
+      // 1. POST /api/tasks/:id/publish returns 202 immediately
+      const res = await server.inject({
+        method: 'POST',
+        url: '/api/tasks/proj-async~task-1/publish',
+        headers: authHeaders(),
+      });
+      expect(res.statusCode).toBe(202);
+      const body = JSON.parse(res.body);
+      expect(body.started).toBe(true);
+
+      // 2. DB has state: 'auditing' and SSE emitted task.auditing
+      const immediateTask = ctx.taskRepo.get('proj-async/task-1');
+      const immediatePr = JSON.parse(immediateTask?.pushResult || '{}');
+      expect(immediatePr.state).toBe('auditing');
+      expect(events.some((e) => e.type === 'task.auditing')).toBe(true);
+
+      // 3. Subsequent publish request while project is publishing returns 409 conflict
+      const dupRes = await server.inject({
+        method: 'POST',
+        url: '/api/tasks/proj-async~task-1/publish',
+        headers: authHeaders(),
+      });
+      // Either 409 because it is publishing or background task already completed
+      if (dupRes.statusCode === 409) {
+        expect(JSON.parse(dupRes.body).message || JSON.parse(dupRes.body).error).toContain('đang trong quá trình publish');
+      }
+
+      // 4. Background execution completes and updates state to pushed
+      await vi.waitFor(() => {
+        const finishedTask = ctx.taskRepo.get('proj-async/task-1');
+        expect(finishedTask?.status).toBe('pushed');
+      });
+
+      expect(events.some((e) => e.type === 'task.audit_passed')).toBe(true);
+      expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
     });
   });
 });

@@ -22,26 +22,28 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-const projectPublishLocks = new Map<string, Promise<unknown>>();
+const activePublishProjects = new Set<string>();
+
+export function isProjectPublishing(projectId: string): boolean {
+  return activePublishProjects.has(projectId);
+}
+
+export function clearPublishLocks(): void {
+  activePublishProjects.clear();
+}
 
 /**
- * Ensures sequential execution of publish workflows per project.
+ * Ensures single execution of publish workflow per project without queuing up.
  */
 export async function withProjectPublishLock<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
-  const previous = projectPublishLocks.get(projectId) || Promise.resolve();
-  let resolveCurrent: () => void;
-  const current = new Promise<void>((resolve) => {
-    resolveCurrent = resolve;
-  });
-  projectPublishLocks.set(projectId, current);
+  if (activePublishProjects.has(projectId)) {
+    throw new HttpError(409, 'conflict', `Dự án đang trong quá trình publish`);
+  }
+  activePublishProjects.add(projectId);
   try {
-    await previous.catch(() => {});
     return await fn();
   } finally {
-    resolveCurrent!();
-    if (projectPublishLocks.get(projectId) === current) {
-      projectPublishLocks.delete(projectId);
-    }
+    activePublishProjects.delete(projectId);
   }
 }
 
@@ -791,6 +793,25 @@ export async function publishTask(
           }
         }
 
+        deps.taskRepo.update(t.id, {
+          pushResult: JSON.stringify({
+            state: 'auditing',
+            startedAt: new Date().toISOString(),
+          }),
+        });
+        if (taskId !== t.id) {
+          deps.taskRepo.update(taskId, {
+            pushResult: JSON.stringify({
+              state: 'auditing',
+              startedAt: new Date().toISOString(),
+            }),
+          });
+        }
+
+        deps.eventBus.emit('task.auditing', t.id, {
+          taskId: t.id,
+          projectId: currentProject.id,
+        });
         deps.eventBus.emit('task.audit_started', t.id, {
           taskId: t.id,
           projectId: currentProject.id,
@@ -1110,6 +1131,15 @@ export async function publishTask(
       // 4. Get HEAD commit sha
       const pushedCommit = await runGit(['-C', worktreePath, 'rev-parse', 'HEAD'], worktreePath, env);
 
+      // Update state to pushing before initiating remote git push
+      deps.taskRepo.update(taskId, {
+        pushResult: JSON.stringify({
+          state: 'pushing',
+          auditPassed: !isSkipAudit && isAuditConfigEnabled,
+          auditSkipped: isSkipAudit,
+        }),
+      });
+
       // 5. Push target branch to remote
       await runGit(['-C', worktreePath, 'push', remote, `HEAD:refs/heads/${targetBranch}`], worktreePath, env);
 
@@ -1134,6 +1164,7 @@ export async function publishTask(
       const { compareUrl } = buildGitUrls(remoteUrl, pushedCommit, prevRemoteSha);
       const pushedAt = new Date().toISOString();
       const pushResultObj = {
+        state: 'pushed',
         remote,
         branch: targetBranch,
         commit: pushedCommit,
@@ -1172,7 +1203,7 @@ export async function publishTask(
       const errorMsg = err instanceof Error ? err.message : String(err);
       const failedAt = new Date().toISOString();
       deps.taskRepo.update(taskId, {
-        pushResult: JSON.stringify({ error: errorMsg, failedAt, retryable: true }),
+        pushResult: JSON.stringify({ state: 'push_failed', error: errorMsg, failedAt, retryable: true }),
       });
       deps.eventBus.emit('task.push_failed', taskId, {
         taskId,

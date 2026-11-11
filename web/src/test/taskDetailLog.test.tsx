@@ -10,6 +10,7 @@ import { TaskDetail } from '../types/api';
 describe('TaskDetailPage - Live log of running task', () => {
   let queryClient: QueryClient;
   let runOutputListener: sse.RunOutputCallback | null = null;
+  let eventListener: sse.EventCallback | null = null;
 
   beforeEach(() => {
     queryClient = new QueryClient({
@@ -22,6 +23,13 @@ describe('TaskDetailPage - Live log of running task', () => {
       runOutputListener = cb;
       return () => {
         runOutputListener = null;
+      };
+    });
+
+    vi.spyOn(sse, 'subscribeToEvents').mockImplementation((cb) => {
+      eventListener = cb;
+      return () => {
+        eventListener = null;
       };
     });
   });
@@ -48,7 +56,7 @@ describe('TaskDetailPage - Live log of running task', () => {
     };
 
     vi.spyOn(client, 'getTask').mockResolvedValue(mockTask);
-    vi.spyOn(client, 'getTaskLog').mockResolvedValue('Fake agent: starting...\n');
+    const getTaskLogSpy = vi.spyOn(client, 'getTaskLog').mockResolvedValue('Fake agent: starting...\n');
 
     render(
       <QueryClientProvider client={queryClient}>
@@ -62,6 +70,7 @@ describe('TaskDetailPage - Live log of running task', () => {
 
     // Initial log displayed
     expect(await screen.findByText(/Fake agent: starting\.\.\./)).toBeInTheDocument();
+    expect(getTaskLogSpy).toHaveBeenCalledWith('demo~task-slow', { tail: 500, scope: 'all' });
 
     // Verify subscriber was registered
     expect(runOutputListener).not.toBeNull();
@@ -73,5 +82,176 @@ describe('TaskDetailPage - Live log of running task', () => {
 
     // Check that terminal has updated and contains the new live log
     expect(screen.getByText(/Fake agent: working slowly\.\.\./)).toBeInTheDocument();
+  });
+
+  it('displays previous run logs via scope=all even when latest run log is empty', async () => {
+    const mockTask: TaskDetail = {
+      id: 'demo/task-multi',
+      projectId: 'demo',
+      slug: 'task-multi',
+      title: 'Task Multi',
+      level: 'easy',
+      status: 'review',
+      dependsOn: '[]',
+      attempt: 0,
+      resume: 0,
+      createdAt: '2026-10-15T08:00:00Z',
+      updatedAt: '2026-10-15T08:00:00Z',
+      runs: [
+        { id: 'r1', taskId: 'demo/task-multi', engine: 'agy', model: 'gemini', profileName: 'p1', kind: 'worker', startedAt: '2026-10-15T08:00:00Z' },
+        { id: 'r2', taskId: 'demo/task-multi', engine: 'claude', model: 'claude:sonnet', profileName: 'claude-may', kind: 'reviewer', startedAt: '2026-10-15T08:30:00Z' },
+      ],
+      reviews: [],
+    };
+
+    const combinedLog = [
+      '── Run #1 · worker · agy/p1 · 15:00 ──',
+      'Worker finished work cleanly',
+      '',
+      '── Run #2 · reviewer · claude/claude-may · 15:30 ──',
+    ].join('\n');
+
+    vi.spyOn(client, 'getTask').mockResolvedValue(mockTask);
+    vi.spyOn(client, 'getTaskLog').mockResolvedValue(combinedLog);
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/tasks/demo~task-multi']}>
+          <Routes>
+            <Route path="/tasks/:id" element={<TaskDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    expect(await screen.findByText(/Worker finished work cleanly/)).toBeInTheDocument();
+    expect(screen.getByText(/Run #1 · worker/)).toBeInTheDocument();
+    expect(screen.getByText(/Run #2 · reviewer · claude\/claude-may/)).toBeInTheDocument();
+  });
+
+  it('displays reviewer status when task is in review and log is empty', async () => {
+    const mockTask: TaskDetail = {
+      id: 'demo/task-rev',
+      projectId: 'demo',
+      slug: 'task-rev',
+      title: 'Task In Review',
+      level: 'easy',
+      status: 'review',
+      dependsOn: '[]',
+      attempt: 0,
+      resume: 0,
+      createdAt: '2026-10-15T08:00:00Z',
+      updatedAt: '2026-10-15T08:00:00Z',
+      runs: [
+        { id: 'r2', taskId: 'demo/task-rev', engine: 'claude', model: 'claude:sonnet', profileName: 'claude-may', kind: 'reviewer', startedAt: '2026-10-15T08:30:00Z' },
+      ],
+      reviews: [],
+    };
+
+    vi.spyOn(client, 'getTask').mockResolvedValue(mockTask);
+    vi.spyOn(client, 'getTaskLog').mockResolvedValue('');
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/tasks/demo~task-rev']}>
+          <Routes>
+            <Route path="/tasks/:id" element={<TaskDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    // Displays contextual reviewer status instead of generic "Chưa có log từ worker..."
+    expect(await screen.findByText(/claude-may/)).toBeInTheDocument();
+  });
+
+  it('displays checking status when task is in checking and log is empty', async () => {
+    const mockTask: TaskDetail = {
+      id: 'demo/task-chk',
+      projectId: 'demo',
+      slug: 'task-chk',
+      title: 'Task In Checking',
+      level: 'easy',
+      status: 'checking',
+      dependsOn: '[]',
+      attempt: 0,
+      resume: 0,
+      createdAt: '2026-10-15T08:00:00Z',
+      updatedAt: '2026-10-15T08:00:00Z',
+      runs: [],
+      reviews: [],
+    };
+
+    vi.spyOn(client, 'getTask').mockResolvedValue(mockTask);
+    vi.spyOn(client, 'getTaskLog').mockResolvedValue('');
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/tasks/demo~task-chk']}>
+          <Routes>
+            <Route path="/tasks/:id" element={<TaskDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    // Displays checking status
+    expect(await screen.findByText(/chạy kiểm tra|running checks/i)).toBeInTheDocument();
+  });
+
+  it('appends new run header when SSE review.started arrives instead of clearing log', async () => {
+    const mockTask: TaskDetail = {
+      id: 'demo/task-sse',
+      projectId: 'demo',
+      slug: 'task-sse',
+      title: 'Task SSE',
+      level: 'easy',
+      status: 'review',
+      dependsOn: '[]',
+      attempt: 0,
+      resume: 0,
+      createdAt: '2026-10-15T08:00:00Z',
+      updatedAt: '2026-10-15T08:00:00Z',
+      runs: [
+        { id: 'r1', taskId: 'demo/task-sse', engine: 'agy', model: 'gemini', profileName: 'p1', kind: 'worker', startedAt: '2026-10-15T08:00:00Z' },
+      ],
+      reviews: [],
+    };
+
+    vi.spyOn(client, 'getTask').mockResolvedValue(mockTask);
+    vi.spyOn(client, 'getTaskLog').mockResolvedValue('Worker output finished.\n');
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/tasks/demo~task-sse']}>
+          <Routes>
+            <Route path="/tasks/:id" element={<TaskDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    expect(await screen.findByText(/Worker output finished\./)).toBeInTheDocument();
+
+    // Emit review.started SSE event
+    act(() => {
+      eventListener!({
+        id: 101,
+        type: 'review.started',
+        taskId: 'demo/task-sse',
+        ts: new Date().toISOString(),
+        payload: {
+          engine: 'claude',
+          profile: 'claude-may',
+          model: 'claude:sonnet',
+          actor: 'claude-reviewer',
+          runId: 'r2',
+        },
+      });
+    });
+
+    // Check that initial worker log remains, and new reviewer run header is appended
+    expect(screen.getByText(/Worker output finished\./)).toBeInTheDocument();
+    expect(screen.getByText(/reviewer · claude\/claude-may/)).toBeInTheDocument();
   });
 });

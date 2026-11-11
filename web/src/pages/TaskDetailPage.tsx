@@ -126,6 +126,20 @@ export const TaskDetailPage: React.FC = () => {
     refetchInterval: 4000,
   });
 
+  const emptyLogMessage = React.useMemo(() => {
+    if (task?.status === 'review') {
+      const activeReviewer = task.runs?.filter((r) => r.kind === 'reviewer').at(-1);
+      if (activeReviewer?.profileName) {
+        return t('taskDetail.reviewingWithProfile', { profile: activeReviewer.profileName });
+      }
+      return t('taskDetail.reviewing');
+    }
+    if (task?.status === 'checking') {
+      return t('taskDetail.checkingLog');
+    }
+    return t('taskDetail.noLog');
+  }, [task?.status, task?.runs, t]);
+
   const [runParams, setRunParams] = useSearchParams();
   const [runsPage, setRunsPage] = useState(Math.max(1, Number(runParams.get('runsPage') || 1)));
   const [runsCursors, setRunsCursors] = useState<Record<number, string | undefined>>({});
@@ -185,10 +199,28 @@ export const TaskDetailPage: React.FC = () => {
       const rawId = id ? id.replace('~', '/') : '';
       if (event.taskId === id || (rawId && event.taskId === rawId)) {
         setLiveEvents((prev) => [event, ...prev.filter((e) => e.id !== event.id)]);
+        if (event.type === 'review.started' || event.type === 'task.running') {
+          setLiveLog((prev) => {
+            const matches = prev.match(/── Run #(\d+)/g);
+            const runNum = (matches ? matches.length : (task?.runs?.length || 0)) + 1;
+            const d = new Date(event.ts || Date.now());
+            const hh = String(d.getHours()).padStart(2, '0');
+            const mm = String(d.getMinutes()).padStart(2, '0');
+            const timeStr = `${hh}:${mm}`;
+            const kind = event.type === 'review.started' ? 'reviewer' : 'worker';
+            const p = (event.payload || {}) as Record<string, any>;
+            const engine = p.engine || (p.model?.startsWith('claude') ? 'claude' : p.model?.startsWith('codex') ? 'codex' : 'worker');
+            const profile = p.profile || p.profileName || '';
+            const agent = profile ? `${engine}/${profile}` : engine;
+            const header = `── Run #${runNum} · ${kind} · ${agent} · ${timeStr} ──`;
+            if (prev.includes(header)) return prev;
+            return prev ? `${prev.trimEnd()}\n\n${header}\n` : `${header}\n`;
+          });
+        }
       }
     });
     return unsub;
-  }, [id]);
+  }, [id, task?.runs?.length]);
 
   const timelineEvents = React.useMemo(() => {
     const initial = task?.events || [];
@@ -209,7 +241,7 @@ export const TaskDetailPage: React.FC = () => {
   useQuery({
     queryKey: ['taskLog', id],
     queryFn: async () => {
-      const text = await getTaskLog(id, { tail: 500 });
+      const text = await getTaskLog(id, { tail: 500, scope: 'all' });
       setLiveLog(text);
       return text;
     },
@@ -1149,7 +1181,7 @@ export const TaskDetailPage: React.FC = () => {
                   </div>
                 </div>
               ) : liveLog
-            ) : <span className="text-[var(--t-log-muted)]">{t('taskDetail.noLog')}</span>}
+            ) : <span className="text-[var(--t-log-muted)]">{emptyLogMessage}</span>}
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <button type="button" disabled={!logSelection} title={t('extra.captureFromSelectionTip')} onClick={() => { if (logSelection) openCapture(logSelection, 'log'); }} className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] text-[var(--t-on-accent)] text-xs font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">{t('extra.captureFromSelection')}</button>

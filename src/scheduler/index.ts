@@ -1140,18 +1140,18 @@ export class Scheduler {
       });
     }
 
-    // Tasks in review where the review chain is empty (direct auto-merge) re-emit review_ready on startup
+    // Review tasks waiting for manual approval or with completed review chains
+    // should not re-emit review_ready or gate notifications on restart.
     for (const task of this.taskRepo.getByStatus('review')) {
       if (!this.projectRepo.get(task.projectId)) continue;
       const chain = this.reviewChainForTask(task);
-      if (chain.length === 0) {
-        const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
-        if (lastWorker?.outcome === 'done') {
-          const checks = this.getCheckResults(task.id);
-          this.emitReviewReadyIfReview(task.id, {
-            reviewChainComplete: true,
-            checksPassed: checks.length > 0 ? checks.every((c) => c.ok) : true,
-          });
+      const step = chain[task.reviewStep ?? 0];
+      if (chain.length > 0) {
+        if ((task.reviewStep ?? 0) >= chain.length || !isAutomatedStep(step)) {
+          this.reviewNotified.set(task.id, `complete:${task.reviewStep ?? 0}`);
+        }
+        if (step?.reviewer === 'claude') {
+          this.reviewNotified.set(task.id, `gate:${task.reviewStep ?? 0}`);
         }
       }
     }

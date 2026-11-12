@@ -956,6 +956,54 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
+  it('does not re-emit task.review_ready on scheduler restart for tasks waiting for manual review or completed chains', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    // Task with empty review chain (manual review required)
+    projectRepo.update('test-project', { reviewChain: '[]' });
+    taskRepo.update('test-project/review', { status: 'review', reviewStep: 0 });
+    // Add completed worker run
+    runRepo.finish('autocheck-run', 'done', undefined, undefined);
+    db.prepare("UPDATE runs SET kind = 'worker', outcome = 'done' WHERE id = 'autocheck-run'").run();
+
+    // Clear prior events
+    db.prepare('DELETE FROM events').run();
+
+    scheduler.stop();
+
+    // Create a new Scheduler to simulate daemon restart
+    const fake = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fake as unknown as { id: string }).id = 'codex';
+    const restartedScheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
+    restartedScheduler.configureReviewer(reviewRepo, failover);
+
+    // Verify recoverOnStartup did not emit review_ready
+    const readyEventsOnStartup = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
+    expect(readyEventsOnStartup).toHaveLength(0);
+
+    // Verify ticks also do not emit review_ready
+    for (let tick = 0; tick < 5; tick++) restartedScheduler.tick();
+    const readyEventsAfterTicks = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
+    expect(readyEventsAfterTicks).toHaveLength(0);
+
+    // Also test task with completed chain
+    projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
+    taskRepo.update('test-project/review', { reviewStep: 1 });
+    restartedScheduler.stop();
+
+    // Restart again
+    const restartedScheduler2 = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    restartedScheduler2.configureReviewer(reviewRepo, failover);
+
+    for (let tick = 0; tick < 5; tick++) restartedScheduler2.tick();
+    const readyEventsChainComplete = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
+    expect(readyEventsChainComplete).toHaveLength(0);
+    restartedScheduler2.stop();
+  });
+
   it('runs a Codex final step itself and completes the chain when it approves', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }]) });

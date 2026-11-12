@@ -54,25 +54,40 @@ function nowMs(now?: number | Date): number {
   return now instanceof Date ? now.getTime() : typeof now === 'number' ? now : Date.now();
 }
 
-function parts(ms: number, locale: TimeLocale) {
+function parts(ms: number, locale: TimeLocale, timeZone: string = TIME_ZONE) {
   const date = new Date(ms);
   const formatter = new Intl.DateTimeFormat(locale === 'en' ? 'en-GB' : 'vi-VN', {
-    timeZone: TIME_ZONE, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+    timeZone, day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
   });
   const values = Object.fromEntries(formatter.formatToParts(date).map(({ type, value }) => [type, value]));
-  return { day: Number(values.day), month: Number(values.month), hour: values.hour, minute: values.minute, weekday: date.toLocaleDateString(locale === 'en' ? 'en-US' : 'vi-VN', { timeZone: TIME_ZONE, weekday: 'long' }) };
+  return {
+    day: Number(values.day),
+    month: Number(values.month),
+    year: Number(values.year),
+    hour: values.hour,
+    minute: values.minute,
+    weekday: date.toLocaleDateString(locale === 'en' ? 'en-US' : 'vi-VN', { timeZone, weekday: 'long' }),
+  };
 }
 
-function sameDay(a: number, b: number): boolean {
-  return dayKey(a) === dayKey(b);
+function sameDay(a: number, b: number, timeZone: string = TIME_ZONE): boolean {
+  return dayKey(a, timeZone) === dayKey(b, timeZone);
 }
 
-function tomorrow(target: number, current: number): boolean {
-  return dayKey(target) - dayKey(current) === 86400000;
+function tomorrow(target: number, current: number, timeZone: string = TIME_ZONE): boolean {
+  return dayKey(target, timeZone) - dayKey(current, timeZone) === 86400000;
 }
 
-function dayKey(ms: number): number {
-  const values = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(ms)).map(({ type, value }) => [type, value]));
+function yesterday(target: number, current: number, timeZone: string = TIME_ZONE): boolean {
+  return dayKey(current, timeZone) - dayKey(target, timeZone) === 86400000;
+}
+
+function sameYear(a: number, b: number, timeZone: string = TIME_ZONE): boolean {
+  return parts(a, 'vi', timeZone).year === parts(b, 'vi', timeZone).year;
+}
+
+function dayKey(ms: number, timeZone: string = TIME_ZONE): number {
+  const values = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(ms)).map(({ type, value }) => [type, value]));
   return Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day));
 }
 
@@ -297,5 +312,188 @@ export function formatIsoTitle(value: string | number | Date | null | undefined)
   const parsed = parseApiTime(value);
   if (!Number.isFinite(parsed)) return '';
   return new Date(parsed).toISOString();
+}
+
+export interface FormatShortContextualTimeOptions {
+  now?: number | Date;
+  timeZone?: string;
+  fallback?: string;
+  mode?: 'auto' | 'clock' | 'ago';
+}
+
+/**
+ * Format timestamp as a short contextual string.
+ * Examples:
+ * - < 1 minute ago: "vừa xong" (vi) / "just now" (en)
+ * - < 1 hour ago: "5 phút trước" (vi) / "5m ago" (en)
+ * - today: "14:32"
+ * - yesterday: "hôm qua 14:20" (vi) / "yesterday 14:20" (en)
+ * - this year: "12/04 14:20"
+ * - older: "12/04/2025"
+ */
+export function formatShortContextualTime(
+  value: string | number | Date | null | undefined,
+  locale: TimeLocale = 'vi',
+  nowOrOpts?: number | Date | FormatShortContextualTimeOptions,
+  opts?: FormatShortContextualTimeOptions,
+): string {
+  const options: FormatShortContextualTimeOptions =
+    typeof nowOrOpts === 'object' && !(nowOrOpts instanceof Date)
+      ? nowOrOpts
+      : { ...opts, now: typeof nowOrOpts === 'number' || nowOrOpts instanceof Date ? nowOrOpts : opts?.now };
+
+  const parsed = parseApiTime(value);
+  const isEn = String(locale).startsWith('en');
+  if (!Number.isFinite(parsed)) {
+    return options.fallback ?? (isEn ? 'time unknown' : 'chưa rõ thời gian');
+  }
+
+  const current = nowMs(options.now);
+  const tz = options.timeZone || TIME_ZONE;
+  const mode = options.mode || 'auto';
+
+  if (mode === 'ago') {
+    return formatTimeAgo(parsed, current, locale);
+  }
+
+  const diffSec = Math.max(0, Math.floor((current - parsed) / 1000));
+  const p = parts(parsed, locale, tz);
+  const clock = `${p.hour}:${p.minute}`;
+
+  if (mode === 'clock') {
+    if (sameDay(parsed, current, tz)) return clock;
+    if (yesterday(parsed, current, tz)) return isEn ? `yesterday ${clock}` : `hôm qua ${clock}`;
+    if (sameYear(parsed, current, tz)) {
+      const dd = String(p.day).padStart(2, '0');
+      const mm = String(p.month).padStart(2, '0');
+      return `${dd}/${mm} ${clock}`;
+    }
+    const dd = String(p.day).padStart(2, '0');
+    const mm = String(p.month).padStart(2, '0');
+    return `${dd}/${mm}/${p.year}`;
+  }
+
+  // mode === 'auto'
+  if (diffSec < 60) {
+    return isEn ? 'just now' : 'vừa xong';
+  }
+  if (diffSec < 3600) {
+    const mins = Math.floor(diffSec / 60);
+    return isEn ? `${mins}m ago` : `${mins} phút trước`;
+  }
+  if (sameDay(parsed, current, tz)) {
+    return clock;
+  }
+  if (yesterday(parsed, current, tz)) {
+    return isEn ? `yesterday ${clock}` : `hôm qua ${clock}`;
+  }
+  const dd = String(p.day).padStart(2, '0');
+  const mm = String(p.month).padStart(2, '0');
+  if (sameYear(parsed, current, tz)) {
+    return `${dd}/${mm} ${clock}`;
+  }
+  return `${dd}/${mm}/${p.year}`;
+}
+
+/**
+ * Format duration in milliseconds into human-readable duration string.
+ * E.g. "12 phút" / "12m", "45s", "1h 5m" / "1h 5p".
+ */
+export function formatDuration(durationMs: number | null | undefined, locale: TimeLocale = 'vi'): string {
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 0) {
+    return '—';
+  }
+  const isEn = String(locale).startsWith('en');
+  const totalSec = Math.floor(durationMs / 1000);
+  if (totalSec < 60) {
+    return `${totalSec}s`;
+  }
+  const totalMin = Math.floor(totalSec / 60);
+  if (totalMin < 60) {
+    return isEn ? `${totalMin}m` : `${totalMin} phút`;
+  }
+  const hours = Math.floor(totalMin / 60);
+  const restMin = totalMin % 60;
+  if (hours < 24) {
+    if (restMin === 0) return `${hours}h`;
+    return isEn ? `${hours}h ${restMin}m` : `${hours}h ${restMin}p`;
+  }
+  const days = Math.floor(hours / 24);
+  const restH = hours % 24;
+  if (restH === 0) return `${days}d`;
+  return `${days}d ${restH}h`;
+}
+
+/**
+ * Contextual label for task status timestamps.
+ * E.g. "Hoàn thành 14:32", "Đang chạy từ 10:05", "Đã đẩy git 3 giờ trước".
+ */
+export function formatStatusTimeLabel(
+  status: string,
+  value: string | number | Date | null | undefined,
+  locale: TimeLocale = 'vi',
+  now: number | Date = Date.now(),
+  t?: (key: string, params?: Record<string, string | number>) => string,
+): string {
+  const isEn = String(locale).startsWith('en');
+  const parsed = parseApiTime(value);
+  if (!Number.isFinite(parsed)) {
+    return t ? t(`status.${status}`) : status;
+  }
+
+  const diffSec = Math.max(0, Math.floor((nowMs(now) - parsed) / 1000));
+  const timeStr = status === 'pushed' && diffSec < 86400 && diffSec >= 60
+    ? formatTimeAgo(parsed, nowMs(now), locale)
+    : formatShortContextualTime(parsed, locale, now);
+
+  if (t) {
+    const key = `statusTime.${status}`;
+    const formatted = t(key, { time: timeStr });
+    if (formatted && formatted !== key) {
+      return formatted;
+    }
+  }
+
+  if (isEn) {
+    switch (status) {
+      case 'running': return `Running since ${timeStr}`;
+      case 'checking': return `Checking since ${timeStr}`;
+      case 'queued': return `Queued since ${timeStr}`;
+      case 'waiting_quota': return `Waiting for quota since ${timeStr}`;
+      case 'review': return `In review since ${timeStr}`;
+      case 'paused': return `Paused since ${timeStr}`;
+      case 'draft': return `Draft since ${timeStr}`;
+      case 'done': return `Completed ${timeStr}`;
+      case 'pushed': return `Pushed to git ${timeStr}`;
+      case 'failed': return `Failed ${timeStr}`;
+      case 'blocked': return `Blocked ${timeStr}`;
+      case 'cancelled': return `Cancelled ${timeStr}`;
+      case 'merged': return `Merged ${timeStr}`;
+      case 'changes_requested': return `Changes requested ${timeStr}`;
+      case 'auditing': return `Auditing since ${timeStr}`;
+      case 'publishing': return `Publishing since ${timeStr}`;
+      default: return `${status} ${timeStr}`;
+    }
+  }
+
+  switch (status) {
+    case 'running': return `Đang chạy từ ${timeStr}`;
+    case 'checking': return `Đang kiểm tra từ ${timeStr}`;
+    case 'queued': return `Chờ chạy từ ${timeStr}`;
+    case 'waiting_quota': return `Chờ quota từ ${timeStr}`;
+    case 'review': return `Chờ duyệt từ ${timeStr}`;
+    case 'paused': return `Tạm dừng từ ${timeStr}`;
+    case 'draft': return `Nháp từ ${timeStr}`;
+    case 'done': return `Hoàn thành ${timeStr}`;
+    case 'pushed': return `Đã đẩy git ${timeStr}`;
+    case 'failed': return `Lỗi ${timeStr}`;
+    case 'blocked': return `Bị chặn ${timeStr}`;
+    case 'cancelled': return `Đã hủy ${timeStr}`;
+    case 'merged': return `Đã gộp ${timeStr}`;
+    case 'changes_requested': return `Yêu cầu sửa ${timeStr}`;
+    case 'auditing': return `Đang audit từ ${timeStr}`;
+    case 'publishing': return `Đang đẩy git từ ${timeStr}`;
+    default: return `${status} ${timeStr}`;
+  }
 }
 

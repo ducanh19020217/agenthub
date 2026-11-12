@@ -1019,6 +1019,27 @@ export const handlers = [
     return HttpResponse.json(task);
   }),
 
+  // GET /api/tasks/:id/timeline
+  http.get('/api/tasks/:id/timeline', ({ params, request }) => {
+    if (!checkAuth(request)) {
+      return HttpResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const { id } = params;
+    const normalizedId = typeof id === 'string' && id.includes('~') ? id.replace('~', '/') : id;
+    const task = mockTasks.find((t) => t.id === id || t.id === normalizedId);
+    if (!task) {
+      return HttpResponse.json({ error: 'Task not found' }, { status: 404 });
+    }
+    const timeline = task.timeline || [
+      {
+        status: task.status,
+        at: task.statusChangedAt || task.updatedAt || task.createdAt,
+        estimated: task.statusChangedAtEstimated ?? true,
+      },
+    ];
+    return HttpResponse.json(timeline);
+  }),
+
   // PATCH /api/tasks/:id
   http.patch('/api/tasks/:id', async ({ params, request }) => {
     if (!checkAuth(request)) {

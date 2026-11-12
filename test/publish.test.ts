@@ -2174,7 +2174,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
 
       let callCount = 0;
       const origPublishTask = ctx.service.publishTask.bind(ctx.service);
-      ctx.service.publishTask = vi.fn(async (id: string, options?: any) => {
+      ctx.service.publishTask = vi.fn(async (_id: string, _options?: any) => {
         callCount++;
         if (callCount === 1) {
           // First call throws 409, while publish lock is ALREADY NOT active (simulating race)

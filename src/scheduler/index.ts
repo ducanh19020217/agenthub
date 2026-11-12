@@ -1152,32 +1152,34 @@ export class Scheduler {
       const autoMergeEnabled = Boolean(settings.review?.autoMerge || settings.integration?.autoMerge);
       const taskEvents = this.eventRepo.getByTask(task.id);
 
+      const hasMergeOutcome = (): boolean => {
+        const lastOutcomeEvent = taskEvents.filter((e) =>
+          e.type === 'review.auto_merge_skipped' || e.type === 'merge.failed' || e.type === 'merge.conflict'
+        ).at(-1);
+        const lastReadyEvent = taskEvents.filter((e) => e.type === 'task.review_ready').at(-1);
+        return Boolean(lastOutcomeEvent && (!lastReadyEvent || lastOutcomeEvent.id > lastReadyEvent.id));
+      };
+
       if (chain.length === 0) {
-        if (autoMergeEnabled) {
-          const isSkippedOrFailed = taskEvents.some((e) => e.type === 'review.auto_merge_skipped' || e.type === 'merge.failed');
-          if (!isSkippedOrFailed) {
-            const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
-            if (lastWorker?.outcome === 'done') {
-              const checks = this.getCheckResults(task.id);
-              this.emitReviewReadyIfReview(task.id, {
-                reviewChainComplete: true,
-                checksPassed: checks.length > 0 ? checks.every((c) => c.ok) : true,
-              });
-            }
+        this.reviewNotified.set(task.id, 'complete:0');
+        if (autoMergeEnabled && !hasMergeOutcome()) {
+          const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
+          if (lastWorker?.outcome === 'done') {
+            const checks = this.getCheckResults(task.id);
+            this.emitReviewReadyIfReview(task.id, {
+              reviewChainComplete: true,
+              checksPassed: checks.length > 0 ? checks.every((c) => c.ok) : true,
+            });
           }
         }
       } else if (stepIdx >= chain.length) {
-        const isSkippedOrFailed = taskEvents.some((e) => e.type === 'review.auto_merge_skipped' || e.type === 'merge.failed');
-        if (autoMergeEnabled && !isSkippedOrFailed) {
+        this.reviewNotified.set(task.id, `complete:${stepIdx}`);
+        if (autoMergeEnabled && !hasMergeOutcome()) {
           const checks = this.getCheckResults(task.id);
           this.emitReviewReadyIfReview(task.id, {
             reviewChainComplete: true,
             checksPassed: checks.length > 0 ? checks.every((c) => c.ok) : true,
           });
-          this.reviewNotified.set(task.id, `complete:${stepIdx}`);
-        } else {
-          // Manual approval required: seed reviewNotified so ticks do not broadcast duplicate events
-          this.reviewNotified.set(task.id, `complete:${stepIdx}`);
         }
       } else {
         const step = chain[stepIdx];

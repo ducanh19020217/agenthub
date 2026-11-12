@@ -1118,9 +1118,10 @@ describe('Codex reviewer failover lifecycle', () => {
     restartedScheduler.configureReviewer(reviewRepo, failover);
     (restartedScheduler as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
 
-    // Verify recoverOnStartup did not emit review_ready
+    // Verify recoverOnStartup did not emit review_ready and seeded reviewNotified for chain: []
     const readyEventsOnStartup = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
     expect(readyEventsOnStartup).toHaveLength(0);
+    expect((restartedScheduler as unknown as { reviewNotified: Map<string, string> }).reviewNotified.get('test-project/review')).toBe('complete:0');
 
     // Verify ticks also do not emit review_ready
     for (let tick = 0; tick < 5; tick++) restartedScheduler.tick();
@@ -1175,6 +1176,63 @@ describe('Codex reviewer failover lifecycle', () => {
     expect(readyEvents).toHaveLength(1);
     expect(readyEvents[0].payload).toContain('"reviewChainComplete":true');
     restartedScheduler.stop();
+  });
+
+  it('does not re-emit task.review_ready on restart for autoMerge tasks stopped at merge.conflict', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    projectRepo.update('test-project', {
+      reviewChain: '[]',
+      settings: JSON.stringify({ review: { autoMerge: true } }),
+    });
+    taskRepo.update('test-project/review', { status: 'review', reviewStep: 0 });
+    runRepo.finish('autocheck-run', 'done', undefined, undefined);
+    db.prepare("UPDATE runs SET kind = 'worker', outcome = 'done' WHERE id = 'autocheck-run'").run();
+
+    // Prior events include review_ready followed by merge.conflict
+    db.prepare('DELETE FROM events').run();
+    eventRepo.insert('task.review_ready', 'test-project/review', { reviewChainComplete: true, checksPassed: true });
+    eventRepo.insert('merge.conflict', 'test-project/review', { files: 'foo.ts' });
+
+    scheduler.stop();
+
+    // Restart scheduler
+    const fake = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fake as unknown as { id: string }).id = 'codex';
+    const restartedScheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
+    restartedScheduler.configureReviewer(reviewRepo, failover);
+
+    const eventsCountBefore = eventRepo.getRecent(50).length;
+    (restartedScheduler as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    // Must NOT re-emit review_ready on startup
+    const newReadyEvents = eventRepo.getSince(eventsCountBefore).filter((e) => e.type === 'task.review_ready');
+    expect(newReadyEvents).toHaveLength(0);
+
+    // Also ticks must NOT emit review_ready
+    for (let tick = 0; tick < 3; tick++) restartedScheduler.tick();
+    const tickReadyEvents = eventRepo.getSince(eventsCountBefore).filter((e) => e.type === 'task.review_ready');
+    expect(tickReadyEvents).toHaveLength(0);
+
+    // Also test chain with steps completed (stepIdx >= chain.length)
+    projectRepo.update('test-project', {
+      reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]),
+    });
+    taskRepo.update('test-project/review', { reviewStep: 1 });
+    restartedScheduler.stop();
+
+    const restartedScheduler2 = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    restartedScheduler2.configureReviewer(reviewRepo, failover);
+    const count2 = eventRepo.getRecent(50).length;
+    (restartedScheduler2 as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    const chainReadyEvents = eventRepo.getSince(count2).filter((e) => e.type === 'task.review_ready');
+    expect(chainReadyEvents).toHaveLength(0);
+
+    restartedScheduler2.stop();
   });
 
   it('recovers interrupted Claude manual gate and emits gate_ready only when not already notified', () => {

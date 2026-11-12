@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { ServerResponse } from 'node:http';
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import fastifyCompress from '@fastify/compress';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
 import { ZodError } from 'zod';
@@ -94,6 +95,12 @@ export async function createServer(
     return config.port;
   };
   registerSecurityHooks(fastify, token, getPort, config.allowedHosts);
+
+  // Register compression (gzip/br for JSON/text >= 1KB)
+  await fastify.register(fastifyCompress, {
+    threshold: 1024,
+    encodings: ['br', 'gzip', 'deflate'],
+  });
 
   // Register WebSocket support
   await fastify.register(fastifyWebsocket);

@@ -399,4 +399,37 @@ describe('AgentHub SSE /api/events', () => {
 
     expect(duration).toBeLessThan(2000);
   });
+
+  it('does NOT compress SSE stream even when accept-encoding: gzip, br is sent', async () => {
+    let sseConnected = false;
+    let contentEncoding: string | string[] | undefined = 'initial';
+    let contentType: string | string[] | undefined;
+
+    const req = http.request(
+      `http://127.0.0.1:${port}/api/events?token=${token}`,
+      {
+        headers: {
+          host: `127.0.0.1:${port}`,
+          'accept-encoding': 'gzip, deflate, br',
+        },
+      },
+      (res) => {
+        if (res.statusCode === 200) {
+          sseConnected = true;
+          contentEncoding = res.headers['content-encoding'];
+          contentType = res.headers['content-type'];
+        }
+      },
+    );
+    req.end();
+
+    await vi.waitFor(() => {
+      expect(sseConnected).toBe(true);
+    }, { timeout: 3000 });
+
+    expect(contentType).toContain('text/event-stream');
+    expect(contentEncoding).toBeUndefined();
+
+    req.destroy();
+  });
 });

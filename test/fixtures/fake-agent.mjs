@@ -30,12 +30,63 @@ async function run() {
     'reviewer-malformed': 'not a reviewer result',
     'reviewer-mentions-limit': { verdict: 'approved', feedback: 'ElevenLabs client now maps HTTP 429 rate limit to a retryable error.' },
   };
+  const auditResults = {
+    'audit-pass': { verdict: 'pass', findings: [], summary: 'Pre-publish audit passed.' },
+    'audit-p3': {
+      verdict: 'pass',
+      findings: [{ severity: 'P3', kind: 'out_of_scope', file: 'README.md', line: 1, detail: 'Minor typo in doc' }],
+      summary: 'Pass with P3 notice.',
+    },
+    'audit-fail': {
+      verdict: 'fail',
+      findings: [{ severity: 'P1', kind: 'wrong_requirement', file: 'src/main.ts', line: 10, detail: 'Missing required feature X' }],
+      summary: 'Audit failed due to missing requirements.',
+    },
+    'audit-fail-empty': {
+      verdict: 'fail',
+      findings: [],
+      summary: 'Fail without findings.',
+    },
+    'audit-malformed': 'not valid json {',
+  };
+  if (mode.startsWith('audit-')) {
+    if (mode === 'audit-error') {
+      process.stderr.write('audit spawn failed');
+      process.exit(1);
+    }
+    if (mode === 'audit-quota') {
+      console.error('usage limit exceeded; try again in 2h 3m');
+      process.exit(1);
+    }
+    if (mode === 'audit-malformed') {
+      if (process.env.FAKE_OUTPUT_PATH) {
+        fs.writeFileSync(process.env.FAKE_OUTPUT_PATH, 'malformed json {{{');
+      }
+      return;
+    }
+    if (process.env.FAKE_OUTPUT_PATH) {
+      fs.writeFileSync(process.env.FAKE_OUTPUT_PATH, JSON.stringify(auditResults[mode] || auditResults['audit-pass']));
+    }
+    return;
+  }
+  if (process.env.FAKE_OUTPUT_PATH && (process.env.FAKE_PROMPT || '').includes('Pre-Publish Audit Agent')) {
+    fs.writeFileSync(process.env.FAKE_OUTPUT_PATH, JSON.stringify(auditResults['audit-pass']));
+    return;
+  }
   if (mode.startsWith('reviewer-')) {
     if (mode === 'reviewer-chatter') {
       console.log('Codex banner: starting read-only review');
       console.log('tool chatter: inspected git diff and test output');
       fs.writeFileSync(process.env.FAKE_OUTPUT_PATH, JSON.stringify(reviewerResults['reviewer-approved']));
       console.log('Codex banner: finished');
+      return;
+    }
+    if (mode === 'reviewer-auth-word-approved') {
+      console.log('Inspecting auth module: handling 401 unauthenticated and rate limit 429');
+      fs.writeFileSync(process.env.FAKE_OUTPUT_PATH, JSON.stringify({
+        verdict: 'approved',
+        feedback: 'Reviewed auth module: 401 unauthenticated and 429 rate limit errors handled properly.',
+      }));
       return;
     }
     if (mode === 'reviewer-quota') {
@@ -117,6 +168,25 @@ async function run() {
         'Task completed (slowly).',
       );
       break;
+
+    case 'sleep-done': {
+      console.log('Fake agent: sleep-done waiting for trigger...');
+      const triggerFile = path.join(agentHubDir, 'TRIGGER_DONE');
+      let waiting = true;
+      while (waiting) {
+        if (fs.existsSync(triggerFile) || process.env.STOP_SLEEP === '1') {
+          waiting = false;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      fs.writeFileSync(
+        path.join(agentHubDir, 'DONE'),
+        'Task completed successfully.\n\n- All tests pass\n- No remaining work',
+      );
+      console.log('Fake agent: sleep-done finished with DONE');
+      break;
+    }
 
     case 'sleep-loop': {
       console.log('Fake agent: sleep loop...');

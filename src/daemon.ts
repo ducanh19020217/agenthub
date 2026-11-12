@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AgentHubConfig, DEFAULT_QUOTA_LOW_PCT } from './config.js';
@@ -57,7 +58,6 @@ import { TelegramBotService } from './telegram.js';
 import { PermissionBroker } from './chat/permissions.js';
 import { findClaudeBin } from './chat/claude.js';
 import { stopProcessGroups } from './priority.js';
-import fs from 'node:fs';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { SetupManager } from './tools/setup.js';
@@ -122,6 +122,7 @@ export interface DaemonContext {
   timesheetService: OpenProjectTimesheetService;
   giteaSyncService: GiteaSyncService;
   perfCollector: PerfCollector;
+  userShutdownRequested?: boolean;
 }
 
 export interface CreateContextOptions {
@@ -512,10 +513,11 @@ export function createContext(
     timesheetManualRepo,
     giteaSyncService,
     perfCollector,
+    userShutdownRequested: false,
   };
 }
 
-export function closeContext(ctx: DaemonContext, preserveWorkerProcesses = false): void {
+export function closeContext(ctx: DaemonContext, _preserveWorkerProcesses = false): void {
   try {
     ctx.perfCollector?.stop();
   } catch {
@@ -567,7 +569,7 @@ export function closeContext(ctx: DaemonContext, preserveWorkerProcesses = false
     // ignore
   }
   try {
-    if (!preserveWorkerProcesses) stopProcessGroups('SIGTERM');
+    stopProcessGroups('SIGTERM');
   } catch {
     // ignore
   }
@@ -614,6 +616,9 @@ export async function startDaemon(
   ctx: DaemonContext;
   shutdown: () => Promise<void>;
 }> {
+  const shutdownFlagPath = path.join(config.hubHome || path.join(os.homedir(), '.agenthub'), 'shutdown_requested');
+  try { fs.unlinkSync(shutdownFlagPath); } catch { /* ignore */ }
+
   const ctx = createContext(config, engineOverrides);
   let tempCleanupTimer: NodeJS.Timeout | undefined;
 
@@ -637,6 +642,22 @@ export async function startDaemon(
 
   // Start notification service and claude transcript scanner
   ctx.notifier.start();
+
+  // Notify if any project has publish explicitly disabled during initial default-on migration
+  try {
+    const disabledProjectsRow = ctx.db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_disabled_projects'").get() as { value: string } | undefined;
+    const notifiedRow = ctx.db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_disabled_notified'").get() as { value: string } | undefined;
+    if (disabledProjectsRow && !notifiedRow) {
+      const list = JSON.parse(disabledProjectsRow.value) as string[];
+      if (list.length > 0) {
+        const msg = `Cấu hình publish: các project sau được giữ nguyên tắt publish theo cấu hình trước đó: ${list.join(', ')}`;
+        ctx.scheduler.getEventBus().emit('brain.notify', undefined, { text: msg, level: 'decision' });
+        ctx.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_disabled_notified', '1')").run();
+      }
+    }
+  } catch {
+    // best effort notification
+  }
   ctx.claudeScanner.start();
   ctx.bulletinService.start();
   ctx.brainRunner.start();
@@ -673,6 +694,8 @@ export async function startDaemon(
     openProjectTimesheetPreview: (sourceId, date) => ctx.timesheetService.preview(sourceId, date),
     openProjectTimesheetRun: (sourceId, date, hours) => ctx.timesheetService.run(sourceId, date, hours),
     onShutdown: (disable) => {
+      ctx.userShutdownRequested = true;
+      ctx.service.setUserShutdownRequested(true);
       if (disable) {
         try {
           const command = process.platform === 'darwin' ? (process.env.AGENTHUB_LAUNCHCTL || 'launchctl') : (process.env.AGENTHUB_SYSTEMCTL_BIN || process.env.AGENTHUB_SYSTEMCTL || 'systemctl');
@@ -713,10 +736,10 @@ export async function startDaemon(
 
   // Graceful shutdown
   let isShuttingDown = false;
-  const shutdown = async () => {
+  const shutdown = async (preserveWorkerProcesses = controlledRestart) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
-    process.removeListener('SIGINT', shutdown);
+    process.removeListener('SIGINT', onInt);
     process.removeListener('SIGTERM', onTerm);
 
     const startTime = Date.now();
@@ -731,7 +754,7 @@ export async function startDaemon(
     try {
       // Dừng nhận request trước, rồi mới đóng scheduler và DB
       await fastify.close();
-      closeContext(ctx, controlledRestart);
+      closeContext(ctx, preserveWorkerProcesses);
     } catch (err) {
       console.error('Error during shutdown:', err);
     } finally {
@@ -743,25 +766,68 @@ export async function startDaemon(
     }
   };
 
+  const checkUserShutdown = (): boolean => {
+    if (ctx.userShutdownRequested || ctx.service?.isUserShutdownRequested?.()) return true;
+    const shutdownFlagPath = path.join(config.hubHome || path.join(os.homedir(), '.agenthub'), 'shutdown_requested');
+    if (fs.existsSync(shutdownFlagPath)) {
+      try {
+        const stat = fs.statSync(shutdownFlagPath);
+        fs.unlinkSync(shutdownFlagPath);
+        // Ignore stale marker older than 30s so future restarts are not misclassified as user stops
+        if (Date.now() - stat.mtimeMs > 30_000) {
+          return false;
+        }
+        ctx.userShutdownRequested = true;
+        ctx.service?.setUserShutdownRequested?.(true);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  };
+
   const onTerm = () => {
-    const workersRunning = ctx.scheduler.getRunning().size > 0 || ctx.scheduler.getReviewerStatus().running.length > 0;
-    let parentIsServiceManager = false;
-    try {
-      parentIsServiceManager = /^(?:systemd|launchd)$/i.test(fs.readFileSync(`/proc/${process.ppid}/comm`, 'utf8').trim());
-    } catch { /* platform does not expose the parent name */ }
-    // A termination that did not come through the explicit drain API is still
-    // a hub restart from the worker's point of view. Persist the outcome and
-    // explanation before the process group is torn down.
-    if (workersRunning) ctx.scheduler.shutdownForUser('hub_restart');
-    if (workersRunning && !parentIsServiceManager) ctx.eventRepo.insert('daemon.stop_requested', undefined, { senderPid: process.ppid || null });
-    void shutdown();
+    if (checkUserShutdown()) {
+      const hasActiveWork = ctx.scheduler.getRunning().size > 0
+        || ctx.scheduler.getReviewerStatus().running.length > 0
+        || ctx.scheduler.getRestartState().waitingFor.length > 0;
+      if (hasActiveWork) ctx.scheduler.shutdownForUser('user_stop');
+      void shutdown(false);
+      return;
+    }
+    const hasActiveWork = ctx.scheduler.getRunning().size > 0
+      || ctx.scheduler.getReviewerStatus().running.length > 0
+      || ctx.scheduler.getRestartState().waitingFor.length > 0;
+    // A signal termination is a daemon handoff by default. Persist the outcome
+    // before closing resources, and keep detached workers outside the daemon's
+    // process-group cleanup so the next daemon can adopt them.
+    if (hasActiveWork) ctx.scheduler.shutdownForUser('hub_handoff');
+    if (hasActiveWork) ctx.eventRepo.insert('daemon.stop_requested', undefined, { senderPid: process.ppid || null });
+    void shutdown(true);
+  };
+
+  const onInt = () => {
+    if (checkUserShutdown()) {
+      const hasActiveWork = ctx.scheduler.getRunning().size > 0
+        || ctx.scheduler.getReviewerStatus().running.length > 0
+        || ctx.scheduler.getRestartState().waitingFor.length > 0;
+      if (hasActiveWork) ctx.scheduler.shutdownForUser('user_stop');
+      void shutdown(false);
+      return;
+    }
+    const hasActiveWork = ctx.scheduler.getRunning().size > 0
+      || ctx.scheduler.getReviewerStatus().running.length > 0
+      || ctx.scheduler.getRestartState().waitingFor.length > 0;
+    if (hasActiveWork) ctx.scheduler.shutdownForUser('hub_handoff');
+    void shutdown(true);
   };
 
   // Last line of defence: log stray async errors instead of taking the whole hub down.
   process.on('unhandledRejection', (reason) => {
     console.error('[daemon] unhandled rejection:', reason instanceof Error ? reason.stack || reason.message : reason);
   });
-  process.on('SIGINT', shutdown);
+  process.on('SIGINT', onInt);
   process.on('SIGTERM', onTerm);
 
   return { fastify, ctx, shutdown };

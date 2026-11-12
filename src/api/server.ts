@@ -213,17 +213,20 @@ export async function createServer(
   fastify.get('/api/system/restart', async () => service.getRestartState());
   fastify.delete('/api/system/restart', async () => service.cancelRestartDrain());
   fastify.post('/api/system/restart', async (req) => {
-    const body = (req.body || {}) as { mode?: unknown; timeoutMinutes?: unknown; reason?: unknown };
+    const body = (req.body || {}) as { mode?: unknown; timeoutMinutes?: unknown; reason?: unknown; killWorkers?: unknown };
     const mode = body.mode === undefined || body.mode === 'when-idle' ? 'when-idle' : body.mode === 'now' ? 'now' : null;
     if (!mode) throw new HttpError(400, 'bad_request', "mode phải là 'when-idle' hoặc 'now'");
     const timeoutMinutes = body.timeoutMinutes === undefined ? 120 : Number(body.timeoutMinutes);
     if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) throw new HttpError(400, 'bad_request', 'timeoutMinutes phải lớn hơn 0');
     const reason = typeof body.reason === 'string' ? body.reason : undefined;
+    const killWorkers = body.killWorkers === true;
     if (mode === 'now') {
       const waiting = service.getRestartState().waitingFor;
-      const result = service.shutdownForUser('hub_restart');
+      const result = killWorkers
+        ? service.shutdownForUser('hub_restart')
+        : service.shutdownForUser('hub_handoff');
       options?.onRestart?.();
-      return { ...service.getRestartState(), mode, waitingFor: waiting, ...result };
+      return { ...service.getRestartState(), mode, killWorkers, waitingFor: waiting, ...result };
     }
     return service.beginRestartDrain(timeoutMinutes, reason, () => options?.onRestart?.());
   });
@@ -685,6 +688,11 @@ export async function createServer(
     return service.getTask(id);
   });
 
+  fastify.get('/api/tasks/:id/timeline', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getTaskTimeline(id);
+  });
+
   fastify.patch('/api/tasks/:id', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
     return service.updateTask(id, req.body);
@@ -735,9 +743,11 @@ export async function createServer(
     return service.retryReviewer(id);
   });
 
-  fastify.post('/api/tasks/:id/publish', async (req: FastifyRequest) => {
+  fastify.post('/api/tasks/:id/publish', async (req: FastifyRequest, reply: FastifyReply) => {
     const { id } = req.params as { id: string };
-    return service.publishTask(id, { manual: true });
+    const body = (req.body as { skipAudit?: boolean } | undefined) || {};
+    const res = service.startPublishTask(id, { manual: true, skipAudit: Boolean(body.skipAudit) });
+    return reply.status(202).send(res);
   });
 
   fastify.delete('/api/tasks/:id/worktree', async (req: FastifyRequest) => {
@@ -747,7 +757,7 @@ export async function createServer(
 
   fastify.get('/api/tasks/:id/log', async (req: FastifyRequest, reply: FastifyReply) => {
     const { id } = req.params as { id: string };
-    const query = req.query as { run?: string; tail?: string };
+    const query = req.query as { run?: string; tail?: string; scope?: string };
     const log = service.getTaskLog(id, query);
     return reply.type('text/plain; charset=utf-8').send(log);
   });

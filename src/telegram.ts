@@ -27,6 +27,7 @@ import { reviewerSettingsFromLegacy } from './reviewer-config.js';
 import { QuotaService, QuotaCapacitySnapshot } from './quota/index.js';
 import { autoMergeReasonLabel, firstCheckError } from './auto-merge-notify.js';
 import { formatYYYYMMDD } from './integrations/openproject/daily-report.js';
+import { isProjectPublishing } from './publish.js';
 
 export interface TelegramTimesheetCommand { ticket: string | 'new'; activeHours: number; waitHours: number; pinned: boolean; description: string; }
 export function parseTimesheetCommand(text: string): TelegramTimesheetCommand {
@@ -157,6 +158,13 @@ export interface TelegramServiceOptions {
 
 export type PendingChatState =
   | { action: 'reject_feedback'; taskId: string }
+  | {
+      action: 'decision_other';
+      decisionId: string;
+      messageId?: number;
+      messageChatId?: number;
+      originalText?: string;
+    }
   | { action: 'triage_note'; sourceId: string; wpId: number; decision: 'ask' | 'skip' }
   | { action: 'newtask_description'; projectId?: string }
   | { action: 'newtask_project_description'; description: string; externalRef?: string }
@@ -828,6 +836,7 @@ export class TelegramBotService {
         [
           { text: '✅ Đồng ý', callback_data: `decision:agree:${decision.id}` },
           { text: '❌ Không', callback_data: `decision:reject:${decision.id}` },
+          { text: '✏️ Khác', callback_data: `decision:other:${decision.id}` },
         ],
         [{ text: '🌐 Xem dashboard', url: this.getDashboardUrl() }],
       ];
@@ -877,6 +886,7 @@ export class TelegramBotService {
         keyboard.push([
           { text: '✅ Đồng ý', callback_data: `decision:agree:${dec.id}` },
           { text: '❌ Không', callback_data: `decision:reject:${dec.id}` },
+          { text: '✏️ Khác', callback_data: `decision:other:${dec.id}` },
         ]);
       } else {
         for (const dec of pendingDecisions.slice(0, 5)) {
@@ -887,6 +897,7 @@ export class TelegramBotService {
           keyboard.push([
             { text: `✅ ${short}`, callback_data: `decision:agree:${dec.id}` },
             { text: `❌ ${short}`, callback_data: `decision:reject:${dec.id}` },
+            { text: `✏️ ${short}`, callback_data: `decision:other:${dec.id}` },
           ]);
         }
       }
@@ -1175,6 +1186,79 @@ export class TelegramBotService {
         return;
       }
 
+      if (pendingState.action === 'decision_other') {
+        const customText = rawText.trim();
+        if (!customText) {
+          await this.sendMessage(chatId, 'Phương án không được để trống. Vui lòng nhập lại (hoặc /cancel để huỷ):');
+          return;
+        }
+        if (customText.length > 2000) {
+          await this.sendMessage(chatId, 'Phương án quá dài (tối đa 2000 ký tự). Vui lòng nhập lại (hoặc /cancel để huỷ):');
+          return;
+        }
+
+        const d = this.decisionTracker.getDecision(pendingState.decisionId);
+        if (!d || d.answered) {
+          this.chatStates.delete(chatId);
+          await this.sendMessage(chatId, 'Quyết định đã hết hạn hoặc đã trả lời.');
+          return;
+        }
+
+        this.chatStates.delete(chatId);
+        const updated = this.decisionTracker.answerDecision(
+          pendingState.decisionId,
+          'other',
+          this.now(),
+          customText,
+        );
+
+        if (this.chatService) {
+          forwardDecisionToBrain(
+            this.chatService,
+            pendingState.decisionId,
+            updated?.text || d.text,
+            'other',
+            updated?.taskId,
+            customText,
+          );
+        }
+
+        const escaped = this.escapeHtml(customText);
+        const keyboard: InlineKeyboardButton[][] = [
+          [{ text: '🌐 Xem dashboard', url: this.getDashboardUrl() }],
+        ];
+
+        let edited = false;
+        const targetChatId = pendingState.messageChatId || chatId;
+        if (pendingState.messageId && targetChatId) {
+          const originalText = pendingState.originalText ? this.escapeHtml(pendingState.originalText) : '';
+          const updatedText = originalText
+            ? `${originalText}\n\n✏️ <b>Đã phản hồi: Phương án khác — ${escaped}</b>`
+            : `✏️ <b>Đã phản hồi: Phương án khác — ${escaped}</b>`;
+          try {
+            await this.editMessage(targetChatId, pendingState.messageId, updatedText, {
+              inline_keyboard: keyboard,
+            });
+            edited = true;
+          } catch {
+            edited = false;
+          }
+        }
+
+        if (!edited) {
+          await this.sendMessage(chatId, `✏️ <b>Đã phản hồi: Phương án khác — ${escaped}</b>`);
+        }
+
+        this.eventBus.emit('decision.answered', undefined, {
+          decisionId: pendingState.decisionId,
+          action: 'other',
+          answer: 'other',
+          text: updated?.text || d.text,
+          customAnswer: customText,
+        });
+        return;
+      }
+
       if (pendingState.action === 'reject_feedback') {
         const taskId = pendingState.taskId;
         this.chatStates.delete(chatId);
@@ -1378,11 +1462,17 @@ export class TelegramBotService {
       }
 
       case '/restart': {
-        if (args[0]?.toLowerCase() === 'now') {
+        const killWorkers = args.some((a) => a.toLowerCase() === '--kill-workers' || a.toLowerCase() === 'kill-workers');
+        const isNow = args[0]?.toLowerCase() === 'now' || (killWorkers && args[1]?.toLowerCase() === 'now');
+        if (isNow) {
           const status = this.service.getStatus();
           const running = status.tasks.running + status.tasks.checking;
-          await this.sendMessage(chatId, `⚠️ <b>Khởi động lại ngay?</b> ${running} worker/check đang chạy sẽ bị dừng.`, { inline_keyboard: [[
-            { text: '✅ Xác nhận', callback_data: 'hubrestart:confirm' },
+          const text = killWorkers
+            ? `⚠️ <b>Khởi động lại ngay?</b> ${running} worker/check đang chạy sẽ bị dừng.`
+            : `🔄 <b>Khởi động lại ngay?</b> Worker đang chạy sẽ được giữ nguyên (handoff).`;
+          const confirmData = killWorkers ? 'hubrestart:confirm:kill' : 'hubrestart:confirm';
+          await this.sendMessage(chatId, text, { inline_keyboard: [[
+            { text: '✅ Xác nhận', callback_data: confirmData },
             { text: '❌ Hủy', callback_data: 'hubrestart:cancel' },
           ]] });
         } else {
@@ -2506,9 +2596,15 @@ export class TelegramBotService {
         await this.answerCallbackQuery(query.id, 'Đã hủy.');
         return;
       }
+      const killWorkers = taskIdOrParam === 'kill';
       await this.answerCallbackQuery(query.id, 'Đang khởi động lại...');
-      this.service.shutdownForUser('hub_restart');
-      await this.sendMessage(chatId, '🔄 Đang khởi động lại AgentHub; worker đã được đưa về hàng chờ.');
+      if (killWorkers) {
+        this.service.shutdownForUser('hub_restart');
+        await this.sendMessage(chatId, '🔄 Đang khởi động lại AgentHub; worker đã được đưa về hàng chờ.');
+      } else {
+        this.service.shutdownForUser('hub_handoff');
+        await this.sendMessage(chatId, '🔄 Đang khởi động lại AgentHub; worker tiếp tục chạy và sẽ được nhận lại sau khi khởi động.');
+      }
       this.service.triggerRestart();
       return;
     }
@@ -2623,7 +2719,7 @@ export class TelegramBotService {
       }
       case 'decision': {
         const decisionId = taskIdOrParam;
-        if (action !== 'agree' && action !== 'reject') {
+        if (action !== 'agree' && action !== 'reject' && action !== 'other') {
           await this.answerCallbackQuery(query.id, 'Lựa chọn không hợp lệ.');
           return;
         }
@@ -2632,10 +2728,27 @@ export class TelegramBotService {
           await this.answerCallbackQuery(query.id, 'Quyết định đã hết hạn hoặc đã trả lời.');
           return;
         }
+
+        if (action === 'other') {
+          await this.answerCallbackQuery(query.id);
+          this.chatStates.set(chatId, {
+            action: 'decision_other',
+            decisionId,
+            messageId: query.message?.message_id,
+            messageChatId: query.message?.chat?.id || chatId,
+            originalText: query.message?.text,
+          });
+          await this.sendMessage(
+            chatId,
+            '✏️ Nhập phương án của bạn cho quyết định này (hoặc /cancel để huỷ):',
+          );
+          return;
+        }
+
         const answer = action;
         const updated = this.decisionTracker.answerDecision(decisionId, answer, this.now());
-        const label = answer === 'agree' ? 'Đồng ý' : 'Không';
-        const icon = answer === 'agree' ? '✅' : '❌';
+        const label = answer === 'agree' ? 'Đồng ý' : answer === 'reject' ? 'Không' : 'Phương án khác';
+        const icon = answer === 'agree' ? '✅' : answer === 'reject' ? '❌' : '✏️';
         await this.answerCallbackQuery(query.id, `Bạn đã chọn: ${label}`);
 
         if (this.chatService) {
@@ -2818,20 +2931,23 @@ export class TelegramBotService {
           );
         } else if (action === 'publish') {
           try {
-            await this.answerCallbackQuery(query.id, 'Đang đẩy lên git...');
-            const res = await this.service.publishTask(resolved.id, { manual: true });
-            if (res.ok && 'commit' in res) {
-              const successText = `🚀 Đã đẩy task <b>${this.escapeHtml(resolved.id)}</b> lên <code>${this.escapeHtml(res.remote)}/${this.escapeHtml(res.branch)}</code> (commit <code>${this.escapeHtml(res.commit.slice(0, 7))}</code>).`;
-              if (query.message) {
-                const prev = this.escapeHtml(query.message.text || '');
-                await this.editMessage(chatId, query.message.message_id, `${prev}\n\n${successText}`, { inline_keyboard: [] });
-              } else {
-                await this.sendMessage(chatId, successText);
-              }
-            } else if (!res.ok) {
-              const failText = `❌ Đẩy task <b>${this.escapeHtml(resolved.id)}</b> thất bại: ${this.escapeHtml(res.error)}`;
-              await this.sendMessage(chatId, failText);
+            const project = this.projectRepo.get(resolved.projectId);
+            if (project && isProjectPublishing(project.id)) {
+              await this.answerCallbackQuery(query.id, 'Dự án đang publish');
+              await this.sendMessage(chatId, `⏳ Dự án <b>${this.escapeHtml(project.id)}</b> đang trong quá trình publish.`);
+              return;
             }
+            await this.answerCallbackQuery(query.id, 'Đã bắt đầu audit + publish');
+            const startText = `🚀 Đã bắt đầu audit + publish cho task <b>${this.escapeHtml(resolved.id)}</b>. Kết quả sẽ được thông báo sau khi hoàn thành.`;
+            if (query.message) {
+              const prev = this.escapeHtml(query.message.text || '');
+              await this.editMessage(chatId, query.message.message_id, `${prev}\n\n${startText}`, { inline_keyboard: [] });
+            } else {
+              await this.sendMessage(chatId, startText);
+            }
+            void this.service.publishTask(resolved.id, { manual: true }).catch((err) => {
+              console.error(`[telegram] Publish task ${resolved.id} failed:`, err);
+            });
           } catch (err: unknown) {
             const errMsg = err instanceof Error ? err.message : String(err);
             await this.answerCallbackQuery(query.id, 'Lỗi đẩy git.');
@@ -3140,7 +3256,8 @@ export class TelegramBotService {
         const pauseBadge = r.paused
           ? (r.pauseReason === 'load' || r.pauseReason === 'brain_load' ? ' ⏸ [Tạm dừng (quá tải)]' : ' ⏸ [Tạm dừng (thủ công)]')
           : '';
-        text = text + `• <code>${r.taskId}</code> (${r.profileName}/${r.model})${pauseBadge}\n  <i>${this.escapeHtml(titleStr)}</i>\n`;
+        const adoptedBadge = (r as { adopted?: boolean }).adopted ? ' 🔄 [Đã nhận lại sau khởi động lại]' : '';
+        text = text + `• <code>${r.taskId}</code> (${r.profileName}/${r.model})${pauseBadge}${adoptedBadge}\n  <i>${this.escapeHtml(titleStr)}</i>\n`;
       }
     }
 
@@ -4088,6 +4205,7 @@ export class TelegramBotService {
     const effectiveMode = effectiveBrainMode(projectId, projectId ? this.projectRepo.get(projectId) : null, this.config.brain);
     if (effectiveMode === 'auto') {
       const isAllowedInAuto =
+        type === 'run.adopted' ||
         type === 'brain.notify' ||
         type === 'disk.low' ||
         type === 'disk.ok' ||
@@ -4112,6 +4230,7 @@ export class TelegramBotService {
         (type === 'task.done' && (this.config.telegram.notify.taskDone !== false || this.config.telegram.notify.projectIdle !== false)) ||
         (type === 'task.pushed' && this.config.telegram.notify.taskDone !== false) ||
         (type === 'task.push_failed' && this.config.telegram.notify.failed !== false) ||
+        (type === 'task.audit_failed' && this.config.telegram.notify.failed !== false) ||
         (TelegramBotService.INTERRUPT_EVENTS.has(type) && this.config.telegram.notify.interrupted !== false);
 
         if (!isAllowedInAuto) {
@@ -4173,6 +4292,7 @@ export class TelegramBotService {
             [
               { text: '✅ Đồng ý', callback_data: `decision:agree:${decisionId}` },
               { text: '❌ Không', callback_data: `decision:reject:${decisionId}` },
+              { text: '✏️ Khác', callback_data: `decision:other:${decisionId}` },
             ],
             [{ text: '🌐 Xem dashboard', url: dashboardUrl }],
           ];
@@ -4347,6 +4467,18 @@ export class TelegramBotService {
         break;
       }
 
+      case 'run.adopted': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const keyboard: InlineKeyboardButton[][] = taskId
+          ? [[{ text: '🌐 Xem task', url: this.getDashboardUrl(`#/tasks/${toRouteId(taskId)}`) }]]
+          : [];
+        this.broadcastMessage(
+          `${prefix}🔄 <b>Hub khởi động lại, tiếp tục theo dõi worker</b>\nID: <code>${taskId}</code>${minimal ? '' : `\nTiêu đề: <b>${this.escapeHtml(title)}</b>`}`,
+          keyboard.length ? { inline_keyboard: keyboard } : undefined,
+        );
+        break;
+      }
+
       case 'hub.restarting':
       case 'hub.restart_timeout': {
         const timeout = type === 'hub.restart_timeout';
@@ -4478,7 +4610,7 @@ export class TelegramBotService {
       }
 
       case 'task.push_failed': {
-        if (notify.failed === false) return;
+        if (notify.failed === false || p.suppressNotification) return;
         const errorMsg = typeof p.error === 'string' ? p.error : 'Lỗi không xác định';
         const title = this.resolveTaskTitle(taskId, p);
 
@@ -4494,6 +4626,31 @@ export class TelegramBotService {
           body += `\nTiêu đề: <b>${this.escapeHtml(title)}</b>`;
         }
         body += `\nLý do: ${this.escapeHtml(errorMsg)}`;
+
+        this.broadcastMessage(
+          body,
+          { inline_keyboard: keyboard },
+        );
+        break;
+      }
+
+      case 'task.audit_failed': {
+        if (notify.failed === false) return;
+        const title = this.resolveTaskTitle(taskId, p);
+        const count = Array.isArray(p.findings) ? p.findings.length : 0;
+        const reason = p.exceededMaxRounds ? '\nĐã vượt quá số vòng sửa cho phép, dừng chờ người xử lý.' : '\nĐã tự động trả về worker để sửa.';
+
+        const keyboard: InlineKeyboardButton[][] = [
+          [
+            { text: '🌐 Xem task', url: this.getDashboardUrl(taskId ? `#/tasks/${toRouteId(taskId)}` : '') },
+          ],
+        ];
+
+        let body = `${prefix}⚠️ <b>Audit trước khi publish thất bại</b>\nID: <code>${taskId}</code>`;
+        if (!minimal && title) {
+          body += `\nTiêu đề: <b>${this.escapeHtml(title)}</b>`;
+        }
+        body += `\nPhát hiện: ${count} vấn đề${reason}`;
 
         this.broadcastMessage(
           body,
@@ -5325,6 +5482,8 @@ export class TelegramBotService {
     const prefix = this.projectPrefix(projectId, { raw: true });
     const minimal = this.isMinimalProject(projectId);
     switch (type) {
+      case 'run.adopted':
+        return minimal ? `${prefix}Tiếp tục theo dõi worker` : `${prefix}Task ${this.resolveTaskTitle(taskId, p)}: Hub khởi động lại, tiếp tục theo dõi worker`;
       case 'brain.notify':
         return minimal ? `${prefix}Bộ não: đã trả lời` : `${prefix}Bộ não: ${p?.text || 'Thông báo mới'}`;
       case 'task.review_ready':

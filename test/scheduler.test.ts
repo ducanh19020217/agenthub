@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { EventEmitter } from 'node:events';
 import { execFileSync, spawn } from 'node:child_process';
 import { loadConfig } from '../src/config.js';
 import { openDatabase, ProjectRepo, DepartmentRepo, ProfileRepo, QuotaMarkRepo, TaskRepo, RunRepo, EventRepo, ReviewRepo } from '../src/db/index.js';
@@ -573,6 +574,30 @@ describe('Scheduler regression fixes', () => {
     delete process.env.FAKE_MODE;
   });
 
+  it('hands off a detached worker and adopts it without dispatching a duplicate', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/a', projectId: 'test-project', slug: 'a', title: 'A', status: 'queued' });
+    process.env.FAKE_MODE = 'slow';
+    const first = makeScheduler();
+    first.tick();
+    await vi.waitFor(() => expect(first.getRunning().has('test-project/a')).toBe(true));
+    const run = runRepo.getByTask('test-project/a')[0];
+    first.shutdownForUser('hub_handoff');
+    expect(runRepo.get(run.id)?.outcome).toBeNull();
+    expect(runRepo.get(run.id)?.handoff).toBe(1);
+    first.stop();
+
+    const second = makeScheduler();
+    second.start();
+    expect(second.getRunning().has('test-project/a')).toBe(true);
+    expect(runRepo.getByTask('test-project/a').filter((candidate) => candidate.outcome === null)).toHaveLength(1);
+    second.cancelAll();
+    second.stop();
+    delete process.env.FAKE_MODE;
+  });
+
   it('does not kill a recovered run immediately when its old timeout has elapsed', () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
@@ -780,6 +805,19 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
+  it('does not crash a successful reviewer run when feedback or log mentions 401 or rate limit', async () => {
+    const { scheduler, reviewRepo } = makeReviewer('reviewer-auth-word-approved');
+    scheduler.tick();
+    await vi.waitFor(() => {
+      expect(taskRepo.get('test-project/review')?.status).toBe('done');
+    });
+    expect(reviewRepo.getByTask('test-project/review')[0]?.verdict).toBe('approved');
+    const reviewerRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
+    expect(reviewerRun?.outcome).toBe('done');
+    expect(profileRepo.get('codex-1')?.authState).not.toBe('not_logged_in');
+    scheduler.stop();
+  });
+
   it('routes changes_requested back to queued with feedback', async () => {
     const { scheduler, reviewRepo } = makeReviewer('reviewer-changes');
     scheduler.tick();
@@ -812,6 +850,246 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
+  it('parses verdict and finishes review when child emits exit before stdout flushes with 50ms delay', async () => {
+    const projectPath = path.join(tmpDir, 'review-repo-race');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'codex-1', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const worktreePath = path.join(tmpDir, 'review-worktree-race');
+    fs.cpSync(projectPath, worktreePath, { recursive: true });
+    taskRepo.insert({ id: 'test-project/review-race', projectId: 'test-project', slug: 'review-race', title: 'Review race', body: 'Check race.', status: 'review' });
+    taskRepo.update('test-project/review-race', { worktreePath });
+    db.prepare('INSERT INTO runs (id, taskId, engine, model, profileName) VALUES (?, ?, ?, ?, ?)')
+      .run('autocheck-race', 'test-project/review-race', 'agy', 'gemini-3.8-flash-low', 'codex-1');
+    db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run('test-project/review-race', 'autocheck-race', 'test', 1, 0, 10, 'OK');
+
+    const mockChild = new EventEmitter() as unknown as ChildProcess;
+    mockChild.pid = 99999;
+    mockChild.unref = vi.fn();
+
+    const mockEngine: Engine = {
+      id: 'codex',
+      family: () => 'codex',
+      spawn: (opts: SpawnOpts) => {
+        setTimeout(() => {
+          // Emit exit first
+          mockChild.emit('exit', 0);
+          // 50ms later, write result and emit close
+          setTimeout(() => {
+            if (opts.outputPath) {
+              fs.mkdirSync(path.dirname(opts.outputPath), { recursive: true });
+              fs.writeFileSync(opts.outputPath, JSON.stringify({ verdict: 'approved', feedback: 'Delayed flush verdict ok' }), 'utf8');
+            }
+            mockChild.emit('close', 0);
+          }, 50);
+        }, 10);
+        return mockChild;
+      },
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    };
+
+    config.reviewer.enabled = true;
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', mockEngine]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-race.json'));
+    failover.activate(3600);
+    scheduler.configureReviewer(reviewRepo, failover);
+
+    scheduler.tick();
+
+    await vi.waitFor(() => {
+      const run = runRepo.getByTask('test-project/review-race').find((r) => r.kind === 'reviewer');
+      expect(run?.outcome).toBe('done');
+    }, { timeout: 3000 });
+
+    const review = reviewRepo.getByTask('test-project/review-race')[0];
+    expect(review?.verdict).toBe('approved');
+    expect(review?.feedback).toBe('Delayed flush verdict ok');
+
+    scheduler.stop();
+  });
+
+  it('handles reviewer killed by signal as a crash and emits review.waiting for retry', async () => {
+    const projectPath = path.join(tmpDir, 'review-repo-signal');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'codex-signal', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const worktreePath = path.join(tmpDir, 'review-worktree-signal');
+    fs.cpSync(projectPath, worktreePath, { recursive: true });
+    taskRepo.insert({ id: 'test-project/review-signal', projectId: 'test-project', slug: 'review-signal', title: 'Review signal', body: 'Check signal.', status: 'review' });
+    taskRepo.update('test-project/review-signal', { worktreePath });
+    db.prepare('INSERT INTO runs (id, taskId, engine, model, profileName) VALUES (?, ?, ?, ?, ?)')
+      .run('autocheck-signal', 'test-project/review-signal', 'agy', 'gemini-3.8-flash-low', 'codex-signal');
+    db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run('test-project/review-signal', 'autocheck-signal', 'test', 1, 0, 10, 'OK');
+
+    const mockChild = new EventEmitter() as unknown as ChildProcess;
+    mockChild.pid = 99998;
+    mockChild.unref = vi.fn();
+
+    const mockEngine: Engine = {
+      id: 'codex',
+      family: () => 'codex',
+      spawn: () => {
+        setTimeout(() => {
+          mockChild.emit('exit', null, 'SIGTERM');
+          mockChild.emit('close', null, 'SIGTERM');
+        }, 10);
+        return mockChild;
+      },
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    };
+
+    config.reviewer.enabled = true;
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', mockEngine]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-signal.json'));
+    failover.activate(3600);
+    scheduler.configureReviewer(reviewRepo, failover);
+
+    scheduler.tick();
+
+    await vi.waitFor(() => {
+      const run = runRepo.getByTask('test-project/review-signal').find((r) => r.kind === 'reviewer');
+      expect(run?.outcome).toBe('crashed');
+    }, { timeout: 3000 });
+
+    const waitingEvents = eventRepo.getRecent(20).filter((e) => e.taskId === 'test-project/review-signal' && e.type === 'review.waiting');
+    expect(waitingEvents).toHaveLength(1);
+    expect(waitingEvents[0].payload).toContain('"reason":"crash"');
+
+    // Ensure it was NOT marked as malformed_output
+    const failedEvents = eventRepo.getRecent(20).filter((e) => e.taskId === 'test-project/review-signal' && e.type === 'review.failed');
+    expect(failedEvents).toHaveLength(0);
+
+    scheduler.stop();
+  });
+
+  it('does not overwrite or clear exitTimeout of a new run on late close or exit from an old run', async () => {
+    const projectPath = path.join(tmpDir, 'review-repo-late');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'codex-late', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const worktreePath = path.join(tmpDir, 'review-worktree-late');
+    fs.cpSync(projectPath, worktreePath, { recursive: true });
+    taskRepo.insert({ id: 'test-project/review-late', projectId: 'test-project', slug: 'review-late', title: 'Review late', body: 'Check late.', status: 'review' });
+    taskRepo.update('test-project/review-late', { worktreePath });
+    db.prepare('INSERT INTO runs (id, taskId, engine, model, profileName) VALUES (?, ?, ?, ?, ?)')
+      .run('autocheck-late', 'test-project/review-late', 'agy', 'gemini-3.8-flash-low', 'codex-late');
+    db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run('test-project/review-late', 'autocheck-late', 'test', 1, 0, 10, 'OK');
+
+    const mockChild1 = new EventEmitter() as unknown as ChildProcess;
+    mockChild1.pid = 99991;
+    mockChild1.unref = vi.fn();
+
+    const mockChild2 = new EventEmitter() as unknown as ChildProcess;
+    mockChild2.pid = 99992;
+    mockChild2.unref = vi.fn();
+
+    let spawnCount = 0;
+    const mockEngine: Engine = {
+      id: 'codex',
+      family: () => 'codex',
+      spawn: () => {
+        spawnCount++;
+        return spawnCount === 1 ? mockChild1 : mockChild2;
+      },
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    };
+
+    config.reviewer.enabled = true;
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', mockEngine]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-late.json'));
+    failover.activate(3600);
+    scheduler.configureReviewer(reviewRepo, failover);
+
+    // Spawn run 1
+    scheduler.tick();
+    const active1 = scheduler.getReviewerRun('test-project/review-late');
+    expect(active1).toBeDefined();
+    const run1Id = active1!.runId;
+
+    // Simulate timeout of run 1
+    (scheduler as unknown as { finishReview: (...args: unknown[]) => void }).finishReview(
+      'test-project/review-late', run1Id, 'codex-late', 'timeout'
+    );
+    expect(scheduler.getReviewerRun('test-project/review-late')).toBeUndefined();
+
+    // Now spawn run 2 for the same task
+    // Clear backoff on codex-late so it can spawn run 2
+    (scheduler as unknown as { reviewerBackoffUntil: Map<string, number> }).reviewerBackoffUntil.clear();
+    // A reviewer timeout also sets the per-task crash backoff.
+    (scheduler as unknown as { reviewerTaskBackoffUntil: Map<string, number> }).reviewerTaskBackoffUntil.clear();
+    scheduler.tick();
+    const active2 = scheduler.getReviewerRun('test-project/review-late');
+    expect(active2).toBeDefined();
+    expect(active2!.runId).not.toBe(run1Id);
+
+    // Give run 2 an existing exitTimeout
+    const fakeTimer = setTimeout(() => {}, 10000);
+    active2!.exitTimeout = fakeTimer;
+
+    // Now mockChild1 emits a late exit or error or close
+    mockChild1.emit('exit', 0);
+    // run 2's exitTimeout must NOT have been overwritten
+    expect(active2!.exitTimeout).toBe(fakeTimer);
+
+    mockChild1.emit('close', 0);
+    // run 2's exitTimeout must NOT have been cleared
+    expect(active2!.exitTimeout).toBe(fakeTimer);
+    expect(scheduler.getReviewerRun('test-project/review-late')?.runId).toBe(active2!.runId);
+
+    clearTimeout(fakeTimer);
+    scheduler.stop();
+  });
+
+  it('does not change authState when Codex reviewer times out with 401 in log', async () => {
+    const { scheduler } = makeReviewer('reviewer-chatter');
+    profileRepo.updateAuthState('codex-1', 'ok', null, null);
+    const reviewerRun = runRepo.getByTask('test-project/review').find((r) => r.kind === 'reviewer');
+    const logPath = path.join(tmpDir, 'logs', 'codex-timeout.log');
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.writeFileSync(logPath, 'Examining src/auth.ts\nLine 42: return res.status(401).json({ error: "UNAUTHENTICATED" });\nStill analyzing...\n', 'utf8');
+
+    // Simulate timeout directly on the scheduler
+    const profile = profileRepo.get('codex-1')!;
+    expect(profile.authState).toBe('ok');
+
+    (scheduler as unknown as { finishReview: (taskId: string, runId: string, profileName: string, reason: string, code: number | null) => void })
+      .finishReview('test-project/review', reviewerRun?.id || 'fake-run', 'codex-1', 'timeout', null);
+
+    const afterProfile = profileRepo.get('codex-1');
+    expect(afterProfile?.authState).toBe('ok');
+
+    scheduler.stop();
+  });
+
+  it('getNextReviewerProfile is a pure function and emits no events', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    const task = taskRepo.get('test-project/review')!;
+
+    const emittedEvents: Array<{ event: string; taskId?: string }> = [];
+    scheduler.eventBus.on('review.fallback', (taskId) => emittedEvents.push({ event: 'review.fallback', taskId }));
+    scheduler.eventBus.on('review.waiting', (taskId) => emittedEvents.push({ event: 'review.waiting', taskId }));
+
+    const initialNotifiedSize = (scheduler as unknown as { reviewerFallbackNotified: Set<string> }).reviewerFallbackNotified.size;
+    const nextProfile = scheduler.getNextReviewerProfile(task);
+    expect(nextProfile).toBeDefined();
+    expect(emittedEvents).toEqual([]);
+    expect((scheduler as unknown as { reviewerFallbackNotified: Set<string> }).reviewerFallbackNotified.size).toBe(initialNotifiedSize);
+
+    scheduler.stop();
+  });
+
   it('cleans up a reviewer when the child emits an asynchronous spawn error', async () => {
     const { scheduler } = makeReviewer('reviewer-error');
     scheduler.tick();
@@ -831,6 +1109,26 @@ describe('Codex reviewer failover lifecycle', () => {
     });
     expect(taskRepo.get('test-project/review')?.status).toBe('review');
     expect(new QuotaService(quotaMarkRepo, profileRepo).isExhausted('codex-1', 'codex')).toBe(true);
+    const reviewerRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
+    expect(reviewerRun?.logPath).toBeDefined();
+    if (reviewerRun?.logPath && fs.existsSync(reviewerRun.logPath)) {
+      const logContent = fs.readFileSync(reviewerRun.logPath, 'utf8');
+      expect(logContent).toContain('[agenthub] reviewer codex-1 hết quota');
+    }
+    scheduler.stop();
+  });
+
+  it('appends failover reason with target reviewer when quota is exhausted', async () => {
+    const { scheduler } = makeReviewer('reviewer-quota');
+    profileRepo.upsert({ name: 'codex-2', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    scheduler.tick();
+    await vi.waitFor(() => {
+      expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).toBe('quota');
+    });
+    const firstRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
+    expect(firstRun?.logPath).toBeDefined();
+    const logContent = fs.readFileSync(firstRun!.logPath!, 'utf8');
+    expect(logContent).toContain('[agenthub] reviewer codex-1 hết quota, chuyển sang codex-2');
     scheduler.stop();
   });
 
@@ -888,6 +1186,230 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.tick();
     expect(ready()).toHaveLength(2);
     scheduler.stop();
+  });
+
+  it('does not re-emit task.review_ready on scheduler restart for tasks waiting for manual review or completed chains', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    // Task with empty review chain (manual review required)
+    projectRepo.update('test-project', { reviewChain: '[]' });
+    taskRepo.update('test-project/review', { status: 'review', reviewStep: 0 });
+    // Add completed worker run
+    runRepo.finish('autocheck-run', 'done', undefined, undefined);
+    db.prepare("UPDATE runs SET kind = 'worker', outcome = 'done' WHERE id = 'autocheck-run'").run();
+
+    // Clear prior events
+    db.prepare('DELETE FROM events').run();
+
+    scheduler.stop();
+
+    // Create a new Scheduler to simulate daemon restart
+    const fake = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fake as unknown as { id: string }).id = 'codex';
+    const restartedScheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
+    restartedScheduler.configureReviewer(reviewRepo, failover);
+    (restartedScheduler as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    // Verify recoverOnStartup did not emit review_ready and seeded reviewNotified for chain: []
+    const readyEventsOnStartup = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
+    expect(readyEventsOnStartup).toHaveLength(0);
+    expect((restartedScheduler as unknown as { reviewNotified: Map<string, string> }).reviewNotified.get('test-project/review')).toBe('complete:0');
+
+    // Verify ticks also do not emit review_ready
+    for (let tick = 0; tick < 5; tick++) restartedScheduler.tick();
+    const readyEventsAfterTicks = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
+    expect(readyEventsAfterTicks).toHaveLength(0);
+
+    // Also test task with completed chain
+    projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
+    taskRepo.update('test-project/review', { reviewStep: 1 });
+    restartedScheduler.stop();
+
+    // Restart again
+    const restartedScheduler2 = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    restartedScheduler2.configureReviewer(reviewRepo, failover);
+    (restartedScheduler2 as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    for (let tick = 0; tick < 5; tick++) restartedScheduler2.tick();
+    const readyEventsChainComplete = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
+    expect(readyEventsChainComplete).toHaveLength(0);
+    restartedScheduler2.stop();
+  });
+
+  it('re-emits task.review_ready on restart for interrupted tasks with autoMerge enabled', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    // Enable autoMerge on the project
+    projectRepo.update('test-project', {
+      reviewChain: '[]',
+      settings: JSON.stringify({ review: { autoMerge: true } }),
+    });
+    taskRepo.update('test-project/review', { status: 'review', reviewStep: 0 });
+    // Add completed worker run
+    runRepo.finish('autocheck-run', 'done', undefined, undefined);
+    db.prepare("UPDATE runs SET kind = 'worker', outcome = 'done' WHERE id = 'autocheck-run'").run();
+
+    // Clear events table to simulate restart after worker passed checks but before auto-merge finished
+    db.prepare('DELETE FROM events').run();
+    scheduler.stop();
+
+    // Restart scheduler
+    const fake = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fake as unknown as { id: string }).id = 'codex';
+    const restartedScheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
+    restartedScheduler.configureReviewer(reviewRepo, failover);
+    (restartedScheduler as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    // Verify recoverOnStartup emitted review_ready for the interrupted auto-merge task
+    const readyEvents = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
+    expect(readyEvents).toHaveLength(1);
+    expect(readyEvents[0].payload).toContain('"reviewChainComplete":true');
+    restartedScheduler.stop();
+  });
+
+  it('does not re-emit task.review_ready on restart for autoMerge tasks stopped at merge.conflict', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    projectRepo.update('test-project', {
+      reviewChain: '[]',
+      settings: JSON.stringify({ review: { autoMerge: true } }),
+    });
+    taskRepo.update('test-project/review', { status: 'review', reviewStep: 0 });
+    runRepo.finish('autocheck-run', 'done', undefined, undefined);
+    db.prepare("UPDATE runs SET kind = 'worker', outcome = 'done' WHERE id = 'autocheck-run'").run();
+
+    // Prior events include review_ready followed by merge.conflict
+    db.prepare('DELETE FROM events').run();
+    eventRepo.insert('task.review_ready', 'test-project/review', { reviewChainComplete: true, checksPassed: true });
+    eventRepo.insert('merge.conflict', 'test-project/review', { files: 'foo.ts' });
+
+    scheduler.stop();
+
+    // Restart scheduler
+    const fake = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fake as unknown as { id: string }).id = 'codex';
+    const restartedScheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
+    restartedScheduler.configureReviewer(reviewRepo, failover);
+
+    const eventsCountBefore = eventRepo.getRecent(50).length;
+    (restartedScheduler as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    // Must NOT re-emit review_ready on startup
+    const newReadyEvents = eventRepo.getSince(eventsCountBefore).filter((e) => e.type === 'task.review_ready');
+    expect(newReadyEvents).toHaveLength(0);
+
+    // Also ticks must NOT emit review_ready
+    for (let tick = 0; tick < 3; tick++) restartedScheduler.tick();
+    const tickReadyEvents = eventRepo.getSince(eventsCountBefore).filter((e) => e.type === 'task.review_ready');
+    expect(tickReadyEvents).toHaveLength(0);
+
+    // Also test chain with steps completed (stepIdx >= chain.length)
+    projectRepo.update('test-project', {
+      reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]),
+    });
+    taskRepo.update('test-project/review', { reviewStep: 1 });
+    restartedScheduler.stop();
+
+    const restartedScheduler2 = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    restartedScheduler2.configureReviewer(reviewRepo, failover);
+    const count2 = eventRepo.getRecent(50).length;
+    (restartedScheduler2 as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    const chainReadyEvents = eventRepo.getSince(count2).filter((e) => e.type === 'task.review_ready');
+    expect(chainReadyEvents).toHaveLength(0);
+
+    restartedScheduler2.stop();
+  });
+
+  it('recovers interrupted Claude manual gate and emits gate_ready only when not already notified', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'claude', mode: 'gate' }]) });
+    taskRepo.update('test-project/review', { status: 'review', reviewStep: 0 });
+    // Add completed worker run so recovery does not treat it as a crashed running worker
+    runRepo.finish('autocheck-run', 'done', undefined, undefined);
+    db.prepare("UPDATE runs SET kind = 'worker', outcome = 'done' WHERE id = 'autocheck-run'").run();
+
+    // Case 1: gate_ready was NOT emitted before restart (interrupted)
+    db.prepare('DELETE FROM events').run();
+    scheduler.stop();
+
+    const fake = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fake as unknown as { id: string }).id = 'codex';
+    const restarted1 = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
+    restarted1.configureReviewer(reviewRepo, failover);
+    (restarted1 as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    // First tick emits review.gate_ready
+    restarted1.tick();
+    const gateEvents1 = eventRepo.getRecent(50).filter((e) => e.type === 'review.gate_ready');
+    expect(gateEvents1).toHaveLength(1);
+    restarted1.stop();
+
+    // Case 2: Now gate_ready WAS emitted; another restart must NOT emit gate_ready again
+    const restarted2 = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    restarted2.configureReviewer(reviewRepo, failover);
+    (restarted2 as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    const gateEventsBefore = eventRepo.getRecent(50).filter((e) => e.type === 'review.gate_ready').length;
+    for (let tick = 0; tick < 5; tick++) restarted2.tick();
+    const gateEventsAfter = eventRepo.getRecent(50).filter((e) => e.type === 'review.gate_ready').length;
+    expect(gateEventsAfter).toBe(gateEventsBefore);
+    restarted2.stop();
+  });
+
+  it('recovers an interrupted reviewer run by emitting review.waiting and re-running on tick', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
+    taskRepo.update('test-project/review', { status: 'review', reviewStep: 0 });
+
+    // Insert an active running reviewer run that was cut off by restart
+    const cutOffRunId = 'interrupted-reviewer-run';
+    runRepo.insert({
+      id: cutOffRunId,
+      taskId: 'test-project/review',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-1',
+      kind: 'reviewer',
+    });
+
+    scheduler.stop();
+
+    // Restart scheduler
+    const fake = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fake as unknown as { id: string }).id = 'codex';
+    const restartedScheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
+    restartedScheduler.configureReviewer(reviewRepo, failover);
+    (restartedScheduler as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    // Verify the old run was marked as crashed and review.waiting was emitted
+    const crashedRun = runRepo.get(cutOffRunId);
+    expect(crashedRun?.outcome).toBe('crashed');
+
+    const waitingEvents = eventRepo.getRecent(50).filter((e) => e.type === 'review.waiting');
+    expect(waitingEvents.length).toBeGreaterThan(0);
+
+    // Scheduler tick will now re-spawn a fresh reviewer run
+    restartedScheduler.tick();
+    const newRuns = runRepo.getByTask('test-project/review').filter((r) => r.kind === 'reviewer' && r.id !== cutOffRunId);
+    expect(newRuns.length).toBeGreaterThanOrEqual(1);
+
+    restartedScheduler.stop();
   });
 
   it('runs a Codex final step itself and completes the chain when it approves', async () => {

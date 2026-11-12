@@ -980,5 +980,211 @@ describe('TaskDetailPage', () => {
     expect(titles).toContain('2026-11-06T17:52:44.000Z');
     expect(titles).toContain('2026-11-07T18:22:34.000Z');
   });
+
+  it('renders adopted badge and timeline event when worker was adopted after hub restart', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      id: 'proj-1~t1',
+      projectId: 'proj-1',
+      slug: 't1',
+      title: 'Task Adopted',
+      level: 'easy',
+      status: 'running',
+      currentRun: {
+        startedAt: '2026-11-06T17:50:00.000Z',
+        lastOutputAt: '2026-11-06T17:52:00.000Z',
+        lastActivityAt: '2026-11-06T17:52:00.000Z',
+        activitySource: 'log',
+        model: 'gemini-3.8-flash-high',
+        profileName: 'profile-1',
+        engine: 'agy',
+        adopted: true,
+      },
+      events: [
+        {
+          id: 1,
+          type: 'run.adopted',
+          ts: '2026-11-06T17:51:00.000Z',
+          taskId: 'proj-1~t1',
+          payload: { note: 'Hub khởi động lại, tiếp tục theo dõi worker' },
+        },
+      ],
+      runs: [],
+      reviews: [],
+    } as never);
+
+    renderPage();
+
+    expect(await screen.findByText('Task Adopted')).toBeInTheDocument();
+    const badge = screen.getByTestId('task-adopted-badge');
+    expect(badge).toBeInTheDocument();
+    expect(badge.textContent).toContain('đã nhận lại sau khi hub khởi động lại');
+
+    const adoptedEvent = screen.getByTestId('timeline-event-run.adopted');
+    expect(adoptedEvent).toBeInTheDocument();
+    expect(adoptedEvent.textContent).toContain('Hub khởi động lại, tiếp tục theo dõi worker');
+  });
+
+  it('27. Task với auditPassed: hiển thị badge "Audit đạt"', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'pushed',
+      pushedAt: '2026-11-06T18:00:00.000Z',
+      pushResult: JSON.stringify({
+        remote: 'origin',
+        branch: 'main',
+        commit: '1234567890abcdef',
+        auditPassed: true,
+      }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const auditBadge = await screen.findByTestId('publish-audit-status-passed');
+    expect(auditBadge).toBeInTheDocument();
+    expect(auditBadge.textContent).toContain('Audit đạt');
+  });
+
+  it('28. Task với auditSkipped: hiển thị badge "Bỏ qua audit"', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'pushed',
+      pushedAt: '2026-11-06T18:00:00.000Z',
+      pushResult: JSON.stringify({
+        remote: 'origin',
+        branch: 'main',
+        commit: '1234567890abcdef',
+        auditSkipped: true,
+      }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const auditBadge = await screen.findByTestId('publish-audit-status-skipped');
+    expect(auditBadge).toBeInTheDocument();
+    expect(auditBadge.textContent).toContain('Bỏ qua audit');
+  });
+
+  it('29. Task với auditFailed: hiển thị badge "Audit không đạt" và danh sách findings', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      pushResult: JSON.stringify({
+        error: 'Audit trước khi publish thất bại',
+        auditFailed: true,
+        findings: [
+          {
+            severity: 'P1',
+            kind: 'wrong_requirement',
+            file: 'src/main.ts',
+            line: 42,
+            detail: 'Thiếu kiểm tra quyền hạn',
+          },
+          {
+            severity: 'P2',
+            kind: 'regression_risk',
+            file: 'src/api.ts',
+            line: 10,
+            detail: 'Có nguy cơ gây lỗi deadlock',
+          },
+        ],
+      }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const auditBadge = await screen.findByTestId('publish-audit-status-failed');
+    expect(auditBadge).toBeInTheDocument();
+    expect(auditBadge.textContent).toContain('Audit không đạt');
+
+    const findingsContainer = await screen.findByTestId('publish-audit-findings');
+    expect(findingsContainer).toBeInTheDocument();
+    expect(findingsContainer.textContent).toContain('Thiếu kiểm tra quyền hạn');
+    expect(findingsContainer.textContent).toContain('src/main.ts:42');
+    expect(findingsContainer.textContent).toContain('P1');
+    expect(findingsContainer.textContent).toContain('Có nguy cơ gây lỗi deadlock');
+  });
+
+  it('30. Nút Bỏ qua audit và publish: xác nhận confirm và gọi publishTask(id, { skipAudit: true })', async () => {
+    const publishSpy = vi.spyOn(client, 'publishTask').mockResolvedValue({
+      ok: true,
+      remote: 'origin',
+      branch: 'main',
+      commit: '1234567890abcdef',
+      auditSkipped: true,
+    } as any);
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const skipAuditBtn = await screen.findByTestId('header-btn-publish-skip-audit');
+    expect(skipAuditBtn).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(skipAuditBtn);
+    });
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(publishSpy).toHaveBeenCalledWith('proj-1~t1', { skipAudit: true });
+  });
+
+  it('31. Task với pushResult.state === "auditing": hiển thị badge "Đang audit…" từ trạng thái server', async () => {
+    vi.spyOn(client, 'getProject').mockResolvedValue({
+      id: 'proj-1',
+      name: 'Project 1',
+      path: '/tmp/proj-1',
+      defaultBranch: 'main',
+      settings: {
+        publish: { enabled: true, remote: 'origin', branch: 'main' },
+      },
+    } as any);
+
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      pushResult: JSON.stringify({
+        state: 'auditing',
+        startedAt: '2026-11-11T12:00:00.000Z',
+      }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const auditingBadge = await screen.findByTestId('publish-audit-status-auditing');
+    expect(auditingBadge).toBeInTheDocument();
+    expect(auditingBadge.textContent).toContain('Đang audit');
+  });
+
+  it('32. Task với localUpdate="skipped_dirty": hiển thị banner cảnh báo nhánh local chưa cập nhật', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'pushed',
+      pushedAt: '2026-11-07T03:30:00Z',
+      pushResult: JSON.stringify({
+        remote: 'origin',
+        branch: 'main',
+        commit: 'abcdef1234567890',
+        localUpdate: 'skipped_dirty',
+      }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const skippedBanner = await screen.findByTestId('publish-skipped-dirty-banner');
+    expect(skippedBanner).toBeInTheDocument();
+    expect(skippedBanner).toHaveTextContent('main');
+  });
 });
 

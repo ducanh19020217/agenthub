@@ -463,10 +463,11 @@ describe('Integrations UI Suite', () => {
         expect(screen.getByTestId('project-remote-deploy-section')).toBeInTheDocument();
       });
 
-      expect(screen.getByLabelText('Nhánh nguồn')).toBeInTheDocument();
-      expect(screen.getByLabelText('Nhánh đích')).toBeInTheDocument();
-      expect(screen.getByLabelText('URL Gitea')).toBeInTheDocument();
-      expect(screen.getByLabelText('Token Gitea')).toBeInTheDocument();
+      const giteaSection = screen.getByTestId('project-gitea-section');
+      expect(within(giteaSection).getByLabelText('Nhánh nguồn')).toBeInTheDocument();
+      expect(within(giteaSection).getByLabelText('Nhánh đích')).toBeInTheDocument();
+      expect(within(giteaSection).getByLabelText('URL Gitea')).toBeInTheDocument();
+      expect(within(giteaSection).getByLabelText('Token Gitea')).toBeInTheDocument();
       expect(screen.getByLabelText('Trigger')).toBeInTheDocument();
       expect(screen.getByLabelText('Steps')).toBeInTheDocument();
     });
@@ -719,10 +720,6 @@ describe('Integrations UI Suite', () => {
       expect(publishSection).toBeInTheDocument();
 
       const publishToggle = within(publishSection).getByTestId('publish-toggle');
-      expect(publishToggle).not.toBeChecked();
-
-      // Enable publish
-      fireEvent.click(publishToggle);
       expect(publishToggle).toBeChecked();
 
       // Remote input
@@ -753,9 +750,6 @@ describe('Integrations UI Suite', () => {
       renderWithProviders(<ProjectSettingsDrawer project={mockProject} isOpen={true} onClose={vi.fn()} />);
 
       const publishSection = await screen.findByTestId('project-publish-section');
-      const publishToggle = within(publishSection).getByTestId('publish-toggle');
-
-      fireEvent.click(publishToggle);
 
       // Select custom option to reveal text input
       const branchSelect = within(publishSection).getByLabelText('Nhánh đích');

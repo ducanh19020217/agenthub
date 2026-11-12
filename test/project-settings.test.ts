@@ -38,9 +38,14 @@ describe('project settings parsing', () => {
       reviewChecklist: [],
       notifications: { telegramContent: 'full' },
       publish: {
-        enabled: false,
+        enabled: true,
         remote: 'origin',
         pushIntegrationBranch: true,
+        audit: {
+          enabled: true,
+          maxFixRounds: 2,
+          maxTasks: 10,
+        },
       },
     });
     expect(projectSettings(undefined)).toEqual(DEFAULT_PROJECT_SETTINGS);
@@ -81,6 +86,24 @@ describe('project settings parsing', () => {
       ci: { branch: 'staging' },
     });
     expect(partial.ci).toEqual({ enabled: true, branch: 'staging' });
+  });
+
+  it('merges publish audit settings and respects defaults', () => {
+    const updated = mergeProjectSettings(DEFAULT_PROJECT_SETTINGS, {
+      publish: {
+        enabled: true,
+        audit: { enabled: true, maxFixRounds: 3 },
+      },
+    });
+    expect(updated.publish.enabled).toBe(true);
+    expect(updated.publish.audit).toEqual({ enabled: true, maxFixRounds: 3, maxTasks: 10 });
+
+    const disabledAudit = mergeProjectSettings(updated, {
+      publish: {
+        audit: { enabled: false },
+      },
+    });
+    expect(disabledAudit.publish.audit).toEqual({ enabled: false, maxFixRounds: 3, maxTasks: 10 });
   });
 
   it('clears reviewer order and fallback overrides when set to null in mergeProjectSettings', () => {

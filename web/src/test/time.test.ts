@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   formatDateTime,
   formatDateTimeWithAgo,
+  formatDuration,
   formatIsoTitle,
   formatReset,
   formatResetCompact,
+  formatShortContextualTime,
+  formatStatusTimeLabel,
   formatTime,
   formatTimeAgo,
   parseApiTime,
@@ -213,6 +216,120 @@ describe('API time helpers', () => {
       expect(formatIsoTitle(null)).toBe('');
       expect(formatIsoTitle(undefined)).toBe('');
       expect(formatIsoTitle(NaN)).toBe('');
+    });
+  });
+
+  describe('formatShortContextualTime', () => {
+    // 2026-11-12 14:32:00 VN (+07:00) = 2026-11-12 07:32:00 UTC
+    const now = Date.parse('2026-11-12T07:32:00Z');
+
+    it('formats times less than a minute ago as "vừa xong" / "just now"', () => {
+      const recent = now - 20 * 1000;
+      expect(formatShortContextualTime(recent, 'vi', now)).toBe('vừa xong');
+      expect(formatShortContextualTime(recent, 'en', now)).toBe('just now');
+    });
+
+    it('formats times less than an hour ago as "X phút trước" / "Xm ago"', () => {
+      const fiveMins = now - 5 * 60 * 1000;
+      expect(formatShortContextualTime(fiveMins, 'vi', now)).toBe('5 phút trước');
+      expect(formatShortContextualTime(fiveMins, 'en', now)).toBe('5m ago');
+    });
+
+    it('formats times earlier today as clock time HH:mm in Asia/Ho_Chi_Minh', () => {
+      // 10:05:00 VN = 03:05:00 UTC
+      const tenAm = Date.parse('2026-11-12T03:05:00Z');
+      expect(formatShortContextualTime(tenAm, 'vi', now)).toBe('10:05');
+      expect(formatShortContextualTime(tenAm, 'en', now)).toBe('10:05');
+    });
+
+    it('formats times yesterday as "hôm qua HH:mm" / "yesterday HH:mm"', () => {
+      // 2026-11-11 14:20:00 VN = 07:20:00 UTC
+      const yesterdayTime = Date.parse('2026-11-11T07:20:00Z');
+      expect(formatShortContextualTime(yesterdayTime, 'vi', now)).toBe('hôm qua 14:20');
+      expect(formatShortContextualTime(yesterdayTime, 'en', now)).toBe('yesterday 14:20');
+    });
+
+    it('handles invalid timestamps gracefully with localized fallback', () => {
+      expect(formatShortContextualTime('invalid', 'vi')).toBe('chưa rõ thời gian');
+      expect(formatShortContextualTime('invalid', 'en')).toBe('time unknown');
+      expect(formatShortContextualTime(null, 'vi')).toBe('chưa rõ thời gian');
+    });
+  });
+
+  describe('formatDuration', () => {
+    it('formats seconds, minutes, hours and days', () => {
+      expect(formatDuration(45 * 1000, 'vi')).toBe('45s');
+      expect(formatDuration(45 * 1000, 'en')).toBe('45s');
+
+      expect(formatDuration(12 * 60 * 1000, 'vi')).toBe('12 phút');
+      expect(formatDuration(12 * 60 * 1000, 'en')).toBe('12m');
+
+      expect(formatDuration((2 * 60 + 15) * 60 * 1000, 'vi')).toBe('2h 15p');
+      expect(formatDuration((2 * 60 + 15) * 60 * 1000, 'en')).toBe('2h 15m');
+
+      expect(formatDuration(3 * 3600 * 1000, 'vi')).toBe('3h');
+      expect(formatDuration(3 * 3600 * 1000, 'en')).toBe('3h');
+
+      expect(formatDuration(26 * 3600 * 1000, 'vi')).toBe('1d 2h');
+      expect(formatDuration(48 * 3600 * 1000, 'en')).toBe('2d');
+    });
+
+    it('handles invalid or negative durations', () => {
+      expect(formatDuration(null, 'vi')).toBe('—');
+      expect(formatDuration(-100, 'vi')).toBe('—');
+      expect(formatDuration(NaN, 'vi')).toBe('—');
+    });
+  });
+
+  describe('formatStatusTimeLabel', () => {
+    // 2026-11-12 14:32:00 VN = 07:32:00 UTC
+    const now = Date.parse('2026-11-12T07:32:00Z');
+
+    it('formats running status with "từ" / "since"', () => {
+      // 10:05 VN
+      const tenAm = Date.parse('2026-11-12T03:05:00Z');
+      expect(formatStatusTimeLabel('running', tenAm, 'vi', now)).toBe('Đang chạy từ 10:05');
+      expect(formatStatusTimeLabel('running', tenAm, 'en', now)).toBe('Running since 10:05');
+    });
+
+    it('formats done status with contextual time', () => {
+      // 14:32 VN
+      const doneAt = Date.parse('2026-11-12T07:32:00Z');
+      expect(formatStatusTimeLabel('done', doneAt, 'vi', now)).toBe('Hoàn thành vừa xong');
+      expect(formatStatusTimeLabel('done', doneAt, 'en', now)).toBe('Completed just now');
+
+      // 10:05 VN earlier today (clock mode)
+      const tenAm = Date.parse('2026-11-12T03:05:00Z');
+      expect(formatStatusTimeLabel('done', tenAm, 'vi', now)).toBe('Hoàn thành 10:05');
+      expect(formatStatusTimeLabel('done', tenAm, 'en', now)).toBe('Completed 10:05');
+    });
+
+    it('formats pushed status with relative time ago when pushed 3 hours ago', () => {
+      const threeHoursAgo = now - 3 * 3600 * 1000;
+      expect(formatStatusTimeLabel('pushed', threeHoursAgo, 'vi', now)).toBe('Đã đẩy git 3 giờ trước');
+      expect(formatStatusTimeLabel('pushed', threeHoursAgo, 'en', now)).toBe('Pushed to git 3h ago');
+    });
+
+    it('supports custom translation function t if provided', () => {
+      const tenAm = Date.parse('2026-11-12T03:05:00Z');
+      const mockT = (key: string, params?: Record<string, string | number>) => {
+        if (key === 'statusTime.running') return `Custom Running ${params?.time}`;
+        return key;
+      };
+      expect(formatStatusTimeLabel('running', tenAm, 'en', now, mockT)).toBe('Custom Running 10:05');
+    });
+
+    it('falls back when value is null or invalid', () => {
+      expect(formatStatusTimeLabel('running', null, 'vi')).toBe('running');
+    });
+
+    it('appends localized estimated suffix when estimated is true', () => {
+      const tenAm = Date.parse('2026-11-12T03:05:00Z');
+      expect(formatStatusTimeLabel('done', tenAm, 'vi', now, undefined, true)).toBe('Hoàn thành 10:05 (ước lượng)');
+      expect(formatStatusTimeLabel('done', tenAm, 'en', now, undefined, true)).toBe('Completed 10:05 (estimated)');
+
+      expect(formatStatusTimeLabel('running', tenAm, 'vi', now, undefined, true)).toBe('Đang chạy từ 10:05 (ước lượng)');
+      expect(formatStatusTimeLabel('running', tenAm, 'en', now, undefined, true)).toBe('Running since 10:05 (estimated)');
     });
   });
 });

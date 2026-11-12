@@ -236,11 +236,18 @@ export interface DeployStatus {
   logPath?: string;
 }
 
+export interface PublishAuditSettings {
+  enabled?: boolean;
+  maxFixRounds?: number;
+  maxTasks?: number;
+}
+
 export interface PublishSettings {
   enabled: boolean;
   remote: string;
   branch?: string;
   pushIntegrationBranch: boolean;
+  audit?: PublishAuditSettings;
 }
 
 /** Mirrors src/projects/settings.ts. */
@@ -336,6 +343,8 @@ export interface Run {
   reason?: string | null;
   logPath?: string | null;
   resetAt?: number | null;
+  handoff?: number | null;
+  adopted?: boolean;
 }
 
 export interface Review {
@@ -371,6 +380,15 @@ export interface BlockingDiskInfo {
   label: string;
   freeGB: number;
   minFreeGB: number;
+}
+
+export interface TaskTimelineItem {
+  status: TaskStatus | string;
+  at: string;
+  durationMs?: number;
+  runId?: string | null;
+  actor?: string | null;
+  estimated?: boolean;
 }
 
 export interface Task {
@@ -414,6 +432,9 @@ export interface Task {
   reviewChain?: ReviewChainStep[];
   createdAt: string;
   updatedAt: string;
+  statusChangedAt?: string | null;
+  statusChangedAtEstimated?: boolean;
+  timeline?: TaskTimelineItem[];
   pushedAt?: string | null;
   pushResult?: string | null | {
     remote?: string;
@@ -424,6 +445,20 @@ export interface Task {
     error?: string | null;
     reason?: string | null;
     outputTail?: string | null;
+    localUpdate?: 'updated' | 'skipped_dirty';
+    auditPassed?: boolean;
+    auditSkipped?: boolean;
+    auditFailed?: boolean;
+    findings?: Array<{
+      severity: 'P1' | 'P2' | 'P3';
+      kind: string;
+      file: string;
+      line: number;
+      detail: string;
+    }>;
+    summary?: string;
+    failedAt?: string;
+    retryable?: boolean;
   };
   reviewer?: 'codex' | 'claude';
   currentRun?: {
@@ -441,6 +476,7 @@ export interface Task {
     pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
     rss?: number;
     cpu?: number;
+    adopted?: boolean;
   } | null;
   paused?: boolean;
   pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
@@ -558,6 +594,7 @@ export interface RunningWorker {
   cpu?: number;
   paused?: boolean;
   pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
+  adopted?: boolean;
 }
 
 export type BrainActivity =

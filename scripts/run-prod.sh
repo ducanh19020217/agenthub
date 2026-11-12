@@ -28,8 +28,10 @@ cd "$ROOT_DIR"
 MODE="${1:-service}"
 WAIT=0
 FORCE=0
+KILL_WORKERS=0
 for arg in "$@"; do
   [ "$arg" = "--wait" ] && WAIT=1
+  [ "$arg" = "--kill-workers" ] && KILL_WORKERS=1
   if [ "$arg" = "--force" ] || [ "$arg" = "--now" ]; then FORCE=1; fi
 done
 
@@ -90,7 +92,8 @@ show_help() {
   echo "  -s, --status                Xem trạng thái dịch vụ Production hiện tại"
   echo "  --restart                   Khởi động lại dịch vụ Production"
   echo "  --wait                      Chờ drain hoàn tất sau --restart"
-  echo "  --force, --now              Khởi động lại ngay, dừng worker đang chạy"
+  echo "  --force, --now              Khởi động lại ngay (mặc định handoff worker)"
+  echo "  --kill-workers              Dừng worker khi khởi động lại ngay (dùng kèm --force/--now)"
   echo "  --stop                      Dừng dịch vụ Production (= ./scripts/stop-prod.sh)"
   echo "  -h, --help                  Xem hướng dẫn này"
   echo ""
@@ -118,8 +121,13 @@ case "$MODE" in
     if health_ok && [ -f "$HOME/.agenthub/token" ]; then
       TOKEN=$(cat "$HOME/.agenthub/token" 2>/dev/null || true)
       if [ "$FORCE" = 1 ]; then
-        echo "⚠️ Khởi động lại ngay: worker đang chạy sẽ bị dừng."
-        if curl -fsS -m 5 -X POST "http://127.0.0.1:7700/api/system/restart" -H "Authorization: Bearer $TOKEN" -H 'Host: 127.0.0.1:7700' -H 'Content-Type: application/json' --data '{"mode":"now"}' >/dev/null; then exit 0; fi
+        if [ "$KILL_WORKERS" = 1 ]; then
+          echo "⚠️ Khởi động lại ngay: worker đang chạy sẽ bị dừng."
+          if curl -fsS -m 5 -X POST "http://127.0.0.1:7700/api/system/restart" -H "Authorization: Bearer $TOKEN" -H 'Host: 127.0.0.1:7700' -H 'Content-Type: application/json' --data '{"mode":"now","killWorkers":true}' >/dev/null; then exit 0; fi
+        else
+          echo "🔄 Khởi động lại ngay (handoff: worker tiếp tục chạy)..."
+          if curl -fsS -m 5 -X POST "http://127.0.0.1:7700/api/system/restart" -H "Authorization: Bearer $TOKEN" -H 'Host: 127.0.0.1:7700' -H 'Content-Type: application/json' --data '{"mode":"now","killWorkers":false}' >/dev/null; then exit 0; fi
+        fi
       else
         RESPONSE=$(curl -fsS -m 5 -X POST "http://127.0.0.1:7700/api/system/restart" -H "Authorization: Bearer $TOKEN" -H 'Host: 127.0.0.1:7700' -H 'Content-Type: application/json' --data '{"mode":"when-idle"}' || true)
         if [ -n "$RESPONSE" ]; then
@@ -212,7 +220,7 @@ else
     fi
   else
     # Cài đặt hoặc cập nhật service file
-    node dist/cli.js install-service >/dev/null 2>&1 || true
+    node dist/cli.js service upgrade >/dev/null 2>&1 || true
 
     # Kích hoạt linger để service chạy 24/7 kể cả khi logout
     loginctl enable-linger "$USER" 2>/dev/null || true

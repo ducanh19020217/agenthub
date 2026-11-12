@@ -1332,6 +1332,68 @@ describe('AgentHub API Extra Endpoints', () => {
       });
       expect(resR2.statusCode).toBe(200);
       expect(resR2.body).toBe('Log from Run 2\n');
+
+      // scope=all: stitches all runs in chronological order with run headers
+      ctx.runRepo.insert({
+        id: 'run-r3',
+        taskId: 'p-log-runs/t2',
+        engine: 'claude',
+        model: 'claude:sonnet',
+        profileName: 'claude-may',
+        kind: 'reviewer',
+        startedAt: '2026-10-15 11:30:00',
+        logPath: path.join(tmpDir, 'run3.log'),
+      });
+      fs.writeFileSync(path.join(tmpDir, 'run3.log'), 'Reviewer checked the diff.\n', 'utf-8');
+
+      const resAll = await server.inject({
+        method: 'GET',
+        url: '/api/tasks/p-log-runs~t2/log?scope=all',
+        headers: authHeaders(),
+      });
+      expect(resAll.statusCode).toBe(200);
+      expect(resAll.body).toContain('── Run #1 · worker · agy/p1 · 10:00 ──\nLog from Run 1');
+      expect(resAll.body).toContain('── Run #2 · worker · agy/p1 · 11:00 ──\nLog from Run 2');
+      expect(resAll.body).toContain('── Run #3 · reviewer · claude/claude-may · 11:30 ──\nReviewer checked the diff.');
+      // Verify ordering: Run 1 comes before Run 2, which comes before Run 3
+      const idx1 = resAll.body.indexOf('Run #1');
+      const idx2 = resAll.body.indexOf('Run #2');
+      const idx3 = resAll.body.indexOf('Run #3');
+      expect(idx1).toBeLessThan(idx2);
+      expect(idx2).toBeLessThan(idx3);
+
+      // scope=all with tail limit: clamps to specified tailKB
+      const resTailed = await server.inject({
+        method: 'GET',
+        url: '/api/tasks/p-log-runs~t2/log?scope=all&tail=1',
+        headers: authHeaders(),
+      });
+      expect(resTailed.statusCode).toBe(200);
+      expect(Buffer.byteLength(resTailed.body, 'utf-8')).toBeLessThanOrEqual(1024);
+      expect(resTailed.body).toContain('Reviewer checked the diff.');
+
+      // scope=all with multi-byte UTF-8 characters: never produces replacement character 
+      fs.writeFileSync(
+        path.join(tmpDir, 'run3.log'),
+        'Dòng 1: Khởi động quá trình kiểm tra.\n' +
+        'Dòng 2: Tiếng Việt có dấu kiểm tra mã hoá UTF-8 nhiều byte: 🚀 Ứng dụng hoạt động ổn định.\n'.repeat(30) +
+        'Dòng cuối: Hoàn thành duyệt mã nguồn.\n',
+        'utf-8',
+      );
+      const resUtf8 = await server.inject({
+        method: 'GET',
+        url: '/api/tasks/p-log-runs~t2/log?scope=all&tail=1',
+        headers: authHeaders(),
+      });
+      expect(resUtf8.statusCode).toBe(200);
+      expect(resUtf8.body).not.toContain('\uFFFD');
+      expect(resUtf8.body).toContain('Hoàn thành duyệt mã nguồn.');
+      // Headers in returned sections are intact
+      for (const line of resUtf8.body.split('\n')) {
+        if (line.startsWith('── Run #')) {
+          expect(line).toMatch(/^── Run #\d+ · .* ──$/);
+        }
+      }
     });
   });
 

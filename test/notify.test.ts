@@ -798,6 +798,24 @@ describe('NotificationService (Desktop Notifications)', () => {
     notifier.stop();
   });
 
+  it('notifies decision.answered with other label', () => {
+    config.notifications.desktop = true;
+    config.notifications.desktopLevel = 'all';
+    const notifier = new NotificationService({ eventBus, config, taskRepo, profileRepo, quotaMarkRepo, exec: fakeExec });
+    notifier.start();
+
+    eventBus.emit('decision.answered', undefined, {
+      decisionId: 'dec-1',
+      action: 'other',
+      answer: 'other',
+      customAnswer: 'Làm theo phương án X',
+    });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toBe('Đã phản hồi quyết định: Phương án khác — Làm theo phương án X');
+
+    notifier.stop();
+  });
+
   it('filters raw notifications by each project brain mode', () => {
     projectRepo.insert({ id: 'p1', name: 'P1', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1, settings: JSON.stringify({ brain: { mode: 'auto' } }) });
     projectRepo.insert({ id: 'p2', name: 'P2', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });

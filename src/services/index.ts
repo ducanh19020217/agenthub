@@ -18,6 +18,7 @@ import {
   QuotaMarkRepo,
   TaskRepo,
   RunRepo,
+  RunRow,
   ReviewRepo,
   EventRepo,
   TaskNoteRepo,
@@ -79,7 +80,7 @@ import type { PageResult } from '../pagination.js';
 import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
 import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
-import { publishTask as executePublishTask, type PublishResult } from '../publish.js';
+import { publishTask as executePublishTask, isProjectPublishing, onProjectPublishLockReleased, type PublishResult } from '../publish.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
@@ -185,11 +186,22 @@ function apiProfile(profile: ProfileRow): ProfileRow {
   };
 }
 
+export interface TaskTimelineItem {
+  status: string;
+  at: string;
+  durationMs?: number;
+  runId?: string | null;
+  actor?: string | null;
+  estimated?: boolean;
+}
+
 function apiTask(task: TaskRow, blockingDisk?: BlockingDiskInfo | null): TaskRow {
   return {
     ...task,
     waitReason: task.waitReason ?? null,
     blockingDisk: blockingDisk !== undefined ? blockingDisk : (task.blockingDisk ?? null),
+    statusChangedAt: toApiTime(task.statusChangedAt ?? task.updatedAt)!,
+    statusChangedAtEstimated: Boolean(task.statusChangedAtEstimated),
     createdAt: toApiTime(task.createdAt)!,
     updatedAt: toApiTime(task.updatedAt)!,
   };
@@ -740,6 +752,23 @@ export function toRouteId(taskId: string): string {
   return taskId.replace('/', '~');
 }
 
+export function formatRunLogHeader(run: RunRow, index: number): string {
+  let timeStr = '';
+  if (run.startedAt) {
+    try {
+      const d = new Date(run.startedAt);
+      if (!isNaN(d.getTime())) {
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        timeStr = `${hh}:${mm}`;
+      }
+    } catch { /* fallback */ }
+  }
+  const kind = run.kind || 'worker';
+  const timePart = timeStr ? ` · ${timeStr}` : '';
+  return `── Run #${index + 1} · ${kind} · ${run.engine}/${run.profileName}${timePart} ──`;
+}
+
 export function readLogTail(filePath: string, tailKB = 512): string {
   if (!fs.existsSync(filePath)) return '';
   try {
@@ -750,6 +779,35 @@ export function readLogTail(filePath: string, tailKB = 512): string {
       const bytesToRead = Math.min(stat.size, maxBytes);
       const buffer = Buffer.alloc(bytesToRead);
       fs.readSync(fd, buffer, 0, bytesToRead, stat.size - bytesToRead);
+      return buffer.toString('utf-8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return '';
+  }
+}
+
+export function readRunLogTailSafe(filePath: string, maxBytes: number): string {
+  if (!fs.existsSync(filePath) || maxBytes <= 0) return '';
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const stat = fs.fstatSync(fd);
+      if (stat.size === 0) return '';
+      const bytesToRead = Math.min(stat.size, maxBytes);
+      const buffer = Buffer.alloc(bytesToRead);
+      fs.readSync(fd, buffer, 0, bytesToRead, stat.size - bytesToRead);
+      if (bytesToRead < stat.size) {
+        // Discard up to the first newline to start at a clean line boundary and avoid split UTF-8
+        const nl = buffer.indexOf(0x0a);
+        if (nl !== -1 && nl + 1 < buffer.length) {
+          return buffer.subarray(nl + 1).toString('utf-8');
+        }
+        let start = 0;
+        while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start++;
+        return buffer.subarray(start).toString('utf-8');
+      }
       return buffer.toString('utf-8');
     } finally {
       fs.closeSync(fd);
@@ -906,6 +964,11 @@ export function formatEventSummary(
     case 'run.crashed':
       return `${taskLabel} bị dừng đột ngột`;
 
+    case 'run.adopted': {
+      const note = typeof p.note === 'string' && p.note ? p.note : 'Hub khởi động lại, tiếp tục theo dõi worker';
+      return `${taskLabel}: ${note}`;
+    }
+
     case 'run.stalled':
       return `${taskLabel} bị kẹt khi chờ tác vụ nền`;
 
@@ -1024,6 +1087,7 @@ export interface TokenImportResult {
 
 export class AppService {
   private restartHandler?: () => void;
+  private userShutdownRequested = false;
   private trackerRepo?: TrackerItemRepo;
   private triageDecisionHandler?: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>;
   private triageInputHandler?: (sourceId: string, wpId: number, content: string) => Promise<{ taskId: string }>;
@@ -1046,6 +1110,7 @@ export class AppService {
   private autoMergeCheckRetries = new Set<string>();
   private autoMergeCheckRetryPromises = new Map<string, Promise<boolean>>();
   private autoMergeSkipped = new Set<string>();
+  private pendingAutoPublishTasks = new Map<string, Set<string>>();
   public avatarService: AvatarService;
   constructor(
     public config: AgentHubConfig,
@@ -1251,6 +1316,9 @@ export class AppService {
 
   shutdownForUser(reason = 'user_stop'): { queued: number; reviewers: number; childPids: number[] } {
     this.stopClaudeAuthRecovery();
+    if (reason === 'user_stop') {
+      this.userShutdownRequested = true;
+    }
     const result = this.scheduler.shutdownForUser(reason);
     const chatPids = this.chatService?.getRunningPids?.() || [];
     this.chatService?.stop();
@@ -1262,6 +1330,14 @@ export class AppService {
       ...result,
       childPids: [...(result.childPids || []), ...chatPids],
     };
+  }
+
+  isUserShutdownRequested(): boolean {
+    return this.userShutdownRequested;
+  }
+
+  setUserShutdownRequested(value = true): void {
+    this.userShutdownRequested = value;
   }
 
   getRestartState() { return this.scheduler.getRestartState(); }
@@ -1664,6 +1740,7 @@ export class AppService {
         cpu: r.cpu ?? 0,
         paused: Boolean(r.paused),
         pauseReason: r.pauseReason ?? null,
+        adopted: Boolean(r.adopted),
       };
     });
 
@@ -2433,6 +2510,8 @@ export class AppService {
           const saved = JSON.parse(note.content.slice('project_archive_status:'.length)) as { status?: string; waitReason?: string | null };
           if (saved.status) {
             this.taskRepo.update(note.taskId, { status: saved.status, waitReason: saved.waitReason as TaskRow['waitReason'] });
+            const resumePayload = { reason: 'project_restored', status: saved.status };
+            this.scheduler.getEventBus().emit(`task.${saved.status}`, note.taskId, resumePayload);
           }
         } catch {
           // Ignore malformed historical notes.
@@ -4270,6 +4349,7 @@ export class AppService {
         pauseReason: activeRun.pauseReason ?? null,
         rss: activeRun.rss ?? 0,
         cpu: activeRun.cpu ?? 0,
+        adopted: Boolean(activeRun.adopted),
       } : null,
       runs: runs.map(apiRun),
       reviews: reviewsWithModels.map(apiReview),
@@ -4303,8 +4383,211 @@ export class AppService {
       sourceRef: task.sourceRef ? JSON.parse(task.sourceRef) : null,
       triage,
       derivedTasks: this.taskRepo.getDerivedFrom(taskId).map((t) => apiTask(t, this.getBlockingDiskForTask(t))),
+      timeline: this.getTaskTimeline(taskId),
       claudeCost: (() => { const measured = this.claudeSessionRepo?.taskCost(taskId); return measured ? { measured: measured.effectiveTokens > 0, ...measured } : { measured: false, effectiveTokens: 0, sessions: 0 }; })(),
     };
+  }
+
+  getTaskTimeline(idParam: string): TaskTimelineItem[] {
+    const taskId = toTaskId(idParam);
+    const task = this.taskRepo.get(taskId);
+    if (!task) {
+      throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    }
+
+    const events = this.eventRepo ? this.eventRepo.getByTask(taskId) : [];
+    const runs = this.runRepo ? this.runRepo.getByTask(taskId) : [];
+    const reviews = this.reviewRepo ? this.reviewRepo.getByTask(taskId) : [];
+
+    const candidates: Array<{
+      status: string;
+      at: string;
+      runId?: string | null;
+      actor?: string | null;
+      estimated?: boolean;
+    }> = [];
+
+    // Parse events
+    for (const event of events) {
+      const at = toApiTime(event.ts);
+      if (!at) continue;
+
+      let payload: Record<string, unknown> | null = null;
+      if (event.payload) {
+        if (typeof event.payload === 'string') {
+          try { payload = JSON.parse(event.payload); } catch { payload = null; }
+        } else if (typeof event.payload === 'object') {
+          payload = event.payload as Record<string, unknown>;
+        }
+      }
+
+      switch (event.type) {
+        case 'task.draft':
+          candidates.push({ status: 'draft', at });
+          break;
+        case 'task.queued':
+          candidates.push({
+            status: 'queued',
+            at,
+            actor: typeof payload?.by === 'string' ? payload.by : null,
+          });
+          break;
+        case 'task.running':
+          candidates.push({
+            status: 'running',
+            at,
+            runId: typeof payload?.runId === 'string' ? payload.runId : null,
+            actor: typeof payload?.profile === 'string'
+              ? payload.profile
+              : (typeof payload?.profileName === 'string' ? payload.profileName : null),
+          });
+          break;
+        case 'task.checking':
+          candidates.push({ status: 'checking', at });
+          break;
+        case 'task.review_ready':
+        case 'review.gate_started':
+          candidates.push({ status: 'review', at });
+          break;
+        case 'task.done':
+          candidates.push({
+            status: 'done',
+            at,
+            actor: typeof payload?.by === 'string' ? payload.by : null,
+          });
+          break;
+        case 'task.merged':
+          candidates.push({ status: 'merged', at });
+          break;
+        case 'task.publishing':
+          candidates.push({ status: 'publishing', at });
+          break;
+        case 'task.auditing':
+          candidates.push({ status: 'auditing', at });
+          break;
+        case 'task.pushed':
+          candidates.push({ status: 'pushed', at });
+          break;
+        case 'task.failed':
+          candidates.push({ status: 'failed', at });
+          break;
+        case 'task.blocked':
+          candidates.push({ status: 'blocked', at });
+          break;
+        case 'task.cancelled':
+          candidates.push({
+            status: 'cancelled',
+            at,
+            actor: typeof payload?.by === 'string' ? payload.by : null,
+          });
+          break;
+        case 'task.waiting_quota':
+          candidates.push({ status: 'waiting_quota', at });
+          break;
+        case 'task.paused':
+          candidates.push({ status: 'paused', at });
+          break;
+        case 'task.resumed':
+          candidates.push({ status: 'running', at });
+          break;
+      }
+    }
+
+    // Include reviews with verdict 'changes_requested'
+    for (const review of reviews) {
+      if (review.verdict === 'changes_requested') {
+        const at = toApiTime(review.createdAt);
+        if (at) {
+          candidates.push({
+            status: 'changes_requested',
+            at,
+            actor: review.actor || null,
+          });
+        }
+      }
+    }
+
+    // Include runs if no corresponding task.running event
+    for (const run of runs) {
+      const at = toApiTime(run.startedAt);
+      if (at) {
+        const hasRunningEvent = candidates.some((c) => c.status === 'running' && c.runId === run.id);
+        if (!hasRunningEvent) {
+          candidates.push({
+            status: 'running',
+            at,
+            runId: run.id,
+            actor: run.profileName || null,
+          });
+        }
+      }
+    }
+
+    // If task has pushedAt and not in candidates
+    if (task.pushedAt) {
+      const at = toApiTime(task.pushedAt);
+      if (at && !candidates.some((c) => c.status === 'pushed')) {
+        candidates.push({ status: 'pushed', at });
+      }
+    }
+
+    // Sort chronologically
+    candidates.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+
+    // Deduplicate consecutive identical statuses while preserving all rounds
+    const deduplicated: typeof candidates = [];
+    for (const item of candidates) {
+      const last = deduplicated.at(-1);
+      if (!last || last.status !== item.status) {
+        deduplicated.push(item);
+      } else {
+        if (!last.runId && item.runId) last.runId = item.runId;
+        if (!last.actor && item.actor) last.actor = item.actor;
+      }
+    }
+
+    // Ensure current status is represented
+    if (deduplicated.length === 0) {
+      const at = toApiTime(task.statusChangedAt ?? task.updatedAt ?? task.createdAt)!;
+      deduplicated.push({
+        status: task.status,
+        at,
+        estimated: Boolean(task.statusChangedAtEstimated),
+      });
+    } else if (deduplicated.at(-1)!.status !== task.status) {
+      const at = toApiTime(task.statusChangedAt ?? task.updatedAt)!;
+      deduplicated.push({
+        status: task.status,
+        at,
+        estimated: Boolean(task.statusChangedAtEstimated),
+      });
+    }
+
+    // Compute durations
+    const timeline: TaskTimelineItem[] = [];
+    for (let i = 0; i < deduplicated.length; i++) {
+      const curr = deduplicated[i];
+      const next = deduplicated[i + 1];
+      let durationMs: number | undefined = undefined;
+      if (next) {
+        const tCurr = Date.parse(curr.at);
+        const tNext = Date.parse(next.at);
+        if (Number.isFinite(tCurr) && Number.isFinite(tNext)) {
+          durationMs = Math.max(0, tNext - tCurr);
+        }
+      }
+
+      timeline.push({
+        status: curr.status,
+        at: curr.at,
+        ...(durationMs !== undefined ? { durationMs } : {}),
+        ...(curr.runId ? { runId: curr.runId } : {}),
+        ...(curr.actor ? { actor: curr.actor } : {}),
+        ...(curr.estimated ? { estimated: true } : {}),
+      });
+    }
+
+    return timeline;
   }
 
   private async prepareOpenProjectTicket(parsed: z.infer<typeof CreateTaskSchema>, project: ProjectRow): Promise<{
@@ -4498,6 +4781,8 @@ export class AppService {
     if (initialStatus === 'queued') {
       this.scheduler.getEventBus().emit('task.queued', taskId);
       this.scheduler.triggerTick();
+    } else if (initialStatus === 'draft') {
+      this.scheduler.getEventBus().emit('task.draft', taskId);
     }
 
     const task = this.taskRepo.get(taskId)!;
@@ -4872,13 +5157,11 @@ export class AppService {
 
     for (const task of draftTasks) {
       this.taskRepo.updateStatus(task.id, 'queued');
-      this.eventRepo.insert('task.queued', task.id, { fromBatch: id });
-      this.scheduler.getEventBus().emit('task.queued', task.id);
+      this.scheduler.getEventBus().emit('task.queued', task.id, { fromBatch: id });
     }
 
     this.taskBatchRepo.updateStatus(id, 'dispatched');
     const payload = { batchId: id, projectId: batch.projectId, dispatchedCount: draftTasks.length };
-    this.eventRepo.insert('batch.dispatched', undefined, payload);
     this.scheduler.getEventBus().emit('batch.dispatched', undefined, payload);
     this.scheduler.triggerTick();
 
@@ -4900,11 +5183,12 @@ export class AppService {
     for (const task of tasks) {
       if (task.status === 'draft') {
         this.taskRepo.update(task.id, { status: 'cancelled', cancelReason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, cancelledBy: 'batch:discard' });
+        const cancelPayload = { reason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, by: 'batch:discard' };
+        this.scheduler.getEventBus().emit('task.cancelled', task.id, cancelPayload);
       }
     }
     this.taskBatchRepo.updateStatus(id, 'discarded');
     const payload = { batchId: id, projectId: batch.projectId };
-    this.eventRepo.insert('batch.discarded', undefined, payload);
     this.scheduler.getEventBus().emit('batch.discarded', undefined, payload);
 
     return { ok: true, batchId: id };
@@ -5235,9 +5519,7 @@ export class AppService {
       this.scheduler.getEventBus().emit('task.merged', taskId, mergeResult);
       const proj = this.projectRepo.get(task.projectId);
       if (proj && projectSettings(proj).publish?.enabled) {
-        void this.publishTask(taskId).catch((err) => {
-          console.error(`[publish] Auto-publish failed for task ${taskId}:`, err);
-        });
+        this.enqueueAutoPublish(task.projectId, taskId);
       }
     }
     return this.taskRepo.get(taskId)!;
@@ -5652,7 +5934,94 @@ export class AppService {
     return { ok: true };
   }
 
-  async publishTask(idParam: string, options?: { manual?: boolean }): Promise<PublishResult> {
+  startPublishTask(idParam: string, options?: { manual?: boolean; skipAudit?: boolean }): { started: true } {
+    const taskId = toTaskId(idParam);
+    const initialTask = this.taskRepo.get(taskId);
+    if (!initialTask) {
+      throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    }
+
+    if (initialTask.status !== 'done' && initialTask.status !== 'pushed') {
+      throw new HttpError(
+        400,
+        'bad_request',
+        `Task đang ở trạng thái "${initialTask.status}", chỉ có thể publish task "done" hoặc "pushed"`,
+      );
+    }
+
+    const project = this.projectRepo.get(initialTask.projectId);
+    if (!project) {
+      throw new HttpError(404, 'not_found', `Project "${initialTask.projectId}" không tồn tại`);
+    }
+
+    if (isProjectPublishing(project.id)) {
+      throw new HttpError(409, 'conflict', `Dự án đang trong quá trình publish`);
+    }
+
+    const isManual = Boolean(options?.manual);
+    const isSkipAudit = isManual && Boolean(options?.skipAudit);
+    const projSettings = projectSettings(project);
+    const isAuditConfigEnabled = projSettings.publish?.audit?.enabled !== false;
+    const willAudit = !isSkipAudit && isAuditConfigEnabled;
+
+    this.taskRepo.update(taskId, {
+      pushResult: JSON.stringify({
+        state: willAudit ? 'auditing' : 'pushing',
+        startedAt: new Date().toISOString(),
+        auditSkipped: isSkipAudit,
+      }),
+    });
+
+    if (willAudit) {
+      this.scheduler.getEventBus().emit('task.auditing', taskId, {
+        taskId,
+        projectId: project.id,
+      });
+      this.scheduler.getEventBus().emit('task.audit_started', taskId, {
+        taskId,
+        projectId: project.id,
+      });
+    }
+
+    void this.publishTask(taskId, options).catch((err: unknown) => {
+      console.error(`[publish] Background publish failed for task ${taskId}:`, err);
+      try {
+        const currentTask = this.taskRepo.get(taskId);
+        if (currentTask && currentTask.status !== 'pushed') {
+          let isAuditingState = false;
+          try {
+            const pr = currentTask.pushResult ? JSON.parse(currentTask.pushResult) : null;
+            isAuditingState = pr?.state === 'auditing' || pr?.state === 'pushing';
+          } catch {
+            isAuditingState = true;
+          }
+          if (isAuditingState) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            const failedAt = new Date().toISOString();
+            this.taskRepo.update(taskId, {
+              pushResult: JSON.stringify({
+                state: 'push_failed',
+                error: errorMsg,
+                failedAt,
+                retryable: true,
+              }),
+            });
+            this.scheduler.getEventBus().emit('task.push_failed', taskId, {
+              taskId,
+              projectId: project.id,
+              error: errorMsg,
+            });
+          }
+        }
+      } catch {
+        // Ignore DB errors if database was closed during shutdown / test teardown
+      }
+    });
+
+    return { started: true };
+  }
+
+  async publishTask(idParam: string, options?: { manual?: boolean; skipAudit?: boolean }): Promise<PublishResult> {
     const taskId = toTaskId(idParam);
     return executePublishTask(
       taskId,
@@ -5661,12 +6030,82 @@ export class AppService {
         projectRepo: this.projectRepo,
         eventBus: this.scheduler.getEventBus(),
         hubHome: this.config.hubHome,
+        engines: this.scheduler.getEngines(),
+        profileRepo: this.profileRepo,
+        quotaService: this.scheduler.getQuotaService(),
+        reviewRepo: this.reviewRepo,
+        runRepo: this.runRepo,
+        config: this.config,
       },
       options,
     );
   }
 
-  getTaskLog(idParam: string, query?: { run?: string; tail?: string | number }): string {
+  enqueueAutoPublish(projectId: string, taskId: string): void {
+    const run = async (tId: string) => {
+      try {
+        await this.publishTask(tId);
+        // Process any other queued tasks for this project that remain unpushed
+        const pending = this.pendingAutoPublishTasks.get(projectId);
+        if (pending && pending.size > 0) {
+          for (const remainingId of Array.from(pending)) {
+            const t = this.taskRepo.get(remainingId);
+            if (!t || t.status === 'pushed') {
+              pending.delete(remainingId);
+            }
+          }
+          if (pending.size > 0) {
+            const next = Array.from(pending).pop()!;
+            pending.delete(next);
+            this.enqueueAutoPublish(projectId, next);
+          }
+        }
+      } catch (err: unknown) {
+        if (err instanceof HttpError && err.statusCode === 409) {
+          let set = this.pendingAutoPublishTasks.get(projectId);
+          if (!set) {
+            set = new Set<string>();
+            this.pendingAutoPublishTasks.set(projectId, set);
+          }
+          set.add(tId);
+
+          const drain = () => {
+            const currentSet = this.pendingAutoPublishTasks.get(projectId);
+            if (!currentSet || currentSet.size === 0) return;
+            let nextId: string | null = null;
+            for (const id of Array.from(currentSet)) {
+              const t = this.taskRepo.get(id);
+              if (!t || t.status === 'pushed') {
+                currentSet.delete(id);
+              } else {
+                nextId = id;
+              }
+            }
+            if (nextId) {
+              currentSet.delete(nextId);
+              this.enqueueAutoPublish(projectId, nextId);
+            }
+          };
+
+          const unsubscribe = onProjectPublishLockReleased(projectId, () => {
+            drain();
+          });
+
+          // Check if lock was already released before listener was registered
+          if (!isProjectPublishing(projectId)) {
+            unsubscribe();
+            drain();
+          }
+          return;
+        }
+        console.error(`[publish] Auto-publish failed for task ${tId}:`, err);
+      }
+    };
+
+    void run(taskId);
+  }
+
+  getTaskLog(idParam: string, query?: { run?: string; tail?: string | number; scope?: string }): string {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) {
@@ -5675,13 +6114,73 @@ export class AppService {
 
     const runs = this.runRepo.getByTask(taskId);
     const runId = query?.run;
-    const targetRun = runId ? runs.find((r) => r.id === runId) : runs[runs.length - 1];
+    const tailKB = query?.tail ? parseInt(String(query.tail), 10) : 512;
+    const maxBytes = Math.min(Math.max(1, isNaN(tailKB) ? 512 : tailKB), 512) * 1024;
 
+    if (runId) {
+      const targetRun = runs.find((r) => r.id === runId);
+      if (!targetRun?.logPath || !fs.existsSync(targetRun.logPath)) {
+        return '';
+      }
+      return readLogTail(targetRun.logPath, isNaN(tailKB) ? 512 : tailKB);
+    }
+
+    if (query?.scope === 'all') {
+      if (runs.length === 0) return '';
+      // We process runs from latest to oldest so recent logs are prioritized
+      // without loading entire giant log files into memory.
+      const sections: string[] = [];
+      let totalBytes = 0;
+
+      for (let i = runs.length - 1; i >= 0; i--) {
+        const r = runs[i];
+        const header = formatRunLogHeader(r, i);
+        const headerBytes = Buffer.byteLength(header, 'utf8') + 1; // +1 for newline
+
+        // If even the header cannot fit in the remaining budget, stop
+        if (totalBytes + headerBytes > maxBytes) {
+          break;
+        }
+
+        const remainingLogBudget = maxBytes - totalBytes - headerBytes - (sections.length > 0 ? 2 : 0);
+        let logContent = '';
+        if (r.logPath && fs.existsSync(r.logPath) && remainingLogBudget > 0) {
+          logContent = readRunLogTailSafe(r.logPath, remainingLogBudget);
+          // If logContent in bytes exceeds remainingLogBudget, trim from the beginning by lines
+          if (Buffer.byteLength(logContent, 'utf8') > remainingLogBudget) {
+            const lines = logContent.split('\n');
+            const kept: string[] = [];
+            let keptBytes = 0;
+            for (let l = lines.length - 1; l >= 0; l--) {
+              const lineBytes = Buffer.byteLength(lines[l], 'utf8') + 1;
+              if (keptBytes + lineBytes > remainingLogBudget) break;
+              kept.unshift(lines[l]);
+              keptBytes += lineBytes;
+            }
+            logContent = kept.join('\n');
+          }
+        }
+
+        let section = header;
+        if (logContent.trim()) {
+          section = `${header}\n${logContent.trimEnd()}`;
+        }
+        const sectionBytes = Buffer.byteLength(section, 'utf8') + (sections.length > 0 ? 2 : 0);
+        sections.unshift(section);
+        totalBytes += sectionBytes;
+
+        if (totalBytes >= maxBytes) {
+          break;
+        }
+      }
+
+      return sections.length > 0 ? sections.join('\n\n') + '\n' : '';
+    }
+
+    const targetRun = runs[runs.length - 1];
     if (!targetRun?.logPath || !fs.existsSync(targetRun.logPath)) {
       return '';
     }
-
-    const tailKB = query?.tail ? parseInt(String(query.tail), 10) : 512;
     return readLogTail(targetRun.logPath, isNaN(tailKB) ? 512 : tailKB);
   }
 

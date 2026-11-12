@@ -211,6 +211,14 @@ export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 
     if (payload.level === 'decision') return isEn ? `📌 Decision needed: ${text}` : `📌 Cần quyết định: ${text}`;
     return `ℹ️ ${appName}: ${text}`;
   }
+  if (event.type === 'decision.answered') {
+    const answer = payload.answer as string | undefined;
+    const label = isEn
+      ? (answer === 'agree' ? 'Agreed' : answer === 'reject' ? 'Rejected' : 'Other option')
+      : (answer === 'agree' ? 'Đồng ý' : answer === 'reject' ? 'Không' : 'Phương án khác');
+    const customText = typeof payload.customAnswer === 'string' && payload.customAnswer ? ` — ${payload.customAnswer}` : '';
+    return isEn ? `Decision answered: ${label}${customText}` : `Đã phản hồi quyết định: ${label}${customText}`;
+  }
   if (event.type === 'batch.created') {
     const count = typeof payload.taskCount === 'number' ? payload.taskCount : 0;
     const who = typeof payload.createdBy === 'string' && payload.createdBy ? payload.createdBy : 'Claude';

@@ -72,6 +72,14 @@ Nếu kế hoạch chưa đạt bất kỳ tiêu chí nào ở trên, PHẢI ch�
     : '';
   const recentReviews = previousReviews.slice(-3);
   const olderReviews = previousReviews.slice(0, -3).map((review) => `- ${review.actor || 'không rõ'}, ${review.verdict}, ${review.createdAt}`);
+  const standardCriteria = isPlanTask
+    ? ''
+    : `\n\nTIÊU CHÍ BẮT BUỘC KHI REVIEW (vi phạm bất kỳ tiêu chí nào thì BẮT BUỘC chọn changes_requested):
+1. Đúng yêu cầu: code làm đúng ý đề bài, không hiểu sai, không làm thiếu.
+2. Không lệch phạm vi: mọi file hoặc hunk trong git diff phải phục vụ đề bài. Refactor, đổi tên, format lại, đổi hành vi hay xoá code không liên quan thì liệt kê ra và yêu cầu revert.
+3. Không gây lỗi tiềm ẩn: với hàm, type, API, schema DB, config, event bị đổi, phải grep nơi gọi hoặc nơi dùng trong repo và xác nhận không làm hỏng tính năng khác (đổi chữ ký, đổi giá trị mặc định, đổi thứ tự, bỏ nhánh xử lý…).
+
+Feedback phải có mục riêng cho từng tiêu chí trong ba tiêu chí trên (ghi rõ đạt hoặc liệt kê lỗi kèm file:dòng).\n`;
   const reviewHistory = previousReviews.length === 0
     ? 'Chưa có lượt review trước.'
     : [...(olderReviews.length ? [`Các lượt cũ đã rút gọn (actor/verdict/date):\n${olderReviews.join('\n')}`] : []), ...recentReviews.map((review, index) => [
@@ -115,7 +123,7 @@ ${reviewHistory}
 Nếu feedback chỉ nói về lỗi do môi trường chỉ đọc của reviewer, không yêu cầu worker sửa; báo rõ đây là lỗi môi trường để hệ thống chuyển cho người.
 
 Đề bài task:
-${truncateUtf8(taskBody, 24 * 1024, `\n[đề bài đã rút gọn; đọc toàn bộ tại ${worktreePath}/.agenthub/task.md]`)}${planInstructions}
+${truncateUtf8(taskBody, 24 * 1024, `\n[đề bài đã rút gọn; đọc toàn bộ tại ${worktreePath}/.agenthub/task.md]`)}${planInstructions}${standardCriteria}
 
 CHECKLIST KHI DUYỆT (BẮT BUỘC ĐỐI CHIẾU):
 ${checklistText}

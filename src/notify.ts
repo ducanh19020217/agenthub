@@ -285,6 +285,7 @@ export class NotificationService {
         type === 'merge.failed' ||
         type === 'task.pushed' ||
         type === 'task.push_failed' ||
+        type === 'task.audit_failed' ||
         type.startsWith('remote_deploy.') ||
         type.startsWith('tracker.') ||
         type === 'quota.exhausted' ||
@@ -332,6 +333,14 @@ export class NotificationService {
         } else {
           this.notify(`ℹ️ ${this.appName}: ${text}`, 'normal');
         }
+        break;
+      }
+
+      case 'decision.answered': {
+        const answer = p.answer as string | undefined;
+        const label = answer === 'agree' ? 'Đồng ý' : answer === 'reject' ? 'Không' : 'Phương án khác';
+        const customText = typeof p.customAnswer === 'string' && p.customAnswer ? ` — ${p.customAnswer}` : '';
+        this.notify(`Đã phản hồi quyết định: ${label}${customText}`, 'normal');
         break;
       }
 
@@ -768,14 +777,28 @@ export class NotificationService {
       case 'task.pushed': {
         const branchStr = typeof p.branch === 'string' ? ` vào ${p.branch}` : '';
         const title = this.resolveTaskTitle(taskId, p);
-        this.notify(`🚀 Đã đẩy lên git${branchStr}: ${title}`, 'normal');
+        if (p.localUpdate === 'skipped_dirty') {
+          const target = typeof p.branch === 'string' ? p.branch : 'target';
+          this.notify(`Đã đẩy lên remote; nhánh local ${target} chưa cập nhật vì thư mục đang có thay đổi chưa commit`, 'warning');
+        } else {
+          this.notify(`🚀 Đã đẩy lên git${branchStr}: ${title}`, 'normal');
+        }
         break;
       }
 
       case 'task.push_failed': {
+        if (p.suppressNotification) break;
         const err = typeof p.error === 'string' ? `: ${p.error}` : '';
         const title = this.resolveTaskTitle(taskId, p);
         this.notify(`❌ Đẩy git thất bại: ${title}${err}`, 'critical');
+        break;
+      }
+
+      case 'task.audit_failed': {
+        const title = this.resolveTaskTitle(taskId, p);
+        const count = Array.isArray(p.findings) ? ` (${p.findings.length} vấn đề)` : '';
+        const reason = p.exceededMaxRounds ? ' - Vượt quá số vòng sửa cho phép, chờ người xử lý' : '';
+        this.notify(`⚠️ Audit trước khi publish thất bại: ${title}${count}${reason}`, 'critical');
         break;
       }
     }

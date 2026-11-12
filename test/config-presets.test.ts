@@ -328,10 +328,10 @@ describe('Config Presets, Priority, and Effective Config', () => {
       expect(autoPreset.config.publish.enabled).toBe(true);
 
       const safePreset = presets.find((p: { id: string }) => p.id === 'safe');
-      expect(safePreset.config.publish.enabled).toBe(false);
+      expect(safePreset.config.publish.enabled).toBe(true);
 
       const balancedPreset = presets.find((p: { id: string }) => p.id === 'balanced');
-      expect(balancedPreset.config.publish.enabled).toBe(false);
+      expect(balancedPreset.config.publish.enabled).toBe(true);
     });
 
     it('dryRun=true tính toán diff nhưng không ghi xuống dữ liệu', async () => {
@@ -443,6 +443,56 @@ describe('Config Presets, Priority, and Effective Config', () => {
         headers: authHeaders(),
       });
       expect(JSON.parse(effRes.body).preset).toBe('custom');
+    });
+
+    it('giữ nguyên cấu hình publish.audit tùy biến khi apply preset', async () => {
+      const repoDir = path.join(tmpDir, 'test-repo-preserve-audit');
+      initGitRepo(repoDir);
+
+      await server.inject({
+        method: 'POST',
+        url: '/api/projects',
+        headers: authHeaders(),
+        payload: {
+          id: 'proj-audit-custom',
+          name: 'Audit Custom',
+          path: repoDir,
+          settings: {
+            publish: {
+              enabled: true,
+              audit: {
+                enabled: false,
+                maxFixRounds: 5,
+              },
+            },
+          },
+        },
+      });
+
+      // Apply preset 'auto'
+      const applyRes = await server.inject({
+        method: 'POST',
+        url: '/api/presets/apply',
+        headers: authHeaders(),
+        payload: {
+          scope: 'project:proj-audit-custom',
+          preset: 'auto',
+          dryRun: false,
+        },
+      });
+      expect(applyRes.statusCode).toBe(200);
+
+      const checkRes = await server.inject({
+        method: 'GET',
+        url: '/api/projects/proj-audit-custom',
+        headers: authHeaders(),
+      });
+      const proj = JSON.parse(checkRes.body);
+      expect(proj.settings.publish.audit).toEqual({
+        enabled: false,
+        maxFixRounds: 5,
+        maxTasks: 10,
+      });
     });
 
     it('apply preset cho scope department và scope global', async () => {

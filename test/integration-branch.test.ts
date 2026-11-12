@@ -424,6 +424,66 @@ describe('Integration branch and cross-project dependencies', () => {
     expect(ctx.taskRepo.get(task3.id)!.status).toBe('review');
   });
 
+  it('does not abort merge in progress in user-declared worktree and leaves task in review with merge.failed', async () => {
+    const repo = path.join(tmpDir, 'user-worktree-merge-repo');
+    initGitRepo(repo, 'main');
+    const userWorktree = path.join(tmpDir, 'user-worktree-main');
+    execFileSync('git', ['-C', repo, 'worktree', 'add', '-b', 'user-main-branch', userWorktree, 'main']);
+
+    ctx.service.createProject({
+      id: 'user-wt-proj',
+      name: 'User WT Proj',
+      path: repo,
+      defaultBranch: 'main',
+      settings: { integration: { enabled: false, autoMerge: true }, review: { autoMerge: true } },
+      reviewChain: [{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }],
+      merge: { enabled: true, worktrees: { main: userWorktree }, checks: [], timeoutSec: 30 },
+    });
+
+    ctx.service.createTask({ project: 'user-wt-proj', slug: 'feat-user', title: 'Feature User', body: 'Do it', level: 'easy', start: true });
+    ctx.scheduler.tick();
+    const task = ctx.taskRepo.get('user-wt-proj/feat-user')!;
+    fs.writeFileSync(path.join(task.worktreePath!, 'feature.txt'), 'feature content\n');
+    execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
+    execFileSync('git', ['-C', task.worktreePath!, 'commit', '-m', 'feat: feature']);
+    ctx.taskRepo.update(task.id, { status: 'review', reviewStep: 1 });
+    persistPassedCheck(task.id, 'review-1');
+    ctx.reviewRepo.insert({ id: 'codex-ok-user', taskId: task.id, verdict: 'approved', feedback: 'ok', actor: 'codex-reviewer' });
+
+    // Simulate user having an in-progress merge with conflict or MERGE_HEAD in userWorktree
+    fs.writeFileSync(path.join(userWorktree, 'conflict.txt'), 'user content\n');
+    execFileSync('git', ['-C', userWorktree, 'add', '.']);
+    execFileSync('git', ['-C', userWorktree, 'commit', '-m', 'user worktree commit']);
+    // Create another branch with conflicting file
+    execFileSync('git', ['-C', repo, 'branch', 'other-conflict']);
+    const otherWorktree = path.join(tmpDir, 'other-wt');
+    execFileSync('git', ['-C', repo, 'worktree', 'add', otherWorktree, 'other-conflict']);
+    fs.writeFileSync(path.join(otherWorktree, 'conflict.txt'), 'other content\n');
+    execFileSync('git', ['-C', otherWorktree, 'add', '.']);
+    execFileSync('git', ['-C', otherWorktree, 'commit', '-m', 'other commit']);
+    try {
+      execFileSync('git', ['-C', userWorktree, 'merge', '--no-ff', 'other-conflict'], { stdio: 'pipe' });
+    } catch {
+      // conflict -> leaves MERGE_HEAD
+    }
+    const hasMergeHead = execFileSync('git', ['-C', userWorktree, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'], { encoding: 'utf8' }).trim();
+    expect(hasMergeHead).toBeTruthy();
+
+    const emittedConflicts: string[] = [];
+    ctx.scheduler.getEventBus().on('merge.conflict', (id) => emittedConflicts.push(id));
+
+    // Attempt auto-merge via review chain
+    await ctx.service.autoMergeReviewedTask(task.id);
+
+    // Verify 409 conflict: task was re-queued with conflict and emitted merge.conflict
+    expect(ctx.taskRepo.get(task.id)!.status).toBe('queued');
+    expect(emittedConflicts).toContain(task.id);
+
+    // CRITICAL: user's MERGE_HEAD was NOT aborted!
+    const mergeHeadStillPresent = execFileSync('git', ['-C', userWorktree, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'], { encoding: 'utf8' }).trim();
+    expect(mergeHeadStillPresent).toBe(hasMergeHead);
+  });
+
   it('does not auto-reassign after 3 merge conflicts and emits autoRetried: false', async () => {
     const repo = path.join(tmpDir, 'conflict-limit-repo');
     initGitRepo(repo, 'main');

@@ -65,13 +65,37 @@ export const RemoteDeploySettingsSchema = z.object({
 });
 export type RemoteDeploySettings = z.infer<typeof RemoteDeploySettingsSchema>;
 
+export const PublishAuditSettingsSchema = z.object({
+  enabled: z.boolean().default(true),
+  maxFixRounds: z.number().int().min(1).max(10).default(2),
+  maxTasks: z.number().int().min(1).default(10),
+});
+export type PublishAuditSettings = z.infer<typeof PublishAuditSettingsSchema>;
+
+export const PublishAuditSettingsInputSchema = z.object({
+  enabled: z.boolean().optional(),
+  maxFixRounds: z.number().int().min(1).max(10).optional(),
+  maxTasks: z.number().int().min(1).optional(),
+});
+
 export const PublishSettingsSchema = z.object({
-  enabled: z.boolean().default(false),
+  enabled: z.boolean().default(true),
+  enabledAt: z.string().optional(),
   remote: z.string().trim().min(1).default('origin'),
   branch: z.string().trim().min(1, 'Tên nhánh không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
   pushIntegrationBranch: z.boolean().default(true),
+  audit: PublishAuditSettingsSchema.default({}),
 });
 export type PublishSettings = z.infer<typeof PublishSettingsSchema>;
+
+export const PublishSettingsInputSchema = z.object({
+  enabled: z.boolean().optional(),
+  enabledAt: z.string().optional(),
+  remote: z.string().trim().min(1).optional(),
+  branch: z.string().trim().min(1, 'Tên nhánh không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
+  pushIntegrationBranch: z.boolean().optional(),
+  audit: PublishAuditSettingsInputSchema.optional(),
+});
 
 export const ProjectSettingsSchema = z.object({
   remoteDeploy: RemoteDeploySettingsSchema.default({}),
@@ -167,7 +191,7 @@ export const ProjectSettingsInputSchema = z.object({
   integration: ProjectSettingsSchema.shape.integration.removeDefault().partial().optional(),
   review: ProjectSettingsSchema.shape.review.removeDefault().partial().optional(),
   ci: ProjectSettingsSchema.shape.ci.removeDefault().partial().optional(),
-  publish: ProjectSettingsSchema.shape.publish.removeDefault().partial().optional(),
+  publish: PublishSettingsInputSchema.optional(),
   references: z.array(ReferenceSchema).max(20).optional(),
   reviewChecklist: z.array(z.string().min(1).max(500).refine(isSafeProjectRelativePath, 'phải là đường dẫn tương đối trong project, không được chứa ..')).max(5).optional(),
   notifications: ProjectSettingsSchema.shape.notifications.removeDefault().partial().optional(),
@@ -285,7 +309,20 @@ export function mergeProjectSettings(current: ProjectSettings, input: ProjectSet
       ...(nextReviewFallback ? { fallback: nextReviewFallback } : {}),
     },
     ci: { ...current.ci, ...input.ci },
-    publish: { ...(current.publish || DEFAULT_PROJECT_SETTINGS.publish), ...input.publish },
+    publish: (() => {
+      const currentPublish = current.publish || DEFAULT_PROJECT_SETTINGS.publish;
+      const isEnabling = input.publish?.enabled === true && currentPublish.enabled !== true;
+      const enabledAt = input.publish?.enabledAt || (isEnabling ? new Date().toISOString() : currentPublish.enabledAt);
+      return {
+        ...currentPublish,
+        ...input.publish,
+        ...(enabledAt ? { enabledAt } : {}),
+        audit: {
+          ...(currentPublish.audit || { enabled: true, maxFixRounds: 2 }),
+          ...input.publish?.audit,
+        },
+      };
+    })(),
     references: input.references ?? current.references,
     reviewChecklist: input.reviewChecklist ?? current.reviewChecklist,
     notifications: { ...current.notifications, ...input.notifications },

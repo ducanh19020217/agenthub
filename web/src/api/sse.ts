@@ -360,6 +360,7 @@ export function connectSSE(queryClient: QueryClient, options: SSEConnectionOptio
       'task.cancelled',
       'task.timeout',
       'run.crashed',
+      'run.adopted',
       'profile.created',
       'profile.updated',
       'profile.check',

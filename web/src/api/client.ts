@@ -20,6 +20,7 @@ import {
   Task,
   TaskDetail,
   TaskNote,
+  TaskTimelineItem,
   UpdateProjectInput,
   UpdateTaskInput,
   VersionResponse,
@@ -677,7 +678,7 @@ export interface TaskQuery {
   limit?: number;
   cursor?: string;
   offset?: number;
-  sort?: 'createdAt' | 'updatedAt' | 'title' | 'slug';
+  sort?: 'createdAt' | 'updatedAt' | 'title' | 'slug' | 'statusChangedAt';
   order?: 'asc' | 'desc';
 }
 
@@ -767,6 +768,10 @@ export async function createTaskFromError(data: CaptureTaskInput): Promise<Task>
 
 export async function getTask(id: string): Promise<TaskDetail> {
   return apiFetch<TaskDetail>(`/api/tasks/${encodeURIComponent(id)}`);
+}
+
+export async function getTaskTimeline(id: string): Promise<TaskTimelineItem[]> {
+  return apiFetch<TaskTimelineItem[]>(`/api/tasks/${encodeURIComponent(id)}/timeline`);
 }
 
 export async function updateTask(id: string, data: UpdateTaskInput): Promise<Task> {
@@ -907,10 +912,37 @@ export async function retryReviewer(id: string): Promise<Task> {
   });
 }
 
-export async function publishTask(id: string): Promise<{ ok: boolean; error?: string; remote?: string; branch?: string; commit?: string; compareUrl?: string; skipped?: boolean; reason?: string }> {
-  return apiFetch<{ ok: boolean; error?: string; remote?: string; branch?: string; commit?: string; compareUrl?: string; skipped?: boolean; reason?: string }>(`/api/tasks/${encodeURIComponent(id)}/publish`, {
-    method: 'POST',
-  });
+export async function publishTask(
+  id: string,
+  options?: { skipAudit?: boolean },
+): Promise<{
+  started?: boolean;
+  ok?: boolean;
+  error?: string;
+  remote?: string;
+  branch?: string;
+  commit?: string;
+  compareUrl?: string;
+  skipped?: boolean;
+  reason?: string;
+  auditPassed?: boolean;
+  auditSkipped?: boolean;
+  auditFailed?: boolean;
+  findings?: Array<{
+    severity: 'P1' | 'P2' | 'P3';
+    kind: string;
+    file: string;
+    line: number;
+    detail: string;
+  }>;
+}> {
+  return apiFetch(
+    `/api/tasks/${encodeURIComponent(id)}/publish`,
+    {
+      method: 'POST',
+      body: JSON.stringify(options || {}),
+    },
+  );
 }
 
 export async function deleteWorktree(id: string): Promise<{ ok: boolean }> {
@@ -921,11 +953,12 @@ export async function deleteWorktree(id: string): Promise<{ ok: boolean }> {
 
 export async function getTaskLog(
   id: string,
-  params?: { run?: string; tail?: number },
+  params?: { run?: string; tail?: number; scope?: string },
 ): Promise<string> {
   const query = new URLSearchParams();
   if (params?.run) query.set('run', params.run);
   if (params?.tail) query.set('tail', String(params.tail));
+  if (params?.scope) query.set('scope', params.scope);
   const qStr = query.toString();
   return apiFetch<string>(`/api/tasks/${encodeURIComponent(id)}/log${qStr ? `?${qStr}` : ''}`);
 }

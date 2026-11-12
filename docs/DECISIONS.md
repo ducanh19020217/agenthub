@@ -248,6 +248,129 @@
   - API scan chỉ trả về metadata, không trả token ra ngoài.
   - Sự kiện `profile.imported` và log hệ thống tuyệt đối không chứa token hay JWT secret.
   - MCP tool `hub_cockpit_scan` chỉ cung cấp metadata phục vụ tham khảo, không có công cụ import tự động qua MCP.
+## DEC-022: Worker sống qua restart service bằng KillMode=process
+
+- systemd unit dùng `KillMode=process` để khi daemon nhận SIGTERM, systemd chỉ quản lý tiến trình chính; worker detached không nằm trong nhóm bị kết thúc khi service restart. `TimeoutStopSec=20` giới hạn thời gian daemon thoát sạch.
+- launchd dùng `AbandonProcessGroup=true` với cùng mục tiêu trên macOS.
+- `agenthub service upgrade` ghi lại unit/plist hiện hành và thực hiện thao tác reload/activate của platform thông qua luồng cài service. `scripts/run-prod.sh` gọi lệnh này sau mỗi build production.
+- Giữ `KillMode=process` thay vì `mixed`: mục tiêu handoff yêu cầu worker không bị SIGTERM/SIGKILL theo vòng đời service manager; scheduler chịu trách nhiệm kill worker chỉ trong luồng người dùng chọn dừng hẳn.
+
+## DEC-023: Cơ chế Pre-publish Audit Gate và quản lý kiểm tra trước khi push
+
+- **Bối cảnh**: Tính năng audit trước khi publish (`t-prepublish-audit`) đảm bảo các thay đổi code được rà soát nghiêm ngặt bằng agent chỉ đọc trước khi đẩy (`git push`) lên remote, tránh đẩy code sai đề bài, ngoài phạm vi, gây lỗi tiềm ẩn (hồi quy), hoặc mất code khi giải xung đột merge (`merge_loss`).
+- **Quyết định thiết kế**:
+  1. **Bộ nhớ đệm (Cache) audit trong bộ nhớ**:
+     - Kết quả audit pass được lưu trong `auditPassCache` dạng `Map<string, PrePublishAuditResult>` theo key `${taskId}:${commitSha}`.
+     - Quyết định lưu trong bộ nhớ (in-memory) thay vì database để tối ưu hiệu năng và giữ trạng thái nhẹ nhàng cho daemon. Khi daemon restart, cache được làm sạch tự nhiên; các task chưa push sẽ được audit lại với commit SHA hiện tại nếu cần.
+  2. **Bộ đếm vòng sửa audit độc lập**:
+     - Thay vì dùng chung và tiêu hao trực tiếp bộ đếm `reviewerChangesRequested` của quy trình review thông thường (vốn có thể khiến task đã qua review bị dừng ngay ở lần audit fail đầu tiên), hệ thống quản lý bộ đếm vòng sửa audit riêng biệt dựa trên bản ghi review `actor: 'audit-prepublish'` trong `reviewRepo` và `pushResult.auditFixRounds`.
+     - Cấu hình `maxFixRounds` được giới hạn trong khoảng `1..10` (mặc định 2) thông qua Zod schema nhằm ngăn ngừa worker lặp vô hạn khi không sửa được phát hiện của audit.
+  3. **Xác định dải task chưa push và trích xuất diff**:
+     - Danh sách task cần audit được xác định dựa trên dải commit chuẩn bị được đẩy lên remote: `remote/target..source` (với `refs/remotes/<remote>/<targetBranch>` được fetch sớm trước khi audit gate chạy). Bất kỳ task nào có commit hoặc branch tip đã là tổ tiên (`--is-ancestor`) của `remote/target` sẽ được bỏ qua vì đã tồn tại trên remote.
+     - Trích xuất diff và commit SHA: ưu tiên tìm merge commit của task trên nhánh tích hợp hoặc nhánh đích (`<merge>^1 <merge>`) thông qua `--ancestry-path` hoặc commit message grep. Việc dùng merge commit diff đảm bảo kiểm tra được toàn bộ thay đổi bao gồm cả phần giải xung đột merge (`merge_loss`), đồng thời cung cấp commit SHA ổn định cho cache ngay cả khi nhánh task đã bị xoá. Nếu không có merge commit (ví dụ rebase/fast-forward), fallback về `merge-base..branch`.
+     - Giới hạn kích thước diff: diff nhúng vào prompt được cắt tối đa 40.000 ký tự kèm thông báo hướng dẫn agent tự chạy các lệnh đọc an toàn (`git show <commitSha>`, `git diff`) trong repo để tránh tràn context window hoặc timeout.
+  4. **Chính sách Fail-Closed và Retryable**:
+     - Khi reviewer engine gặp lỗi nội bộ, hết quota, timeout (mặc định 300s, tự động dọn timer và kill process group) hoặc trả về output JSON sai cú pháp, hệ thống dừng publish ngay lập tức (`fail-closed`), đánh dấu `retryable: true` trong `PublishFailedResult` và cập nhật vào `pushResult` của cả task đang audit lẫn task yêu cầu publish mà không tự ý trả task về worker sửa.
+
+## DEC-024: Mặc định bật Publish cho mọi project và cập nhật an toàn working tree local
+
+- **Bối cảnh**:
+  - Ban đầu (DEC-019), publish chỉ được bật mặc định cho preset `auto`, còn `safe`, `balanced` và `DEFAULT_PROJECT_SETTINGS.publish` đặt tắt (`enabled: false`).
+  - Khi thực tế triển khai, hầu hết project chưa có cấu hình `settings.publish` nên tính năng publish không hoạt động theo kỳ vọng của người dùng.
+  - Ngoài ra, việc cập nhật con trỏ nhánh local bằng `git update-ref refs/heads/<target>` khi thư mục làm việc chính (`project.path`) đang checkout đúng nhánh đích sẽ làm lệch giữa con trỏ nhánh và các file thực tế trong working tree, khiến `git status` báo người dùng sửa ngược toàn bộ thay đổi.
+- **Quyết định thiết kế**:
+  1. **Mặc định bật publish toàn diện**:
+     - `DEFAULT_PROJECT_SETTINGS.publish.enabled = true`, cấu hình mặc định kèm `audit: { enabled: true, maxFixRounds: 2 }`, remote `origin`, nhánh đích fallback theo `project.defaultBranch`.
+     - Cả 3 preset (`safe`, `balanced`, `auto`) đều đặt `publish.enabled: true`. Riêng `safe` vẫn duy trì yêu cầu duyệt và merge thủ công trước khi publish.
+     - Mọi project mới đăng ký (UI, MCP `hub_register_project`, CLI, setup import) đều được bật publish mặc định.
+  2. **Migration một lần cho các project hiện hữu**:
+     - Hàm `ensureProjectPublishMigration` chạy một lần khi khởi tạo database: duyệt qua toàn bộ project chưa có `settings.publish` để bật mặc định.
+     - Project nào đã đặt rõ ràng `publish.enabled = false` (như drone-strike-online) được giữ nguyên tuyệt đối không ghi đè, đồng thời lưu danh sách vào `meta` và phát thông báo qua event/log để người dùng chủ động kiểm tra.
+     - Các project không có remote `origin` vẫn bật cấu hình nhưng khi publish sẽ báo lỗi rõ ràng, retryable và không làm crash hệ thống.
+     - Việc đồng bộ `publish.enabled: true` ở cả 3 preset và default settings đảm bảo cơ chế `detectProjectPreset` và `effective-config` tính toán chính xác, không biến các project thành `custom`.
+  3. **An toàn khi cập nhật nhánh local đang checkout**:
+     - Kiểm tra nhánh đang checkout tại `project.path` qua `git symbolic-ref --short HEAD`.
+     - Nếu đang ở chính nhánh đích (`targetBranch`):
+       - Thư mục sạch (kiểm tra `git status --porcelain -uno`, bỏ qua file untracked): cập nhật bằng `git merge --ff-only <pushedCommit>` thay vì `update-ref`, giúp file trong working tree khớp hoàn toàn với con trỏ nhánh.
+       - Thư mục bẩn (có thay đổi tracked đã sửa hoặc staged), hoặc lệnh `merge --ff-only` thất bại: không đụng vào nhánh local, chỉ đẩy lên remote, đánh dấu `pushResult.localUpdate = 'skipped_dirty'` và gửi thông báo cảnh báo đến người dùng.
+     - Nếu nhánh đích không được checkout (ở nhánh khác hoặc detached HEAD): tiếp tục dùng `git update-ref` trực tiếp như trước.
+  4. **Giao diện & i18n**:
+     - Project Settings Drawer hiển thị toggle publish bật mặc định.
+     - TaskDetailPage hiển thị banner cảnh báo `publish-skipped-dirty-banner` khi `localUpdate === 'skipped_dirty'`.
+     - Thêm đầy đủ chuỗi bản dịch `publishSkippedDirty` cho cả tiếng Việt và tiếng Anh.
+
+## DEC-025: Audit tất cả task tồn đọng trên integration và giới hạn số task trong một lần publish
+
+- **Bối cảnh**:
+  - Khi một project kích hoạt publish sau khi đã có nhiều task hoàn thành (`done`) và được merge vào nhánh tích hợp (`agenthub/integration`), hoặc khi tính năng publish audit được bật lần đầu tiên, dải commit chưa đẩy lên remote (`remote/target..source`) sẽ bao gồm tất cả các task đã tích hợp nhưng chưa được push trước đó.
+  - Lần publish đầu tiên (hoặc sau một đợt tích hợp nhiều task) sẽ thực hiện audit toàn bộ các task tồn đọng trong dải commit này để đảm bảo chất lượng toàn diện của code được đưa lên remote. Nếu một task cũ trong dải audit bị phát hiện lỗi (finding P1 hoặc P2), nó có thể bị chuyển trạng thái và trả về worker tương ứng để sửa đổi.
+- **Quyết định thiết kế**:
+  1. **Audit tất cả task done chưa push trên integration**:
+     - Hàm `findTasksToAudit` rà soát toàn bộ các task hoàn thành có commit nằm trong dải chuẩn bị push. Khi một task cũ bị audit fail, nó được trả về worker để sửa nếu chưa vượt quá số vòng tối đa (`maxFixRounds`); task hiện tại đang kích hoạt publish được đánh dấu trạng thái "bị chặn bởi task X" (không gắn nhầm cờ `auditFailed: true`).
+     - Khi một lượt publish sau đó thành công, tất cả các task nằm trong dải được đẩy lên đều được chuyển sang trạng thái `pushed` và xoá bỏ trạng thái audit lỗi tạm thời.
+  2. **Giới hạn số task audit trong một lần (`maxTasks`)**:
+     - Để ngăn ngừa việc khoá tài nguyên (lock publish) quá lâu và tốn lượng lớn token / quota khi tích luỹ quá nhiều commit chưa push, hệ thống áp dụng giới hạn số task được audit trong một lần publish: `publish.audit.maxTasks`.
+     - Giá trị mặc định là 10 (cấu hình được trong settings của project hoặc preset, giá trị số nguyên tối thiểu là 1).
+     - Nếu số task cần audit vượt quá giới hạn (`tasksToAudit.length > maxTasks`), tiến trình publish sẽ huỷ bỏ ngay lập tức (`abort`), không thực hiện push, đánh dấu `pushResult` với lỗi vượt quá giới hạn (`exceededMaxTasks: true`) và phát sự kiện `task.push_failed` để thông báo cho người dùng qua Telegram và desktop notification.
+
+
+## DEC-026: Task baseline khi kích hoạt publish và chống lặp thông báo lỗi
+
+- **Bối cảnh**:
+  - Khi một project được bật tính năng publish (thông qua migration tự động bật mặc định, hoặc người dùng bật lại sau khi tắt), hoặc khi nhánh đích trên remote (`origin/<target>`) chưa có lịch sử/chưa tồn tại, có thể có nhiều hơn 10 task đã `done` và được merge vào nhánh tích hợp trước thời điểm bật publish.
+  - Theo DEC-025, nếu số task cần audit vượt quá `maxTasks` (mặc định 10), hệ thống huỷ publish với lỗi `exceededMaxTasks`. Do auto-publish chạy sau mỗi lần merge task mới, lỗi này lặp lại liên tục sau mỗi task hoàn thành, gửi thông báo spam (Telegram & desktop) và chặn vĩnh viễn việc publish tự động cho đến khi người dùng publish thủ công kèm `skipAudit: true`.
+  - Ngoài ra, trong trường hợp race condition khi đang audit task A, task B được merge vào integration, auto-publish của B nhận 409 từ publish lock. Nếu A merge tip hiện tại của integration thay vì SHA tại thời điểm audit, code của B bị đẩy lên remote mà không qua audit gate.
+- **Quyết định thiết kế**:
+  1. **Lưu mốc thời gian bật publish (`enabledAt`)**:
+     - `projects.settings.publish.enabledAt` ghi nhận thời điểm tính năng publish được bật (hoặc thời điểm chạy migration `migration:publish_default_on_at`, fallback về `project.createdAt`).
+     - Khi người dùng bật lại publish từ trạng thái tắt (`publish.enabled: false` sang `true`), `enabledAt` được cập nhật lại theo thời gian hiện tại (`new Date().toISOString()`).
+     - Đối với database đã chạy migration ở bản trước nhưng chưa có `enabledAt`, hệ thống dùng `project.createdAt` (hoặc mốc migration cũ nếu đã ghi) cho các project đã bật publish thay vì gán thời điểm deploy hiện tại, đảm bảo code merge sau khi bật publish không bị vô tình coi là baseline mà không qua audit gate.
+     - **Giới hạn chủ đích**: Dùng `project.createdAt` làm mốc cho project cũ đồng nghĩa với việc toàn bộ backlog chưa push tạo sau mốc này vẫn được tính vào `maxTasks`; đây là sự đánh đổi có chủ đích để bảo đảm an toàn tuyệt đối, không đẩy code chưa audit lên remote.
+     - Project có `settings` NULL hoặc thiếu cấu hình `publish` trong database đã migrate được bổ sung cấu hình publish mặc định kèm `enabledAt` để backlog cũ được phân loại baseline, không bị kẹt `maxTasks`.
+  2. **Phân tách task baseline và miễn trừ audit gate**:
+     - Trong `findTasksToAudit`: các task đã hoàn thành và được merge trước mốc `enabledAt` được phân loại là **task baseline**.
+     - Mốc thời gian hoàn thành của task được xác định ưu tiên theo các mốc ổn định: (1) commit date của merge commit, (2) commit date của nhánh task trên git, (3) thời điểm approved review hoặc hoàn thành run. Khi không xác định được mốc merge thật, hệ thống an toàn đưa task vào diện audit (fail-closed) thay vì dựa vào `createdAt` (có thể làm task tạo trước nhưng merge sau bị lọt thành baseline).
+     - Task gốc (root task) được chỉ định publish luôn được kiểm tra và audit, không bao giờ bị coi là baseline.
+     - Các task baseline được miễn trừ khỏi audit gate (`tasksToAudit` không chứa task baseline), do đó số lượng task baseline không tính vào ngưỡng `maxTasks`. Chỉ các task được merge sau `enabledAt` mới phải qua audit gate.
+     - Khi git push thành công, cả `tasksToAudit` và `baselineTasks` đều được cập nhật trạng thái `status: 'pushed'`. Riêng task baseline được gắn thêm cờ `baseline: true, auditSkipped: true` trong `pushResult` và payload sự kiện `task.pushed`.
+     - **Kiểm tra sớm task gốc trong snapshot**: Trong mọi chế độ publish (kể cả manual skip audit hoặc khi publish audit bị tắt trong cấu hình), hệ thống kiểm tra task gốc có thuộc `tasksToAudit` hoặc `baselineTasks` (tức là nằm trong `sourceSha` / snapshot nguồn) ngay sau khi tìm candidates, trước khi audit và trước khi `git push`. Nếu task gốc chưa được merge vào snapshot nguồn, `publishTask` trả về lỗi sớm (`push_failed`), phát sự kiện `task.push_failed` và huỷ bỏ quá trình publish mà không tạo worktree hay đẩy bất kỳ commit nào lên remote.
+  3. **Chống spam thông báo lỗi publish lặp lại (`suppressNotification`)**:
+     - Quản lý bộ nhớ đệm `lastProjectPublishError` theo `projectId`.
+     - Khoá chống lặp được chuẩn hoá thông qua `normalizePublishErrorKey` (loại bỏ các số đếm biến động, commit SHA, task ID), đảm bảo các lỗi cùng bản chất (như backlog vượt quá `maxTasks` với số lượng task tăng dần sau mỗi lần merge) được nhận diện chính xác là lỗi lặp.
+     - Cờ `suppressNotification: true` chỉ áp dụng cho publish tự động (`!options?.manual`). Khi người dùng publish thủ công, thông báo luôn được gửi để phản hồi thao tác.
+     - Các dịch vụ thông báo (`NotificationService` cho desktop và `TelegramBotService` cho Telegram) kiểm tra cờ này và bỏ qua việc gửi thông báo lặp lại, giữ cho luồng thông báo của người dùng không bị nhiễu.
+     - Khi một lượt publish thành công, bản ghi lỗi của project được xoá để sẵn sàng ghi nhận nếu có lỗi mới phát sinh sau này.
+  4. **Snapshot SHA nguồn trước audit và xếp hàng auto-publish khi gặp xung đột lock (P1)**:
+     - Trước khi audit, SHA của `sourceBranch` được snapshot (`sourceSha`). Publish chỉ audit và merge/push đúng commit `sourceSha` đó, ngăn việc vô tình đẩy code của task merge muộn chưa được audit.
+     - Khi auto-publish nhận 409 do publish khác đang chạy, task được xếp hàng chờ (`enqueueAutoPublish`) và tự động kích hoạt publish lại ngay khi lock được nhả (`onProjectPublishLockReleased`).
+     - Hàng đợi chờ 409 chỉ lưu trong bộ nhớ (in-memory); đây là thiết kế an toàn vì ngay cả khi khởi động lại, lần publish tiếp theo sẽ tự động gom và audit toàn bộ backlog chưa push trên nhánh tích hợp.
+     - Khi nhận 409, `enqueueAutoPublish` kiểm tra `isProjectPublishing` ngay sau khi đăng ký listener để kích hoạt xử lý ngay nếu lock đã được nhả trước thời điểm đăng ký callback.
+  5. **Bảo toàn trạng thái cuối khi publish nền gặp lỗi (P3)**:
+     - Bọc bắt lỗi trong `startPublishTask` để khi publish nền bị lỗi trước hoặc trong khi xử lý, trạng thái `auditing` luôn được chuyển về trạng thái cuối `push_failed` kèm sự kiện `task.push_failed`, không để lại trạng thái treo trong DB.
+
+## DEC-027: Rà soát phát sinh sự kiện chuyển trạng thái task và kiến trúc tái hiện dòng thời gian (timeline)
+
+- **Bối cảnh**:
+  - Đề bài yêu cầu hiển thị thời điểm task vào trạng thái hiện tại (`statusChangedAt`) và dòng thời gian workflow (`GET /api/tasks/:id/timeline`).
+  - Hệ thống cần xác định nguồn dữ liệu chính xác cho các mốc chuyển trạng thái, hạn chế tối đa việc phải đoán từ `updatedAt`.
+  - Cần rà soát toàn bộ các đường chuyển trạng thái trong Scheduler và AppService để đảm bảo không bị thiếu event, đồng thời làm rõ lý do tại sao dòng thời gian kết hợp dữ liệu từ `events`, `reviews` và `runs`.
+- **Quyết định thiết kế**:
+  1. **Rà soát và bổ sung sự kiện chuyển trạng thái**:
+     - Tất cả các trạng thái chính thức của task (`draft`, `queued`, `running`, `checking`, `review`, `done`, `blocked`, `failed`, `cancelled`, `waiting_quota`, `paused`, `pushed`) đều phát sự kiện tương ứng qua `eventBus` và lưu vào bảng `events`: `task.draft`, `task.queued`, `task.running`, `task.checking`, `task.review_ready`, `task.done`, `task.blocked`, `task.failed`, `task.cancelled`, `task.waiting_quota`, `task.paused`, `task.pushed`, cũng như `task.merged`, `task.publishing`, `task.auditing`.
+     - Bổ sung phát sự kiện cho các đường chuyển trạng thái trước đây chưa phát event:
+       - Khi huỷ đợt task nháp (`discardDraftBatch`): các task nháp bị chuyển sang `cancelled` nay phát sự kiện `task.cancelled` kèm ghi vào bảng `events`.
+       - Khi khôi phục project (`restoreProject`): các task được khôi phục về trạng thái trước đó nay phát sự kiện `task.<status>` tương ứng.
+  2. **Lý do suy luận `changes_requested` từ bảng `reviews`**:
+     - Trong mô hình vòng đời của AgentHub, `changes_requested` là một **phán quyết review** (verdict), không phải một trạng thái nghỉ độc lập trong schema `tasks.status` (schema DB ràng buộc `CHECK(status IN ('draft','queued','running','checking','review','done','blocked','failed','cancelled','waiting_quota','paused','pushed'))`).
+     - Khi reviewer yêu cầu sửa đổi (`changes_requested`), hệ thống lưu kết quả và nhận xét vào bảng `reviews` (`verdict: 'changes_requested'`), đồng thời lập tức đưa task trở lại hàng đợi `queued` với cờ `resume: 1` để worker tiếp tục xử lý vòng tiếp theo.
+     - Vì vậy, bảng `reviews` là nguồn chân lý bền vững (`source of truth`) lưu trữ thời điểm, người review và nội dung feedback của từng vòng. API `getTaskTimeline` đọc trực tiếp từ `reviews` để thể hiện rõ ràng bước `changes_requested` giữa các vòng chạy mà không làm biến dạng schema DB.
+  3. **Lý do kết hợp bảng `runs` cho bước `running`**:
+     - Bảng `runs` ghi nhận chi tiết mọi lượt chạy của worker (`startedAt`, `finishedAt`, `runId`, `profileName`, `model`).
+     - Khi daemon khởi động lại hoặc khi sự kiện cũ trong bảng `events` bị dọn dẹp / không đầy đủ trên các task lịch sử, bảng `runs` đảm bảo tái hiện đầy đủ và không bị gộp mất các vòng chạy (multi-round rework & retry).
+  4. **Cập nhật migration backfill (migration 75)**:
+     - Hàm `backfillTaskStatusChangedAt` hỗ trợ đầy đủ các nhánh trạng thái của task (`queued`, `running`, `checking`, `review`, `done`, `pushed`, `failed`, `blocked`, `cancelled`, `waiting_quota`, `paused`, `draft`, cũng như `merged`, `changes_requested`, `publishing`, `auditing`) để ưu tiên lấy timestamp chính xác từ event hoặc review tương ứng, chỉ fallback về `updatedAt` kèm cờ `statusChangedAtEstimated: 1` khi thực sự không có lịch sử.
+     - `TaskRepo.updateStatus` và `TaskRepo.update` chỉ cập nhật lại `statusChangedAt` khi trạng thái thực sự thay đổi, tránh làm mới sai mốc thời gian khi chỉ cập nhật các trường phụ (như `waitReason`).
+
 - **Giải mã kho Cockpit bản mới (2026-11-10, người dùng đồng ý)**:
   - Cockpit từ bản có `secure_account_storage` (tham chiếu v1.3.81, `src-tauri/src/modules/secure_account_storage.rs`) mã hoá file chi tiết từng tài khoản bằng AES-256-GCM; file chỉ mục (`accounts.json`, `codex_accounts.json`, `claude_accounts.json`) vẫn để dạng thường và có `email`, `name`, `plan_type`.
   - Khoá là 32 byte ngẫu nhiên, base64, trong `<dataDir>/secure-account-storage.key`, tạo một lần và không đổi; "rotation 30 ngày" của Cockpit chỉ mã hoá lại bằng nonce mới với cùng khoá. Envelope: `{ version, kind, algorithm, key_id, encrypted_at, nonce, ciphertext }`, nonce 12 byte, ciphertext có tag 16 byte nối ở cuối.
@@ -255,7 +378,7 @@
   - Thiếu khoá, sai khoá, hoặc thuật toán lạ: báo lý do theo từng tài khoản và gợi ý nhập file Export. Đường dự phòng `POST /api/integrations/cockpit/import-export` nhận file Export của Cockpit, tự nhận diện Antigravity/Codex/Claude theo từng mục.
   - Mã giải mã viết lại bằng `node:crypto`, không chép code Cockpit (giấy phép CC BY-NC-SA 4.0).
 
-## DEC-022: Sửa migration 73 để giữ bộ đếm task khi rebuild bảng
+## DEC-028: Sửa migration 73 để giữ bộ đếm task khi rebuild bảng
 
 - **Bối cảnh**: Migration 73 rebuild `tasks`, trong khi `runCount` và `consecutiveCrashes` được thêm ngoài danh sách migration sau vòng lặp. Bản rebuild cũ dùng `SELECT *`, gây lỗi trên DB đã có hai cột và có thể để lại bảng `tasks_new` rỗng.
 - **Quyết định**: Sửa migration 73 tại chỗ vì migration này chưa được khóa và chưa chạy thành công trên DB thật có các cột bộ đếm. Migration xóa `tasks_new` cũ bằng `DROP TABLE IF EXISTS`, sao chép theo danh sách cột tường minh, và mang theo cả hai bộ đếm. Trước khi chạy migration 73, đảm bảo hai cột bộ đếm đã tồn tại; DB mới cũng cần bước này vì các cột vẫn được quản lý ngoài danh sách migration.

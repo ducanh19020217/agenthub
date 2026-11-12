@@ -28,9 +28,9 @@ import {
   publishTask,
   getProject,
 } from '../api/client';
-import { TaskLevel, EventItem } from '../types/api';
+import { TaskLevel, EventItem, TaskTimelineItem, TaskStatus } from '../types/api';
 import { subscribeToRunOutput, subscribeToEvents } from '../api/sse';
-import { formatDateTime, formatIsoTitle, parseApiTime } from '../lib/time';
+import { formatDateTime, formatIsoTitle, parseApiTime, formatShortContextualTime, formatDuration } from '../lib/time';
 import { CheckResults } from '../components/CheckResults';
 import { StatusBadge } from '../components/StatusBadge';
 import { SilentRunIndicator } from '../components/SilentRunIndicator';
@@ -50,6 +50,7 @@ import {
   CheckCircle2,
   XCircle,
   AlertCircle,
+  AlertTriangle,
   Terminal,
   FileText,
   GitCommit,
@@ -126,6 +127,46 @@ export const TaskDetailPage: React.FC = () => {
     refetchInterval: 4000,
   });
 
+  const workflowTimelineItems: TaskTimelineItem[] = useMemo(() => {
+    if (task?.timeline && task.timeline.length > 0) return task.timeline;
+    if (task) {
+      return [
+        {
+          status: task.status,
+          at: task.statusChangedAt || task.updatedAt || task.createdAt,
+          estimated: task.statusChangedAtEstimated ?? true,
+        },
+      ];
+    }
+    return [];
+  }, [task]);
+
+  const emptyLogMessage = React.useMemo(() => {
+    if (task?.status === 'review') {
+      const activeReviewer = task.runs?.filter((r) => r.kind === 'reviewer').at(-1);
+      if (activeReviewer?.profileName) {
+        return t('taskDetail.reviewingWithProfile', { profile: activeReviewer.profileName });
+      }
+      return t('taskDetail.reviewing');
+    }
+    if (task?.status === 'checking') {
+      return t('taskDetail.checkingLog');
+    }
+    return t('taskDetail.noLog');
+  }, [task?.status, task?.runs, t]);
+
+  const showLastRunHint = React.useMemo(() => {
+    if (task?.status !== 'review' && task?.status !== 'checking') return false;
+    if (!liveLog) return false;
+    const lastHeaderIndex = liveLog.lastIndexOf('── Run #');
+    if (lastHeaderIndex === -1) {
+      return liveLog.trim() === '';
+    }
+    const newlineAfterHeader = liveLog.indexOf('\n', lastHeaderIndex);
+    const contentAfterHeader = newlineAfterHeader === -1 ? '' : liveLog.slice(newlineAfterHeader).trim();
+    return contentAfterHeader === '';
+  }, [task?.status, liveLog]);
+
   const [runParams, setRunParams] = useSearchParams();
   const [runsPage, setRunsPage] = useState(Math.max(1, Number(runParams.get('runsPage') || 1)));
   const [runsCursors, setRunsCursors] = useState<Record<number, string | undefined>>({});
@@ -185,10 +226,48 @@ export const TaskDetailPage: React.FC = () => {
       const rawId = id ? id.replace('~', '/') : '';
       if (event.taskId === id || (rawId && event.taskId === rawId)) {
         setLiveEvents((prev) => [event, ...prev.filter((e) => e.id !== event.id)]);
+        if (event.type === 'review.started' || event.type === 'task.running') {
+          setLiveLog((prev) => {
+            const p = (event.payload || {}) as Record<string, any>;
+            const runId = p.runId;
+            const matchingRun = task?.runs?.find((r) => r.id === runId);
+
+            // Determine run sequence number:
+            // 1. Explicit runNumber from SSE event payload
+            // 2. Index in task.runs if matchingRun exists
+            // 3. Highest run number already present in prev + 1
+            // 4. task.runs.length + 1
+            let runNum = typeof p.runNumber === 'number' && p.runNumber > 0 ? p.runNumber : 0;
+            if (!runNum && matchingRun && task?.runs) {
+              const idx = task.runs.findIndex((r) => r.id === runId);
+              if (idx !== -1) runNum = idx + 1;
+            }
+            if (!runNum) {
+              const lastMatch = [...prev.matchAll(/── Run #(\d+)/g)].pop();
+              const lastNum = lastMatch ? parseInt(lastMatch[1], 10) : 0;
+              runNum = Math.max(lastNum + 1, (task?.runs?.length || 0) + 1);
+            }
+
+            const d = new Date(event.ts || Date.now());
+            const hh = String(d.getHours()).padStart(2, '0');
+            const mm = String(d.getMinutes()).padStart(2, '0');
+            const timeStr = `${hh}:${mm}`;
+            const kind = event.type === 'review.started' ? 'reviewer' : 'worker';
+
+            // Consistent engine/profile formatting matching server formatRunLogHeader
+            const engine = matchingRun?.engine || p.engine || (p.model?.startsWith('claude') ? 'claude' : p.model?.startsWith('codex') ? 'codex' : 'worker');
+            const profile = matchingRun?.profileName || p.profile || p.profileName || '';
+            const agent = profile ? `${engine}/${profile}` : engine;
+
+            const header = `── Run #${runNum} · ${kind} · ${agent} · ${timeStr} ──`;
+            if (prev.includes(`── Run #${runNum} ·`)) return prev;
+            return prev ? `${prev.trimEnd()}\n\n${header}\n` : `${header}\n`;
+          });
+        }
       }
     });
     return unsub;
-  }, [id]);
+  }, [id, task?.runs?.length]);
 
   const timelineEvents = React.useMemo(() => {
     const initial = task?.events || [];
@@ -209,7 +288,7 @@ export const TaskDetailPage: React.FC = () => {
   useQuery({
     queryKey: ['taskLog', id],
     queryFn: async () => {
-      const text = await getTaskLog(id, { tail: 500 });
+      const text = await getTaskLog(id, { tail: 500, scope: 'all' });
       setLiveLog(text);
       return text;
     },
@@ -350,7 +429,12 @@ export const TaskDetailPage: React.FC = () => {
   });
 
   const publishMutation = useMutation({
-    mutationFn: () => publishTask(id),
+    mutationFn: (options?: { skipAudit?: boolean }) => {
+      if (options && typeof options.skipAudit === 'boolean') {
+        return publishTask(id, options);
+      }
+      return publishTask(id);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task', id] });
       queryClient.invalidateQueries({ queryKey: ['tasks'] });
@@ -360,6 +444,8 @@ export const TaskDetailPage: React.FC = () => {
       setFeedbackError(err?.message || t('taskDetail.publishError'));
     },
   });
+
+  const isPublishing = publishMutation.isPending || parsedPushResult?.state === 'auditing' || parsedPushResult?.state === 'pushing';
 
   const rerunChecksMutation = useMutation({
     mutationFn: () => rerunChecks(id),
@@ -622,6 +708,14 @@ export const TaskDetailPage: React.FC = () => {
                   {getReviewerEngine(task) === 'claude' ? 'Claude' : 'Codex'}
                 </span>
               )}
+              {(task.currentRun?.adopted || task.events?.some((e) => e.type === 'run.adopted')) && (
+                <span
+                  data-testid="task-adopted-badge"
+                  className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)] border border-[color-mix(in_srgb,var(--t-accent)_30%,transparent)]"
+                >
+                  {t('taskDetail.adoptedBadge')}
+                </span>
+              )}
               {task.status === 'running' && (task.paused || task.currentRun?.paused) && (
                 <span
                   data-testid="task-paused-badge"
@@ -830,16 +924,32 @@ export const TaskDetailPage: React.FC = () => {
 
           {/* Publish action button (if done and not pushed, or failed) */}
           {(task.status === 'done' || (task.status === 'pushed' && parsedPushResult?.error)) && (
-            <button
-              type="button"
-              data-testid="header-btn-publish"
-              onClick={() => publishMutation.mutate()}
-              disabled={publishMutation.isPending}
-              className="px-3.5 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
-            >
-              {parsedPushResult?.error ? <RotateCcw className="w-4 h-4" /> : <UploadCloud className="w-4 h-4" />}
-              <span>{publishMutation.isPending ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
-            </button>
+            <div className="inline-flex items-center gap-1.5">
+              <button
+                type="button"
+                data-testid="header-btn-publish"
+                onClick={() => publishMutation.mutate()}
+                disabled={isPublishing}
+                className="px-3.5 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                {parsedPushResult?.error ? <RotateCcw className="w-4 h-4" /> : <UploadCloud className="w-4 h-4" />}
+                <span>{isPublishing ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
+              </button>
+              <button
+                type="button"
+                data-testid="header-btn-publish-skip-audit"
+                onClick={() => {
+                  if (window.confirm(t('taskDetail.confirmPublishSkipAudit'))) {
+                    publishMutation.mutate({ skipAudit: true });
+                  }
+                }}
+                disabled={isPublishing}
+                className="px-2.5 py-1.5 rounded-lg border border-[var(--t-border)] text-[var(--t-text-3)] text-xs font-medium hover:bg-[var(--t-surface-2)] inline-flex items-center gap-1 cursor-pointer"
+                title={t('taskDetail.btnPublishSkipAudit')}
+              >
+                <span>{t('taskDetail.btnPublishSkipAudit')}</span>
+              </button>
+            </div>
           )}
 
           {/* Delete worktree (if done, pushed or cancelled and has worktreePath) */}
@@ -895,20 +1005,61 @@ export const TaskDetailPage: React.FC = () => {
                   {t('status.pushed')}
                 </span>
               )}
+              {parsedPushResult?.auditSkipped ? (
+                <span data-testid="publish-audit-status-skipped" className="text-xs px-2 py-0.5 rounded-full font-medium bg-[color-mix(in_srgb,var(--t-text-3)_15%,transparent)] text-[var(--t-text-3)]">
+                  {t('taskDetail.auditStatusSkipped')}
+                </span>
+              ) : parsedPushResult?.auditPassed ? (
+                <span data-testid="publish-audit-status-passed" className="text-xs px-2 py-0.5 rounded-full font-medium bg-[color-mix(in_srgb,var(--status-pushed-color)_15%,transparent)] text-[var(--status-pushed-color)]">
+                  {t('taskDetail.auditStatusPassed')}
+                </span>
+              ) : parsedPushResult?.auditFailed ? (
+                <span data-testid="publish-audit-status-failed" className="text-xs px-2 py-0.5 rounded-full font-medium bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)]">
+                  {t('taskDetail.auditStatusFailed')}
+                </span>
+              ) : (parsedPushResult?.state === 'auditing' || parsedPushResult?.auditing) ? (
+                <span data-testid="publish-audit-status-auditing" className="text-xs px-2 py-0.5 rounded-full font-medium bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)] animate-pulse">
+                  {t('taskDetail.auditStatusAuditing')}
+                </span>
+              ) : null}
             </div>
             {(parsedPushResult?.error || task.status === 'done') && (
-              <button
-                type="button"
-                data-testid="btn-publish-task"
-                onClick={() => publishMutation.mutate()}
-                disabled={publishMutation.isPending}
-                className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
-              >
-                {parsedPushResult?.error ? <RotateCcw className="w-3.5 h-3.5" /> : <UploadCloud className="w-3.5 h-3.5" />}
-                <span>{publishMutation.isPending ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  data-testid="btn-publish-task"
+                  onClick={() => publishMutation.mutate()}
+                  disabled={isPublishing}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
+                >
+                  {parsedPushResult?.error ? <RotateCcw className="w-3.5 h-3.5" /> : <UploadCloud className="w-3.5 h-3.5" />}
+                  <span>{isPublishing ? t('taskDetail.publishing') : parsedPushResult?.error ? t('taskDetail.btnRetryPublish') : t('taskDetail.btnPublish')}</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="btn-publish-skip-audit"
+                  onClick={() => {
+                    if (window.confirm(t('taskDetail.confirmPublishSkipAudit'))) {
+                      publishMutation.mutate({ skipAudit: true });
+                    }
+                  }}
+                  disabled={isPublishing}
+                  className="px-2.5 py-1.5 rounded-lg border border-[var(--t-border)] text-[var(--t-text-3)] text-xs font-medium hover:bg-[var(--t-surface-2)] inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <span>{t('taskDetail.btnPublishSkipAudit')}</span>
+                </button>
+              </div>
             )}
           </div>
+
+          {parsedPushResult?.localUpdate === 'skipped_dirty' && (
+            <div data-testid="publish-skipped-dirty-banner" className="rounded-lg p-3 bg-[color-mix(in_srgb,var(--t-warn)_12%,transparent)] border border-[var(--t-warn)] text-xs text-[var(--t-warn)] space-y-1">
+              <div className="font-semibold flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{t('taskDetail.publishSkippedDirty', { branch: parsedPushResult.branch || project?.defaultBranch || 'main' })}</span>
+              </div>
+            </div>
+          )}
 
           {parsedPushResult?.error ? (
             <div data-testid="publish-error-banner" className="rounded-lg p-3 bg-[color-mix(in_srgb,var(--t-crit)_12%,transparent)] border border-[var(--t-crit)] text-xs text-[var(--t-crit)] space-y-1">
@@ -958,6 +1109,31 @@ export const TaskDetailPage: React.FC = () => {
               </div>
             </div>
           )}
+
+          {parsedPushResult?.findings && parsedPushResult.findings.length > 0 && (
+            <div data-testid="publish-audit-findings" className="rounded-lg p-3 bg-[color-mix(in_srgb,var(--t-crit)_8%,transparent)] border border-[color-mix(in_srgb,var(--t-crit)_30%,transparent)] space-y-2 text-xs">
+              <div className="font-semibold text-[var(--t-crit)] flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{t('taskDetail.auditFindingsTitle', { count: parsedPushResult.findings.length })}</span>
+              </div>
+              <ul className="space-y-1.5 list-none pl-0">
+                {parsedPushResult.findings.map((f: any, i: number) => (
+                  <li key={i} className="flex items-start gap-2 text-[var(--t-text)]">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold shrink-0 ${
+                      f.severity === 'P1' ? 'bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)] border border-[color-mix(in_srgb,var(--t-crit)_30%,transparent)]' :
+                      f.severity === 'P2' ? 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)] border border-[color-mix(in_srgb,var(--t-warn)_30%,transparent)]' :
+                      'bg-[var(--t-surface-2)] text-[var(--t-text-2)] border border-[var(--t-border)]'
+                    }`}>
+                      {f.severity}
+                    </span>
+                    <span className="font-mono text-[var(--t-text-3)] shrink-0">{f.kind}</span>
+                    <span className="font-mono text-[var(--t-accent)] shrink-0">{f.file}:{f.line}</span>
+                    <span className="text-[var(--t-text-2)]">- {f.detail}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </section>
       )}
 
@@ -997,6 +1173,101 @@ export const TaskDetailPage: React.FC = () => {
 
       {(task.sourceRef || (task.derivedTasks && task.derivedTasks.length > 0)) && <section className="bg-[var(--t-surface)] rounded-xl border border-[var(--t-border)] p-5 text-sm space-y-2"><h2 className="font-semibold">{t('extra.linkedTasks')}</h2>{task.sourceRef && <p>{t('extra.generatedFrom')}: <button type="button" className="text-[var(--t-accent)] underline cursor-pointer" onClick={() => navigate(`/tasks/${encodeURIComponent(task.sourceRef!.taskId.replace('/', '~'))}`)}>{task.sourceRef.taskId}</button></p>}{task.derivedTasks?.map((derived) => <p key={derived.id}>{t('extra.generatedTask')}: <button type="button" className="text-[var(--t-accent)] underline cursor-pointer" onClick={() => navigate(`/tasks/${encodeURIComponent(derived.id.replace('/', '~'))}`)}>{derived.id}</button></p>)}</section>}
 
+      {/* Workflow Timeline */}
+      <section
+        data-testid="workflow-timeline"
+        className="bg-[var(--t-surface)] p-6 rounded-xl border border-[var(--t-border)] space-y-4 shadow-xs"
+      >
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-[var(--t-text-3)] flex items-center gap-2">
+            <Clock className="w-4 h-4 text-[var(--t-accent)]" />
+            <span>{t('taskDetail.workflowTimeline')}</span>
+          </h2>
+          <span className="text-xs text-[var(--t-text-3)]">
+            {t('taskDetail.workflowTimelineDesc')}
+          </span>
+        </div>
+
+        <ol className="relative border-l-2 border-[var(--t-border)] ml-3 space-y-4 pl-5 text-xs">
+          {workflowTimelineItems.map((item, idx) => {
+            const isCurrent = idx === workflowTimelineItems.length - 1;
+            const statusKey = item.status as TaskStatus;
+            const parsedAt = parseApiTime(item.at);
+            const currentDurationMs = isCurrent && Number.isFinite(parsedAt)
+              ? Math.max(0, Date.now() - parsedAt)
+              : item.durationMs;
+
+            return (
+              <li
+                key={`${item.status}-${item.at}-${idx}`}
+                data-testid={`workflow-step-${idx}`}
+                data-status={item.status}
+                className="relative space-y-1.5"
+              >
+                <div
+                  className={`absolute -left-[27px] top-1 h-3.5 w-3.5 rounded-full border-2 bg-[var(--t-surface)] ${
+                    isCurrent
+                      ? 'border-[var(--t-accent)] ring-4 ring-[color-mix(in_srgb,var(--t-accent)_20%,transparent)]'
+                      : 'border-[var(--t-text-3)]'
+                  }`}
+                />
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <StatusBadge status={statusKey} size="sm" />
+
+                  {item.at && (
+                    <span
+                      className="font-mono text-[11px] text-[var(--t-text-2)]"
+                      title={formatIsoTitle(item.at)}
+                    >
+                      {formatDateTime(item.at, locale)}
+                    </span>
+                  )}
+
+                  {currentDurationMs !== undefined && currentDurationMs > 0 && (
+                    <span
+                      className="rounded bg-[var(--t-surface-2)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--t-text-2)] border border-[var(--t-border)]"
+                      data-testid={`workflow-duration-${idx}`}
+                    >
+                      {formatDuration(currentDurationMs, locale)}
+                    </span>
+                  )}
+
+                  {item.estimated && (
+                    <span className="italic text-[11px] text-[var(--t-text-3)]">
+                      ({t('taskDetail.stepEstimated')})
+                    </span>
+                  )}
+
+                  {item.actor && (
+                    <span className="font-mono text-[11px] text-[var(--t-text-3)]">
+                      · {item.actor}
+                    </span>
+                  )}
+
+                  {item.runId && (
+                    <span className="font-mono text-[11px] text-[var(--t-text-3)]">
+                      (run {item.runId})
+                    </span>
+                  )}
+                </div>
+
+                {isCurrent && (
+                  <p
+                    data-testid="workflow-current-step"
+                    className="text-xs font-medium text-[var(--t-accent)]"
+                  >
+                    {t('taskDetail.currentStepSince', {
+                      time: formatShortContextualTime(item.at, locale),
+                    })}
+                  </p>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      </section>
+
       {/* Timeline */}
       <div data-testid="task-timeline" className="bg-[var(--t-surface)] p-6 rounded-xl border border-[var(--t-border)] space-y-3 shadow-xs">
         <h3 className="text-sm font-semibold uppercase tracking-wider text-[var(--t-text-3)] flex items-center gap-2">
@@ -1030,6 +1301,11 @@ export const TaskDetailPage: React.FC = () => {
                     </span>
                   )}
                 </div>
+                {evt.type === 'run.adopted' && (
+                  <p className="text-xs text-[var(--t-accent)] font-medium">
+                    {String(evt.payload?.note || t('taskDetail.runAdoptedNote'))}
+                  </p>
+                )}
                 {evt.type === 'review.fallback' && (
                   <p className="text-xs text-[var(--t-warn)] font-medium">
                     {t('taskDetail.reviewFallbackLine', { profile: evt.payload?.profile || 'claude' })}
@@ -1128,15 +1404,20 @@ export const TaskDetailPage: React.FC = () => {
             onScroll={handleScroll}
             className="w-full h-[520px] bg-[var(--t-log-bg)] text-[var(--t-log-text)] font-mono text-xs p-4 rounded-xl overflow-y-auto border border-[var(--t-border)] shadow-inner whitespace-pre-wrap leading-relaxed select-text"
           >
-            {liveLog ? (
-              logVirtualized ? (
-                <div style={{ height: `${logLines.length * 18}px`, position: 'relative' }}>
-                  <div style={{ position: 'absolute', top: `${logStart * 18}px`, left: 0, right: 0 }}>
-                    {logLines.slice(logStart, logEnd).map((line, index) => <div key={logStart + index} className="h-[18px]">{line || '\u00a0'}</div>)}
+            {liveLog.trim() ? (
+              <>
+                {logVirtualized ? (
+                  <div style={{ height: `${logLines.length * 18}px`, position: 'relative' }}>
+                    <div style={{ position: 'absolute', top: `${logStart * 18}px`, left: 0, right: 0 }}>
+                      {logLines.slice(logStart, logEnd).map((line, index) => <div key={logStart + index} className="h-[18px]">{line || '\u00a0'}</div>)}
+                    </div>
                   </div>
-                </div>
-              ) : liveLog
-            ) : <span className="text-[var(--t-log-muted)]">{t('taskDetail.noLog')}</span>}
+                ) : liveLog}
+                {showLastRunHint && (
+                  <div className="text-[var(--t-log-muted)] mt-1">{emptyLogMessage}</div>
+                )}
+              </>
+            ) : <span className="text-[var(--t-log-muted)]">{emptyLogMessage}</span>}
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <button type="button" disabled={!logSelection} title={t('extra.captureFromSelectionTip')} onClick={() => { if (logSelection) openCapture(logSelection, 'log'); }} className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] text-[var(--t-on-accent)] text-xs font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">{t('extra.captureFromSelection')}</button>

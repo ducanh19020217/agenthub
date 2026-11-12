@@ -82,7 +82,7 @@ function systemctlCommand(...args: string[]): string {
 }
 
 function installService(opts: { nodePath: string; cliPath: string; currentPath: string; homeDir: string; print: boolean; exec?: (command: string, options: { stdio: 'inherit' }) => void }): ServiceInstallResult {
-  const content = `[Unit]\nDescription=AgentHub Daemon\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=${opts.nodePath} ${opts.cliPath} daemon\nRestart=on-failure\nKillMode=process\nEnvironment=PATH=${opts.currentPath}\n\n[Install]\nWantedBy=default.target\n`;
+  const content = `[Unit]\nDescription=AgentHub Daemon\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=${opts.nodePath} ${opts.cliPath} daemon\nRestart=on-failure\nKillMode=process\nTimeoutStopSec=20\nEnvironment=PATH=${opts.currentPath}\n\n[Install]\nWantedBy=default.target\n`;
   const file = path.join(opts.homeDir, '.config', 'systemd', 'user', 'agenthub.service');
   const activate = `${systemctlCommand('--user', 'daemon-reload')} && ${systemctlCommand('--user', 'enable', '--now', 'agenthub')}`;
   if (!opts.print) {

@@ -397,27 +397,32 @@ export function registerBrainRoutes(
   fastify.post('/api/brain/decisions/:id/answer', async (req: FastifyRequest) => {
     const tracker = appService?.telegramBotService?.getDecisionTracker();
     const { id } = req.params as { id: string };
-    const body = req.body as { answer?: 'agree' | 'reject' } | undefined;
+    const body = req.body as { answer?: 'agree' | 'reject' | 'other'; customAnswer?: string } | undefined;
     const answer = body?.answer;
-    if (!answer || (answer !== 'agree' && answer !== 'reject')) {
-      throw new HttpError(400, 'bad_request', 'answer must be agree or reject');
+    if (!answer || (answer !== 'agree' && answer !== 'reject' && answer !== 'other')) {
+      throw new HttpError(400, 'bad_request', 'answer must be agree, reject, or other');
+    }
+    const customAnswer = body?.customAnswer?.trim();
+    if (answer === 'other' && !customAnswer) {
+      throw new HttpError(400, 'bad_request', 'customAnswer is required when answer is other');
     }
     const d = tracker?.getDecision(id);
     if (!d || d.answered) {
       throw new HttpError(404, 'not_found', 'Quyết định đã hết hạn hoặc đã trả lời');
     }
-    const updated = tracker?.answerDecision(id, answer);
+    const updated = tracker?.answerDecision(id, answer, Date.now(), customAnswer);
     if (!updated) {
       throw new HttpError(404, 'not_found', 'Quyết định đã hết hạn hoặc đã trả lời');
     }
     if (appService?.chatService) {
-      forwardDecisionToBrain(appService.chatService, id, updated.text, answer, updated.taskId);
+      forwardDecisionToBrain(appService.chatService, id, updated.text, answer, updated.taskId, customAnswer);
     }
     appService?.scheduler.getEventBus().emit('decision.answered', undefined, {
       decisionId: id,
       action: answer,
       answer,
       text: updated.text,
+      ...(customAnswer ? { customAnswer } : {}),
     });
     return { ok: true, decision: updated };
   });

@@ -66,7 +66,7 @@ import type { ClaudeSessionRow } from '../claude-sessions/repo.js';
 import { isClaudeProcessOpen, isClaudeQuotaLimited, ClaudeSessionScanner } from '../claude-sessions/scanner.js';
 import type { PageResult } from '../pagination.js';
 import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
-import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
+import { listAllWorktreeProcesses, reapForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
@@ -1642,14 +1642,14 @@ export class AppService {
       .filter((process) => !process.active);
   }
 
-  reapOrphans() {
+  async reapOrphans() {
     const orphans = this.getOrphans();
     const projects = this.projectRepo.getAll();
     const protectedPaths = [this.config.hubHome, ...projects.map((project) => project.path)];
     const roots = [this.config.worktreesDir, ...projects.flatMap((project) => projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir))];
     const reaped: number[] = [];
     for (const orphan of orphans) {
-      reaped.push(...reapSyncForWorktree(orphan.cwd.replace(/ \(deleted\)$/, ''), {
+      reaped.push(...await reapForWorktree(orphan.cwd.replace(/ \(deleted\)$/, ''), {
         worktreesDir: roots,
         protectedPaths,
       }));

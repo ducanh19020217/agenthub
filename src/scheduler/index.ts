@@ -40,11 +40,11 @@ import { parseCodexTokens, parseShortstat, recalculateTaskLines, measureTaskLine
 
 const execFileAsync = promisify(execFile);
 import { ClaudeFailoverState } from '../chat/failover.js';
-import { ensureIntegrationNodeModules, ensureIntegrationWorktree } from '../projects/integration.js';
+import { ensureIntegrationNodeModules, ensureIntegrationWorktreeAsync } from '../projects/integration.js';
 import { buildReviewerPrompt, parseReviewerOutput, ReviewerVerdict, isAutoReviewer, type ReviewerActor } from '../reviewer.js';
 import { CLAUDE_REVIEW_ENGINE_KEY } from '../engines/claude-review.js';
 import { isAutomatedStep, parseReviewChain, reviewerModel, type ReviewChainStep } from '../review-chain.js';
-import { isOrphanProcess, listAllWorktreeProcesses, reap, reapSyncForWorktree } from '../reaper.js';
+import { isOrphanProcess, listAllWorktreeProcesses, reap, reapForWorktree } from '../reaper.js';
 import { LoadGuard, LoadSnapshot } from '../load.js';
 import { measureProcessTree } from '../process-tree.js';
 import { ReferenceSnapshot, takeReferenceSnapshots, detectReferenceModifications, ReferenceModification } from '../references.js';
@@ -1598,7 +1598,7 @@ export class Scheduler {
       this.lastOrphanScan = Date.now();
       await this.scanOrphanWorktrees();
       if (this.stopGeneration !== tickGeneration) return;
-      this.reapOrphans();
+      await this.reapOrphans();
     }
     } finally {
       this.inTick = false;
@@ -1606,7 +1606,7 @@ export class Scheduler {
   }
 
   /** Reap worker descendants left behind after a worktree is deleted or a task stops. */
-  reapOrphans(): void {
+  async reapOrphans(): Promise<void> {
     const oldProcessCutoff = Date.now() - 30 * 60 * 1000;
     const roots = [this.config.worktreesDir, ...this.projectRepo.getAll().flatMap((project) => projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir))];
     const processes = listAllWorktreeProcesses({ worktreesDir: roots, protectedPaths: [this.config.hubHome] });
@@ -1622,7 +1622,7 @@ export class Scheduler {
     for (const info of processes) {
       const dir = info.cwd.replace(/ \(deleted\)$/, '');
       if (info.cwd.endsWith(' (deleted)')) {
-        reapSyncForWorktree(dir, { worktreesDir: roots, protectedPaths: [this.config.hubHome] });
+        await reapForWorktree(dir, { worktreesDir: roots, protectedPaths: [this.config.hubHome] });
         continue;
       }
 
@@ -1630,7 +1630,7 @@ export class Scheduler {
       const active = [...activeWorktrees].some((worktree) => processCwd === worktree || processCwd.startsWith(worktree + path.sep));
       if (active) continue;
       if (info.startedAt > oldProcessCutoff && !isOrphanProcess(info)) continue;
-      reapSyncForWorktree(dir, { worktreesDir: roots, protectedPaths: [this.config.hubHome] });
+      await reapForWorktree(dir, { worktreesDir: roots, protectedPaths: [this.config.hubHome] });
     }
   }
 
@@ -1905,7 +1905,7 @@ export class Scheduler {
     const stalledTask = this.taskRepo.get(taskId);
     if (stalledTask?.worktreePath) {
       const project = this.projectRepo.get(stalledTask.projectId);
-      reapSyncForWorktree(stalledTask.worktreePath, { worktreesDir: project ? projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir, protectedPaths: [this.config.hubHome] });
+      void reapForWorktree(stalledTask.worktreePath, { worktreesDir: project ? projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir, protectedPaths: [this.config.hubHome] });
     }
     this.running.delete(taskId);
     if (rt.lockFile) this.locks.release(rt.profileName, rt.lockFile);
@@ -3619,7 +3619,7 @@ export class Scheduler {
       const branch = task.branch || renderTaskBranch(project, task);
       if (settings.integration?.enabled) {
         try {
-          ensureIntegrationWorktree(project, this.config.hubHome);
+          await ensureIntegrationWorktreeAsync(project, this.config.hubHome);
           if (settings.worktree.install === 'auto') {
             void ensureIntegrationNodeModules(project, this.config.hubHome, {
               cacheDir: this.config.cacheDir,
@@ -4087,7 +4087,7 @@ export class Scheduler {
     const task = this.taskRepo.get(taskId);
     if (task?.worktreePath) {
       const project = this.projectRepo.get(task.projectId);
-      reapSyncForWorktree(task.worktreePath, { worktreesDir: project ? projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir, protectedPaths: [this.config.hubHome] });
+      void reapForWorktree(task.worktreePath, { worktreesDir: project ? projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir, protectedPaths: [this.config.hubHome] });
     }
 
     this.running.delete(taskId);

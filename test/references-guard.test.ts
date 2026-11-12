@@ -6,6 +6,9 @@ import { execFileSync } from 'node:child_process';
 import {
   takeReferenceSnapshot,
   detectReferenceModifications,
+  takeReferenceSnapshotAsync,
+  takeReferenceSnapshotsAsync,
+  detectReferenceModificationsAsync,
 } from '../src/references.js';
 import { loadConfig } from '../src/config.js';
 import {
@@ -169,6 +172,81 @@ describe('Reference snapshotting and modification detection unit tests', () => {
       const mods = detectReferenceModifications([snapshot]);
       expect(mods.length).toBe(1);
       expect(mods[0].name).toBe('absent');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Async reference snapshotting and modification detection', () => {
+  it('takes async snapshots and detects modifications across git, dir, and file references', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-async-ref-'));
+    try {
+      // 1. File ref
+      const fileRef = path.join(root, 'config.json');
+      fs.writeFileSync(fileRef, '{"version": 1}');
+
+      // 2. Dir ref
+      const dirRef = path.join(root, 'docs');
+      fs.mkdirSync(dirRef);
+      fs.writeFileSync(path.join(dirRef, 'guide.md'), '# Guide');
+
+      // 3. Git ref
+      const gitRef = path.join(root, 'repo');
+      fs.mkdirSync(gitRef);
+      execFileSync('git', ['init', '--template='], { cwd: gitRef });
+      execFileSync('git', ['checkout', '-b', 'main'], { cwd: gitRef });
+      fs.writeFileSync(path.join(gitRef, 'readme.txt'), 'hello');
+      execFileSync('git', ['add', '.'], { cwd: gitRef });
+      execFileSync('git', ['commit', '-m', 'init'], {
+        cwd: gitRef,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: 'test',
+          GIT_AUTHOR_EMAIL: 'test@example.com',
+          GIT_COMMITTER_NAME: 'test',
+          GIT_COMMITTER_EMAIL: 'test@example.com',
+        },
+      });
+
+      // 4. Missing ref
+      const missingRef = path.join(root, 'missing.txt');
+
+      const refs = [
+        { name: 'cfg', path: fileRef },
+        { name: 'docs', path: dirRef },
+        { name: 'code', path: gitRef },
+        { name: 'missing', path: missingRef },
+      ];
+
+      // Take snapshot individually and concurrently
+      const singleSnapshot = await takeReferenceSnapshotAsync(refs[0]);
+      expect(singleSnapshot.kind).toBe('file');
+
+      // Take snapshots concurrently
+      const snapshots = await takeReferenceSnapshotsAsync(refs);
+      expect(snapshots.length).toBe(4);
+      expect(snapshots[0].kind).toBe('file');
+      expect(snapshots[1].kind).toBe('dir');
+      expect(snapshots[2].kind).toBe('git');
+      expect(snapshots[3].kind).toBe('missing');
+
+      // No modifications initially
+      const initialMods = await detectReferenceModificationsAsync(snapshots);
+      expect(initialMods).toEqual([]);
+
+      // Modify all references
+      fs.writeFileSync(fileRef, '{"version": 2}');
+      fs.writeFileSync(path.join(dirRef, 'new.md'), '# New doc');
+      fs.writeFileSync(path.join(gitRef, 'readme.txt'), 'modified hello');
+      fs.writeFileSync(missingRef, 'now exists');
+
+      const detectedMods = await detectReferenceModificationsAsync(snapshots);
+      expect(detectedMods.length).toBe(4);
+      expect(detectedMods.some((m) => m.name === 'cfg')).toBe(true);
+      expect(detectedMods.some((m) => m.name === 'docs')).toBe(true);
+      expect(detectedMods.some((m) => m.name === 'code')).toBe(true);
+      expect(detectedMods.some((m) => m.name === 'missing')).toBe(true);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

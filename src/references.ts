@@ -1,7 +1,11 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
 import path from 'node:path';
+
+const execFileAsync = promisify(execFile);
 
 export interface GitReferenceSnapshot {
   kind: 'git';
@@ -64,6 +68,17 @@ function runGit(refPath: string, args: string[]): { value: string | null; timedO
     return { value: execFileSync('git', args, { cwd: refPath, ...GIT_EXEC_OPTIONS }).trim(), timedOut: false };
   } catch (error) {
     const timedOut = error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ETIMEDOUT';
+    if (timedOut) console.warn(`Reference git command timed out after 10s: ${refPath} git ${args.join(' ')}`);
+    return { value: null, timedOut };
+  }
+}
+
+async function runGitAsync(refPath: string, args: string[]): Promise<{ value: string | null; timedOut: boolean }> {
+  try {
+    const { stdout } = await execFileAsync('git', args, { cwd: refPath, encoding: 'utf8', timeout: GIT_EXEC_OPTIONS.timeout, maxBuffer: GIT_EXEC_OPTIONS.maxBuffer });
+    return { value: stdout.trim(), timedOut: false };
+  } catch (error) {
+    const timedOut = error instanceof Error && 'code' in error && ((error as NodeJS.ErrnoException).code === 'ETIMEDOUT' || (error as NodeJS.ErrnoException).code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
     if (timedOut) console.warn(`Reference git command timed out after 10s: ${refPath} git ${args.join(' ')}`);
     return { value: null, timedOut };
   }
@@ -163,8 +178,104 @@ export function takeReferenceSnapshot(ref: { name: string; path: string }): Refe
   };
 }
 
+async function walkDirAsync(dir: string, baseDir = dir, acc = new Map<string, DirFileEntry>()): Promise<Map<string, DirFileEntry>> {
+  if (acc.size >= MAX_DIR_FILES) return acc;
+  let entries: fs.Dirent[];
+  try {
+    entries = await fsPromises.readdir(dir, { withFileTypes: true });
+  } catch {
+    return acc;
+  }
+
+  for (const entry of entries) {
+    if (acc.size >= MAX_DIR_FILES) break;
+    // Skip common version control or package manager directories in non-git reference walks
+    if (entry.name === '.git' || entry.name === 'node_modules') continue;
+
+    const fullPath = path.join(dir, entry.name);
+    try {
+      if (entry.isDirectory()) {
+        await walkDirAsync(fullPath, baseDir, acc);
+      } else if (entry.isFile()) {
+        const stat = await fsPromises.stat(fullPath);
+        const relPath = path.relative(baseDir, fullPath);
+        acc.set(relPath, { mtimeMs: stat.mtimeMs, size: stat.size });
+      }
+    } catch {
+      // Ignore unreadable files or broken links
+    }
+  }
+
+  return acc;
+}
+
+async function pathExistsAsync(p: string): Promise<boolean> {
+  try {
+    await fsPromises.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function hashFileAsync(filePath: string): Promise<string | undefined> {
+  try {
+    const data = await fsPromises.readFile(filePath);
+    return crypto.createHash('sha256').update(data).digest('hex');
+  } catch {
+    return undefined;
+  }
+}
+
+/** Async variant: uses non-blocking fs promises and execFile for git calls to avoid blocking the event loop. */
+export async function takeReferenceSnapshotAsync(ref: { name: string; path: string }): Promise<ReferenceSnapshot> {
+  let stat: fs.Stats;
+  try {
+    stat = await fsPromises.stat(ref.path);
+  } catch {
+    return { kind: 'missing', name: ref.name, path: ref.path };
+  }
+
+  if (stat.isFile()) {
+    const sha256 = await hashFileAsync(ref.path);
+    return { kind: 'file', name: ref.name, path: ref.path, mtimeMs: stat.mtimeMs, size: stat.size, sha256 };
+  }
+
+  const gitDir = path.join(ref.path, '.git');
+  let isGit = false;
+  try {
+    const gitStat = await fsPromises.stat(gitDir);
+    isGit = gitStat.isDirectory() || gitStat.isFile();
+  } catch {
+    isGit = false;
+  }
+
+  if (isGit) {
+    const [headResult, statusResult] = await Promise.all([
+      runGitAsync(ref.path, ['rev-parse', 'HEAD']),
+      runGitAsync(ref.path, ['status', '--porcelain']),
+    ]);
+    return {
+      kind: 'git',
+      name: ref.name,
+      path: ref.path,
+      head: headResult.value,
+      status: statusResult.value ?? '',
+      unavailable: headResult.timedOut || statusResult.timedOut,
+    };
+  }
+
+  const files = await walkDirAsync(ref.path);
+  return { kind: 'dir', name: ref.name, path: ref.path, files };
+}
+
 export function takeReferenceSnapshots(references: Array<{ name: string; path: string }>): ReferenceSnapshot[] {
   return references.map((ref) => takeReferenceSnapshot(ref));
+}
+
+/** Async variant: takes snapshots in parallel (up to all concurrently). */
+export async function takeReferenceSnapshotsAsync(references: Array<{ name: string; path: string }>): Promise<ReferenceSnapshot[]> {
+  return Promise.all(references.map((ref) => takeReferenceSnapshotAsync(ref)));
 }
 
 function parsePorcelainFiles(porcelain: string): string[] {
@@ -310,4 +421,82 @@ export function detectReferenceModifications(snapshots: ReferenceSnapshot[]): Re
 
 function parsePorcelain(porcelain: string): string[] {
   return parsePorcelainFiles(porcelain);
+}
+
+/** Async variant: uses non-blocking fs promises and execFile for git calls to avoid blocking the event loop. */
+export async function detectReferenceModificationsAsync(snapshots: ReferenceSnapshot[]): Promise<ReferenceModification[]> {
+  const results = await Promise.all(
+    snapshots.map(async (snapshot): Promise<ReferenceModification | null> => {
+      if (snapshot.kind === 'missing') {
+        const exists = await pathExistsAsync(snapshot.path);
+        if (exists) {
+          return { name: snapshot.name, path: snapshot.path, modifiedFiles: [snapshot.path] };
+        }
+        return null;
+      }
+
+      let stat: fs.Stats | null = null;
+      try {
+        stat = await fsPromises.stat(snapshot.path);
+      } catch {
+        stat = null;
+      }
+
+      if (!stat) {
+        return { name: snapshot.name, path: snapshot.path, modifiedFiles: [path.basename(snapshot.path)] };
+      }
+
+      if (snapshot.kind === 'file') {
+        const currentHash = await hashFileAsync(snapshot.path);
+        if (stat.size !== snapshot.size || stat.mtimeMs !== snapshot.mtimeMs || (snapshot.sha256 !== undefined && currentHash !== snapshot.sha256)) {
+          return { name: snapshot.name, path: snapshot.path, modifiedFiles: [path.basename(snapshot.path)] };
+        }
+        return null;
+      }
+
+      if (snapshot.kind === 'git') {
+        if (snapshot.unavailable) return null;
+        const [headResult, statusResult] = await Promise.all([
+          runGitAsync(snapshot.path, ['rev-parse', 'HEAD']),
+          runGitAsync(snapshot.path, ['status', '--porcelain']),
+        ]);
+        if (headResult.timedOut || statusResult.timedOut) return null;
+        const currentHead = headResult.value;
+        const currentStatus = statusResult.value ?? '';
+
+        if (currentHead !== snapshot.head || currentStatus !== snapshot.status) {
+          const fileSet = new Set<string>();
+          for (const f of parsePorcelain(currentStatus)) fileSet.add(f);
+          if (snapshot.head && currentHead && snapshot.head !== currentHead) {
+            const diffResult = await runGitAsync(snapshot.path, ['diff', '--name-only', `${snapshot.head}..${currentHead}`]);
+            if (!diffResult.timedOut) {
+              for (const f of (diffResult.value ?? '').split('\n').map((s) => s.trim()).filter(Boolean)) fileSet.add(f);
+            }
+          }
+          if (fileSet.size === 0) fileSet.add('(git repository status changed)');
+          return { name: snapshot.name, path: snapshot.path, modifiedFiles: Array.from(fileSet) };
+        }
+        return null;
+      }
+
+      if (snapshot.kind === 'dir') {
+        const currentFiles = await walkDirAsync(snapshot.path);
+        const changed: string[] = [];
+        for (const [relPath, entry] of snapshot.files) {
+          const currentEntry = currentFiles.get(relPath);
+          if (!currentEntry) changed.push(relPath);
+          else if (currentEntry.size !== entry.size || currentEntry.mtimeMs !== entry.mtimeMs) changed.push(relPath);
+        }
+        for (const relPath of currentFiles.keys()) {
+          if (!snapshot.files.has(relPath)) changed.push(relPath);
+        }
+        if (changed.length > 0) return { name: snapshot.name, path: snapshot.path, modifiedFiles: changed };
+        return null;
+      }
+
+      return null;
+    }),
+  );
+
+  return results.filter((m): m is ReferenceModification => m !== null);
 }

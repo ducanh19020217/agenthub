@@ -134,6 +134,7 @@ export const vi = {
     perfChartLabel: 'Biểu đồ CPU 1 giờ',
     perfProcess: '{count} tiến trình',
     perfProcesses: '{count} tiến trình',
+    perfEventLoop: 'Event loop (1 ph): p50 {p50}ms · p99 {p99}ms · max {max}ms',
     diskBlockingTitle: 'Tạm dừng dispatch: Hết dung lượng ổ đĩa',
     diskBlockingBanner: '{count} task đang phải chờ vì hết dung lượng ({disks}). Gợi ý: dọn thùng rác hoặc cache node_modules.',
     diskBlockingHubHome: 'Ổ chứa dữ liệu hub (~/.agenthub) sắp đầy. Toàn bộ dispatch bị tạm dừng.',

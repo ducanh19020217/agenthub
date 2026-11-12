@@ -47,7 +47,7 @@ import { isAutomatedStep, parseReviewChain, reviewerModel, type ReviewChainStep 
 import { isOrphanProcess, listAllWorktreeProcesses, reap, reapForWorktree } from '../reaper.js';
 import { LoadGuard, LoadSnapshot } from '../load.js';
 import { measureProcessTree } from '../process-tree.js';
-import { ReferenceSnapshot, takeReferenceSnapshots, detectReferenceModifications, ReferenceModification } from '../references.js';
+import { ReferenceSnapshot, takeReferenceSnapshotsAsync, detectReferenceModificationsAsync, ReferenceModification } from '../references.js';
 import { normalizeReviewerModel, reviewerSettingsFromLegacy, type ReviewerOrderItem, type ReviewerFallback } from '../reviewer-config.js';
 import { cleanupTaskRunArtifacts } from '../temp-cleanup.js';
 import { reviewMaxRoundsFor } from '../reviewer-rounds.js';
@@ -2193,7 +2193,7 @@ export class Scheduler {
       return;
     }
     if (rt.referenceSnapshots && rt.referenceSnapshots.length > 0) {
-      const modifications = detectReferenceModifications(rt.referenceSnapshots);
+      const modifications = await detectReferenceModificationsAsync(rt.referenceSnapshots);
       if (modifications.length > 0) {
         await this.handleReferenceModifications(taskId, task, rt, modifications);
         if (!this.stopped) this.triggerTick();
@@ -3857,7 +3857,8 @@ export class Scheduler {
     this.taskRepo.update(task.id, { runCount: (task.runCount || 0) + 1, status: 'running' });
 
     // Spawn the engine
-    const referenceSnapshots = takeReferenceSnapshots(projectSettings(project).references);
+    const refs = projectSettings(project).references;
+    const referenceSnapshots = refs && refs.length > 0 ? await takeReferenceSnapshotsAsync(refs) : [];
     try {
       const child = engine.spawn({
         profile,

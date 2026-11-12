@@ -136,6 +136,7 @@ export const en: typeof vi = {
     perfChartLabel: '1-hour CPU chart',
     perfProcess: '{count} process',
     perfProcesses: '{count} processes',
+    perfEventLoop: 'Event loop (1m): p50 {p50}ms · p99 {p99}ms · max {max}ms',
     diskBlockingTitle: 'Dispatch paused: Low disk space',
     diskBlockingBanner: '{count} task(s) waiting due to low disk space ({disks}). Suggestion: clean trash or node_modules cache.',
     diskBlockingHubHome: 'Hub data disk (~/.agenthub) is running out of space. All dispatches are paused.',

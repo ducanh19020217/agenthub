@@ -9,7 +9,14 @@ import { createServer } from '../src/api/server.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { FakeEngine } from '../src/engines/index.js';
 import { NotificationService } from '../src/notify.js';
-import { BulletinService, getChangedFilesForWorktree, parseDiffOutput, parsePorcelainOutput } from '../src/bulletin.js';
+import {
+  BulletinService,
+  getChangedFilesForWorktree,
+  getChangedFilesForWorktreeAsync,
+  parseDiffOutput,
+  parsePorcelainOutput,
+  Semaphore,
+} from '../src/bulletin.js';
 import { cmdNote, cmdNotes } from '../src/cli.js';
 
 describe('Context Bulletin & Overlap Coordination', () => {
@@ -389,7 +396,7 @@ describe('Context Bulletin & Overlap Coordination', () => {
       });
 
       // 1. First overlap check
-      const result1 = bulletinService.checkOverlaps();
+      const result1 = await bulletinService.checkOverlaps();
       expect(result1.overlapsFound).toHaveLength(1);
       expect(result1.overlapsFound[0]).toEqual({
         taskId: 'proj/task-1',
@@ -427,7 +434,7 @@ describe('Context Bulletin & Overlap Coordination', () => {
 
       // 2. Second overlap check (both tasks still running, both still modifying shared.ts)
       // Must NOT report duplicate ("không báo trùng lặp")
-      const result2 = bulletinService.checkOverlaps();
+      const result2 = await bulletinService.checkOverlaps();
       expect(result2.overlapsFound).toHaveLength(0);
 
       // No new events emitted
@@ -499,6 +506,36 @@ describe('Context Bulletin & Overlap Coordination', () => {
 
       expect(content).toContain('.agenthub/context/bulletin.md');
       expect(content).toContain('agenthub note');
+    });
+  });
+
+  describe('Semaphore and git concurrency limiter', () => {
+    it('limits concurrent executions to max', async () => {
+      const sem = new Semaphore(2);
+      let active = 0;
+      let peak = 0;
+
+      const tasks = Array.from({ length: 6 }, async () => {
+        return sem.run(async () => {
+          active++;
+          peak = Math.max(peak, active);
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          active--;
+        });
+      });
+
+      await Promise.all(tasks);
+      expect(peak).toBe(2);
+      expect(sem.activeCount).toBe(0);
+      expect(sem.pendingCount).toBe(0);
+    });
+
+    it('getChangedFilesForWorktreeAsync collects changed files using git limiter', async () => {
+      fs.writeFileSync(path.join(worktree1Dir, 'async-file.ts'), 'export const asyncVal = true;\n');
+      const sem = new Semaphore(2);
+      const files = await getChangedFilesForWorktreeAsync(worktree1Dir, 'main', sem);
+      expect(files.has('async-file.ts')).toBe(true);
+      expect(sem.activeCount).toBe(0);
     });
   });
 });

@@ -12,7 +12,8 @@ export type TaskStatus =
 
 export interface PerfGroup { cpuPercent: number; rssBytes: number; processes: number; }
 export interface PerfSample { at: string; cpuCount: number; groups: Record<string, PerfGroup>; }
-export interface PerfReport { samples: PerfSample[]; latest: PerfSample | null; }
+export interface EventLoopStats { p50Ms: number; p99Ms: number; maxMs: number; meanMs: number; }
+export interface PerfReport { samples: PerfSample[]; latest: PerfSample | null; eventLoop?: EventLoopStats | null; }
 
 export type TaskLevel = 'easy' | 'hard';
 
@@ -648,6 +649,9 @@ export interface HubStatus {
     enabled: boolean;
     allowedChatsCount?: number;
     hasToken?: boolean;
+  };
+  perf?: {
+    eventLoop?: EventLoopStats | null;
   };
   // Backwards compatibility aliases
   tasksByStatus?: Record<TaskStatus, number>;

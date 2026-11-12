@@ -1,11 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import type Database from 'better-sqlite3';
 import type { ProjectRow, TaskRow } from './db/index.js';
 import { runInProcessGroup } from './priority.js';
 import { workerEnvironment } from './worker-guard.js';
 import { taskCommitRef } from './commit-convention.js';
+
+const execFileAsync = promisify(execFile);
 
 const MAX_OUTPUT = 8192;
 const CONFLICT_MARKER_REGEX = /^(<{7}|={7}|>{7})( |$)/m;
@@ -36,15 +39,15 @@ function isNodeModules(rel: string): boolean {
   return /(^|\/)node_modules(\/|$)/.test(rel);
 }
 
-function isGitIgnored(repo: string, rel: string): boolean {
+async function isGitIgnored(repo: string, rel: string): Promise<boolean> {
   try {
-    execFileSync('git', ['check-ignore', '-q', '--', rel], { cwd: repo, stdio: 'ignore' });
+    await execFileAsync('git', ['check-ignore', '-q', '--', rel], { cwd: repo });
     return true;
   } catch {
     const alt = rel.endsWith('/') ? rel.replace(/\/+$/, '') : `${rel}/`;
     if (alt && alt !== rel) {
       try {
-        execFileSync('git', ['check-ignore', '-q', '--', alt], { cwd: repo, stdio: 'ignore' });
+        await execFileAsync('git', ['check-ignore', '-q', '--', alt], { cwd: repo });
         return true;
       } catch {
         return false;
@@ -54,15 +57,19 @@ function isGitIgnored(repo: string, rel: string): boolean {
   }
 }
 
-function changedFiles(repo: string, task: TaskRow, project: ProjectRow): string[] {
+async function changedFiles(repo: string, task: TaskRow, project: ProjectRow): Promise<string[]> {
   const names = new Set<string>();
-  try { for (const n of execFileSync('git', ['diff', '--name-only', `${task.baseRef || project.defaultBranch}...${task.branch || 'HEAD'}`], { cwd: repo, encoding: 'utf8' }).split('\n')) if (n) names.add(n); } catch { /* ignore */ }
   try {
-    for (const line of execFileSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' }).split('\n')) {
+    const { stdout: diffOut } = await execFileAsync('git', ['diff', '--name-only', `${task.baseRef || project.defaultBranch}...${task.branch || 'HEAD'}`], { cwd: repo, encoding: 'utf8' });
+    for (const n of diffOut.split('\n')) if (n) names.add(n);
+  } catch { /* ignore */ }
+  try {
+    const { stdout: statusOut } = await execFileAsync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' });
+    for (const line of statusOut.split('\n')) {
       if (!line.trim()) continue;
       const rel = line.slice(3).trim().replace(/^"|"$/g, '');
       if (!rel || rel === '.agenthub' || rel.startsWith('.agenthub/')) continue;
-      if (isNodeModules(rel) || isGitIgnored(repo, rel)) continue;
+      if (isNodeModules(rel) || await isGitIgnored(repo, rel)) continue;
       try {
         const cleanRel = rel.replace(/\/+$/, '');
         if (fs.lstatSync(path.join(repo, cleanRel)).isSymbolicLink()) continue;
@@ -75,9 +82,10 @@ function changedFiles(repo: string, task: TaskRow, project: ProjectRow): string[
   return [...names];
 }
 
-function committedAgentHubFiles(repo: string, task: TaskRow, project: ProjectRow): string[] {
+async function committedAgentHubFiles(repo: string, task: TaskRow, project: ProjectRow): Promise<string[]> {
   try {
-    return execFileSync('git', ['diff', '--name-only', `${task.baseRef || project.defaultBranch}...${task.branch || 'HEAD'}`], { cwd: repo, encoding: 'utf8' })
+    const { stdout } = await execFileAsync('git', ['diff', '--name-only', `${task.baseRef || project.defaultBranch}...${task.branch || 'HEAD'}`], { cwd: repo, encoding: 'utf8' });
+    return stdout
       .split('\n')
       .map((name) => name.trim())
       .filter((name) => name === '.agenthub' || name.startsWith('.agenthub/'));
@@ -86,13 +94,16 @@ function committedAgentHubFiles(repo: string, task: TaskRow, project: ProjectRow
   }
 }
 
-export function mandatoryChecks(repo: string, task: TaskRow, project: ProjectRow): CheckDefinition[] {
-  const files = changedFiles(repo, task, project);
+export async function mandatoryChecks(repo: string, task: TaskRow, project: ProjectRow): Promise<CheckDefinition[]> {
+  const [files, agentHubFiles] = await Promise.all([
+    changedFiles(repo, task, project),
+    committedAgentHubFiles(repo, task, project),
+  ]);
   const checks = [
     { name: 'zero-byte', files },
     { name: 'uncommitted', files },
     { name: 'conflict-markers', files },
-    { name: 'agenthub-files', files: committedAgentHubFiles(repo, task, project) },
+    { name: 'agenthub-files', files: agentHubFiles },
   ].map(({ name, files: checkFiles }) => ({ name, cmd: [], timeoutSec: 30, _files: checkFiles } as CheckDefinition & { _files: string[] }));
   if (project.settings && (projectSettings(project).commitConvention.commitRegex || projectSettings(project).commitConvention.commitTemplate.includes('{ref}'))) {
     checks.push({ name: 'commit-message', cmd: [], timeoutSec: 30, _files: [] } as CheckDefinition & { _files: string[] });
@@ -100,9 +111,10 @@ export function mandatoryChecks(repo: string, task: TaskRow, project: ProjectRow
   return checks;
 }
 function tail(value: string): string { return value.length > MAX_OUTPUT ? value.slice(-MAX_OUTPUT) : value; }
-function worktreeHead(repo: string): string | null {
+async function worktreeHead(repo: string): Promise<string | null> {
   try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim() || null;
+    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' });
+    return stdout.trim() || null;
   } catch {
     return null;
   }
@@ -118,7 +130,11 @@ async function runOne(check: CheckDefinition, repo: string, hubHome: string, pro
     const files = (check as CheckDefinition & { _files?: string[] })._files || []; let output = '';
     if (check.name === 'uncommitted') {
       try {
-        const trackedModified = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], { cwd: repo, encoding: 'utf8' })
+        const [trackedOut, untrackedOut] = await Promise.all([
+          execFileAsync('git', ['status', '--porcelain', '--untracked-files=no'], { cwd: repo, encoding: 'utf8' }),
+          execFileAsync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' }),
+        ]);
+        const trackedModified = trackedOut.stdout
           .split('\n')
           .map((x) => x.trimEnd())
           .filter(Boolean)
@@ -127,21 +143,24 @@ async function runOne(check: CheckDefinition, repo: string, hubHome: string, pro
             if (!rel || rel === '.agenthub' || rel.startsWith('.agenthub/')) return false;
             return true;
           });
-        const untracked = execFileSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' })
+        const untrackedLines = untrackedOut.stdout
           .split('\n')
-          .filter((x) => x.startsWith('?? '))
-          .filter((x) => {
-            const rel = x.slice(3).trim().replace(/^"|"$/g, '');
-            if (!rel || rel === '.agenthub' || rel.startsWith('.agenthub/')) return false;
-            if (isNodeModules(rel) || isGitIgnored(repo, rel)) return false;
-            try {
-              const cleanRel = rel.replace(/\/+$/, '');
-              return !fs.lstatSync(path.join(repo, cleanRel)).isSymbolicLink();
-            } catch {
-              return false;
-            }
-          });
-        output = [...trackedModified, ...untracked].join('\n');
+          .filter((x) => x.startsWith('?? '));
+        const filteredUntracked: string[] = [];
+        for (const x of untrackedLines) {
+          const rel = x.slice(3).trim().replace(/^"|"$/g, '');
+          if (!rel || rel === '.agenthub' || rel.startsWith('.agenthub/')) continue;
+          if (isNodeModules(rel)) continue;
+          if (await isGitIgnored(repo, rel)) continue;
+          try {
+            const cleanRel = rel.replace(/\/+$/, '');
+            if (fs.lstatSync(path.join(repo, cleanRel)).isSymbolicLink()) continue;
+          } catch {
+            continue;
+          }
+          filteredUntracked.push(x);
+        }
+        output = [...trackedModified, ...filteredUntracked].join('\n');
       } catch (e) {
         output = String(e);
       }
@@ -159,7 +178,7 @@ async function runOne(check: CheckDefinition, repo: string, hubHome: string, pro
     const ref = taskCommitRef(project, task);
     try {
       const range = `${(task.baseRef || project.defaultBranch || 'main')}..HEAD`;
-      const log = execFileSync('git', ['log', '--no-merges', '--format=%H%x00%s', range], { cwd: repo, encoding: 'utf8' });
+      const { stdout: log } = await execFileAsync('git', ['log', '--no-merges', '--format=%H%x00%s', range], { cwd: repo, encoding: 'utf8' });
       const regex = convention.commitRegex ? new RegExp(convention.commitRegex) : null;
       const bad: string[] = [];
       if (convention.commitTemplate.includes('{ref}') && !ref) {
@@ -192,7 +211,7 @@ export class CheckRunner {
     const configured = project.checks ? JSON.parse(project.checks) as CheckDefinition[] : detectChecks(repo);
     // Explicit project checks are authoritative. Only auto-detected release
     // checks are excluded because they may run npm ci/package.
-    const allChecks = [...(project.checks ? configured : configured.filter((check) => !isHeavyReleaseCheck(check))), ...mandatoryChecks(repo, task, project)];
+    const allChecks = [...(project.checks ? configured : configured.filter((check) => !isHeavyReleaseCheck(check))), ...await mandatoryChecks(repo, task, project)];
     const checks = options.onlyNames ? allChecks.filter((check) => options.onlyNames!.includes(check.name)) : allChecks;
     if (!options.reuseSavedResults) {
       if (options.onlyNames?.length) {
@@ -201,7 +220,7 @@ export class CheckRunner {
         this.db.prepare('DELETE FROM check_results WHERE taskId = ? AND runId = ?').run(task.id, runId);
       }
     }
-    const head = worktreeHead(repo);
+    const head = await worktreeHead(repo);
     const existingRows = options.reuseSavedResults
       ? this.db.prepare('SELECT name, ok, exitCode, durationMs, outputTail, head FROM check_results WHERE taskId = ? AND runId = ?')
         .all(task.id, runId) as Array<{ name: string; ok: number; exitCode: number | null; durationMs: number; outputTail: string; head: string | null }>

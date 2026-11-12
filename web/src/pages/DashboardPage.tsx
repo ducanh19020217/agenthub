@@ -327,6 +327,18 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
         <div className="flex items-center justify-between"><div><h2 className="text-base font-semibold">{t('dashboard.perfTitle')}</h2><p className="text-xs text-[var(--t-text-2)]">{t('dashboard.perfSubtitle')}</p></div><Cpu className="w-5 h-5 text-[var(--t-accent)]" /></div>
         {perf?.latest ? <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{Object.entries(perf.latest.groups).filter(([, value]) => value.processes > 0).sort((a, b) => b[1].cpuPercent - a[1].cpuPercent).map(([name, value]) => <div key={name} className="rounded-lg bg-[var(--t-surface-2)] px-3 py-2"><div className="flex justify-between text-xs"><span className="font-medium">{name}</span><span>{value.cpuPercent.toFixed(1)}% CPU</span></div><div className="mt-1 text-xs text-[var(--t-text-2)]">{(value.rssBytes / 1024 ** 3).toFixed(2)} GB · {value.processes === 1 ? t('dashboard.perfProcess', { count: value.processes }) : t('dashboard.perfProcesses', { count: value.processes })}</div></div>)}</div> : <p className="text-xs text-[var(--t-text-2)]">{t('dashboard.perfNoSamples')}</p>}
         {perf?.samples?.length ? <div className="flex h-8 items-end gap-0.5" aria-label={t('dashboard.perfChartLabel')}>{perf.samples.map((sample, index) => <span key={`${sample.at}-${index}`} className="flex-1 rounded-t bg-[var(--t-accent)] opacity-70" style={{ height: `${Math.max(4, Math.min(100, Object.values(sample.groups).reduce((sum, group) => sum + group.cpuPercent, 0) / Math.max(1, sample.cpuCount)))}%` }} />)}</div> : null}
+        {(() => {
+          const el = perf?.eventLoop || status.perf?.eventLoop;
+          if (!el) return null;
+          return (
+            <div data-testid="event-loop-stats" className="flex flex-wrap items-center gap-2 pt-2 border-t border-[var(--t-border)] text-xs text-[var(--t-text-2)]">
+              <span>{t('dashboard.perfEventLoop', { p50: el.p50Ms.toFixed(0), p99: el.p99Ms.toFixed(0), max: el.maxMs.toFixed(0) })}</span>
+              {el.maxMs > 500 && (
+                <span className="text-[var(--t-danger)] font-medium">⚠️ max &gt; 500ms</span>
+              )}
+            </div>
+          );
+        })()}
       </section>
 
       {status.disks && status.disks.length > 0 && (

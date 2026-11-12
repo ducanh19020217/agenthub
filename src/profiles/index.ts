@@ -185,7 +185,8 @@ export class ProfileService {
 
   /**
    * Read email from agy log files.
-   * Look for "authenticated successfully as <email>" pattern.
+   * Look for "authenticated successfully as <email>" pattern using chunked reads
+   * without loading entire log files into memory.
    */
   readEmailFromLog(logDir: string): string | null {
     if (!fs.existsSync(logDir)) return null;
@@ -199,10 +200,32 @@ export class ProfileService {
 
       // Search from newest to oldest
       for (let i = files.length - 1; i >= 0; i--) {
-        const content = fs.readFileSync(path.join(logDir, files[i]), 'utf-8');
-        const match = content.match(/authenticated successfully as (\S+)/i);
-        if (match) {
-          return match[1];
+        const filePath = path.join(logDir, files[i]);
+        let fd: number | undefined;
+        try {
+          fd = fs.openSync(filePath, 'r');
+          const bufSize = 16 * 1024;
+          const buffer = Buffer.alloc(bufSize);
+          let remainder = '';
+          let bytesRead = 0;
+          while ((bytesRead = fs.readSync(fd, buffer, 0, bufSize, null)) > 0) {
+            const text = remainder + buffer.toString('utf-8', 0, bytesRead);
+            const match = text.match(/authenticated successfully as (\S+)/i);
+            if (match) {
+              return match[1];
+            }
+            remainder = text.slice(-200);
+          }
+        } catch {
+          // ignore error reading individual file
+        } finally {
+          if (fd !== undefined) {
+            try {
+              fs.closeSync(fd);
+            } catch {
+              // ignore
+            }
+          }
         }
       }
     } catch {

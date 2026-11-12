@@ -7,6 +7,7 @@ import {
   createTaskFromError,
   deleteWorktree,
   getTask,
+  getTaskTimeline,
   getTaskRunsPage,
   getTasks,
   getTaskLog,
@@ -28,9 +29,9 @@ import {
   publishTask,
   getProject,
 } from '../api/client';
-import { TaskLevel, EventItem } from '../types/api';
+import { TaskLevel, EventItem, TaskTimelineItem, TaskStatus } from '../types/api';
 import { subscribeToRunOutput, subscribeToEvents } from '../api/sse';
-import { formatDateTime, formatIsoTitle, parseApiTime } from '../lib/time';
+import { formatDateTime, formatIsoTitle, parseApiTime, formatShortContextualTime, formatDuration } from '../lib/time';
 import { CheckResults } from '../components/CheckResults';
 import { StatusBadge } from '../components/StatusBadge';
 import { SilentRunIndicator } from '../components/SilentRunIndicator';
@@ -126,6 +127,28 @@ export const TaskDetailPage: React.FC = () => {
     enabled: !!id,
     refetchInterval: 4000,
   });
+
+  const { data: timelineData } = useQuery({
+    queryKey: ['task-timeline', id],
+    queryFn: () => getTaskTimeline(id),
+    enabled: !!id,
+    refetchInterval: 4000,
+  });
+
+  const workflowTimelineItems: TaskTimelineItem[] = useMemo(() => {
+    if (timelineData && timelineData.length > 0) return timelineData;
+    if (task?.timeline && task.timeline.length > 0) return task.timeline;
+    if (task) {
+      return [
+        {
+          status: task.status,
+          at: task.statusChangedAt || task.updatedAt || task.createdAt,
+          estimated: task.statusChangedAtEstimated ?? true,
+        },
+      ];
+    }
+    return [];
+  }, [timelineData, task]);
 
   const emptyLogMessage = React.useMemo(() => {
     if (task?.status === 'review') {
@@ -1158,6 +1181,101 @@ export const TaskDetailPage: React.FC = () => {
       )}
 
       {(task.sourceRef || (task.derivedTasks && task.derivedTasks.length > 0)) && <section className="bg-[var(--t-surface)] rounded-xl border border-[var(--t-border)] p-5 text-sm space-y-2"><h2 className="font-semibold">{t('extra.linkedTasks')}</h2>{task.sourceRef && <p>{t('extra.generatedFrom')}: <button type="button" className="text-[var(--t-accent)] underline cursor-pointer" onClick={() => navigate(`/tasks/${encodeURIComponent(task.sourceRef!.taskId.replace('/', '~'))}`)}>{task.sourceRef.taskId}</button></p>}{task.derivedTasks?.map((derived) => <p key={derived.id}>{t('extra.generatedTask')}: <button type="button" className="text-[var(--t-accent)] underline cursor-pointer" onClick={() => navigate(`/tasks/${encodeURIComponent(derived.id.replace('/', '~'))}`)}>{derived.id}</button></p>)}</section>}
+
+      {/* Workflow Timeline */}
+      <section
+        data-testid="workflow-timeline"
+        className="bg-[var(--t-surface)] p-6 rounded-xl border border-[var(--t-border)] space-y-4 shadow-xs"
+      >
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-[var(--t-text-3)] flex items-center gap-2">
+            <Clock className="w-4 h-4 text-[var(--t-accent)]" />
+            <span>{t('taskDetail.workflowTimeline')}</span>
+          </h2>
+          <span className="text-xs text-[var(--t-text-3)]">
+            {t('taskDetail.workflowTimelineDesc')}
+          </span>
+        </div>
+
+        <ol className="relative border-l-2 border-[var(--t-border)] ml-3 space-y-4 pl-5 text-xs">
+          {workflowTimelineItems.map((item, idx) => {
+            const isCurrent = idx === workflowTimelineItems.length - 1;
+            const statusKey = item.status as TaskStatus;
+            const parsedAt = parseApiTime(item.at);
+            const currentDurationMs = isCurrent && Number.isFinite(parsedAt)
+              ? Math.max(0, Date.now() - parsedAt)
+              : item.durationMs;
+
+            return (
+              <li
+                key={`${item.status}-${item.at}-${idx}`}
+                data-testid={`workflow-step-${idx}`}
+                data-status={item.status}
+                className="relative space-y-1.5"
+              >
+                <div
+                  className={`absolute -left-[27px] top-1 h-3.5 w-3.5 rounded-full border-2 bg-[var(--t-surface)] ${
+                    isCurrent
+                      ? 'border-[var(--t-accent)] ring-4 ring-[color-mix(in_srgb,var(--t-accent)_20%,transparent)]'
+                      : 'border-[var(--t-text-3)]'
+                  }`}
+                />
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <StatusBadge status={statusKey} size="sm" />
+
+                  {item.at && (
+                    <span
+                      className="font-mono text-[11px] text-[var(--t-text-2)]"
+                      title={formatIsoTitle(item.at)}
+                    >
+                      {formatDateTime(item.at, locale)}
+                    </span>
+                  )}
+
+                  {currentDurationMs !== undefined && currentDurationMs > 0 && (
+                    <span
+                      className="rounded bg-[var(--t-surface-2)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--t-text-2)] border border-[var(--t-border)]"
+                      data-testid={`workflow-duration-${idx}`}
+                    >
+                      {formatDuration(currentDurationMs, locale)}
+                    </span>
+                  )}
+
+                  {item.estimated && (
+                    <span className="italic text-[11px] text-[var(--t-text-3)]">
+                      ({t('taskDetail.stepEstimated')})
+                    </span>
+                  )}
+
+                  {item.actor && (
+                    <span className="font-mono text-[11px] text-[var(--t-text-3)]">
+                      · {item.actor}
+                    </span>
+                  )}
+
+                  {item.runId && (
+                    <span className="font-mono text-[11px] text-[var(--t-text-3)]">
+                      (run {item.runId})
+                    </span>
+                  )}
+                </div>
+
+                {isCurrent && (
+                  <p
+                    data-testid="workflow-current-step"
+                    className="text-xs font-medium text-[var(--t-accent)]"
+                  >
+                    {t('taskDetail.currentStepSince', {
+                      time: formatShortContextualTime(item.at, locale),
+                    })}
+                  </p>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      </section>
 
       {/* Timeline */}
       <div data-testid="task-timeline" className="bg-[var(--t-surface)] p-6 rounded-xl border border-[var(--t-border)] space-y-3 shadow-xs">

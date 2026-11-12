@@ -236,12 +236,16 @@ interface RunningTask {
   // Stall & looping detection
   lastCommitCheckAt?: number;
   lastCommitCount?: number;
+  lastCommitAt?: number | null;
   lastNoCommitThresholdEmitted?: number;
   noCommitMinutes?: number;
   isLooping?: boolean;
   loopingCommand?: string;
   commandOccurrences?: Array<{ command: string; timestamp: number }>;
   lastLogOffset?: number;
+  // Changed-file count cache (async, updated alongside commit check)
+  changedFileCount?: number;
+  changedFileCheckAt?: number;
   // Resource metrics & Pause/Resume
   rss?: number;
   cpu?: number;
@@ -421,7 +425,7 @@ export class Scheduler {
 
 
     if (!engineOverrides || !(engineOverrides instanceof Map)) {
-      this.engines.set('agy', new AgyEngine());
+      this.engines.set('agy', new AgyEngine(undefined, undefined, this.config.workers?.agyStreamOutput ?? true));
       const codexPath = CodexEngine.findCodexPath();
       if (codexPath) {
         this.engines.set('codex', new CodexEngine(codexPath, this.config.workers?.codexSandbox || 'off'));
@@ -1747,6 +1751,19 @@ export class Scheduler {
 
     const commitCount = timestamps.length;
     rt.lastCommitCount = commitCount;
+    rt.lastCommitAt = commitCount > 0 ? timestamps[0] : null;
+
+    // Count changed files (uncommitted + staged + untracked) in the worktree, async + cached here
+    if (repoPath) {
+      try {
+        const { stdout: statusOut } = await execFileAsync('git', ['status', '--porcelain', '-unormal'], { cwd: repoPath });
+        const changedLines = statusOut.trim().split('\n').filter(Boolean);
+        rt.changedFileCount = changedLines.length;
+        rt.changedFileCheckAt = now;
+      } catch {
+        // ignore – leave previous value
+      }
+    }
 
     const lastCommitTime = commitCount > 0 ? timestamps[0] : rt.startTime;
     const elapsedMs = Math.max(0, now - lastCommitTime);
@@ -1995,7 +2012,7 @@ export class Scheduler {
     // Conversation and worktree scans are deliberately cached: a scheduler tick
     // runs every two seconds, while a recursive scan can inspect thousands of files.
     const conversationMtime = this.getConversationMtime(rt);
-    rt.cachedConversationMtime = Math.max(rt.cachedConversationMtime, conversationMtime);
+    rt.cachedConversationMtime = Math.max(rt.cachedConversationMtime || 0, conversationMtime || 0);
     const task = this.taskRepo.get(rt.taskId);
     const worktreePath = task?.worktreePath;
     let worktreeMtime = 0;
@@ -2005,10 +2022,10 @@ export class Scheduler {
         worktreeMtime = Math.max(worktreeMtime, indexMtime > rt.startTime ? indexMtime : 0);
       } catch { /* Worktrees without an index are still checked recursively. */ }
       if (worktreeMtime <= rt.cachedConversationMtime && conversationMtime <= rt.lastActivityAt) {
-        worktreeMtime = this.getWorktreeMtime(worktreePath, rt.startTime, rt.cachedWorktreeMtime);
+        worktreeMtime = this.getWorktreeMtime(worktreePath, rt.startTime, rt.cachedWorktreeMtime || 0);
       }
     }
-    rt.cachedWorktreeMtime = Math.max(rt.cachedWorktreeMtime, worktreeMtime);
+    rt.cachedWorktreeMtime = Math.max(rt.cachedWorktreeMtime || 0, worktreeMtime);
     rt.activityCheckedAt = now;
 
     const candidates: Array<{ source: ActivitySource; mtime: number }> = [
@@ -2268,15 +2285,11 @@ export class Scheduler {
 
           // Quota failover is a continuation, not a crash/retry attempt. Keep
           // the task's run-limit counter unchanged and reuse its worktree.
+          // Do not write synthetic lines to the worker's log file; record via event/state only.
           const next = this.findModelProfilePair(task);
           const reason = next
             ? `quota exhausted on ${rt.engine.id}/${rt.model} (${rt.profileName})`
             : `quota exhausted on ${rt.engine.id}/${rt.model} (${rt.profileName}); all models/profiles unavailable`;
-          try {
-            fs.appendFileSync(run?.logPath || '', `\n[agenthub] Failover: ${rt.profileName}/${rt.model} → ${next ? `${next.profileName}/${next.model}` : 'waiting_quota'}; reason: ${reason}\n`);
-          } catch {
-            // The run log may have been removed by cleanup; the event remains authoritative.
-          }
           this.eventBus.emit('task.failover', taskId, {
             from: { profile: rt.profileName, model: rt.model, engine: rt.engine.id },
             to: next ? { profile: next.profileName, model: next.model, engine: getModelEngine(next.model) } : null,
@@ -3811,6 +3824,7 @@ export class Scheduler {
         project,
         gitHooks: projectSettings(project).worktree.gitHooks,
         codexSandbox: this.config.workers?.codexSandbox || 'off',
+        streamOutput: this.config.workers?.agyStreamOutput ?? true,
         workerCount: project.maxParallel,
       });
 

@@ -5086,7 +5086,7 @@ export class AppService {
     for (const task of tasks) {
       if (task.status === 'draft') {
         this.taskRepo.update(task.id, { status: 'cancelled', cancelReason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, cancelledBy: 'batch:discard' });
-        const cancelPayload = { reason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, by: 'batch:discard' };
+        const cancelPayload = { reason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, by: 'batch:discard', draftDiscard: true };
         this.scheduler.getEventBus().emit('task.cancelled', task.id, cancelPayload);
       }
     }

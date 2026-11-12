@@ -3087,6 +3087,21 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(3);
   });
 
+  it('does not send telegram notifications for draftDiscard tasks when discarded from batch', async () => {
+    ctx.projectRepo.insert({ id: 'pdisc', name: 'PDisc', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'pdisc/t-1', projectId: 'pdisc', slug: 't-1', title: 'Draft Task', body: '', level: 'easy', status: 'cancelled' });
+    const bot = createBot('auto');
+
+    bot.handleEvent('task.cancelled', 'pdisc/t-1', {
+      reason: 'Đợt "B" bị bỏ khi còn nháp',
+      by: 'batch:discard',
+      draftDiscard: true,
+    });
+    await bot.flushQueue(CHAT_ID);
+    const sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends).toHaveLength(0);
+  });
+
   it('notifies when a worker is adopted after restart', async () => {
     ctx.projectRepo.insert({ id: 'padopt', name: 'PAdopt', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
     ctx.taskRepo.insert({ id: 'padopt/t-1', projectId: 'padopt', slug: 't-1', title: 'Task Adopted', body: '', level: 'easy', status: 'running' });

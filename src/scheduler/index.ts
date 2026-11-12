@@ -2267,15 +2267,11 @@ export class Scheduler {
 
           // Quota failover is a continuation, not a crash/retry attempt. Keep
           // the task's run-limit counter unchanged and reuse its worktree.
+          // Do not write synthetic lines to the worker's log file; record via event/state only.
           const next = this.findModelProfilePair(task);
           const reason = next
             ? `quota exhausted on ${rt.engine.id}/${rt.model} (${rt.profileName})`
             : `quota exhausted on ${rt.engine.id}/${rt.model} (${rt.profileName}); all models/profiles unavailable`;
-          try {
-            fs.appendFileSync(run?.logPath || '', `\n[agenthub] Failover: ${rt.profileName}/${rt.model} → ${next ? `${next.profileName}/${next.model}` : 'waiting_quota'}; reason: ${reason}\n`);
-          } catch {
-            // The run log may have been removed by cleanup; the event remains authoritative.
-          }
           this.eventBus.emit('task.failover', taskId, {
             from: { profile: rt.profileName, model: rt.model, engine: rt.engine.id },
             to: next ? { profile: next.profileName, model: next.model, engine: getModelEngine(next.model) } : null,

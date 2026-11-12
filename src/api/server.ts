@@ -679,6 +679,11 @@ export async function createServer(
     return service.getTask(id);
   });
 
+  fastify.get('/api/tasks/:id/timeline', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.getTaskTimeline(id);
+  });
+
   fastify.patch('/api/tasks/:id', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
     return service.updateTask(id, req.body);

@@ -1635,7 +1635,7 @@ export interface TaskRow {
   pushedAt?: string | null;
   pushResult?: string | null;
   statusChangedAt?: string | null;
-  statusChangedAtEstimated?: number;
+  statusChangedAtEstimated?: number | boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -2272,12 +2272,14 @@ export class TaskRepo {
     creationSessionId?: string | null;
     creationGoal?: string | null;
     statusChangedAt?: string | null;
-    statusChangedAtEstimated?: number;
+    statusChangedAtEstimated?: number | boolean;
     skipDeps?: boolean;
   }): void {
     const deps = JSON.stringify(row.dependsOn || []);
     const statusChangedAt = row.statusChangedAt ?? new Date().toISOString();
-    const statusChangedAtEstimated = row.statusChangedAtEstimated ?? 0;
+    const statusChangedAtEstimated = typeof row.statusChangedAtEstimated === 'boolean'
+      ? (row.statusChangedAtEstimated ? 1 : 0)
+      : (row.statusChangedAtEstimated ?? 0);
     this.db
       .prepare(
         `INSERT INTO tasks (id, projectId, slug, title, externalRef, body, level, modelChain, baseRef, branch, dependsOn, status, waitReason, worktreePath, doneReport, blockedReport, diffStat, sourceRef, batchId, creationSessionId, creationGoal, statusChangedAt, statusChangedAtEstimated)

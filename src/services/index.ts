@@ -185,6 +185,15 @@ function apiProfile(profile: ProfileRow): ProfileRow {
   };
 }
 
+export interface TaskTimelineItem {
+  status: string;
+  at: string;
+  durationMs?: number;
+  runId?: string | null;
+  actor?: string | null;
+  estimated?: boolean;
+}
+
 function apiTask(task: TaskRow, blockingDisk?: BlockingDiskInfo | null): TaskRow {
   return {
     ...task,
@@ -4256,8 +4265,211 @@ export class AppService {
       sourceRef: task.sourceRef ? JSON.parse(task.sourceRef) : null,
       triage,
       derivedTasks: this.taskRepo.getDerivedFrom(taskId).map((t) => apiTask(t, this.getBlockingDiskForTask(t))),
+      timeline: this.getTaskTimeline(taskId),
       claudeCost: (() => { const measured = this.claudeSessionRepo?.taskCost(taskId); return measured ? { measured: measured.effectiveTokens > 0, ...measured } : { measured: false, effectiveTokens: 0, sessions: 0 }; })(),
     };
+  }
+
+  getTaskTimeline(idParam: string): TaskTimelineItem[] {
+    const taskId = toTaskId(idParam);
+    const task = this.taskRepo.get(taskId);
+    if (!task) {
+      throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    }
+
+    const events = this.eventRepo ? this.eventRepo.getByTask(taskId) : [];
+    const runs = this.runRepo ? this.runRepo.getByTask(taskId) : [];
+    const reviews = this.reviewRepo ? this.reviewRepo.getByTask(taskId) : [];
+
+    const candidates: Array<{
+      status: string;
+      at: string;
+      runId?: string | null;
+      actor?: string | null;
+      estimated?: boolean;
+    }> = [];
+
+    // Parse events
+    for (const event of events) {
+      const at = toApiTime(event.ts);
+      if (!at) continue;
+
+      let payload: Record<string, unknown> | null = null;
+      if (event.payload) {
+        if (typeof event.payload === 'string') {
+          try { payload = JSON.parse(event.payload); } catch { payload = null; }
+        } else if (typeof event.payload === 'object') {
+          payload = event.payload as Record<string, unknown>;
+        }
+      }
+
+      switch (event.type) {
+        case 'task.draft':
+          candidates.push({ status: 'draft', at });
+          break;
+        case 'task.queued':
+          candidates.push({
+            status: 'queued',
+            at,
+            actor: typeof payload?.by === 'string' ? payload.by : null,
+          });
+          break;
+        case 'task.running':
+          candidates.push({
+            status: 'running',
+            at,
+            runId: typeof payload?.runId === 'string' ? payload.runId : null,
+            actor: typeof payload?.profile === 'string'
+              ? payload.profile
+              : (typeof payload?.profileName === 'string' ? payload.profileName : null),
+          });
+          break;
+        case 'task.checking':
+          candidates.push({ status: 'checking', at });
+          break;
+        case 'task.review_ready':
+        case 'review.gate_started':
+          candidates.push({ status: 'review', at });
+          break;
+        case 'task.done':
+          candidates.push({
+            status: 'done',
+            at,
+            actor: typeof payload?.by === 'string' ? payload.by : null,
+          });
+          break;
+        case 'task.merged':
+          candidates.push({ status: 'merged', at });
+          break;
+        case 'task.publishing':
+          candidates.push({ status: 'publishing', at });
+          break;
+        case 'task.auditing':
+          candidates.push({ status: 'auditing', at });
+          break;
+        case 'task.pushed':
+          candidates.push({ status: 'pushed', at });
+          break;
+        case 'task.failed':
+          candidates.push({ status: 'failed', at });
+          break;
+        case 'task.blocked':
+          candidates.push({ status: 'blocked', at });
+          break;
+        case 'task.cancelled':
+          candidates.push({
+            status: 'cancelled',
+            at,
+            actor: typeof payload?.by === 'string' ? payload.by : null,
+          });
+          break;
+        case 'task.waiting_quota':
+          candidates.push({ status: 'waiting_quota', at });
+          break;
+        case 'task.paused':
+          candidates.push({ status: 'paused', at });
+          break;
+        case 'task.resumed':
+          candidates.push({ status: 'running', at });
+          break;
+      }
+    }
+
+    // Include reviews with verdict 'changes_requested'
+    for (const review of reviews) {
+      if (review.verdict === 'changes_requested') {
+        const at = toApiTime(review.createdAt);
+        if (at) {
+          candidates.push({
+            status: 'changes_requested',
+            at,
+            actor: review.actor || null,
+          });
+        }
+      }
+    }
+
+    // Include runs if no corresponding task.running event
+    for (const run of runs) {
+      const at = toApiTime(run.startedAt);
+      if (at) {
+        const hasRunningEvent = candidates.some((c) => c.status === 'running' && c.runId === run.id);
+        if (!hasRunningEvent) {
+          candidates.push({
+            status: 'running',
+            at,
+            runId: run.id,
+            actor: run.profileName || null,
+          });
+        }
+      }
+    }
+
+    // If task has pushedAt and not in candidates
+    if (task.pushedAt) {
+      const at = toApiTime(task.pushedAt);
+      if (at && !candidates.some((c) => c.status === 'pushed')) {
+        candidates.push({ status: 'pushed', at });
+      }
+    }
+
+    // Sort chronologically
+    candidates.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+
+    // Deduplicate consecutive identical statuses while preserving all rounds
+    const deduplicated: typeof candidates = [];
+    for (const item of candidates) {
+      const last = deduplicated.at(-1);
+      if (!last || last.status !== item.status) {
+        deduplicated.push(item);
+      } else {
+        if (!last.runId && item.runId) last.runId = item.runId;
+        if (!last.actor && item.actor) last.actor = item.actor;
+      }
+    }
+
+    // Ensure current status is represented
+    if (deduplicated.length === 0) {
+      const at = toApiTime(task.statusChangedAt ?? task.updatedAt ?? task.createdAt)!;
+      deduplicated.push({
+        status: task.status,
+        at,
+        estimated: Boolean(task.statusChangedAtEstimated),
+      });
+    } else if (deduplicated.at(-1)!.status !== task.status) {
+      const at = toApiTime(task.statusChangedAt ?? task.updatedAt)!;
+      deduplicated.push({
+        status: task.status,
+        at,
+        estimated: Boolean(task.statusChangedAtEstimated),
+      });
+    }
+
+    // Compute durations
+    const timeline: TaskTimelineItem[] = [];
+    for (let i = 0; i < deduplicated.length; i++) {
+      const curr = deduplicated[i];
+      const next = deduplicated[i + 1];
+      let durationMs: number | undefined = undefined;
+      if (next) {
+        const tCurr = Date.parse(curr.at);
+        const tNext = Date.parse(next.at);
+        if (Number.isFinite(tCurr) && Number.isFinite(tNext)) {
+          durationMs = Math.max(0, tNext - tCurr);
+        }
+      }
+
+      timeline.push({
+        status: curr.status,
+        at: curr.at,
+        ...(durationMs !== undefined ? { durationMs } : {}),
+        ...(curr.runId ? { runId: curr.runId } : {}),
+        ...(curr.actor ? { actor: curr.actor } : {}),
+        ...(curr.estimated ? { estimated: true } : {}),
+      });
+    }
+
+    return timeline;
   }
 
   private async prepareOpenProjectTicket(parsed: z.infer<typeof CreateTaskSchema>, project: ProjectRow): Promise<{
@@ -4451,6 +4663,8 @@ export class AppService {
     if (initialStatus === 'queued') {
       this.scheduler.getEventBus().emit('task.queued', taskId);
       this.scheduler.triggerTick();
+    } else if (initialStatus === 'draft') {
+      this.scheduler.getEventBus().emit('task.draft', taskId);
     }
 
     const task = this.taskRepo.get(taskId)!;

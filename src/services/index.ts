@@ -1607,6 +1607,15 @@ export class AppService {
         hasToken: Boolean(this.telegramBotService?.hasValidToken()),
       },
       tools: this.config.tools,
+      perf: (() => {
+        const mem = process.memoryUsage();
+        return {
+          heapUsed: mem.heapUsed,
+          rss: mem.rss,
+          external: mem.external,
+          heapTotal: mem.heapTotal,
+        };
+      })(),
     };
   }
 

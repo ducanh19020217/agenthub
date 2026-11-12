@@ -219,6 +219,7 @@ describe('Batch Planning & Drafts (c-plan-drafts)', () => {
 
     const updatedBatch = ctx.service.getBatch(batchRes.id);
     expect(updatedBatch.status).toBe('dispatched');
+    expect(ctx.eventRepo.getRecent(100).filter((event) => event.type === 'batch.dispatched')).toHaveLength(1);
   });
 
   it('supports discarding a draft batch', async () => {
@@ -241,6 +242,9 @@ describe('Batch Planning & Drafts (c-plan-drafts)', () => {
     const t2 = ctx.taskRepo.get('test-proj/disc-2')!;
     expect(t1.status).toBe('cancelled');
     expect(t2.status).toBe('cancelled');
+    const events = ctx.eventRepo.getRecent(100);
+    expect(events.filter((event) => event.type === 'batch.discarded')).toHaveLength(1);
+    expect(events.filter((event) => event.type === 'task.cancelled')).toHaveLength(2);
   });
 
   it('supports adding, removing, and editing tasks in a draft batch', async () => {

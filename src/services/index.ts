@@ -2452,7 +2452,6 @@ export class AppService {
           if (saved.status) {
             this.taskRepo.update(note.taskId, { status: saved.status, waitReason: saved.waitReason as TaskRow['waitReason'] });
             const resumePayload = { reason: 'project_restored', status: saved.status };
-            this.eventRepo?.insert(`task.${saved.status}`, note.taskId, resumePayload);
             this.scheduler.getEventBus().emit(`task.${saved.status}`, note.taskId, resumePayload);
           }
         } catch {
@@ -5043,13 +5042,11 @@ export class AppService {
 
     for (const task of draftTasks) {
       this.taskRepo.updateStatus(task.id, 'queued');
-      this.eventRepo.insert('task.queued', task.id, { fromBatch: id });
-      this.scheduler.getEventBus().emit('task.queued', task.id);
+      this.scheduler.getEventBus().emit('task.queued', task.id, { fromBatch: id });
     }
 
     this.taskBatchRepo.updateStatus(id, 'dispatched');
     const payload = { batchId: id, projectId: batch.projectId, dispatchedCount: draftTasks.length };
-    this.eventRepo.insert('batch.dispatched', undefined, payload);
     this.scheduler.getEventBus().emit('batch.dispatched', undefined, payload);
     this.scheduler.triggerTick();
 
@@ -5072,13 +5069,11 @@ export class AppService {
       if (task.status === 'draft') {
         this.taskRepo.update(task.id, { status: 'cancelled', cancelReason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, cancelledBy: 'batch:discard' });
         const cancelPayload = { reason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, by: 'batch:discard' };
-        this.eventRepo?.insert('task.cancelled', task.id, cancelPayload);
         this.scheduler.getEventBus().emit('task.cancelled', task.id, cancelPayload);
       }
     }
     this.taskBatchRepo.updateStatus(id, 'discarded');
     const payload = { batchId: id, projectId: batch.projectId };
-    this.eventRepo.insert('batch.discarded', undefined, payload);
     this.scheduler.getEventBus().emit('batch.discarded', undefined, payload);
 
     return { ok: true, batchId: id };

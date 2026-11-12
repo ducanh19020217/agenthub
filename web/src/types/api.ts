@@ -406,6 +406,12 @@ export interface Task {
     pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
     rss?: number;
     cpu?: number;
+    /** Number of commits on task branch since base, cached by scheduler (null = not yet checked) */
+    newCommitCount?: number | null;
+    /** ISO timestamp of the most recent commit on task branch (null = none yet) */
+    lastCommitAt?: string | null;
+    /** Number of files with uncommitted changes in the worktree (null = not yet checked) */
+    changedFileCount?: number | null;
   } | null;
   paused?: boolean;
   pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
@@ -518,6 +524,9 @@ export interface RunningWorker {
   cpu?: number;
   paused?: boolean;
   pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
+  newCommitCount?: number | null;
+  lastCommitAt?: string | null;
+  changedFileCount?: number | null;
 }
 
 export type BrainActivity =

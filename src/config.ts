@@ -301,6 +301,7 @@ export const DEFAULT_UPDATES_CONFIG: UpdatesConfig = {
 
 export interface WorkersConfig {
   codexSandbox: 'off' | 'workspace-write';
+  agyStreamOutput?: boolean;
 }
 
 export interface UiConfig {
@@ -309,6 +310,7 @@ export interface UiConfig {
 
 export const DEFAULT_WORKERS_CONFIG: WorkersConfig = {
   codexSandbox: 'off',
+  agyStreamOutput: true,
 };
 
 /** Đọc cấu hình đánh thức quota, bỏ giá trị sai và dùng mặc định cho phần thiếu. */
@@ -468,6 +470,11 @@ export interface AgentHubConfig {
     nodeModulesOnDone: boolean;
     worktreeOnDoneAfterHours: number;
   };
+  retention: {
+    noisyEventDays: number;
+    eventDays: number;
+    taskNoteDays: number;
+  };
   cacheDir: string;
   cacheMaxEntries: number;
   cacheMaxGB: number;
@@ -530,6 +537,7 @@ export function saveConfig(
     wakeup?: Partial<WakeupConfig>;
     disk?: { minFreeGB?: number; hubHomeMinFreeGB?: number; extraPaths?: ExtraDiskPath[] };
     cleanup?: { nodeModulesOnDone?: boolean; worktreeOnDoneAfterHours?: number };
+    retention?: { noisyEventDays?: number; eventDays?: number; taskNoteDays?: number };
     cacheDir?: string;
     cacheMaxEntries?: number;
     cacheMaxGB?: number;
@@ -733,6 +741,7 @@ export function updateConfigInMemory(
     wakeup?: Partial<WakeupConfig>;
     disk?: { minFreeGB?: number; hubHomeMinFreeGB?: number; extraPaths?: ExtraDiskPath[] };
     cleanup?: { nodeModulesOnDone?: boolean; worktreeOnDoneAfterHours?: number };
+    retention?: { noisyEventDays?: number; eventDays?: number; taskNoteDays?: number };
     cacheDir?: string;
     cacheMaxEntries?: number;
     cacheMaxGB?: number;
@@ -901,6 +910,11 @@ export function updateConfigInMemory(
   }
   if (patch.cleanup?.worktreeOnDoneAfterHours !== undefined) {
     config.cleanup.worktreeOnDoneAfterHours = patch.cleanup.worktreeOnDoneAfterHours;
+  }
+  if (patch.retention) {
+    if (patch.retention.noisyEventDays !== undefined) config.retention.noisyEventDays = patch.retention.noisyEventDays;
+    if (patch.retention.eventDays !== undefined) config.retention.eventDays = patch.retention.eventDays;
+    if (patch.retention.taskNoteDays !== undefined) config.retention.taskNoteDays = patch.retention.taskNoteDays;
   }
   if (patch.cacheDir !== undefined) {
     config.cacheDir = patch.cacheDir;
@@ -1118,6 +1132,13 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
     worktreeOnDoneAfterHours: typeof userCleanup?.worktreeOnDoneAfterHours === 'number' ? userCleanup.worktreeOnDoneAfterHours : 24,
   };
 
+  const rawRetention = (userConfig.retention as { noisyEventDays?: number; eventDays?: number; taskNoteDays?: number } | undefined);
+  const retention = {
+    noisyEventDays: typeof rawRetention?.noisyEventDays === 'number' && rawRetention.noisyEventDays > 0 ? rawRetention.noisyEventDays : 14,
+    eventDays: typeof rawRetention?.eventDays === 'number' && rawRetention.eventDays > 0 ? rawRetention.eventDays : 90,
+    taskNoteDays: typeof rawRetention?.taskNoteDays === 'number' && rawRetention.taskNoteDays > 0 ? rawRetention.taskNoteDays : 90,
+  };
+
   const cacheDir =
     (userConfig.cacheDir as string) ||
     process.env.AGENTHUB_CACHE_DIR ||
@@ -1220,6 +1241,7 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
   const rawWorkers = (userConfig.workers as Record<string, unknown>) || {};
   const workers: WorkersConfig = {
     codexSandbox: rawWorkers.codexSandbox === 'workspace-write' ? 'workspace-write' : DEFAULT_WORKERS_CONFIG.codexSandbox,
+    agyStreamOutput: typeof rawWorkers.agyStreamOutput === 'boolean' ? rawWorkers.agyStreamOutput : DEFAULT_WORKERS_CONFIG.agyStreamOutput,
   };
   const rawChecks = (userConfig.checks as Record<string, unknown>) || {};
   const checks: ChecksConfig = {
@@ -1465,6 +1487,7 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
     },
     disk,
     cleanup,
+    retention,
     cacheDir,
     cacheMaxEntries,
     cacheMaxGB,

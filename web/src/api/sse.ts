@@ -146,24 +146,151 @@ export function handleRunOutput(
   }
 }
 
+export const DEFAULT_LIST_DEBOUNCE_MS = 500;
+export const DEFAULT_LIST_MAX_WAIT_MS = 2000;
+export const DEFAULT_DETAIL_DEBOUNCE_MS = 0; // immediate (microtask)
+
 export interface SSEConnectionOptions {
   deduplicateEvents?: boolean;
   coalesceInvalidations?: boolean;
   onInvalidation?: (queryKey: readonly unknown[], eventId: number) => void;
+  listDebounceMs?: number;
+  listMaxWaitMs?: number;
+  detailDebounceMs?: number;
+}
+
+export function isDetailQueryKey(queryKey: readonly unknown[]): boolean {
+  if (!queryKey || queryKey.length === 0) return false;
+  const first = queryKey[0];
+  return first === 'task' || first === 'taskLog' || first === 'runLog';
 }
 
 export function connectSSE(queryClient: QueryClient, options: SSEConnectionOptions = {}): () => void {
   const deduplicateEvents = options.deduplicateEvents !== false;
   const coalesceInvalidations = options.coalesceInvalidations !== false;
+  const listDebounceMs = options.listDebounceMs ?? DEFAULT_LIST_DEBOUNCE_MS;
+  const listMaxWaitMs = options.listMaxWaitMs ?? DEFAULT_LIST_MAX_WAIT_MS;
+  const detailDebounceMs = options.detailDebounceMs ?? DEFAULT_DETAIL_DEBOUNCE_MS;
+
   let eventSource: EventSource | null = null;
   let isClosed = false;
   let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempts = 0;
   let lastEventId: string | null = null;
   const seenEventIds = new Set<string>();
-  const pendingInvalidations = new Map<string, { queryKey: readonly unknown[]; eventId: number }>();
-  let invalidationFlushScheduled = false;
+
+  const pendingListInvalidations = new Map<string, { queryKey: readonly unknown[]; eventId: number }>();
+  let listDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let listFirstScheduledAt: number | null = null;
+  let hasDeferredListInvalidations = false;
+
+  const pendingDetailInvalidations = new Map<string, { queryKey: readonly unknown[]; eventId: number }>();
+  let detailFlushScheduled = false;
+  let detailDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   let currentEventId: number | undefined;
+
+  function flushListInvalidations(): void {
+    if (listDebounceTimer) {
+      clearTimeout(listDebounceTimer);
+      listDebounceTimer = null;
+    }
+    listFirstScheduledAt = null;
+    hasDeferredListInvalidations = false;
+
+    if (pendingListInvalidations.size === 0) return;
+    const toFlush = Array.from(pendingListInvalidations.values());
+    pendingListInvalidations.clear();
+
+    for (const { queryKey: key, eventId: cause } of toFlush) {
+      options.onInvalidation?.(key, cause);
+      queryClient.invalidateQueries({ queryKey: key });
+    }
+  }
+
+  function scheduleListInvalidation(queryKey: readonly unknown[], eventId: number): void {
+    pendingListInvalidations.set(JSON.stringify(queryKey), { queryKey, eventId });
+
+    if (typeof document !== 'undefined' && document.hidden) {
+      hasDeferredListInvalidations = true;
+      return;
+    }
+
+    if (listDebounceMs <= 0) {
+      flushListInvalidations();
+      return;
+    }
+
+    const now = Date.now();
+    if (listFirstScheduledAt === null) {
+      listFirstScheduledAt = now;
+    }
+
+    if (listDebounceTimer) {
+      clearTimeout(listDebounceTimer);
+      listDebounceTimer = null;
+    }
+
+    const timeSinceFirst = now - listFirstScheduledAt;
+    const timeRemainingMaxWait = Math.max(0, listMaxWaitMs - timeSinceFirst);
+    const delay = Math.min(listDebounceMs, timeRemainingMaxWait);
+
+    listDebounceTimer = setTimeout(() => {
+      listDebounceTimer = null;
+      if (typeof document !== 'undefined' && document.hidden) {
+        hasDeferredListInvalidations = true;
+        return;
+      }
+      flushListInvalidations();
+    }, delay);
+  }
+
+  function flushDetailInvalidations(): void {
+    if (detailDebounceTimer) {
+      clearTimeout(detailDebounceTimer);
+      detailDebounceTimer = null;
+    }
+    detailFlushScheduled = false;
+    if (pendingDetailInvalidations.size === 0) return;
+    const toFlush = Array.from(pendingDetailInvalidations.values());
+    pendingDetailInvalidations.clear();
+
+    for (const { queryKey: key, eventId: cause } of toFlush) {
+      options.onInvalidation?.(key, cause);
+      queryClient.invalidateQueries({ queryKey: key });
+    }
+  }
+
+  function scheduleDetailInvalidation(queryKey: readonly unknown[], eventId: number): void {
+    pendingDetailInvalidations.set(JSON.stringify(queryKey), { queryKey, eventId });
+
+    if (detailDebounceMs <= 0) {
+      if (detailFlushScheduled) return;
+      detailFlushScheduled = true;
+      queueMicrotask(() => {
+        detailFlushScheduled = false;
+        flushDetailInvalidations();
+      });
+      return;
+    }
+
+    if (detailDebounceTimer) {
+      clearTimeout(detailDebounceTimer);
+    }
+    detailDebounceTimer = setTimeout(() => {
+      detailDebounceTimer = null;
+      flushDetailInvalidations();
+    }, detailDebounceMs);
+  }
+
+  const handleVisibilityChange = () => {
+    if (typeof document !== 'undefined' && !document.hidden && hasDeferredListInvalidations) {
+      flushListInvalidations();
+    }
+  };
+
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+  }
 
   function invalidateQueries(queryKey: readonly unknown[]): void {
     const eventId = currentEventId;
@@ -176,17 +303,11 @@ export function connectSSE(queryClient: QueryClient, options: SSEConnectionOptio
       queryClient.invalidateQueries({ queryKey });
       return;
     }
-    pendingInvalidations.set(JSON.stringify(queryKey), { queryKey, eventId });
-    if (invalidationFlushScheduled) return;
-    invalidationFlushScheduled = true;
-    queueMicrotask(() => {
-      invalidationFlushScheduled = false;
-      for (const { queryKey: key, eventId: cause } of pendingInvalidations.values()) {
-        options.onInvalidation?.(key, cause);
-        queryClient.invalidateQueries({ queryKey: key });
-      }
-      pendingInvalidations.clear();
-    });
+    if (isDetailQueryKey(queryKey)) {
+      scheduleDetailInvalidation(queryKey, eventId);
+    } else {
+      scheduleListInvalidation(queryKey, eventId);
+    }
   }
 
   function initSSE() {
@@ -422,5 +543,18 @@ export function connectSSE(queryClient: QueryClient, options: SSEConnectionOptio
       eventSource.close();
       eventSource = null;
     }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    }
+    if (listDebounceTimer) {
+      clearTimeout(listDebounceTimer);
+      listDebounceTimer = null;
+    }
+    if (detailDebounceTimer) {
+      clearTimeout(detailDebounceTimer);
+      detailDebounceTimer = null;
+    }
+    pendingListInvalidations.clear();
+    pendingDetailInvalidations.clear();
   };
 }

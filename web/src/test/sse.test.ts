@@ -100,10 +100,15 @@ describe('Web SSE client (web/src/api/sse.ts)', () => {
       payload: { result: 'ok' },
     });
 
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['tasks'] });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['status'] });
+    // Detail keys are updated immediately
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['task', 'myproj/task-1'] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['task', 'myproj~task-1'] });
+
+    // List keys are debounced (~500ms)
+    vi.advanceTimersByTime(500);
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['tasks'] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['status'] });
 
     const invalidationsBeforeReplay = invalidateSpy.mock.calls.length;
     taskListener({
@@ -229,6 +234,158 @@ describe('Web SSE client (web/src/api/sse.ts)', () => {
     thirdInstance.onerror!();
     vi.advanceTimersByTime(1000);
     expect(mockEventSourceInstances).toHaveLength(4);
+
+    cleanup();
+  });
+
+  it('coalesces 20 events in 300ms into a single invalidation of tasks while updating detail keys', async () => {
+    const queryClient = new QueryClient();
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries');
+    const onInvalidationSpy = vi.fn();
+    const cleanup = connectSSE(queryClient, {
+      onInvalidation: onInvalidationSpy,
+    });
+
+    const taskListener = eventListenersMap['task.queued']?.[0];
+    expect(taskListener).toBeDefined();
+
+    // Emit 20 events over 300ms (every 15ms)
+    for (let i = 1; i <= 20; i++) {
+      taskListener({
+        lastEventId: String(i),
+        data: JSON.stringify({
+          type: 'task.queued',
+          taskId: 'myproj/task-1',
+          payload: { id: 'myproj/task-1' },
+        }),
+      });
+      // Flush microtasks for detail updates and advance 15ms
+      await vi.runAllTicks();
+      vi.advanceTimersByTime(15);
+    }
+
+    // Detail keys should already have been updated
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['task', 'myproj/task-1'] });
+
+    // 'tasks' queryKey has not fired yet during 300ms (since trailing debounce is 500ms)
+    const tasksCallsDuringBurst = invalidateSpy.mock.calls.filter(
+      (call) => Array.isArray(call[0]?.queryKey) && call[0].queryKey[0] === 'tasks' && call[0].queryKey.length === 1
+    );
+    expect(tasksCallsDuringBurst).toHaveLength(0);
+
+    // Advance 500ms after the burst ends
+    vi.advanceTimersByTime(500);
+
+    // 'tasks' queryKey should now have been invalidated exactly ONCE
+    const tasksCallsAfterDebounce = invalidateSpy.mock.calls.filter(
+      (call) => Array.isArray(call[0]?.queryKey) && call[0].queryKey[0] === 'tasks' && call[0].queryKey.length === 1
+    );
+    expect(tasksCallsAfterDebounce).toHaveLength(1);
+
+    // onInvalidation should have been called with the latest eventId (20)
+    expect(onInvalidationSpy).toHaveBeenCalledWith(['tasks'], 20);
+
+    cleanup();
+  });
+
+  it('defers list invalidations when document.hidden is true until tab becomes visible again', async () => {
+    const origHiddenDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden')
+      || Object.getOwnPropertyDescriptor(document, 'hidden');
+    let isHidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => isHidden,
+    });
+
+    try {
+      const queryClient = new QueryClient();
+      const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries');
+      const cleanup = connectSSE(queryClient);
+
+      const taskListener = eventListenersMap['task.done']?.[0];
+      expect(taskListener).toBeDefined();
+
+      // Emit events while tab is hidden
+      for (let i = 1; i <= 5; i++) {
+        taskListener({
+          lastEventId: String(i),
+          data: JSON.stringify({
+            type: 'task.done',
+            taskId: 'myproj/task-1',
+            payload: {},
+          }),
+        });
+        await vi.runAllTicks();
+        vi.advanceTimersByTime(100);
+      }
+
+      // Advance beyond debounce time (1000ms)
+      vi.advanceTimersByTime(1000);
+
+      // 'tasks' should NOT have been invalidated while tab was hidden
+      const tasksCallsWhileHidden = invalidateSpy.mock.calls.filter(
+        (call) => Array.isArray(call[0]?.queryKey) && call[0].queryKey[0] === 'tasks' && call[0].queryKey.length === 1
+      );
+      expect(tasksCallsWhileHidden).toHaveLength(0);
+
+      // Detail keys can still update
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['task', 'myproj/task-1'] });
+
+      // Now tab becomes visible again
+      isHidden = false;
+      document.dispatchEvent(new Event('visibilitychange'));
+
+      // 'tasks' should now be invalidated once
+      const tasksCallsAfterVisible = invalidateSpy.mock.calls.filter(
+        (call) => Array.isArray(call[0]?.queryKey) && call[0].queryKey[0] === 'tasks' && call[0].queryKey.length === 1
+      );
+      expect(tasksCallsAfterVisible).toHaveLength(1);
+
+      // Further visibilitychange without new events does not trigger another refetch
+      document.dispatchEvent(new Event('visibilitychange'));
+      const tasksCallsAfterSecondVisible = invalidateSpy.mock.calls.filter(
+        (call) => Array.isArray(call[0]?.queryKey) && call[0].queryKey[0] === 'tasks' && call[0].queryKey.length === 1
+      );
+      expect(tasksCallsAfterSecondVisible).toHaveLength(1);
+
+      cleanup();
+    } finally {
+      if (origHiddenDesc) {
+        Object.defineProperty(document, 'hidden', origHiddenDesc);
+      } else {
+        delete (document as any).hidden;
+      }
+    }
+  });
+
+  it('enforces max-wait ~2s so continuous events flush list invalidations without starving', async () => {
+    const queryClient = new QueryClient();
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries');
+    const cleanup = connectSSE(queryClient);
+
+    const taskListener = eventListenersMap['task.queued']?.[0];
+    expect(taskListener).toBeDefined();
+
+    // Emit an event every 200ms (which is < 500ms trailing debounce) for 2200ms
+    // Without maxWait, it would never fire because timer gets reset every 200ms.
+    for (let t = 0; t <= 2200; t += 200) {
+      taskListener({
+        lastEventId: String(t),
+        data: JSON.stringify({
+          type: 'task.queued',
+          taskId: 'myproj/task-1',
+          payload: {},
+        }),
+      });
+      await vi.runAllTicks();
+      vi.advanceTimersByTime(200);
+    }
+
+    // By 2200ms (which exceeds 2000ms max-wait), 'tasks' MUST have been invalidated at least once
+    const tasksCalls = invalidateSpy.mock.calls.filter(
+      (call) => Array.isArray(call[0]?.queryKey) && call[0].queryKey[0] === 'tasks' && call[0].queryKey.length === 1
+    );
+    expect(tasksCalls.length).toBeGreaterThanOrEqual(1);
 
     cleanup();
   });

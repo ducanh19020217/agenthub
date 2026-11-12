@@ -1349,7 +1349,8 @@ describe('Quota → profile marked → task runs on another profile', () => {
     expect(task.status).toBe('queued');
     expect(task.attempt).toBe(2);
     expect(task.worktreePath).toBe(worktreePath);
-    expect(fs.readFileSync(logPath, 'utf8')).toContain('Failover: p1/gemini-3.8-flash-medium → p2/gemini-3.8-flash-medium; reason');
+    // Worker log should not contain synthetic failover lines
+    expect(fs.readFileSync(logPath, 'utf8')).not.toContain('Failover:');
     const failover = eventRepo.getRecent(20).find((event) => event.type === 'task.failover');
     expect(failover).toBeDefined();
     const payload = JSON.parse(failover!.payload);
@@ -1432,7 +1433,8 @@ describe('Quota → profile marked → task runs on another profile', () => {
     expect(task.waitReason).toBe('quota');
     expect(task.attempt).toBe(3);
     expect(task.worktreePath).toBe(worktreePath);
-    expect(fs.readFileSync(logPath, 'utf8')).toContain('Failover: p1/gemini-3.8-flash-medium → waiting_quota; reason');
+    // Worker log should not contain synthetic failover lines
+    expect(fs.readFileSync(logPath, 'utf8')).not.toContain('Failover:');
     const failover = eventRepo.getRecent(20).find((event) => event.type === 'task.failover');
     expect(failover).toBeDefined();
     const payload = JSON.parse(failover!.payload);

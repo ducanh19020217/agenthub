@@ -236,12 +236,16 @@ interface RunningTask {
   // Stall & looping detection
   lastCommitCheckAt?: number;
   lastCommitCount?: number;
+  lastCommitAt?: number | null;
   lastNoCommitThresholdEmitted?: number;
   noCommitMinutes?: number;
   isLooping?: boolean;
   loopingCommand?: string;
   commandOccurrences?: Array<{ command: string; timestamp: number }>;
   lastLogOffset?: number;
+  // Changed-file count cache (async, updated alongside commit check)
+  changedFileCount?: number;
+  changedFileCheckAt?: number;
   // Resource metrics & Pause/Resume
   rss?: number;
   cpu?: number;
@@ -365,6 +369,9 @@ export class Scheduler {
   private notifiedSkippedModels = new Set<string>();
   private resourceTimer: ReturnType<typeof setInterval> | null = null;
   private poolTimer: ReturnType<typeof setInterval> | null = null;
+  private retentionTimer: ReturnType<typeof setInterval> | null = null;
+  private retentionStartupTimer: ReturnType<typeof setTimeout> | null = null;
+  private retentionRunning = false;
   private diskReader: (p: string) => DiskSpace = getDiskSpaceSync;
   private usageService?: QuotaUsageService;
   private checkingQueue: QueuedCheck[] = [];
@@ -424,7 +431,7 @@ export class Scheduler {
 
 
     if (!engineOverrides || !(engineOverrides instanceof Map)) {
-      this.engines.set('agy', new AgyEngine());
+      this.engines.set('agy', new AgyEngine(undefined, undefined, this.config.workers?.agyStreamOutput ?? true));
       const codexPath = CodexEngine.findCodexPath();
       if (codexPath) {
         this.engines.set('codex', new CodexEngine(codexPath, this.config.workers?.codexSandbox || 'off'));
@@ -796,6 +803,13 @@ export class Scheduler {
     this.resourceTimer.unref();
     this.poolTimer = setInterval(() => { void this.refillWorktreePools(); }, 10 * 60 * 1000);
     this.poolTimer.unref();
+    this.retentionStartupTimer = setTimeout(() => {
+      this.retentionStartupTimer = null;
+      void this.runRetentionBatch();
+    }, 1000);
+    this.retentionStartupTimer.unref();
+    this.retentionTimer = setInterval(() => { void this.runRetentionBatch(); }, 6 * 60 * 60 * 1000);
+    this.retentionTimer.unref();
     // Also run immediately
     queueMicrotask(() => {
       if (!this.stopped) void this.tick().catch(() => {});
@@ -818,6 +832,14 @@ export class Scheduler {
     if (this.poolTimer) {
       clearInterval(this.poolTimer);
       this.poolTimer = null;
+    }
+    if (this.retentionTimer) {
+      clearInterval(this.retentionTimer);
+      this.retentionTimer = null;
+    }
+    if (this.retentionStartupTimer) {
+      clearTimeout(this.retentionStartupTimer);
+      this.retentionStartupTimer = null;
     }
 
     // Requirement 4: Khi daemon tắt/khởi động lại: mọi task đang paused phải được SIGCONT trước (không để tiến trình đứng mãi).
@@ -1788,6 +1810,19 @@ export class Scheduler {
 
     const commitCount = timestamps.length;
     rt.lastCommitCount = commitCount;
+    rt.lastCommitAt = commitCount > 0 ? timestamps[0] : null;
+
+    // Count changed files (uncommitted + staged + untracked) in the worktree, async + cached here
+    if (repoPath) {
+      try {
+        const { stdout: statusOut } = await execFileAsync('git', ['status', '--porcelain', '-unormal'], { cwd: repoPath });
+        const changedLines = statusOut.trim().split('\n').filter(Boolean);
+        rt.changedFileCount = changedLines.length;
+        rt.changedFileCheckAt = now;
+      } catch {
+        // ignore – leave previous value
+      }
+    }
 
     const lastCommitTime = commitCount > 0 ? timestamps[0] : rt.startTime;
     const elapsedMs = Math.max(0, now - lastCommitTime);
@@ -2036,7 +2071,7 @@ export class Scheduler {
     // Conversation and worktree scans are deliberately cached: a scheduler tick
     // runs every two seconds, while a recursive scan can inspect thousands of files.
     const conversationMtime = this.getConversationMtime(rt);
-    rt.cachedConversationMtime = Math.max(rt.cachedConversationMtime, conversationMtime);
+    rt.cachedConversationMtime = Math.max(rt.cachedConversationMtime || 0, conversationMtime || 0);
     const task = this.taskRepo.get(rt.taskId);
     const worktreePath = task?.worktreePath;
     let worktreeMtime = 0;
@@ -2046,10 +2081,10 @@ export class Scheduler {
         worktreeMtime = Math.max(worktreeMtime, indexMtime > rt.startTime ? indexMtime : 0);
       } catch { /* Worktrees without an index are still checked recursively. */ }
       if (worktreeMtime <= rt.cachedConversationMtime && conversationMtime <= rt.lastActivityAt) {
-        worktreeMtime = this.getWorktreeMtime(worktreePath, rt.startTime, rt.cachedWorktreeMtime);
+        worktreeMtime = this.getWorktreeMtime(worktreePath, rt.startTime, rt.cachedWorktreeMtime || 0);
       }
     }
-    rt.cachedWorktreeMtime = Math.max(rt.cachedWorktreeMtime, worktreeMtime);
+    rt.cachedWorktreeMtime = Math.max(rt.cachedWorktreeMtime || 0, worktreeMtime);
     rt.activityCheckedAt = now;
 
     const candidates: Array<{ source: ActivitySource; mtime: number }> = [
@@ -2309,15 +2344,11 @@ export class Scheduler {
 
           // Quota failover is a continuation, not a crash/retry attempt. Keep
           // the task's run-limit counter unchanged and reuse its worktree.
+          // Do not write synthetic lines to the worker's log file; record via event/state only.
           const next = this.findModelProfilePair(task);
           const reason = next
             ? `quota exhausted on ${rt.engine.id}/${rt.model} (${rt.profileName})`
             : `quota exhausted on ${rt.engine.id}/${rt.model} (${rt.profileName}); all models/profiles unavailable`;
-          try {
-            fs.appendFileSync(run?.logPath || '', `\n[agenthub] Failover: ${rt.profileName}/${rt.model} → ${next ? `${next.profileName}/${next.model}` : 'waiting_quota'}; reason: ${reason}\n`);
-          } catch {
-            // The run log may have been removed by cleanup; the event remains authoritative.
-          }
           this.eventBus.emit('task.failover', taskId, {
             from: { profile: rt.profileName, model: rt.model, engine: rt.engine.id },
             to: next ? { profile: next.profileName, model: next.model, engine: getModelEngine(next.model) } : null,
@@ -3897,6 +3928,7 @@ export class Scheduler {
         project,
         gitHooks: projectSettings(project).worktree.gitHooks,
         codexSandbox: this.config.workers?.codexSandbox || 'off',
+        streamOutput: this.config.workers?.agyStreamOutput ?? true,
         workerCount: project.maxParallel,
       });
 
@@ -4412,7 +4444,7 @@ export class Scheduler {
     const thresholdMs = effectiveAfterHours * 60 * 60 * 1000;
     const now = Date.now();
 
-    const completedTasks = this.taskRepo.getAll().filter((task) => task.status === 'done' || task.status === 'cancelled');
+    const completedTasks = this.taskRepo.getCompletedWithWorktrees();
     for (const task of completedTasks) {
       if (!task.worktreePath) continue;
 
@@ -4504,7 +4536,7 @@ export class Scheduler {
     } catch {
       return;
     }
-    const tasks = this.taskRepo.getAll();
+    const tasks = this.taskRepo.getWorktreeReferences();
     const referenced = new Set(tasks.filter((task) => task.worktreePath).map((task) => path.resolve(task.worktreePath!)));
     for (const projectDir of projects) {
       if (!projectDir.isDirectory()) continue;
@@ -4541,6 +4573,37 @@ export class Scheduler {
     }
     } finally {
       this.orphanScanInProgress = false;
+    }
+  }
+
+  private async runRetentionBatch(): Promise<void> {
+    if (!this.db || this.retentionRunning) return;
+    this.retentionRunning = true;
+    const now = Date.now();
+    const sqliteTime = (days: number): string => new Date(now - days * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19);
+    const noisyTypes = [
+      'brain.updated', 'brain.status', 'deploy.restart_waiting', 'claude.quota_available',
+      'claude.fallback_changed', 'load.high', 'load.ok', 'task.overlap', 'review.waiting',
+    ];
+    const retainedTypes = [
+      'review.fallback', 'review.auto_merge_skipped', 'review.completed', 'review.escalated',
+      'merge.conflict', 'task.merged', 'tracker.timesheet.posted',
+    ];
+    const noisyBefore = sqliteTime(this.config.retention.noisyEventDays);
+    const eventBefore = sqliteTime(this.config.retention.eventDays);
+    const notesBefore = sqliteTime(this.config.retention.taskNoteDays);
+    let optimized = false;
+    try {
+      while (true) {
+        const deletedEvents = this.eventRepo.deleteExpired(noisyTypes, retainedTypes, noisyBefore, eventBefore, 1000);
+        const deletedNotes = this.taskNoteRepo?.deleteOldCompletedOverlaps(notesBefore, 1000) || 0;
+        if (deletedEvents > 0 || deletedNotes > 0) optimized = true;
+        if (deletedEvents < 1000 && deletedNotes < 1000) break;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      if (optimized) this.db.pragma('optimize');
+    } finally {
+      this.retentionRunning = false;
     }
   }
 

@@ -1103,4 +1103,81 @@ describe('AgentHub HTTP API Endpoints', () => {
     const updatedAppend = JSON.parse(resAppend.body);
     expect(updatedAppend.body).toBe('Initial body 1\nAppended note');
   });
+
+  it('compresses large JSON/text responses with gzip/br and does not compress small responses', async () => {
+    const repoPath = path.join(tmpDir, 'compproj');
+    initGitRepo(repoPath);
+
+    const createProjRes = await server.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: authHeaders(),
+      payload: {
+        id: 'compproj',
+        name: 'compproj',
+        path: repoPath,
+        defaultBranch: 'main',
+      },
+    });
+    expect(createProjRes.statusCode).toBe(201);
+
+    const largeBody = 'x'.repeat(2048);
+    const postRes = await server.inject({
+      method: 'POST',
+      url: '/api/tasks',
+      headers: authHeaders(),
+      payload: {
+        project: 'compproj',
+        slug: 'task-1',
+        title: 'Large task for compression testing',
+        body: largeBody,
+      },
+    });
+    expect(postRes.statusCode).toBe(201);
+
+    // Request large task list with accept-encoding: gzip
+    const resGzip = await server.inject({
+      method: 'GET',
+      url: '/api/tasks',
+      headers: {
+        ...authHeaders(),
+        'accept-encoding': 'gzip',
+      },
+    });
+    expect(resGzip.statusCode).toBe(200);
+    expect(resGzip.headers['content-encoding']).toBe('gzip');
+
+    // Request with accept-encoding: br
+    const resBr = await server.inject({
+      method: 'GET',
+      url: '/api/tasks',
+      headers: {
+        ...authHeaders(),
+        'accept-encoding': 'br',
+      },
+    });
+    expect(resBr.statusCode).toBe(200);
+    expect(resBr.headers['content-encoding']).toBe('br');
+
+    // Request without accept-encoding -> no content-encoding
+    const resIdentity = await server.inject({
+      method: 'GET',
+      url: '/api/tasks',
+      headers: authHeaders(),
+    });
+    expect(resIdentity.statusCode).toBe(200);
+    expect(resIdentity.headers['content-encoding']).toBeUndefined();
+
+    // Small JSON response (< 1KB) -> no content-encoding even with accept-encoding
+    const resSmall = await server.inject({
+      method: 'GET',
+      url: '/api/version',
+      headers: {
+        ...authHeaders(),
+        'accept-encoding': 'gzip, br',
+      },
+    });
+    expect(resSmall.statusCode).toBe(200);
+    expect(resSmall.headers['content-encoding']).toBeUndefined();
+  });
 });

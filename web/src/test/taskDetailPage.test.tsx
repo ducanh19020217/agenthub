@@ -768,5 +768,49 @@ describe('TaskDetailPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /Gửi thêm thông tin/i }));
     await vi.waitFor(() => expect(client.submitOpenProjectTriageInput).toHaveBeenCalledWith('demo', 42, 'log từ server'));
   });
+
+  it('19. Hiển thị bảng tiến độ worker (WorkerProgressPanel) khi task running và log trống', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'running',
+      currentRun: {
+        startedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+        lastOutputAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+        lastActivityAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+        activitySource: 'worktree',
+        newCommitCount: 3,
+        lastCommitAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+        changedFileCount: 2,
+      },
+    });
+    vi.spyOn(client, 'getTaskLog').mockResolvedValue('');
+
+    renderPage();
+    expect(await screen.findByTestId('worker-progress-panel')).toBeInTheDocument();
+    expect(screen.getByText(/3 commit/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 file đang thay đổi/i)).toBeInTheDocument();
+    expect(screen.getByText(/worktree/i)).toBeInTheDocument();
+  });
+
+  it('20. Hiển thị bảng tiến độ worker khi log ít dòng (sparse: error: interrupted)', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'running',
+      currentRun: {
+        startedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+        lastOutputAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+        lastActivityAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+        activitySource: 'conversation',
+        newCommitCount: null,
+        lastCommitAt: null,
+        changedFileCount: null,
+      },
+    });
+    vi.spyOn(client, 'getTaskLog').mockResolvedValue('error: interrupted\n');
+
+    renderPage();
+    expect(await screen.findByTestId('worker-progress-panel')).toBeInTheDocument();
+    expect(screen.getByText(/conversation/i)).toBeInTheDocument();
+  });
 });
 

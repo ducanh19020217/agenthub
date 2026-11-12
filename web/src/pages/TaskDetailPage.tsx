@@ -32,6 +32,7 @@ import { parseApiTime } from '../lib/time';
 import { CheckResults } from '../components/CheckResults';
 import { StatusBadge } from '../components/StatusBadge';
 import { SilentRunIndicator } from '../components/SilentRunIndicator';
+import { WorkerProgressPanel, isLogSparse } from '../components/WorkerProgressPanel';
 import { ModelBadge } from '../components/ModelBadge';
 import { useLocale } from '../context/LocaleContext';
 import { UI_Z_INDEX } from '../components/ui/layers';
@@ -956,6 +957,12 @@ export const TaskDetailPage: React.FC = () => {
       {/* 1. Live log */}
       {activeTab === 'log' && (
         <div className="relative">
+          {task?.status === 'running' && (
+            <WorkerProgressPanel
+              currentRun={task.currentRun}
+              logSparse={isLogSparse(liveLog)}
+            />
+          )}
           <div
             ref={logContainerRef}
             onScroll={handleScroll}

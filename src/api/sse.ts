@@ -10,7 +10,7 @@ function formatTimestamp(ts?: string | null): string {
 }
 
 export function registerSseRoute(fastify: FastifyInstance, service: AppService): void {
-  fastify.get('/api/events', async (req: FastifyRequest, reply: FastifyReply) => {
+  fastify.get('/api/events', { compress: false }, async (req: FastifyRequest, reply: FastifyReply) => {
     // Set standard SSE headers
     reply.raw.setHeader('Content-Type', 'text/event-stream');
     reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');

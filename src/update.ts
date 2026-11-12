@@ -1,10 +1,11 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { AgentHubConfig } from './config.js';
 import { findProjectRoot } from './cli.js';
 import { getPlatform } from './platform/index.js';
-import type { ServiceUninstallResult } from './platform/types.js';
+import type { PlatformApi, ServiceInstallResult, ServiceUninstallResult } from './platform/types.js';
 
 export function compareSemver(a: string, b: string): number {
   // "1.0.0-rc.1" -> core [1,0,0], pre ["rc", 1]. A release ranks above its pre-releases.
@@ -180,6 +181,7 @@ export interface UpdateResult {
 export interface UpdateDeps {
   projectRoot?: string;
   exec?: (command: string, args: string[], options?: { cwd?: string; stdio?: 'inherit' | 'pipe' | 'ignore' }) => ExecResult;
+  installService?: (opts: Parameters<PlatformApi['installService']>[0]) => ServiceInstallResult;
   restartService?: () => { restarted: boolean; message: string };
   log?: (msg: string) => void;
 }
@@ -264,7 +266,31 @@ Cập nhật AgentHub lên phiên bản mới nhất từ git tag, build lại v
     throw new Error(`Lỗi khi build web: ${buildWebRes.stderr || buildWebRes.stdout || 'Thất bại'}`);
   }
 
-  // 6. Restart service
+  // 6. Update service unit if already installed, then restart
+  const homeDir = os.homedir();
+  const linuxServiceFile = path.join(homeDir, '.config', 'systemd', 'user', 'agenthub.service');
+  const darwinServiceFile = path.join(homeDir, 'Library', 'LaunchAgents', 'dev.agenthub.plist');
+  const isServiceInstalled = fs.existsSync(linuxServiceFile) || fs.existsSync(darwinServiceFile);
+
+  if (isServiceInstalled) {
+    try {
+      log(`==> Đang cập nhật cấu hình service...`);
+      const cliPath = path.resolve(projectRoot, 'dist', 'cli.js');
+      const installRes = (deps.installService || ((o) => getPlatform().installService(o)))({
+        nodePath: process.execPath,
+        cliPath,
+        currentPath: process.env.PATH || '',
+        homeDir,
+        print: false,
+      });
+      if (!installRes.skipped) {
+        log(`✓ Đã cập nhật file service tại ${installRes.file}`);
+      }
+    } catch (err) {
+      log(`! Không thể tự cập nhật file service: ${(err as Error).message}`);
+    }
+  }
+
   log(`==> Đang khởi động lại service...`);
   const restartResult = deps.restartService ? deps.restartService() : getPlatform().restartService();
   if (restartResult.restarted) {

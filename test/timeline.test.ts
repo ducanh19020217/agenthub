@@ -275,4 +275,139 @@ describe('Task Timeline API (GET /api/tasks/:id/timeline)', () => {
       estimated: true,
     });
   });
+
+  it('correctly handles auto-merged task without duplicate trailing done step and computes durations', async () => {
+    const repoPath = path.join(tmpDir, 'repo-automerge');
+    initGitRepo(repoPath);
+
+    ctx.projectRepo.insert({
+      id: 'proj-auto',
+      name: 'Project Auto',
+      path: repoPath,
+      defaultBranch: 'main',
+      maxParallel: 3,
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj-auto/t4',
+      projectId: 'proj-auto',
+      slug: 't4',
+      title: 'Auto-merged task',
+      status: 'done',
+      statusChangedAt: '2026-11-12T10:18:00.000Z',
+    });
+
+    ctx.eventRepo.insert('task.queued', 'proj-auto/t4');
+    ctx.eventRepo.insert('task.running', 'proj-auto/t4', { runId: 'run-4', profile: 'w1' });
+    ctx.eventRepo.insert('task.checking', 'proj-auto/t4');
+    ctx.eventRepo.insert('task.review_ready', 'proj-auto/t4');
+    ctx.eventRepo.insert('task.done', 'proj-auto/t4', { by: 'claude-reviewer' });
+    ctx.eventRepo.insert('task.merged', 'proj-auto/t4', { mergeCommit: 'abc1234' });
+
+    ctx.db.prepare("UPDATE events SET ts = '2026-11-12 10:00:00' WHERE taskId = 'proj-auto/t4' AND type = 'task.queued'").run();
+    ctx.db.prepare("UPDATE events SET ts = '2026-11-12 10:02:00' WHERE taskId = 'proj-auto/t4' AND type = 'task.running'").run();
+    ctx.db.prepare("UPDATE events SET ts = '2026-11-12 10:14:00' WHERE taskId = 'proj-auto/t4' AND type = 'task.checking'").run();
+    ctx.db.prepare("UPDATE events SET ts = '2026-11-12 10:15:00' WHERE taskId = 'proj-auto/t4' AND type = 'task.review_ready'").run();
+    ctx.db.prepare("UPDATE events SET ts = '2026-11-12 10:18:00' WHERE taskId = 'proj-auto/t4' AND type = 'task.done'").run();
+    ctx.db.prepare("UPDATE events SET ts = '2026-11-12 10:20:00' WHERE taskId = 'proj-auto/t4' AND type = 'task.merged'").run();
+
+    const res = await server.inject({
+      method: 'GET',
+      url: '/api/tasks/proj-auto~t4/timeline',
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const timeline = res.json();
+
+    // Verify exactly 6 steps, ending with 'merged', not done -> merged -> done
+    expect(timeline.map((item: { status: string }) => item.status)).toEqual([
+      'queued',
+      'running',
+      'checking',
+      'review',
+      'done',
+      'merged',
+    ]);
+
+    expect(timeline[4]).toEqual({
+      status: 'done',
+      at: '2026-11-12T10:18:00.000Z',
+      durationMs: 2 * 60 * 1000, // 2 mins from 10:18 to 10:20
+      actor: 'claude-reviewer',
+    });
+
+    expect(timeline[5]).toEqual({
+      status: 'merged',
+      at: '2026-11-12T10:20:00.000Z',
+    });
+
+    // Also verify getTask returns identical timeline without duplicate reading
+    const taskDetail = await ctx.service.getTask('proj-auto~t4');
+    expect(taskDetail.timeline).toEqual(timeline);
+  });
+
+  it('correctly handles pushed task with status done without duplicate trailing done step', async () => {
+    const repoPath = path.join(tmpDir, 'repo-pushed');
+    initGitRepo(repoPath);
+
+    ctx.projectRepo.insert({
+      id: 'proj-push',
+      name: 'Project Push',
+      path: repoPath,
+      defaultBranch: 'main',
+      maxParallel: 3,
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj-push/t5',
+      projectId: 'proj-push',
+      slug: 't5',
+      title: 'Pushed task',
+      status: 'done',
+      statusChangedAt: '2026-11-12T10:18:00.000Z',
+      pushedAt: '2026-11-12T10:25:00.000Z',
+    });
+
+    ctx.eventRepo.insert('task.done', 'proj-push/t5', { by: 'user' });
+    ctx.eventRepo.insert('task.merged', 'proj-push/t5');
+    ctx.eventRepo.insert('task.pushed', 'proj-push/t5');
+
+    ctx.db.prepare("UPDATE events SET ts = '2026-11-12 10:18:00' WHERE taskId = 'proj-push/t5' AND type = 'task.done'").run();
+    ctx.db.prepare("UPDATE events SET ts = '2026-11-12 10:20:00' WHERE taskId = 'proj-push/t5' AND type = 'task.merged'").run();
+    ctx.db.prepare("UPDATE events SET ts = '2026-11-12 10:25:00' WHERE taskId = 'proj-push/t5' AND type = 'task.pushed'").run();
+
+    const res = await server.inject({
+      method: 'GET',
+      url: '/api/tasks/proj-push~t5/timeline',
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const timeline = res.json();
+
+    expect(timeline.map((item: { status: string }) => item.status)).toEqual([
+      'done',
+      'merged',
+      'pushed',
+    ]);
+
+    expect(timeline[0]).toEqual({
+      status: 'done',
+      at: '2026-11-12T10:18:00.000Z',
+      durationMs: 2 * 60 * 1000,
+      actor: 'user',
+    });
+
+    expect(timeline[1]).toEqual({
+      status: 'merged',
+      at: '2026-11-12T10:20:00.000Z',
+      durationMs: 5 * 60 * 1000,
+    });
+
+    expect(timeline[2]).toEqual({
+      status: 'pushed',
+      at: '2026-11-12T10:25:00.000Z',
+    });
+  });
 });

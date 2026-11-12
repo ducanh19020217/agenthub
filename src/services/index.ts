@@ -21,11 +21,13 @@ import {
   RunRow,
   ReviewRepo,
   EventRepo,
+  EventRow,
   TaskNoteRepo,
   TaskNoteRow,
   ProjectRow,
   ProfileRow,
   TaskRow,
+  ReviewRow,
   QuotaMarkRow,
   KnowledgeRepo,
   KnowledgeEntryRow,
@@ -4148,7 +4150,8 @@ export class AppService {
       modelWarnings = ['modelChain không phải JSON hợp lệ'];
     }
 
-    const events = (this.eventRepo ? this.eventRepo.getByTask(taskId) : []).map((e) => {
+    const rawEvents = this.eventRepo ? this.eventRepo.getByTask(taskId) : [];
+    const events = rawEvents.map((e) => {
       let parsedPayload: unknown = null;
       if (e.payload) {
         try {
@@ -4268,7 +4271,7 @@ export class AppService {
       sourceRef: task.sourceRef ? JSON.parse(task.sourceRef) : null,
       triage,
       derivedTasks: this.taskRepo.getDerivedFrom(taskId).map((t) => apiTask(t, this.getBlockingDiskForTask(t))),
-      timeline: this.getTaskTimeline(taskId),
+      timeline: this.buildTaskTimeline(task, rawEvents, runs, reviews),
       claudeCost: (() => { const measured = this.claudeSessionRepo?.taskCost(taskId); return measured ? { measured: measured.effectiveTokens > 0, ...measured } : { measured: false, effectiveTokens: 0, sessions: 0 }; })(),
     };
   }
@@ -4283,6 +4286,16 @@ export class AppService {
     const events = this.eventRepo ? this.eventRepo.getByTask(taskId) : [];
     const runs = this.runRepo ? this.runRepo.getByTask(taskId) : [];
     const reviews = this.reviewRepo ? this.reviewRepo.getByTask(taskId) : [];
+
+    return this.buildTaskTimeline(task, events, runs, reviews);
+  }
+
+  buildTaskTimeline(
+    task: TaskRow,
+    events: EventRow[],
+    runs: RunRow[],
+    reviews: ReviewRow[],
+  ): TaskTimelineItem[] {
 
     const candidates: Array<{
       status: string;
@@ -4439,13 +4452,18 @@ export class AppService {
         at,
         estimated: Boolean(task.statusChangedAtEstimated),
       });
-    } else if (deduplicated.at(-1)!.status !== task.status) {
-      const at = toApiTime(task.statusChangedAt ?? task.updatedAt)!;
-      deduplicated.push({
-        status: task.status,
-        at,
-        estimated: Boolean(task.statusChangedAtEstimated),
-      });
+    } else {
+      const lastStatus = deduplicated.at(-1)!.status;
+      const isDoneMatching =
+        task.status === 'done' && (lastStatus === 'done' || lastStatus === 'merged' || lastStatus === 'pushed');
+      if (lastStatus !== task.status && !isDoneMatching) {
+        const at = toApiTime(task.statusChangedAt ?? task.updatedAt)!;
+        deduplicated.push({
+          status: task.status,
+          at,
+          estimated: Boolean(task.statusChangedAtEstimated),
+        });
+      }
     }
 
     // Compute durations

@@ -305,6 +305,32 @@ describe('Worktree Auto-Cleanup', () => {
     expect(ctx.taskRepo.get('proj/queued')?.waitReason).toBe('disk');
   });
 
+  it('keeps the event loop responsive while cleanup awaits slow git', async () => {
+    const worktreePath = path.join(tmpDir, 'worktrees', 'proj', 't-slow-cleanup');
+    execFileSync('git', ['-C', projectPath, 'worktree', 'add', worktreePath, '-b', 'agenthub/t-slow-cleanup', 'main']);
+    ctx.taskRepo.insert({ id: 'proj/t-slow-cleanup', projectId: 'proj', slug: 't-slow-cleanup', title: 'Slow cleanup', status: 'done' });
+    ctx.taskRepo.update('proj/t-slow-cleanup', { worktreePath });
+    const oldTime = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString().replace('T', ' ').replace('Z', '').slice(0, 19);
+    ctx.db.prepare("UPDATE tasks SET updatedAt = ? WHERE id = 'proj/t-slow-cleanup'").run(oldTime);
+
+    const fakeBin = path.join(tmpDir, 'fake-bin');
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(fakeBin, 'git'), '#!/bin/sh\nsleep 2\nexec /usr/bin/git "$@"\n', { mode: 0o755 });
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}:${originalPath || ''}`;
+    try {
+      let ticks = 0;
+      const timer = setInterval(() => { ticks++; }, 100);
+      await ctx.scheduler.tick();
+      clearInterval(timer);
+      expect(ticks).toBeGreaterThanOrEqual(10);
+      expect(fs.existsSync(worktreePath)).toBe(false);
+      expect(ctx.taskRepo.get('proj/t-slow-cleanup')?.worktreePath).toBeNull();
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
   it('removes an orphan git worktree while preserving its branch and ignores outside paths', async () => {
     const orphanWorktree = path.join(tmpDir, 'worktrees', 'proj', 'orphan');
     execFileSync('git', ['-C', projectPath, 'worktree', 'add', orphanWorktree, '-b', 'agenthub/orphan', 'main']);

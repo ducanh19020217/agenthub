@@ -513,6 +513,33 @@ describe('Scheduler regression fixes', () => {
     delete process.env.FAKE_MODE;
   });
 
+  it('keeps the event loop responsive while startTask awaits slow git', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/slow-start', projectId: 'test-project', slug: 'slow-start', title: 'Slow start', status: 'queued' });
+    process.env.FAKE_MODE = 'slow';
+    const fakeBin = path.join(tmpDir, 'fake-bin');
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(fakeBin, 'git'), '#!/bin/sh\nsleep 2\nexec /usr/bin/git "$@"\n', { mode: 0o755 });
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}:${originalPath || ''}`;
+    const scheduler = makeScheduler();
+    try {
+      let ticks = 0;
+      const timer = setInterval(() => { ticks++; }, 100);
+      await scheduler.tick();
+      clearInterval(timer);
+      expect(ticks).toBeGreaterThanOrEqual(10);
+      expect(taskRepo.get('test-project/slow-start')?.status).toBe('running');
+    } finally {
+      scheduler.cancelAll();
+      scheduler.stop();
+      process.env.PATH = originalPath;
+      delete process.env.FAKE_MODE;
+    }
+  });
+
   it('stop leaves detached workers running and cancelAll cancels them explicitly', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);

@@ -310,7 +310,7 @@ export interface UiConfig {
 
 export const DEFAULT_WORKERS_CONFIG: WorkersConfig = {
   codexSandbox: 'off',
-  agyStreamOutput: false,
+  agyStreamOutput: true,
 };
 
 /** Đọc cấu hình đánh thức quota, bỏ giá trị sai và dùng mặc định cho phần thiếu. */

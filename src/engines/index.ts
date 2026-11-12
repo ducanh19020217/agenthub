@@ -101,7 +101,7 @@ export class AgyEngine implements Engine {
   private agyPath: string | null;
   private streamOutput: boolean;
 
-  constructor(agyPath?: string, customHome?: string, streamOutput = false) {
+  constructor(agyPath?: string, customHome?: string, streamOutput = true) {
     this.agyPath = agyPath || findAgyBin(customHome);
     this.streamOutput = streamOutput;
   }

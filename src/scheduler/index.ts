@@ -422,7 +422,7 @@ export class Scheduler {
 
 
     if (!engineOverrides || !(engineOverrides instanceof Map)) {
-      this.engines.set('agy', new AgyEngine(undefined, undefined, Boolean(this.config.workers?.agyStreamOutput)));
+      this.engines.set('agy', new AgyEngine(undefined, undefined, this.config.workers?.agyStreamOutput ?? true));
       const codexPath = CodexEngine.findCodexPath();
       if (codexPath) {
         this.engines.set('codex', new CodexEngine(codexPath, this.config.workers?.codexSandbox || 'off'));
@@ -3806,7 +3806,7 @@ export class Scheduler {
         project,
         gitHooks: projectSettings(project).worktree.gitHooks,
         codexSandbox: this.config.workers?.codexSandbox || 'off',
-        streamOutput: this.config.workers?.agyStreamOutput,
+        streamOutput: this.config.workers?.agyStreamOutput ?? true,
         workerCount: project.maxParallel,
       });
 

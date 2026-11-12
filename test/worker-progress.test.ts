@@ -77,15 +77,15 @@ describe('Worker Progress Tracking & AgyEngine Stream Option', () => {
   });
 
   it('1. AgyEngine supports agyStreamOutput config and opts.streamOutput flag', async () => {
-    // Check config defaults
-    expect(config.workers.agyStreamOutput).toBe(false);
+    // Check config defaults (agyStreamOutput defaults to true)
+    expect(config.workers.agyStreamOutput).toBe(true);
 
-    // Custom config with agyStreamOutput: true
+    // Custom config with agyStreamOutput: false
     const customCfgPath = path.join(tmpDir, 'custom-cfg');
     fs.mkdirSync(customCfgPath, { recursive: true });
-    fs.writeFileSync(path.join(customCfgPath, 'config.json'), JSON.stringify({ workers: { agyStreamOutput: true } }));
+    fs.writeFileSync(path.join(customCfgPath, 'config.json'), JSON.stringify({ workers: { agyStreamOutput: false } }));
     const customCfg = loadConfig(customCfgPath);
-    expect(customCfg.workers.agyStreamOutput).toBe(true);
+    expect(customCfg.workers.agyStreamOutput).toBe(false);
 
     // Mock binary to inspect CLI args
     const dumpScript = path.join(tmpDir, 'dump-args.mjs');
@@ -103,7 +103,7 @@ process.exit(0);
 
     const profile = ctx.profileRepo.get('p1')!;
 
-    // By default: --output-format stream-json is omitted
+    // By default: --output-format stream-json is included
     const defaultEngine = new AgyEngine(dumpScript);
     const outDefault = path.join(tmpDir, 'args-default.json');
     const childDefault = defaultEngine.spawn({
@@ -115,24 +115,24 @@ process.exit(0);
     });
     await new Promise<void>((resolve) => childDefault.on('exit', () => resolve()));
     const defaultArgs: string[] = JSON.parse(fs.readFileSync(outDefault, 'utf8'));
-    expect(defaultArgs).not.toContain('--output-format');
+    expect(defaultArgs).toContain('--output-format');
+    expect(defaultArgs[defaultArgs.indexOf('--output-format') + 1]).toBe('stream-json');
 
-    // When streamOutput = true on engine or spawn opts:
-    const streamEngine = new AgyEngine(dumpScript, undefined, true);
-    const outStream = path.join(tmpDir, 'args-stream.json');
-    const childStream = streamEngine.spawn({
+    // When streamOutput = false on engine:
+    const disabledEngine = new AgyEngine(dumpScript, undefined, false);
+    const outDisabled = path.join(tmpDir, 'args-disabled.json');
+    const childDisabled = disabledEngine.spawn({
       profile,
       model: 'gemini-3.8-flash-high',
       cwd: tmpDir,
-      prompt: outStream,
-      logPath: path.join(tmpDir, 'stream.log'),
+      prompt: outDisabled,
+      logPath: path.join(tmpDir, 'disabled.log'),
     });
-    await new Promise<void>((resolve) => childStream.on('exit', () => resolve()));
-    const streamArgs: string[] = JSON.parse(fs.readFileSync(outStream, 'utf8'));
-    expect(streamArgs).toContain('--output-format');
-    expect(streamArgs[streamArgs.indexOf('--output-format') + 1]).toBe('stream-json');
+    await new Promise<void>((resolve) => childDisabled.on('exit', () => resolve()));
+    const disabledArgs: string[] = JSON.parse(fs.readFileSync(outDisabled, 'utf8'));
+    expect(disabledArgs).not.toContain('--output-format');
 
-    // Per-call override via opts.streamOutput = true
+    // Per-call override via opts.streamOutput = false
     const outOverride = path.join(tmpDir, 'args-override.json');
     const childOverride = defaultEngine.spawn({
       profile,
@@ -140,12 +140,11 @@ process.exit(0);
       cwd: tmpDir,
       prompt: outOverride,
       logPath: path.join(tmpDir, 'override.log'),
-      streamOutput: true,
+      streamOutput: false,
     });
     await new Promise<void>((resolve) => childOverride.on('exit', () => resolve()));
     const overrideArgs: string[] = JSON.parse(fs.readFileSync(outOverride, 'utf8'));
-    expect(overrideArgs).toContain('--output-format');
-    expect(overrideArgs[overrideArgs.indexOf('--output-format') + 1]).toBe('stream-json');
+    expect(overrideArgs).not.toContain('--output-format');
   });
 
   it('2. AgyEngine quota and auth error detection works with stream-json log entries', () => {

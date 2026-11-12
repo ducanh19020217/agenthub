@@ -122,4 +122,134 @@ describe('Task statusChangedAt and backfill', () => {
 
     db.close();
   });
+
+  it('preserves statusChangedAt and statusChangedAtEstimated when status is unchanged', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-status-preserve-test-'));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, 'hub.db');
+
+    const db = openDatabase(dbPath);
+    const taskRepo = new TaskRepo(db);
+    db.prepare("INSERT INTO projects (id, name, path) VALUES ('p', 'Project', '/tmp')").run();
+
+    const originalTime = '2026-11-12T00:00:00.000Z';
+    taskRepo.insert({
+      id: 'p/task-same',
+      projectId: 'p',
+      slug: 'task-same',
+      title: 'Task Same Status',
+      status: 'queued',
+      statusChangedAt: originalTime,
+    });
+
+    // Mark as estimated to verify estimated flag is also preserved
+    db.prepare('UPDATE tasks SET statusChangedAtEstimated = 1 WHERE id = ?').run('p/task-same');
+
+    const before = taskRepo.get('p/task-same')!;
+    expect(before.status).toBe('queued');
+    expect(before.statusChangedAt).toBe(originalTime);
+    expect(before.statusChangedAtEstimated).toBe(1);
+
+    // 1. updateStatus without changing status
+    taskRepo.updateStatus('p/task-same', 'queued', 'focus');
+    const afterUpdateStatus = taskRepo.get('p/task-same')!;
+    expect(afterUpdateStatus.status).toBe('queued');
+    expect(afterUpdateStatus.waitReason).toBe('focus');
+    expect(afterUpdateStatus.statusChangedAt).toBe(originalTime);
+    expect(afterUpdateStatus.statusChangedAtEstimated).toBe(1);
+
+    // 2. update() without changing status
+    taskRepo.update('p/task-same', { status: 'queued', waitReason: 'disk' });
+    const afterUpdate = taskRepo.get('p/task-same')!;
+    expect(afterUpdate.status).toBe('queued');
+    expect(afterUpdate.waitReason).toBe('disk');
+    expect(afterUpdate.statusChangedAt).toBe(originalTime);
+    expect(afterUpdate.statusChangedAtEstimated).toBe(1);
+
+    // 3. updateStatus WITH a status change refreshes timestamp and resets estimated to 0
+    taskRepo.updateStatus('p/task-same', 'running');
+    const afterStatusChange = taskRepo.get('p/task-same')!;
+    expect(afterStatusChange.status).toBe('running');
+    expect(afterStatusChange.statusChangedAt).not.toBe(originalTime);
+    expect(afterStatusChange.statusChangedAtEstimated).toBe(0);
+
+    // 4. update() WITH a status change refreshes timestamp and resets estimated to 0
+    const runningTime = afterStatusChange.statusChangedAt;
+    taskRepo.update('p/task-same', { status: 'done' });
+    const afterUpdateChange = taskRepo.get('p/task-same')!;
+    expect(afterUpdateChange.status).toBe('done');
+    expect(afterUpdateChange.statusChangedAt).not.toBe(runningTime);
+    expect(afterUpdateChange.statusChangedAtEstimated).toBe(0);
+
+    db.close();
+  });
+
+  it('paginates correctly using cursor when sort=statusChangedAt', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-cursor-pagination-test-'));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, 'hub.db');
+
+    const db = openDatabase(dbPath);
+    const taskRepo = new TaskRepo(db);
+    db.prepare("INSERT INTO projects (id, name, path) VALUES ('p', 'Project', '/tmp')").run();
+
+    // Insert 5 tasks with distinct statusChangedAt
+    const timestamps = [
+      '2026-11-12T01:00:00.000Z',
+      '2026-11-12T02:00:00.000Z',
+      '2026-11-12T03:00:00.000Z',
+      '2026-11-12T04:00:00.000Z',
+      '2026-11-12T05:00:00.000Z',
+    ];
+
+    for (let i = 0; i < timestamps.length; i++) {
+      taskRepo.insert({
+        id: `p/task-${i + 1}`,
+        projectId: 'p',
+        slug: `task-${i + 1}`,
+        title: `Task ${i + 1}`,
+        status: 'done',
+        statusChangedAt: timestamps[i],
+      });
+    }
+
+    // Test DESC order pagination with limit 2
+    const page1Desc = taskRepo.page({ sort: 'statusChangedAt', order: 'desc', limit: 2 });
+    expect(page1Desc.total).toBe(5);
+    expect(page1Desc.items).toHaveLength(2);
+    expect(page1Desc.items[0].id).toBe('p/task-5');
+    expect(page1Desc.items[1].id).toBe('p/task-4');
+    expect(page1Desc.nextCursor).toBeDefined();
+
+    const page2Desc = taskRepo.page({ sort: 'statusChangedAt', order: 'desc', limit: 2, cursor: page1Desc.nextCursor! });
+    expect(page2Desc.items).toHaveLength(2);
+    expect(page2Desc.items[0].id).toBe('p/task-3');
+    expect(page2Desc.items[1].id).toBe('p/task-2');
+    expect(page2Desc.nextCursor).toBeDefined();
+
+    const page3Desc = taskRepo.page({ sort: 'statusChangedAt', order: 'desc', limit: 2, cursor: page2Desc.nextCursor! });
+    expect(page3Desc.items).toHaveLength(1);
+    expect(page3Desc.items[0].id).toBe('p/task-1');
+    expect(page3Desc.nextCursor).toBeNull();
+
+    // Test ASC order pagination with limit 2
+    const page1Asc = taskRepo.page({ sort: 'statusChangedAt', order: 'asc', limit: 2 });
+    expect(page1Asc.items).toHaveLength(2);
+    expect(page1Asc.items[0].id).toBe('p/task-1');
+    expect(page1Asc.items[1].id).toBe('p/task-2');
+    expect(page1Asc.nextCursor).toBeDefined();
+
+    const page2Asc = taskRepo.page({ sort: 'statusChangedAt', order: 'asc', limit: 2, cursor: page1Asc.nextCursor! });
+    expect(page2Asc.items).toHaveLength(2);
+    expect(page2Asc.items[0].id).toBe('p/task-3');
+    expect(page2Asc.items[1].id).toBe('p/task-4');
+    expect(page2Asc.nextCursor).toBeDefined();
+
+    const page3Asc = taskRepo.page({ sort: 'statusChangedAt', order: 'asc', limit: 2, cursor: page2Asc.nextCursor! });
+    expect(page3Asc.items).toHaveLength(1);
+    expect(page3Asc.items[0].id).toBe('p/task-5');
+    expect(page3Asc.nextCursor).toBeNull();
+
+    db.close();
+  });
 });

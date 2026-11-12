@@ -2329,15 +2329,27 @@ export class TaskRepo {
   }
 
   updateStatus(id: string, status: string, waitReason: WaitReason = null, statusChangedAt?: string): void {
-    const changedAt = statusChangedAt ?? new Date().toISOString();
-    if (status === 'waiting_quota' || (status === 'queued' && waitReason !== null)) {
+    const waitClause = (status === 'waiting_quota' || (status === 'queued' && waitReason !== null))
+      ? 'waitReason = ?,'
+      : 'waitReason = NULL,';
+    const waitArgs = (status === 'waiting_quota' || (status === 'queued' && waitReason !== null))
+      ? [waitReason]
+      : [];
+
+    if (statusChangedAt !== undefined) {
       this.db
-        .prepare("UPDATE tasks SET status = ?, waitReason = ?, statusChangedAt = ?, statusChangedAtEstimated = 0, updatedAt = datetime('now') WHERE id = ?")
-        .run(status, waitReason, changedAt, id);
+        .prepare(`UPDATE tasks SET status = ?, ${waitClause} statusChangedAt = ?, statusChangedAtEstimated = 0, updatedAt = datetime('now') WHERE id = ?`)
+        .run(status, ...waitArgs, statusChangedAt, id);
     } else {
+      const now = new Date().toISOString();
       this.db
-        .prepare("UPDATE tasks SET status = ?, waitReason = NULL, statusChangedAt = ?, statusChangedAtEstimated = 0, updatedAt = datetime('now') WHERE id = ?")
-        .run(status, changedAt, id);
+        .prepare(
+          `UPDATE tasks SET status = ?, ${waitClause} ` +
+          `statusChangedAt = CASE WHEN status = ? THEN coalesce(statusChangedAt, ?) ELSE ? END, ` +
+          `statusChangedAtEstimated = CASE WHEN status = ? THEN statusChangedAtEstimated ELSE 0 END, ` +
+          `updatedAt = datetime('now') WHERE id = ?`
+        )
+        .run(status, ...waitArgs, status, now, now, status, id);
     }
   }
 
@@ -2374,11 +2386,20 @@ export class TaskRepo {
         fieldsToApply.waitReason = null;
       }
       if (fieldsToApply.statusChangedAt === undefined) {
-        fieldsToApply.statusChangedAt = new Date().toISOString();
+        const now = new Date().toISOString();
+        sets.push("statusChangedAt = CASE WHEN status = ? THEN coalesce(statusChangedAt, ?) ELSE ? END");
+        values.push(fieldsToApply.status, now, now);
+        if (fieldsToApply.statusChangedAtEstimated === undefined) {
+          sets.push("statusChangedAtEstimated = CASE WHEN status = ? THEN statusChangedAtEstimated ELSE 0 END");
+          values.push(fieldsToApply.status);
+        }
+      } else if (fieldsToApply.statusChangedAtEstimated === undefined) {
         fieldsToApply.statusChangedAtEstimated = 0;
       }
     }
     for (const [key, value] of Object.entries(fieldsToApply)) {
+      if (key === 'statusChangedAt' && fields.statusChangedAt === undefined) continue;
+      if (key === 'statusChangedAtEstimated' && fields.statusChangedAtEstimated === undefined && 'status' in fields) continue;
       sets.push(`${key} = ?`);
       values.push(value);
     }

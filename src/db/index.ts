@@ -1053,6 +1053,7 @@ export const MIGRATIONS: string[] = [
   // Migration 73: explain queued tasks while a safe restart drain is active.
   `
   PRAGMA foreign_keys = OFF;
+  DROP TABLE IF EXISTS tasks_new;
   CREATE TABLE tasks_new (
     id TEXT PRIMARY KEY, projectId TEXT NOT NULL, slug TEXT NOT NULL, title TEXT NOT NULL, body TEXT,
     level TEXT NOT NULL DEFAULT 'easy' CHECK(level IN ('easy','hard')), modelChain TEXT, baseRef TEXT,
@@ -1067,9 +1068,24 @@ export const MIGRATIONS: string[] = [
     doneReport TEXT, blockedReport TEXT, diffStat TEXT, sourceRef TEXT, reviewStep INTEGER NOT NULL DEFAULT 0, batchId TEXT,
     creationSessionId TEXT, creationGoal TEXT, externalRef TEXT,
     cancelReason TEXT, cancelledBy TEXT, pushedAt TEXT, pushResult TEXT,
+    runCount INTEGER NOT NULL DEFAULT 0, consecutiveCrashes INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (projectId) REFERENCES projects(id)
   );
-  INSERT INTO tasks_new SELECT * FROM tasks;
+  INSERT INTO tasks_new (
+    id, projectId, slug, title, body, level, modelChain, baseRef, branch, worktreePath,
+    status, dependsOn, attempt, resume, createdAt, updatedAt, notBefore, transientRetries, slot,
+    checkFixAttempts, reviewerChangesRequested, reviewerEscalated, reviewerEscalatedAt,
+    reviewerEscalationReason, waitReason, doneReport, blockedReport, diffStat, sourceRef, reviewStep, batchId,
+    creationSessionId, creationGoal, externalRef, cancelReason, cancelledBy, pushedAt, pushResult,
+    runCount, consecutiveCrashes
+  ) SELECT
+    id, projectId, slug, title, body, level, modelChain, baseRef, branch, worktreePath,
+    status, dependsOn, attempt, resume, createdAt, updatedAt, notBefore, transientRetries, slot,
+    checkFixAttempts, reviewerChangesRequested, reviewerEscalated, reviewerEscalatedAt,
+    reviewerEscalationReason, waitReason, doneReport, blockedReport, diffStat, sourceRef, reviewStep, batchId,
+    creationSessionId, creationGoal, externalRef, cancelReason, cancelledBy, pushedAt, pushResult,
+    runCount, consecutiveCrashes
+  FROM tasks;
   DROP TABLE tasks;
   ALTER TABLE tasks_new RENAME TO tasks;
   CREATE INDEX IF NOT EXISTS idx_tasks_project_created ON tasks(projectId, createdAt);
@@ -1102,6 +1118,7 @@ export function openDatabase(dbPath: string): Database.Database {
 
   for (let i = currentVersion + 1; i < MIGRATIONS.length; i++) {
     try {
+      if (i === 73) ensureTaskCounterColumns(db);
       db.exec(MIGRATIONS[i]);
     } catch (error) {
       if (String(error).includes('duplicate column name')) {
@@ -1189,11 +1206,16 @@ function ensureSchedulerLimitColumns(db: Database.Database): void {
       if (!String(error).includes('duplicate column name')) throw error;
     }
   };
-  add('tasks', 'runCount', 'INTEGER NOT NULL DEFAULT 0');
-  add('tasks', 'consecutiveCrashes', 'INTEGER NOT NULL DEFAULT 0');
+  ensureTaskCounterColumns(db);
   add('profiles', 'consecutiveCrashes', 'INTEGER NOT NULL DEFAULT 0');
   add('profiles', 'lastCrashAt', 'INTEGER');
   add('profiles', 'coolingUntil', 'INTEGER');
+}
+
+/** Counters live outside MIGRATIONS, but later table rebuilds must carry them forward. */
+function ensureTaskCounterColumns(db: Database.Database): void {
+  if (!hasColumn(db, 'tasks', 'runCount')) db.exec('ALTER TABLE tasks ADD COLUMN runCount INTEGER NOT NULL DEFAULT 0');
+  if (!hasColumn(db, 'tasks', 'consecutiveCrashes')) db.exec('ALTER TABLE tasks ADD COLUMN consecutiveCrashes INTEGER NOT NULL DEFAULT 0');
 }
 
 function ensureCheckResultsColumns(db: Database.Database): void {
@@ -2350,6 +2372,12 @@ export class EventRepo {
     return this.db
       .prepare('SELECT * FROM events WHERE id > ? ORDER BY id')
       .all(afterId) as EventRow[];
+  }
+
+  getLatestProfileAuthExpired(profileName: string): EventRow | undefined {
+    return this.db.prepare(`SELECT * FROM events
+      WHERE type = 'profile.auth_expired' AND json_extract(payload, '$.name') = ?
+      ORDER BY id DESC LIMIT 1`).get(profileName) as EventRow | undefined;
   }
 
   getByTask(taskId: string): EventRow[] {

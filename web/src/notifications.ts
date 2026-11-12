@@ -250,7 +250,8 @@ export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 
   }
   if (event.type === 'profile.auth_expired') {
     const name = typeof payload.name === 'string' ? payload.name : (isEn ? 'profile' : 'tài khoản');
-    return isEn ? `Profile ${name} requires re-authentication` : `Hồ sơ ${name} cần đăng nhập lại`;
+    const command = typeof payload.loginCommand === 'string' ? payload.loginCommand : 'claude /login';
+    return isEn ? `Profile ${name} requires re-authentication. Run: ${command}` : `Hồ sơ ${name} cần đăng nhập lại. Chạy: ${command}`;
   }
   if (event.type === 'ci.failed') {
     const projId = (typeof payload.projectId === 'string' ? payload.projectId : event.taskId) || (isEn ? 'project' : 'dự án');

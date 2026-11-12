@@ -1622,6 +1622,21 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(calls).toHaveLength(0);
     });
 
+    it('sends critical Claude auth expiry with the escaped login command regardless of fallback notification setting', async () => {
+      await bot.stop();
+      config.telegram.notify.fallback = false;
+      bot.handleEvent('profile.auth_expired', undefined, {
+        name: 'NCS',
+        loginCommand: 'CLAUDE_CONFIG_DIR=/tmp/NCS & work claude /login',
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      const calls = recordedCalls.filter((call) => call.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('NCS');
+      expect(calls[0].body?.text).toContain('CLAUDE_CONFIG_DIR=/tmp/NCS &amp; work claude /login');
+    });
+
     it('silences partial family exhaustion and only broadcasts critical outage when capacity is 0', async () => {
       await bot.stop();
       for (const name of ['p1', 'p2']) {

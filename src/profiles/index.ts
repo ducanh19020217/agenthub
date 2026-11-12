@@ -19,8 +19,14 @@ export function resolveClaudeProfile(
   configuredExplicitly = false,
 ): string {
   if (configuredExplicitly && configuredProfile) return configuredProfile;
-  const existing = profileRepo.getAll().find((profile) => profile.engine === 'claude' && profile.kind === 'system');
-  return existing?.name || configuredProfile || 'claude-default';
+  const profiles = profileRepo.getAll().filter((profile) => profile.engine === 'claude' && profile.authState !== 'not_logged_in');
+  const existing = profiles.find((profile) => profile.kind === 'system');
+  if (existing) return existing.name;
+  const configuredExpired = configuredProfile
+    ? profileRepo.getAll().some((profile) => profile.name === configuredProfile && profile.authState === 'not_logged_in')
+    : false;
+  if (configuredProfile && !configuredExpired) return configuredProfile;
+  return profiles[0]?.name || configuredProfile || 'claude-default';
 }
 
 /** Resolve Codex profile: explicitly configured or the logged-in profile with the most remaining quota. */
@@ -470,6 +476,7 @@ export function isProfileLoggedIn(profile: ProfileRow): boolean {
     return Boolean(profile.email) || profile.authState === 'ok';
   }
   if (profile.engine === 'claude') {
+    if (profile.authState === 'not_logged_in') return false;
     const home = profile.home || os.homedir();
     const accountFile = path.join(home, '.claude.json');
     try {

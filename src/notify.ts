@@ -695,7 +695,8 @@ export class NotificationService {
 
       case 'profile.auth_expired': {
         const name = typeof p.name === 'string' ? p.name : 'tài khoản';
-        this.notify(`Hồ sơ ${name} cần đăng nhập lại`, 'normal');
+        const command = typeof p.loginCommand === 'string' ? p.loginCommand : 'claude /login';
+        this.notify(`Hồ sơ ${name} cần đăng nhập lại. Chạy: ${command}`, 'critical');
         break;
       }
 

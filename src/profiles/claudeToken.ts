@@ -23,6 +23,17 @@ export interface ClaudeVerifyResult {
   plan?: string | null;
 }
 
+/** Read an OAuth access token for verification without ever exposing it to logs or API output. */
+export function readClaudeOAuthAccessToken(home: string, systemProfile: boolean): string | null {
+  const file = path.join(home, systemProfile ? '.claude/.credentials.json' : '.credentials.json');
+  try {
+    const value = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+    const oauth = value.claudeAiOauth;
+    const token = oauth && typeof oauth === 'object' ? (oauth as Record<string, unknown>).accessToken : undefined;
+    return typeof token === 'string' && token.trim() ? token : null;
+  } catch { return null; }
+}
+
 /**
  * Verify Claude OAuth token via Anthropic OAuth profile endpoint.
  * Does NOT invoke Claude CLI.

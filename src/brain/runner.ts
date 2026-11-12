@@ -356,6 +356,7 @@ export class BrainRunner {
         this.ensureSession(null);
       }
     }
+    this.opts.eventBus.emit('brain.profiles_synced', undefined, {});
   }
 
   private profileName(department?: { id: string }): string {

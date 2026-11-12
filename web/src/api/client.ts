@@ -666,7 +666,7 @@ export interface TaskQuery {
   limit?: number;
   cursor?: string;
   offset?: number;
-  sort?: 'createdAt' | 'updatedAt' | 'title' | 'slug';
+  sort?: 'createdAt' | 'updatedAt' | 'title' | 'slug' | 'statusChangedAt';
   order?: 'asc' | 'desc';
 }
 

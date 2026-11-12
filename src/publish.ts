@@ -23,13 +23,31 @@ import {
 const execFileAsync = promisify(execFile);
 
 const activePublishProjects = new Set<string>();
+const publishLockReleaseListeners = new Map<string, Array<() => void>>();
 
 export function isProjectPublishing(projectId: string): boolean {
   return activePublishProjects.has(projectId);
 }
 
+export function onProjectPublishLockReleased(projectId: string, callback: () => void): () => void {
+  let list = publishLockReleaseListeners.get(projectId);
+  if (!list) {
+    list = [];
+    publishLockReleaseListeners.set(projectId, list);
+  }
+  list.push(callback);
+  return () => {
+    const arr = publishLockReleaseListeners.get(projectId);
+    if (arr) {
+      const idx = arr.indexOf(callback);
+      if (idx !== -1) arr.splice(idx, 1);
+    }
+  };
+}
+
 export function clearPublishLocks(): void {
   activePublishProjects.clear();
+  publishLockReleaseListeners.clear();
 }
 
 /**
@@ -44,6 +62,17 @@ export async function withProjectPublishLock<T>(projectId: string, fn: () => Pro
     return await fn();
   } finally {
     activePublishProjects.delete(projectId);
+    const listeners = publishLockReleaseListeners.get(projectId);
+    if (listeners && listeners.length > 0) {
+      publishLockReleaseListeners.delete(projectId);
+      for (const cb of listeners) {
+        try {
+          cb();
+        } catch (e) {
+          console.error(`[publish] Error in publish lock release listener for project ${projectId}:`, e);
+        }
+      }
+    }
   }
 }
 
@@ -368,6 +397,7 @@ async function findTasksToAudit(
   repoPath: string,
   env: NodeJS.ProcessEnv,
   deps: PublishTaskDeps,
+  sourceSha?: string | null,
 ): Promise<TaskRow[]> {
   const mainTask = deps.taskRepo.get(taskId);
   const allTasks = deps.taskRepo.getByProject
@@ -388,12 +418,12 @@ async function findTasksToAudit(
     const tBranch = t.branch || `agenthub/${t.slug}`;
     const branchRef = `refs/heads/${tBranch}`;
     const branchExists = await refExists(repoPath, branchRef, env);
-    const mergeCommit = await findMergeCommitForTask(repoPath, t, [sourceBranch, targetBranch], env);
+    const mergeCommit = await findMergeCommitForTask(repoPath, t, [sourceSha || sourceBranch, targetBranch], env);
 
     const taskRef = branchExists ? branchRef : mergeCommit;
 
     if (!taskRef) {
-      if (t.id === taskId) {
+      if (t.id === taskId && !hasSource) {
         tasksToAudit.push(t);
       }
       continue;
@@ -409,21 +439,23 @@ async function findTasksToAudit(
     }
 
     let mergedToPushTarget = false;
-    if (hasSource && (await isAncestor(repoPath, taskRef, sourceRef, env))) {
+    if (hasSource && (await isAncestor(repoPath, taskRef, sourceSha || sourceRef, env))) {
       mergedToPushTarget = true;
     } else if (hasTarget && (await isAncestor(repoPath, taskRef, targetRef, env))) {
       mergedToPushTarget = true;
-    } else if (branchExists && t.id === taskId) {
+    } else if (!hasSource && branchExists && t.id === taskId) {
       mergedToPushTarget = true;
     }
 
-    if (mergedToPushTarget || t.id === taskId) {
+    if (mergedToPushTarget) {
       tasksToAudit.push(t);
     }
   }
 
   if (tasksToAudit.length === 0 && mainTask && (mainTask.status === 'done' || mainTask.status === 'pushed')) {
-    tasksToAudit.push(mainTask);
+    if (!hasSource || (sourceSha && (await isAncestor(repoPath, mainTask.branch ? `refs/heads/${mainTask.branch}` : 'HEAD', sourceSha, env)))) {
+      tasksToAudit.push(mainTask);
+    }
   }
 
   return tasksToAudit;
@@ -794,6 +826,13 @@ export async function publishTask(
       ? remoteRef
       : ((await refExists(repoPath, `refs/heads/${targetBranch}`, env)) ? `refs/heads/${targetBranch}` : targetBranch);
 
+    // Snapshot source branch SHA before computing tasksToAudit so concurrent merges are not included without audit
+    const sourceRef = `refs/heads/${sourceBranch}`;
+    let sourceSha: string | null = null;
+    if (await refExists(repoPath, sourceRef, env)) {
+      sourceSha = await runGit(['-C', repoPath, 'rev-parse', sourceRef], repoPath, env);
+    }
+
     // --- Pre-Publish Audit Gate ---
     const isManual = Boolean(options?.manual);
     const isSkipAudit = isManual && Boolean(options?.skipAudit);
@@ -817,6 +856,7 @@ export async function publishTask(
         repoPath,
         env,
         deps,
+        sourceSha,
       );
 
       const maxTasks = currentSettings.publish?.audit?.maxTasks ?? 10;
@@ -1191,7 +1231,8 @@ export async function publishTask(
       // 3. Merge source branch into target branch (if sourceBranch differs or has commits)
       const sourceExists = await refExists(repoPath, `refs/heads/${sourceBranch}`, env);
       if (sourceExists) {
-        const isAncestor = await execFileAsync('git', ['-C', worktreePath, 'merge-base', '--is-ancestor', sourceBranch, 'HEAD'], { env })
+        const commitToMerge = sourceSha || sourceBranch;
+        const isAncestor = await execFileAsync('git', ['-C', worktreePath, 'merge-base', '--is-ancestor', commitToMerge, 'HEAD'], { env })
           .then(() => true)
           .catch(() => false);
 
@@ -1199,7 +1240,7 @@ export async function publishTask(
           const identity = await gitIdentityArgs(worktreePath, env);
           const mergeMsg = `Merge branch '${sourceBranch}' into ${targetBranch}`;
           try {
-            await runGit(['-C', worktreePath, ...identity, 'merge', '--no-ff', sourceBranch, '-m', mergeMsg], worktreePath, env);
+            await runGit(['-C', worktreePath, ...identity, 'merge', '--no-ff', commitToMerge, '-m', mergeMsg], worktreePath, env);
           } catch (err) {
             try {
               await runGit(['-C', worktreePath, 'merge', '--abort'], worktreePath, env);
@@ -1234,8 +1275,9 @@ export async function publishTask(
       if (currentSettings.integration?.enabled && currentSettings.publish?.pushIntegrationBranch !== false) {
         const integrationBranch = currentSettings.integration.branch || 'agenthub/integration';
         if (await refExists(repoPath, `refs/heads/${integrationBranch}`, env)) {
+          const pushSource = (integrationBranch === sourceBranch && sourceSha) ? sourceSha : `refs/heads/${integrationBranch}`;
           await runGit(
-            ['-C', worktreePath, 'push', remote, `refs/heads/${integrationBranch}:refs/heads/${integrationBranch}`],
+            ['-C', worktreePath, 'push', remote, `${pushSource}:refs/heads/${integrationBranch}`],
             worktreePath,
             env,
           );
@@ -1283,38 +1325,43 @@ export async function publishTask(
         }
       }
 
-      // Ensure root taskId is updated even if not in tasksToAudit
+      // Ensure root taskId is updated if it was audited or audit was skipped
       const rootAuditRes = auditedResults.get(taskId);
       const rootP3Findings = rootAuditRes?.findings?.filter((f) => f.severity === 'P3') ?? [];
-      const pushResultObj: Record<string, unknown> = {
-        state: 'pushed',
-        remote,
-        branch: targetBranch,
-        commit: pushedCommit,
-        compareUrl,
-        pushedIntegrationBranch,
-        auditPassed: !isSkipAudit && isAuditConfigEnabled,
-        auditSkipped: isSkipAudit,
-        findings: rootP3Findings,
-        summary: rootAuditRes?.summary,
-        localUpdate,
-      };
+      const rootInAudit = tasksToAudit.some((t) => t.id === taskId);
+      if (rootInAudit || isSkipAudit || !isAuditConfigEnabled) {
+        if (!rootInAudit) {
+          const pushResultObj: Record<string, unknown> = {
+            state: 'pushed',
+            remote,
+            branch: targetBranch,
+            commit: pushedCommit,
+            compareUrl,
+            pushedIntegrationBranch,
+            auditPassed: !isSkipAudit && isAuditConfigEnabled,
+            auditSkipped: isSkipAudit,
+            findings: rootP3Findings,
+            summary: rootAuditRes?.summary,
+            localUpdate,
+          };
 
-      deps.taskRepo.update(taskId, {
-        status: 'pushed',
-        pushedAt,
-        pushResult: JSON.stringify(pushResultObj),
-      });
+          deps.taskRepo.update(taskId, {
+            status: 'pushed',
+            pushedAt,
+            pushResult: JSON.stringify(pushResultObj),
+          });
+        }
 
-      deps.eventBus.emit('task.pushed', taskId, {
-        taskId,
-        projectId: currentProject.id,
-        remote,
-        branch: targetBranch,
-        commit: pushedCommit,
-        compareUrl,
-        localUpdate,
-      });
+        deps.eventBus.emit('task.pushed', taskId, {
+          taskId,
+          projectId: currentProject.id,
+          remote,
+          branch: targetBranch,
+          commit: pushedCommit,
+          compareUrl,
+          localUpdate,
+        });
+      }
 
       return {
         ok: true,

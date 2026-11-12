@@ -180,7 +180,7 @@ export const defaultProjectSettings = (): NonNullable<Project['settings']> => ({
     mergeMessageTemplate: "Merge branch '{branch}' into {target}",
   },
   brain: { mode: 'inherit' },
-  worktree: { install: 'auto', gitHooks: 'run' },
+  worktree: { install: 'auto', warmPool: 1, gitHooks: 'run' },
   integration: { enabled: false },
   ci: {},
   references: [],
@@ -2357,6 +2357,25 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 <p className="text-[11px] text-[var(--t-text-3)] leading-relaxed">
                   {t('projects.worktreeInstallDesc')}
                 </p>
+              </div>
+
+              <div className="space-y-2 p-3.5 rounded-xl border border-[var(--t-border)] bg-[var(--t-surface-2)]">
+                <label className="flex items-center justify-between gap-3 text-xs">
+                  <span className="font-semibold text-[var(--t-text)]">{t('projects.worktreeWarmPool')}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    aria-label={t('projects.worktreeWarmPool')}
+                    value={draftSettings.worktree.warmPool ?? 1}
+                    onChange={(e) => setDraftSettings((prev) => ({
+                      ...prev,
+                      worktree: { ...prev.worktree, warmPool: Math.max(0, Math.floor(Number(e.target.value) || 0)) },
+                    }))}
+                    className="w-24 rounded border p-2 bg-[var(--t-surface)]"
+                  />
+                </label>
+                <p className="text-[11px] text-[var(--t-text-3)] leading-relaxed">{t('projects.worktreeWarmPoolDesc')}</p>
               </div>
 
               {/* Git hooks */}

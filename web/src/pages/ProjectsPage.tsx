@@ -217,6 +217,19 @@ function ProjectSettingsForm({
             <option value="skip">{t('projects.gitHooksSkip')}</option>
           </select>
         </label>
+
+        <label className="space-y-1">
+          <span className="font-semibold block">{t('projects.worktreeWarmPool')}</span>
+          <input
+            type="number"
+            min={0}
+            step={1}
+            aria-label={t('projects.worktreeWarmPool')}
+            value={value.worktree.warmPool ?? 1}
+            onChange={(e) => update('worktree', { warmPool: Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
+            className="w-full rounded border p-2 bg-[var(--t-surface-2)]"
+          />
+        </label>
       </div>
 
       <div className="space-y-2 text-xs">

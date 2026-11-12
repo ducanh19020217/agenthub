@@ -1151,7 +1151,7 @@ export const en: typeof vi = {
     tokenBudgetHint: 'Leave empty to use global setting ({value}).',
     maxTurnsHint: 'Leave empty to use global setting ({value}).',
     fullPermissionWarning: 'Warning: Full access allows Claude to run arbitrary commands on the system without prompt. Use with caution!',
-    worktreeInstallDesc: 'Disable when project has no package.json or large dependencies to speed up worktree creation.',
+    worktreeInstallDesc: 'Disable when project has no package.json or large dependencies to speed up worktree creation.', worktreeWarmPool: 'Warm worktree pool', worktreeWarmPoolDesc: 'Keep detached worktrees ready under the project root to reduce task startup time. Set 0 to disable.',
     gitHooksDesc: 'Skip when git hooks (pre-commit/linter) take too long or depend on external host tools.',
     integrationWorktreePath: 'Worktree path',
     integrationCurrentBranchLabel: 'Current branch',

@@ -318,6 +318,7 @@ export class Scheduler {
   private tickPromise: Promise<void> | null = null;
   private skipSchedulingOnce = false;
   private diskLow = false;
+  private poolsClearedForDiskLow = false;
   private lastDiskLowEmit = 0;
   private diskBlockedEmitted = false;
   private diskIncidents = new Map<string, { lastLowEmit: number; blockedEmitted: boolean }>();
@@ -455,6 +456,18 @@ export class Scheduler {
     this.eventBus.on('task.done', (taskId) => this.onTaskDoneOrCancelled(taskId));
     this.eventBus.on('task.cancelled', (taskId) => this.onTaskDoneOrCancelled(taskId));
     this.eventBus.on('task.queued', (taskId) => this.invalidateChecks(taskId));
+    this.eventBus.on('task.merged', (taskId) => {
+      const task = this.taskRepo.get(taskId);
+      const project = task ? this.projectRepo.get(task.projectId) : undefined;
+      if (!project || this.stopped || this.getBlockingDiskForTask(task!)) return;
+      void this.worktreeService.refillPool({
+        projectPath: project.path,
+        projectId: project.id,
+        projectSettings: project.settings,
+        baseRef: project.defaultBranch || 'main',
+        diskAvailable: () => !this.stopped && !this.getBlockingDiskForTask(task!),
+      }).catch((error) => console.warn(`[scheduler] Failed to refresh worktree pool after merge: ${String(error)}`));
+    });
   }
 
   getCheckResults(taskId: string) { return this.db ? getCheckResults(this.db, taskId) : []; }
@@ -786,6 +799,10 @@ export class Scheduler {
     // Also run immediately
     queueMicrotask(() => {
       if (!this.stopped) void this.tick().catch(() => {});
+    });
+    // Populate the pool during startup so the first task can use it.
+    queueMicrotask(() => {
+      if (!this.stopped) void this.refillWorktreePools().catch(() => {});
     });
   }
 
@@ -1431,6 +1448,7 @@ export class Scheduler {
 
     if (allDisksOk && this.diskLow && recovered) {
       this.diskLow = false;
+      this.poolsClearedForDiskLow = false;
       this.lastDiskLowEmit = 0;
       this.diskBlockedEmitted = false;
       this.diskIncidents.clear();
@@ -4379,6 +4397,14 @@ export class Scheduler {
     if (this.worktreeCleanupInProgress) return;
     this.worktreeCleanupInProgress = true;
     try {
+    if (this.diskLow && !this.poolsClearedForDiskLow) {
+      this.poolsClearedForDiskLow = true;
+      for (const project of this.projectRepo.getAll()) {
+        await this.worktreeService.removePoolAsync(project).catch((error) => {
+          console.warn(`[scheduler] Failed to remove low-disk worktree pool: ${String(error)}`);
+        });
+      }
+    }
     const afterHours = this.config.cleanup?.worktreeOnDoneAfterHours ?? 24;
     const effectiveAfterHours = this.diskLow ? Math.min(afterHours > 0 ? afterHours : 2, 2) : afterHours;
     if (effectiveAfterHours <= 0) return;

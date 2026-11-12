@@ -221,9 +221,9 @@ function ProjectSettingsForm({
         <label className="space-y-1">
           <span className="font-semibold block">{t('projects.worktreeWarmPool')}</span>
           <input
-            type="number"
-            min={0}
-            step={1}
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
             aria-label={t('projects.worktreeWarmPool')}
             value={value.worktree.warmPool ?? 1}
             onChange={(e) => update('worktree', { warmPool: Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
@@ -1100,6 +1100,7 @@ export const ProjectsPage: React.FC = () => {
                 </p>
                 <Input
                   type="number"
+                  aria-label={t('projects.maxParallelLabel')}
                   min={1}
                   max={10}
                   value={maxParallel}

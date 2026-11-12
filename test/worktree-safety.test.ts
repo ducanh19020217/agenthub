@@ -165,6 +165,23 @@ describe('warm worktree pool', () => {
     expect(fs.existsSync(created)).toBe(true);
   });
 
+  it('refreshes an existing pool slot to the latest base ref', async () => {
+    const { project, worktreesDir, service } = setup();
+    const settings = JSON.stringify({ worktree: { warmPool: 1, install: 'skip' } });
+    const baseBranch = execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: project, encoding: 'utf8' }).trim();
+    await service.refillPool({ projectPath: project, projectId: 'xfarm', projectSettings: settings, baseRef: baseBranch });
+    fs.writeFileSync(path.join(project, 'README.md'), 'updated');
+    execFileSync('git', ['add', 'README.md'], { cwd: project });
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'update'], { cwd: project });
+    const expected = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: project, encoding: 'utf8' }).trim();
+
+    await service.refillPool({ projectPath: project, projectId: 'xfarm', projectSettings: settings, baseRef: baseBranch });
+
+    const poolPath = path.join(worktreesDir, 'xfarm', '.pool', '1');
+    expect(execFileSync('git', ['-C', poolPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()).toBe(expected);
+    expect(execFileSync('git', ['-C', poolPath, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' })).toBe('HEAD\n');
+  });
+
   it('does not create a pool when disabled or disk is low', async () => {
     const first = setup();
     await first.service.refillPool({ projectPath: first.project, projectId: 'xfarm', projectSettings: JSON.stringify({ worktree: { warmPool: 0 } }), baseRef: 'HEAD' });

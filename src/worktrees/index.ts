@@ -7,9 +7,15 @@ import { ensureWorktreeNodeModules } from '../cache.js';
 import { projectSettings } from '../projects/settings.js';
 import { reap, reapSyncForWorktree } from '../reaper.js';
 import { isProjectWorktreeRootAccessible, projectWorktreeRoot, projectWorktreeRoots, resolveProjectFile } from '../projects/paths.js';
+import { lowPriority } from '../priority.js';
 
 const execFileAsync = promisify(execFile);
 const WORKTREE_GIT_TIMEOUT_MS = 10 * 60 * 1000;
+
+function execLowPriorityGit(args: string[], options: Parameters<typeof execFileAsync>[2] = {}): Promise<{ stdout: string; stderr: string }> {
+  const [executable, finalArgs] = lowPriority('git', args);
+  return execFileAsync(executable, finalArgs, options) as Promise<{ stdout: string; stderr: string }>;
+}
 
 export interface WorktreeInfo {
   worktreePath: string;
@@ -250,6 +256,7 @@ export class WorktreeService {
     }
     const project = { id: opts.projectId, path: opts.projectPath, settings: opts.projectSettings };
     const root = projectWorktreeRoot(project, this.config.hubHome, this.config.worktreesDir);
+    await this.poolRefills.get(root)?.catch(() => undefined);
     const poolRoot = path.join(root, '.pool');
     const target = path.join(root, opts.slug);
     if (!fs.existsSync(poolRoot)) {
@@ -329,9 +336,14 @@ export class WorktreeService {
     for (let index = 1; index <= settings.worktree.warmPool && index <= MAX_WORKTREE_SLOTS; index++) {
       if (opts.diskAvailable?.() === false) break;
       const slot = path.join(poolRoot, String(index));
-      if (fs.existsSync(slot)) continue;
       try {
-        await execFileAsync('git', ['-C', opts.projectPath, 'worktree', 'add', '--detach', slot, opts.baseRef], { timeout: WORKTREE_GIT_TIMEOUT_MS });
+        if (fs.existsSync(slot)) {
+          const status = await execLowPriorityGit(['-C', slot, 'status', '--porcelain'], { encoding: 'utf8', timeout: 30_000 });
+          if (status.stdout.trim()) throw new Error('pooled worktree is dirty');
+          await execLowPriorityGit(['-C', slot, 'checkout', '--detach', opts.baseRef], { timeout: WORKTREE_GIT_TIMEOUT_MS });
+        } else {
+          await execLowPriorityGit(['-C', opts.projectPath, 'worktree', 'add', '--detach', slot, opts.baseRef], { timeout: WORKTREE_GIT_TIMEOUT_MS });
+        }
         await this.addToExcludeAsync(slot);
         if (settings.worktree.install === 'auto') {
           const hasLock = (dir: string) => fs.existsSync(path.join(dir, 'package-lock.json')) || fs.existsSync(path.join(dir, 'pnpm-lock.yaml'));

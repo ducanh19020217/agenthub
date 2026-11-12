@@ -50,6 +50,19 @@ health_ok() {
 }
 
 stop_service_directly() {
+  HUB_HOME="${AGENTHUB_HOME:-$HOME/.agenthub}"
+  mkdir -p "$HUB_HOME" 2>/dev/null || true
+  touch "$HUB_HOME/shutdown_requested" 2>/dev/null || true
+
+  if health_ok && [ -f "$HUB_HOME/token" ]; then
+    TOKEN=$(cat "$HUB_HOME/token" 2>/dev/null || true)
+    curl -fsS -m 5 -X POST "http://127.0.0.1:7700/api/hub/shutdown" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H 'Host: 127.0.0.1:7700' \
+      -H 'Content-Type: application/json' \
+      --data "{\"disable\":$([ "$DISABLE" = 1 ] && echo true || echo false)}" >/dev/null 2>&1 || true
+  fi
+
   if [ "$IS_DARWIN" = 1 ]; then
     launchctl bootout "$LAUNCHD_TARGET" 2>/dev/null || true
   else

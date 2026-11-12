@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AgentHubConfig, DEFAULT_QUOTA_LOW_PCT } from './config.js';
@@ -761,8 +762,24 @@ export async function startDaemon(
     }
   };
 
+  const checkUserShutdown = (): boolean => {
+    if (ctx.userShutdownRequested || ctx.service?.isUserShutdownRequested?.()) return true;
+    const shutdownFlagPath = path.join(config.hubHome || path.join(os.homedir(), '.agenthub'), 'shutdown_requested');
+    if (fs.existsSync(shutdownFlagPath)) {
+      try { fs.unlinkSync(shutdownFlagPath); } catch { /* ignore */ }
+      ctx.userShutdownRequested = true;
+      ctx.service?.setUserShutdownRequested?.(true);
+      return true;
+    }
+    return false;
+  };
+
   const onTerm = () => {
-    if (ctx.userShutdownRequested || ctx.service?.isUserShutdownRequested?.()) {
+    if (checkUserShutdown()) {
+      const hasActiveWork = ctx.scheduler.getRunning().size > 0
+        || ctx.scheduler.getReviewerStatus().running.length > 0
+        || ctx.scheduler.getRestartState().waitingFor.length > 0;
+      if (hasActiveWork) ctx.scheduler.shutdownForUser('user_stop');
       void shutdown(false);
       return;
     }
@@ -778,7 +795,11 @@ export async function startDaemon(
   };
 
   const onInt = () => {
-    if (ctx.userShutdownRequested || ctx.service?.isUserShutdownRequested?.()) {
+    if (checkUserShutdown()) {
+      const hasActiveWork = ctx.scheduler.getRunning().size > 0
+        || ctx.scheduler.getReviewerStatus().running.length > 0
+        || ctx.scheduler.getRestartState().waitingFor.length > 0;
+      if (hasActiveWork) ctx.scheduler.shutdownForUser('user_stop');
       void shutdown(false);
       return;
     }

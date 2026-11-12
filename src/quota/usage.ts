@@ -116,6 +116,9 @@ export class QuotaUsageService {
   /** Ngưỡng (%) cho sự kiện quota.low; đọc lúc ghi để đổi trong Cài đặt có hiệu lực ngay. */
   setQuotaLowThreshold(getter: () => number): void { this.quotaLowPct = getter; }
 
+  private collectCallback: (() => Promise<void> | void) | null = null;
+  onCollectAll(callback: () => Promise<void> | void): void { this.collectCallback = callback; }
+
   /**
    * Ghi một cửa sổ quota; phát `quota.low` đúng một lần khi nó vừa tụt từ trên xuống dưới ngưỡng.
    * Hết hẳn (0%) đã có quota.exhausted nên không báo thêm.
@@ -167,6 +170,9 @@ export class QuotaUsageService {
     }
     for (const profile of this.profiles.getEnabled().filter((p) => p.engine === 'claude')) {
       void this.collectClaude(profile);
+    }
+    if (this.collectCallback) {
+      void this.collectCallback();
     }
   }
 

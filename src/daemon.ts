@@ -29,7 +29,9 @@ import {
   TimesheetEntryRepo,
   TimesheetManualEntryRepo,
   TimesheetDayOverrideRepo,
+  ProfileModelRepo,
 } from './db/index.js';
+import { ModelDiscoveryService } from './models/index.js';
 import { CiWatchService } from './ci.js';
 import { OpenProjectIntakeService } from './integrations/openproject/intake.js';
 import { DailyReportService, parseDateNoon } from './integrations/openproject/daily-report.js';
@@ -209,7 +211,10 @@ export function createContext(
 
   const profileService = new ProfileService(config, profileRepo, quotaMarkRepo);
   const locks = new ProfileLockService(path.join(config.agyHomesDir, '.state'), config.slotsPerAgyProfile, config.slotsPerCodexProfile);
+  const profileModelRepo = new ProfileModelRepo(db);
+  const modelDiscoveryService = new ModelDiscoveryService(profileRepo, profileModelRepo);
   const usageService = new QuotaUsageService(profileRepo, usageRepo, quotaMarkRepo);
+  usageService.onCollectAll(() => modelDiscoveryService.discoverAll());
   const quotaService = new QuotaService(quotaMarkRepo, profileRepo);
   const savingsService = new SavingsService(
     config,
@@ -353,6 +358,8 @@ export function createContext(
     directiveRepo,
     departmentRepo,
   );
+  service.profileModelRepo = profileModelRepo;
+  service.modelDiscoveryService = modelDiscoveryService;
   service.setSetupTools(new SetupTools(config, db, scheduler.getEventBus(), () => service));
   service.deployService = deployService;
   service.remoteDeployService = remoteDeployService;

@@ -35,7 +35,9 @@ import {
   CiRepo,
   BlockingDiskInfo,
   TrackerItemRepo,
+  ProfileModelRepo,
 } from '../db/index.js';
+import { ModelDiscoveryService, getDefaultModelsForEngine } from '../models/index.js';
 import type { CiWatchService } from '../ci.js';
 import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
 import type { DailyReportService } from '../integrations/openproject/daily-report.js';
@@ -1084,6 +1086,22 @@ export interface TokenImportResult {
   }>;
 }
 
+export interface DiscoveredModelApiItem {
+  id: string;
+  engine: 'agy' | 'codex' | 'claude';
+  name: string;
+  profiles: string[];
+  verified: boolean;
+  available: boolean;
+  warning?: string | null;
+}
+
+export interface ModelOptionsResponse {
+  models: DiscoveredModelApiItem[];
+  suggestions: string[];
+  configured: string[];
+}
+
 export class AppService {
   private restartHandler?: () => void;
   private userShutdownRequested = false;
@@ -1139,7 +1157,16 @@ export class AppService {
     public directiveRepo?: BrainDirectiveRepo,
     public departmentRepo?: DepartmentRepo,
     public setupTools?: SetupTools,
+    public profileModelRepo?: ProfileModelRepo,
+    public modelDiscoveryService?: ModelDiscoveryService,
   ) {
+    if (!this.profileModelRepo && this.scheduler?.getDatabase?.()) {
+      const db = this.scheduler.getDatabase();
+      if (db) this.profileModelRepo = new ProfileModelRepo(db);
+    }
+    if (!this.modelDiscoveryService && this.profileModelRepo) {
+      this.modelDiscoveryService = new ModelDiscoveryService(this.profileRepo, this.profileModelRepo);
+    }
     this.avatarService = new AvatarService(this.config.hubHome, this.profileRepo);
     this.migrateProjectMergeMappings();
   }
@@ -6450,23 +6477,110 @@ export class AppService {
     return { focus, ...changes };
   }
 
-  getModelOptions() {
-    const profiles = this.profileRepo.getAll().filter((profile) => Boolean(profile.enabled));
-    const suggestions = new Set<string>();
-    for (const profile of profiles) {
-      if (profile.engine === 'agy') {
-        for (const model of VALID_AGY_MODELS) suggestions.add(model);
-      } else if (profile.engine === 'codex') {
-        suggestions.add('codex:gpt-5.6-luna');
+  getModelOptions(): { models: DiscoveredModelApiItem[]; suggestions: string[]; configured: string[] } {
+    const enabledProfiles = this.profileRepo.getAll().filter((profile) => Boolean(profile.enabled) && !profile.deletedAt);
+    const modelMap = new Map<string, DiscoveredModelApiItem>();
+
+    const getProfileModels = (profile: ProfileRow) => {
+      if (this.profileModelRepo) {
+        const rows = this.profileModelRepo.getForProfile(profile.name);
+        if (rows.length > 0) {
+          return rows.map((r) => ({
+            id: r.modelId,
+            name: r.modelName || r.modelId,
+            engine: r.engine as 'agy' | 'codex' | 'claude',
+            verified: Boolean(r.verified),
+          }));
+        }
+      }
+      return getDefaultModelsForEngine(profile.engine);
+    };
+
+    for (const profile of enabledProfiles) {
+      const items = getProfileModels(profile);
+      for (const item of items) {
+        const existing = modelMap.get(item.id);
+        if (existing) {
+          if (!existing.profiles.includes(profile.name)) {
+            existing.profiles.push(profile.name);
+          }
+          if (item.verified) existing.verified = true;
+        } else {
+          modelMap.set(item.id, {
+            id: item.id,
+            engine: item.engine,
+            name: item.name,
+            profiles: [profile.name],
+            verified: item.verified,
+            available: true,
+            warning: null,
+          });
+        }
       }
     }
-    const configured = [
+
+    const arbiterModel = this.config.reviewer.arbiter?.model
+      ? (this.config.reviewer.arbiter.engine === 'codex'
+        ? (this.config.reviewer.arbiter.model.startsWith('codex:') ? this.config.reviewer.arbiter.model : `codex:${this.config.reviewer.arbiter.model}`)
+        : this.config.reviewer.arbiter.model)
+      : null;
+
+    const configuredRaw = [
       ...this.config.defaultModelChains.hard,
       ...this.config.defaultModelChains.easy,
-      ...this.config.reviewer.order.map((item) => `${item.engine}:${item.model}`),
-    ];
-    const configuredModels = [...new Set(configured.filter(Boolean))];
-    return { suggestions: [...suggestions].sort(), configured: configuredModels };
+      ...this.config.reviewer.order.map((item) => (item.engine === 'codex' ? (item.model.startsWith('codex:') ? item.model : `codex:${item.model}`) : item.model)),
+      ...(arbiterModel ? [arbiterModel] : []),
+      ...(this.config.brain?.model ? [this.config.brain.model] : []),
+      ...(this.config.chat?.model ? [this.config.chat.model] : []),
+      ...(this.config.chat?.models || []),
+    ].filter(Boolean);
+    const configuredModels = [...new Set(configuredRaw)];
+
+    for (const model of configuredModels) {
+      if (!modelMap.has(model)) {
+        let engine: 'agy' | 'codex' | 'claude' = 'agy';
+        if (model.startsWith('codex:') || (model.startsWith('gpt-') && !model.startsWith('gpt-oss-'))) {
+          engine = 'codex';
+        } else if (model.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(model)) {
+          engine = 'claude';
+        }
+        modelMap.set(model, {
+          id: model,
+          engine,
+          name: model,
+          profiles: [],
+          verified: false,
+          available: false,
+          warning: 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp',
+        });
+      }
+    }
+
+    const engineOrder: Record<string, number> = { agy: 0, codex: 1, claude: 2 };
+    const allModels = Array.from(modelMap.values()).sort((a, b) => {
+      if (a.available !== b.available) return a.available ? -1 : 1;
+      const eo = (engineOrder[a.engine] ?? 9) - (engineOrder[b.engine] ?? 9);
+      if (eo !== 0) return eo;
+      return a.id.localeCompare(b.id);
+    });
+
+    const suggestions = allModels.filter((m) => m.available).map((m) => m.id);
+
+    return {
+      models: allModels,
+      suggestions,
+      configured: configuredModels,
+    };
+  }
+
+  async refreshModels(): Promise<{ models: DiscoveredModelApiItem[]; suggestions: string[]; configured: string[] }> {
+    if (!this.modelDiscoveryService && this.profileModelRepo) {
+      this.modelDiscoveryService = new ModelDiscoveryService(this.profileRepo, this.profileModelRepo);
+    }
+    if (this.modelDiscoveryService) {
+      await this.modelDiscoveryService.discoverAll({ force: true });
+    }
+    return this.getModelOptions();
   }
 
   updateConfig(raw: unknown) {

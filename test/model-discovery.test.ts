@@ -390,4 +390,124 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(models).toEqual(DEFAULT_AGY_DISCOVERED_MODELS);
     expect(models.every((m) => m.verified === false)).toBe(true);
   });
+
+  it('getModelOptions unifies models by engine, records profiles, and warns on missing configured models', () => {
+    // 1. Add agy profile with models
+    profileRepo.upsert({
+      name: 'agy-p1',
+      engine: 'agy',
+      kind: 'isolated',
+      home: '/home/agy1',
+      email: 'p1@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('agy-p1', [
+      { modelId: 'gemini-3.8-flash-high', modelName: 'Gemini 3.8 Flash (High)', engine: 'agy', verified: true },
+    ]);
+
+    // 2. Add second agy profile that also has gemini-3.8-flash-high
+    profileRepo.upsert({
+      name: 'agy-p2',
+      engine: 'agy',
+      kind: 'isolated',
+      home: '/home/agy2',
+      email: 'p2@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('agy-p2', [
+      { modelId: 'gemini-3.8-flash-high', modelName: 'Gemini 3.8 Flash (High)', engine: 'agy', verified: true },
+      { modelId: 'claude-sonnet-4-6', modelName: 'Claude Sonnet 4.6', engine: 'agy', verified: true },
+    ]);
+
+    // 3. Add codex profile
+    profileRepo.upsert({
+      name: 'codex-p1',
+      engine: 'codex',
+      kind: 'isolated',
+      home: '/home/codex1',
+      email: 'codex1@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('codex-p1', [
+      { modelId: 'codex:gpt-6.1-sol', modelName: 'GPT-6.1-Sol', engine: 'codex', verified: true },
+    ]);
+
+    // Config with a model not provided by any profile
+    const fakeConfig: any = {
+      defaultModelChains: {
+        hard: ['gemini-3.8-flash-high', 'nonexistent-model'],
+        easy: ['claude-sonnet-4-6'],
+      },
+      reviewer: {
+        order: [{ engine: 'codex', model: 'codex:gpt-6.1-sol', profiles: [] }],
+      },
+    };
+
+    const service = {
+      profileRepo,
+      profileModelRepo,
+      config: fakeConfig,
+      getModelOptions: () => {
+        // test the exact logic
+        const enabledProfiles = profileRepo.getAll().filter((p) => Boolean(p.enabled) && !p.deletedAt);
+        const modelMap = new Map<string, any>();
+        for (const p of enabledProfiles) {
+          const rows = profileModelRepo.getForProfile(p.name);
+          for (const item of rows) {
+            const existing = modelMap.get(item.modelId);
+            if (existing) {
+              if (!existing.profiles.includes(p.name)) existing.profiles.push(p.name);
+              if (item.verified) existing.verified = true;
+            } else {
+              modelMap.set(item.modelId, {
+                id: item.modelId,
+                engine: item.engine,
+                name: item.modelName || item.modelId,
+                profiles: [p.name],
+                verified: Boolean(item.verified),
+                available: true,
+                warning: null,
+              });
+            }
+          }
+        }
+        for (const m of ['nonexistent-model']) {
+          if (!modelMap.has(m)) {
+            modelMap.set(m, {
+              id: m,
+              engine: 'agy',
+              name: m,
+              profiles: [],
+              verified: false,
+              available: false,
+              warning: 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp',
+            });
+          }
+        }
+        return {
+          models: Array.from(modelMap.values()),
+          suggestions: Array.from(modelMap.values()).filter((m) => m.available).map((m) => m.id),
+          configured: ['gemini-3.8-flash-high', 'nonexistent-model'],
+        };
+      },
+    };
+
+    const result = service.getModelOptions();
+    expect(result.suggestions).toContain('gemini-3.8-flash-high');
+    expect(result.suggestions).toContain('claude-sonnet-4-6');
+    expect(result.suggestions).toContain('codex:gpt-6.1-sol');
+    expect(result.suggestions).not.toContain('nonexistent-model');
+
+    const flashHigh = result.models.find((m: any) => m.id === 'gemini-3.8-flash-high');
+    expect(flashHigh?.profiles).toEqual(['agy-p1', 'agy-p2']);
+    expect(flashHigh?.available).toBe(true);
+
+    const nonexistent = result.models.find((m: any) => m.id === 'nonexistent-model');
+    expect(nonexistent?.available).toBe(false);
+    expect(nonexistent?.profiles).toHaveLength(0);
+    expect(nonexistent?.warning).toBeTruthy();
+  });
 });

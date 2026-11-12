@@ -871,6 +871,7 @@ export async function createServer(
     return result;
   });
   fastify.get('/api/models', async () => service.getModelOptions());
+  fastify.post('/api/models/refresh', async () => service.refreshModels());
 
   // --- Savings API ---
   fastify.get('/api/savings', async (req: FastifyRequest) => {

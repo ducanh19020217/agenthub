@@ -1215,7 +1215,9 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
     let migrationAt = migrationAtRow?.value;
     if (!migrationAt) {
       migrationAt = new Date().toISOString();
-      db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_default_on_at', ?)").run(migrationAt);
+      if (!metaRow || metaRow.value !== '1') {
+        db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_default_on_at', ?)").run(migrationAt);
+      }
     }
 
     const projects = db.prepare('SELECT id, defaultBranch, settings, createdAt FROM projects').all() as Array<{
@@ -1240,9 +1242,14 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
 
     if (metaRow && metaRow.value === '1') {
       for (const project of projects) {
+        const effectiveEnabledAt = migrationAtRow?.value || project.createdAt || migrationAt;
+
         if (!project.settings) {
           const newSettings = {
-            publish: defaultPublish,
+            publish: {
+              ...defaultPublish,
+              enabledAt: effectiveEnabledAt,
+            },
           };
           updateStmt.run(JSON.stringify(newSettings), project.id);
           migrated.push(project.id);
@@ -1261,7 +1268,10 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
 
         const publishVal = parsed.publish as Record<string, unknown> | undefined;
         if (publishVal === undefined || publishVal === null) {
-          parsed.publish = defaultPublish;
+          parsed.publish = {
+            ...defaultPublish,
+            enabledAt: effectiveEnabledAt,
+          };
           updateStmt.run(JSON.stringify(parsed), project.id);
           migrated.push(project.id);
         } else if (publishVal.enabled === false) {
@@ -1271,7 +1281,6 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
           // Project already had publish enabled in the previous version (where enabledAt was not recorded).
           // Use project.createdAt (or previously recorded migrationAt) to ensure recent tasks merged
           // after publish was enabled are not silently converted to baseline without audit.
-          const effectiveEnabledAt = migrationAtRow?.value || project.createdAt || migrationAt;
           publishVal.enabledAt = effectiveEnabledAt;
           updateStmt.run(JSON.stringify(parsed), project.id);
         }

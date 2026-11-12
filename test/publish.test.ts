@@ -2138,15 +2138,28 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       const pushFailedEvents: any[] = [];
       ctx.scheduler.getEventBus().on('task.push_failed', (_id, p) => pushFailedEvents.push(p));
 
+      const remoteShaBefore = execFileSync('git', ['--git-dir', remotePath, 'rev-parse', 'refs/heads/main'], { env: testEnv }).toString().trim();
+
       const res = await ctx.service.publishTask('proj-unmerged/task-unmerged');
       expect(res.ok).toBe(false);
       expect(res.error).toContain('not included in the push commit');
+
+      // Verify remote target branch was NOT pushed before error was reported
+      const remoteShaAfter = execFileSync('git', ['--git-dir', remotePath, 'rev-parse', 'refs/heads/main'], { env: testEnv }).toString().trim();
+      expect(remoteShaAfter).toBe(remoteShaBefore);
 
       const updated = ctx.taskRepo.get('proj-unmerged/task-unmerged');
       expect(updated?.status).not.toBe('pushed');
       const pr = JSON.parse(updated!.pushResult!);
       expect(pr.state).toBe('push_failed');
       expect(pushFailedEvents.length).toBe(1);
+
+      // Verify skipAudit also rejects unmerged task early and does not push to remote
+      const resSkip = await ctx.service.publishTask('proj-unmerged/task-unmerged', { manual: true, skipAudit: true });
+      expect(resSkip.ok).toBe(false);
+      expect(resSkip.error).toContain('not included in the push commit');
+      const remoteShaAfterSkip = execFileSync('git', ['--git-dir', remotePath, 'rev-parse', 'refs/heads/main'], { env: testEnv }).toString().trim();
+      expect(remoteShaAfterSkip).toBe(remoteShaBefore);
     });
 
     it('enqueueAutoPublish: lock nhả trước khi đăng ký listener 409 -> tự động drain và publish ngay', async () => {

@@ -133,16 +133,20 @@ describe('Publish default-on migration', () => {
     expect(s1.publish.enabled).toBe(true);
     expect(s1.publish.enabledAt).toBe(pastCreatedAt);
 
-    // proj-old-null-settings must have publish enabled and enabledAt populated
+    // proj-old-null-settings must have publish enabled and enabledAt populated with project.createdAt (not now)
     const p2 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-old-null-settings') as ProjectRow;
     const s2 = projectSettings(p2);
     expect(s2.publish.enabled).toBe(true);
-    expect(s2.publish.enabledAt).toBeDefined();
+    expect(s2.publish.enabledAt).toBe('2026-02-01T08:00:00.000Z');
 
-    // proj-old-no-publish must have publish enabled and enabledAt populated
+    // proj-old-no-publish must have publish enabled and enabledAt populated with project.createdAt (not now)
     const p3 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-old-no-publish') as ProjectRow;
     const s3 = projectSettings(p3);
     expect(s3.publish.enabled).toBe(true);
-    expect(s3.publish.enabledAt).toBe(s2.publish.enabledAt);
+    expect(s3.publish.enabledAt).toBe('2026-02-01T08:00:00.000Z');
+
+    // Ensure migration:publish_default_on_at was NOT created in meta when metaRow was already 1
+    const metaMigrationAt = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_default_on_at'").get();
+    expect(metaMigrationAt).toBeUndefined();
   });
 });

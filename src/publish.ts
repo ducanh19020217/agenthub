@@ -576,13 +576,9 @@ async function findTasksToAudit(
         }
       }
 
-      if (mergeTime === null) {
-        const d = t.createdAt;
-        const ts = parseTimestamp(d);
-        if (!isNaN(ts)) mergeTime = ts;
-      }
-
-      if (mergeTime !== null && mergeTime < enabledTime) {
+      // Root task being published must never be categorized as baseline (always audit the gated root task).
+      // Other tasks without a verifiable merge timestamp safely fall back to audit (fail-closed).
+      if (t.id !== taskId && mergeTime !== null && mergeTime < enabledTime) {
         baselineTasks.push(t);
       } else {
         tasksToAudit.push(t);
@@ -959,9 +955,40 @@ export async function publishTask(
     // --- Pre-Publish Audit Gate ---
     const isSkipAudit = isManual && Boolean(options?.skipAudit);
     const isAuditConfigEnabled = currentSettings.publish?.audit?.enabled !== false;
-    let tasksToAudit: TaskRow[] = [];
-    let baselineTasks: TaskRow[] = [];
     const auditedResults = new Map<string, PrePublishAuditResult>();
+
+    // Candidate discovery runs in all publish modes to determine which tasks belong to the push snapshot
+    const candidates = await findTasksToAudit(
+      taskId,
+      currentProject.id,
+      sourceBranch,
+      targetBranch,
+      remote,
+      repoPath,
+      env,
+      deps,
+      sourceSha,
+    );
+    const tasksToAudit = candidates.tasksToAudit;
+    const baselineTasks = candidates.baselineTasks;
+
+    const rootInAudit = tasksToAudit.some((t) => t.id === taskId);
+    const rootInBaseline = baselineTasks.some((t) => t.id === taskId);
+    if (!rootInAudit && !rootInBaseline) {
+      const errorMsg = `Task ${taskId} is not included in the push commit or source snapshot (${sourceSha || sourceBranch})`;
+      const failedAt = new Date().toISOString();
+      deps.taskRepo.update(taskId, {
+        pushResult: JSON.stringify({ state: 'push_failed', error: errorMsg, failedAt, retryable: true }),
+      });
+      emitPushFailed(deps, taskId, currentProject.id, errorMsg, remote, targetBranch, isManual);
+      return {
+        ok: false,
+        error: errorMsg,
+        remote,
+        branch: targetBranch,
+        retryable: true,
+      };
+    }
 
     if (isSkipAudit) {
       deps.eventBus.emit('task.audit_skipped', taskId, {
@@ -970,20 +997,6 @@ export async function publishTask(
         manual: true,
       });
     } else if (isAuditConfigEnabled) {
-      const candidates = await findTasksToAudit(
-        taskId,
-        currentProject.id,
-        sourceBranch,
-        targetBranch,
-        remote,
-        repoPath,
-        env,
-        deps,
-        sourceSha,
-      );
-      tasksToAudit = candidates.tasksToAudit;
-      baselineTasks = candidates.baselineTasks;
-
       const maxTasks = currentSettings.publish?.audit?.maxTasks ?? 10;
       if (tasksToAudit.length > maxTasks) {
         const errorMsg = `Số lượng task cần audit (${tasksToAudit.length}) vượt quá giới hạn tối đa cho phép (${maxTasks}). Vui lòng kiểm tra hoặc điều chỉnh maxTasks.`;
@@ -1407,7 +1420,7 @@ export async function publishTask(
           compareUrl,
           pushedIntegrationBranch,
           auditPassed: !isSkipAudit && isAuditConfigEnabled,
-          auditSkipped: isSkipAudit,
+          auditSkipped: isSkipAudit || !isAuditConfigEnabled,
           findings: p3Findings,
           summary: auditRes?.summary,
           localUpdate,
@@ -1467,47 +1480,8 @@ export async function publishTask(
         }
       }
 
-      // Ensure root taskId is updated if it was audited or baseline or audit was skipped
       const rootAuditRes = auditedResults.get(taskId);
       const rootP3Findings = rootAuditRes?.findings?.filter((f) => f.severity === 'P3') ?? [];
-      const rootInAudit = tasksToAudit.some((t) => t.id === taskId);
-      const rootInBaseline = baselineTasks.some((t) => t.id === taskId);
-      if (!rootInAudit && !rootInBaseline && !isSkipAudit && isAuditConfigEnabled) {
-        const errorMsg = `Task ${taskId} is not included in the push commit (${pushedCommit}) or source snapshot (${sourceSha || sourceBranch})`;
-        deps.taskRepo.update(taskId, {
-          pushResult: JSON.stringify({ state: 'push_failed', error: errorMsg, failedAt: pushedAt, retryable: true }),
-        });
-        emitPushFailed(deps, taskId, currentProject.id, errorMsg, remote, targetBranch, isManual);
-        return {
-          ok: false,
-          error: errorMsg,
-          remote,
-          branch: targetBranch,
-          retryable: true,
-        };
-      }
-
-      if (!rootInAudit && !rootInBaseline) {
-        const pushResultObj: Record<string, unknown> = {
-          state: 'pushed',
-          remote,
-          branch: targetBranch,
-          commit: pushedCommit,
-          compareUrl,
-          pushedIntegrationBranch,
-          auditPassed: !isSkipAudit && isAuditConfigEnabled,
-          auditSkipped: isSkipAudit,
-          findings: rootP3Findings,
-          summary: rootAuditRes?.summary,
-          localUpdate,
-        };
-
-        deps.taskRepo.update(taskId, {
-          status: 'pushed',
-          pushedAt,
-          pushResult: JSON.stringify(pushResultObj),
-        });
-      }
 
       deps.eventBus.emit('task.pushed', taskId, {
         taskId,
@@ -1530,7 +1504,7 @@ export async function publishTask(
         compareUrl,
         pushedIntegrationBranch,
         auditPassed: !isSkipAudit && isAuditConfigEnabled,
-        auditSkipped: isSkipAudit,
+        auditSkipped: isSkipAudit || !isAuditConfigEnabled,
         findings: rootP3Findings,
         localUpdate,
       };

@@ -1116,6 +1116,7 @@ describe('Codex reviewer failover lifecycle', () => {
     const reviewRepo = new ReviewRepo(db);
     const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
     restartedScheduler.configureReviewer(reviewRepo, failover);
+    (restartedScheduler as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
 
     // Verify recoverOnStartup did not emit review_ready
     const readyEventsOnStartup = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
@@ -1135,11 +1136,128 @@ describe('Codex reviewer failover lifecycle', () => {
     const restartedScheduler2 = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
     restartedScheduler2.configureReviewer(reviewRepo, failover);
+    (restartedScheduler2 as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
 
     for (let tick = 0; tick < 5; tick++) restartedScheduler2.tick();
     const readyEventsChainComplete = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
     expect(readyEventsChainComplete).toHaveLength(0);
     restartedScheduler2.stop();
+  });
+
+  it('re-emits task.review_ready on restart for interrupted tasks with autoMerge enabled', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    // Enable autoMerge on the project
+    projectRepo.update('test-project', {
+      reviewChain: '[]',
+      settings: JSON.stringify({ review: { autoMerge: true } }),
+    });
+    taskRepo.update('test-project/review', { status: 'review', reviewStep: 0 });
+    // Add completed worker run
+    runRepo.finish('autocheck-run', 'done', undefined, undefined);
+    db.prepare("UPDATE runs SET kind = 'worker', outcome = 'done' WHERE id = 'autocheck-run'").run();
+
+    // Clear events table to simulate restart after worker passed checks but before auto-merge finished
+    db.prepare('DELETE FROM events').run();
+    scheduler.stop();
+
+    // Restart scheduler
+    const fake = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fake as unknown as { id: string }).id = 'codex';
+    const restartedScheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
+    restartedScheduler.configureReviewer(reviewRepo, failover);
+    (restartedScheduler as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    // Verify recoverOnStartup emitted review_ready for the interrupted auto-merge task
+    const readyEvents = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
+    expect(readyEvents).toHaveLength(1);
+    expect(readyEvents[0].payload).toContain('"reviewChainComplete":true');
+    restartedScheduler.stop();
+  });
+
+  it('recovers interrupted Claude manual gate and emits gate_ready only when not already notified', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'claude', mode: 'gate' }]) });
+    taskRepo.update('test-project/review', { status: 'review', reviewStep: 0 });
+    // Add completed worker run so recovery does not treat it as a crashed running worker
+    runRepo.finish('autocheck-run', 'done', undefined, undefined);
+    db.prepare("UPDATE runs SET kind = 'worker', outcome = 'done' WHERE id = 'autocheck-run'").run();
+
+    // Case 1: gate_ready was NOT emitted before restart (interrupted)
+    db.prepare('DELETE FROM events').run();
+    scheduler.stop();
+
+    const fake = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fake as unknown as { id: string }).id = 'codex';
+    const restarted1 = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
+    restarted1.configureReviewer(reviewRepo, failover);
+    (restarted1 as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    // First tick emits review.gate_ready
+    restarted1.tick();
+    const gateEvents1 = eventRepo.getRecent(50).filter((e) => e.type === 'review.gate_ready');
+    expect(gateEvents1).toHaveLength(1);
+    restarted1.stop();
+
+    // Case 2: Now gate_ready WAS emitted; another restart must NOT emit gate_ready again
+    const restarted2 = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    restarted2.configureReviewer(reviewRepo, failover);
+    (restarted2 as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    const gateEventsBefore = eventRepo.getRecent(50).filter((e) => e.type === 'review.gate_ready').length;
+    for (let tick = 0; tick < 5; tick++) restarted2.tick();
+    const gateEventsAfter = eventRepo.getRecent(50).filter((e) => e.type === 'review.gate_ready').length;
+    expect(gateEventsAfter).toBe(gateEventsBefore);
+    restarted2.stop();
+  });
+
+  it('recovers an interrupted reviewer run by emitting review.waiting and re-running on tick', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
+    taskRepo.update('test-project/review', { status: 'review', reviewStep: 0 });
+
+    // Insert an active running reviewer run that was cut off by restart
+    const cutOffRunId = 'interrupted-reviewer-run';
+    runRepo.insert({
+      id: cutOffRunId,
+      taskId: 'test-project/review',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-1',
+      kind: 'reviewer',
+    });
+
+    scheduler.stop();
+
+    // Restart scheduler
+    const fake = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fake as unknown as { id: string }).id = 'codex';
+    const restartedScheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
+    restartedScheduler.configureReviewer(reviewRepo, failover);
+    (restartedScheduler as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    // Verify the old run was marked as crashed and review.waiting was emitted
+    const crashedRun = runRepo.get(cutOffRunId);
+    expect(crashedRun?.outcome).toBe('crashed');
+
+    const waitingEvents = eventRepo.getRecent(50).filter((e) => e.type === 'review.waiting');
+    expect(waitingEvents.length).toBeGreaterThan(0);
+
+    // Scheduler tick will now re-spawn a fresh reviewer run
+    restartedScheduler.tick();
+    const newRuns = runRepo.getByTask('test-project/review').filter((r) => r.kind === 'reviewer' && r.id !== cutOffRunId);
+    expect(newRuns.length).toBeGreaterThanOrEqual(1);
+
+    restartedScheduler.stop();
   });
 
   it('runs a Codex final step itself and completes the chain when it approves', async () => {

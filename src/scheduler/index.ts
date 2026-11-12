@@ -1140,18 +1140,62 @@ export class Scheduler {
       });
     }
 
-    // Review tasks waiting for manual approval or with completed review chains
-    // should not re-emit review_ready or gate notifications on restart.
+    // Recover review tasks interrupted by restart.
+    // Tasks waiting for manual approval (autoMerge off, or parked at manual gates)
+    // must NOT re-emit review_ready or gate notifications on restart.
     for (const task of this.taskRepo.getByStatus('review')) {
-      if (!this.projectRepo.get(task.projectId)) continue;
+      const project = this.projectRepo.get(task.projectId);
+      if (!project) continue;
       const chain = this.reviewChainForTask(task);
-      const step = chain[task.reviewStep ?? 0];
-      if (chain.length > 0) {
-        if ((task.reviewStep ?? 0) >= chain.length || !isAutomatedStep(step)) {
-          this.reviewNotified.set(task.id, `complete:${task.reviewStep ?? 0}`);
+      const stepIdx = task.reviewStep ?? 0;
+      const settings = projectSettings(project);
+      const autoMergeEnabled = Boolean(settings.review?.autoMerge || settings.integration?.autoMerge);
+      const taskEvents = this.eventRepo.getByTask(task.id);
+
+      if (chain.length === 0) {
+        if (autoMergeEnabled) {
+          const isSkippedOrFailed = taskEvents.some((e) => e.type === 'review.auto_merge_skipped' || e.type === 'merge.failed');
+          if (!isSkippedOrFailed) {
+            const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
+            if (lastWorker?.outcome === 'done') {
+              const checks = this.getCheckResults(task.id);
+              this.emitReviewReadyIfReview(task.id, {
+                reviewChainComplete: true,
+                checksPassed: checks.length > 0 ? checks.every((c) => c.ok) : true,
+              });
+            }
+          }
         }
+      } else if (stepIdx >= chain.length) {
+        const isSkippedOrFailed = taskEvents.some((e) => e.type === 'review.auto_merge_skipped' || e.type === 'merge.failed');
+        if (autoMergeEnabled && !isSkippedOrFailed) {
+          const checks = this.getCheckResults(task.id);
+          this.emitReviewReadyIfReview(task.id, {
+            reviewChainComplete: true,
+            checksPassed: checks.length > 0 ? checks.every((c) => c.ok) : true,
+          });
+          this.reviewNotified.set(task.id, `complete:${stepIdx}`);
+        } else {
+          // Manual approval required: seed reviewNotified so ticks do not broadcast duplicate events
+          this.reviewNotified.set(task.id, `complete:${stepIdx}`);
+        }
+      } else {
+        const step = chain[stepIdx];
         if (step?.reviewer === 'claude') {
-          this.reviewNotified.set(task.id, `gate:${task.reviewStep ?? 0}`);
+          const alreadyNotifiedGate = taskEvents.some((e) => {
+            if (e.type !== 'review.gate_ready') return false;
+            try {
+              const p = e.payload ? JSON.parse(e.payload) as { reviewStep?: unknown } : {};
+              return p.reviewStep === stepIdx;
+            } catch {
+              return false;
+            }
+          });
+          if (alreadyNotifiedGate) {
+            this.reviewNotified.set(task.id, `gate:${stepIdx}`);
+          }
+        } else if (isAutomatedStep(step)) {
+          this.triggerTick();
         }
       }
     }
@@ -1175,6 +1219,8 @@ export class Scheduler {
         this.runRepo.finish(run.id, 'crashed', undefined, 'reviewer interrupted during restart');
         if (this.taskRepo.get(run.taskId)?.status === 'review') {
           this.eventBus.emit('review.failed', run.taskId, { actor: 'codex-reviewer', reason: 'restart_recovery', runId: run.id });
+          this.eventBus.emit('review.waiting', run.taskId, { actor: 'codex-reviewer', reason: 'restart_recovery' });
+          this.triggerTick();
         }
         continue;
       }

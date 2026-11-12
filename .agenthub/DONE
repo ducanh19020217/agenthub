@@ -1,0 +1,28 @@
+# Hoàn tất task perf-worktree-async
+
+## Tóm tắt
+
+- Thêm `WorktreeService.createAsync()` và `removeAsync()` dùng `execFile` promise, giữ kiểm tra path an toàn, fallback branch, `.agenthub/`/`node_modules` exclude và timeout git 10 phút.
+- Scheduler dùng API async khi tạo, cleanup và quét orphan worktree; cleanup có cờ chống chạy chồng, giữ back-off dirty 30 phút/remove lỗi 1 giờ.
+- Await dispatch trong scheduler tick, bảo vệ stop generation, chống start trùng task và giữ slot reservation cho các task đang tạo worktree.
+- API xóa worktree dùng đường async; thêm regression test git chậm chứng minh event loop vẫn chạy.
+
+## Kiểm tra
+
+- `npm run lint`: pass, 0 errors; 80 warnings `no-explicit-any` có sẵn trong test.
+- `npx tsc --noEmit`: pass.
+- `npm run build`: pass.
+- Test mục tiêu: `worktree-cleanup` 9/9, `worktree-safety` 7/7, `worktree-install` 12/12, `worktree-hooks` 5/5.
+- Scheduler suite sau khi cập nhật await: 117/118 pass; còn 1 assertion legacy về tái sử dụng slot sau cancel.
+- Full `npm test -- --run`: đã chạy foreground nhưng còn các test integration cũ gọi tick đồng bộ và bị dừng sau các failure đó; chưa đạt toàn bộ pass.
+
+## Việc còn thiếu
+
+- Cần cập nhật các test integration còn gọi `scheduler.tick()` không await và xử lý assertion slot sau cancel để full suite pass hoàn toàn.
+
+## Commits
+
+- `dd383830 feat: make daemon worktree operations asynchronous`
+- `5c8bf753 test: cover async worktree cleanup`
+- `5cf3378a fix: await scheduler dispatch work`
+- `fede39f8 fix: preserve scheduler reservations across async starts`

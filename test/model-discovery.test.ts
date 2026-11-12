@@ -15,6 +15,7 @@ import {
   DEFAULT_CLAUDE_DISCOVERED_MODELS,
 } from '../src/models/index.js';
 import { openDatabase, ProfileModelRepo, ProfileRepo, ProfileRow } from '../src/db/index.js';
+import { isKnownModel } from '../src/quota/index.js';
 
 describe('Model Discovery Parsers', () => {
   it('parseAgyModelsOutput handles spinner output, tabs and spaces correctly', () => {
@@ -509,5 +510,16 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(nonexistent?.available).toBe(false);
     expect(nonexistent?.profiles).toHaveLength(0);
     expect(nonexistent?.warning).toBeTruthy();
+  });
+
+  it('isKnownModel checks discovered models and falls back to hardcoded models', () => {
+    expect(isKnownModel('gemini-3.8-flash-high')).toBe(true);
+    expect(isKnownModel('unknown-model')).toBe(false);
+
+    // With custom discovered models
+    const custom = new Set(['my-custom-model', 'gemini-3.8-flash-high']);
+    expect(isKnownModel('my-custom-model', custom)).toBe(true);
+    expect(isKnownModel('gemini-3.8-flash-high', custom)).toBe(true);
+    expect(isKnownModel('claude-opus-4-6-thinking', custom)).toBe(false);
   });
 });

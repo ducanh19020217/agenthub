@@ -95,4 +95,54 @@ describe('Publish default-on migration', () => {
     expect(secondRun.migrated).toEqual([]);
     expect(secondRun.explicitlyDisabled).toEqual([]);
   });
+
+  it('nhánh đã migrate (meta = 1): project cũ giữ enabledAt theo project.createdAt, project chưa có settings được migrate bổ sung', () => {
+    // Simulate database migrated by earlier version of publish_default_on
+    db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_default_on', '1')").run();
+    db.prepare("DELETE FROM meta WHERE key = 'migration:publish_default_on_at'").run();
+
+    // 1. Project already enabled in old version, created in past
+    const pastCreatedAt = '2026-01-01T08:00:00.000Z';
+    db.prepare(
+      'INSERT INTO projects (id, name, path, defaultBranch, settings, createdAt) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run('proj-old-enabled', 'Old Enabled', '/tmp/p-old', 'main', JSON.stringify({
+      publish: { enabled: true, remote: 'origin' },
+    }), pastCreatedAt);
+
+    // 2. Project created without settings in already-migrated database
+    db.prepare(
+      'INSERT INTO projects (id, name, path, defaultBranch, settings, createdAt) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run('proj-old-null-settings', 'Null Settings', '/tmp/p-null', 'main', null, '2026-02-01T08:00:00.000Z');
+
+    // 3. Project with settings but missing publish field in already-migrated database
+    db.prepare(
+      'INSERT INTO projects (id, name, path, defaultBranch, settings, createdAt) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run('proj-old-no-publish', 'No Publish Field', '/tmp/p-nopub', 'main', JSON.stringify({
+      brain: { mode: 'auto' },
+    }), '2026-02-01T08:00:00.000Z');
+
+    const result = ensureProjectPublishMigration(db);
+
+    expect(result.migrated).toContain('proj-old-null-settings');
+    expect(result.migrated).toContain('proj-old-no-publish');
+    expect(result.migrated).not.toContain('proj-old-enabled');
+
+    // proj-old-enabled must NOT have enabledAt set to new Date(), but project.createdAt
+    const p1 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-old-enabled') as ProjectRow;
+    const s1 = projectSettings(p1);
+    expect(s1.publish.enabled).toBe(true);
+    expect(s1.publish.enabledAt).toBe(pastCreatedAt);
+
+    // proj-old-null-settings must have publish enabled and enabledAt populated
+    const p2 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-old-null-settings') as ProjectRow;
+    const s2 = projectSettings(p2);
+    expect(s2.publish.enabled).toBe(true);
+    expect(s2.publish.enabledAt).toBeDefined();
+
+    // proj-old-no-publish must have publish enabled and enabledAt populated
+    const p3 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-old-no-publish') as ProjectRow;
+    const s3 = projectSettings(p3);
+    expect(s3.publish.enabled).toBe(true);
+    expect(s3.publish.enabledAt).toBe(s2.publish.enabledAt);
+  });
 });

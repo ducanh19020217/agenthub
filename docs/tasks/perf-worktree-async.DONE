@@ -5,24 +5,25 @@
 - Thêm API worktree bất đồng bộ và chuyển các đường nóng của daemon (start task, cleanup, orphan scan và remove liên quan) sang async, có timeout git và bảo vệ chống chạy chồng.
 - Bổ sung reaper và hook removal async, cùng đường tạo integration worktree và xóa project async để thao tác repo lớn không chặn event loop; giữ API sync cho CLI legacy.
 - Thêm kiểm thử git giả chậm cho cả `createAsync` và `removeAsync`, xác nhận timer vẫn chạy trong lúc Git đang được await.
+- Thêm kiểm thử git giả chậm qua chính `Scheduler.startTask` và cleanup hết hạn, xác nhận event loop vẫn chạy trong lúc daemon chờ Git.
 - Giữ reservation/lock/stop-generation và các kiểm tra an toàn hiện có khi tạo, dọn và xoá worktree.
 - Cập nhật scheduler/test để await tick đúng cách; thay sleep cố định trong các kiểm tra wake-up bằng polling để tránh flaky do dispatch async.
-- Không còn việc chưa làm trong phạm vi task.
+- Không còn việc chưa làm trong phạm vi task; full suite có một test timing flaky khi chạy cùng toàn bộ suite, đã pass khi chạy riêng.
 
 ## Kiểm tra
 
-- `npm test -- --run`: pass 128 test files, 1590 tests (full suite, 257.89s).
+- `npm test -- --run`: 127/128 test files pass, 1591/1592 tests pass (full suite, 282.96s); test `quota-usage.test.ts` về flock fail do timing 3 giây dưới tải suite và pass riêng 10/10.
 - `npm run lint`: pass, 0 errors và 80 warnings `no-explicit-any` đã có sẵn.
 - `npx tsc --noEmit`: pass.
 - `npm run build`: pass.
 - `npm run build:web`: pass.
 - `npm run test:web -- --run`: pass 67 test files, 568 tests.
-- Targeted worktree/integration tests: pass 2 files, 28 tests.
+- Targeted worktree/integration tests: pass 4 files, 43 tests; scheduler/cleanup regression suites pass 2 files, 129 tests.
 - `profile-enabled-persist.test.ts`: pass trong full suite (4 tests); `wait-reason.test.ts`: pass trong full suite (8 tests).
 
 ## Việc còn thiếu
 
-- Không còn việc chưa làm trong phạm vi task. Lint vẫn báo 80 warning `no-explicit-any` có sẵn ở các test không thuộc thay đổi này.
+- Lint vẫn báo 80 warning `no-explicit-any` có sẵn ở các test không thuộc thay đổi này. Full suite còn flaky timing test nêu trên; chạy riêng đã pass.
 
 ## Commit
 
@@ -37,3 +38,4 @@
 - `14c490fc` test: poll for async scheduler wakeups
 - `3ccfa5fe` fix: keep project deletion non-blocking
 - `759fa589` fix: remove remaining daemon worktree blocking
+- `8bf50626` test: cover scheduler git event loop responsiveness

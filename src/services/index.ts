@@ -2447,18 +2447,35 @@ export class AppService {
     const project = this.projectRepo.getIncludingArchived(id);
     if (!project) throw new HttpError(404, 'not_found', `Project "${id}" không tồn tại`);
     if (project.archivedAt && this.taskNoteRepo) {
-      for (const note of this.taskNoteRepo.getByProject(id)) {
+      const notes = this.taskNoteRepo.getByProject(id);
+      const archiveNotesByTask = new Map<string, TaskNoteRow>();
+      const archiveNoteIdsToDelete: number[] = [];
+
+      for (const note of notes) {
         if (!note.content.startsWith('project_archive_status:')) continue;
+        archiveNoteIdsToDelete.push(note.id);
+        archiveNotesByTask.set(note.taskId, note);
+      }
+
+      for (const [taskId, note] of archiveNotesByTask) {
+        const task = this.taskRepo.get(taskId);
+        if (!task || task.status !== 'paused') continue;
+
         try {
           const saved = JSON.parse(note.content.slice('project_archive_status:'.length)) as { status?: string; waitReason?: string | null };
           if (saved.status) {
-            this.taskRepo.update(note.taskId, { status: saved.status, waitReason: saved.waitReason as TaskRow['waitReason'] });
+            this.taskRepo.update(taskId, { status: saved.status, waitReason: saved.waitReason as TaskRow['waitReason'] });
             const resumePayload = { reason: 'project_restored', status: saved.status };
-            this.scheduler.getEventBus().emit(`task.${saved.status}`, note.taskId, resumePayload);
+            const eventType = saved.status === 'review' ? 'task.review_ready' : `task.${saved.status}`;
+            this.scheduler.getEventBus().emit(eventType, taskId, resumePayload);
           }
         } catch {
           // Ignore malformed historical notes.
         }
+      }
+
+      for (const noteId of archiveNoteIdsToDelete) {
+        this.taskNoteRepo.delete(noteId);
       }
     }
     this.projectRepo.restore(id);

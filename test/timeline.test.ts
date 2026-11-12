@@ -410,4 +410,79 @@ describe('Task Timeline API (GET /api/tasks/:id/timeline)', () => {
       at: '2026-11-12T10:25:00.000Z',
     });
   });
+
+  it('restoreProject emits standard events and does not replay stale notes', async () => {
+    const repoPath = path.join(tmpDir, 'repo-restore');
+    initGitRepo(repoPath);
+
+    ctx.projectRepo.insert({
+      id: 'proj-res',
+      name: 'Project Restore',
+      path: repoPath,
+      defaultBranch: 'main',
+      maxParallel: 3,
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj-res/t-rev',
+      projectId: 'proj-res',
+      slug: 't-rev',
+      title: 'Review Task',
+      status: 'review',
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj-res/t-q',
+      projectId: 'proj-res',
+      slug: 't-q',
+      title: 'Queued Task',
+      status: 'queued',
+    });
+
+    // Simulate an old archive note from a previous cycle that should be consumed/cleaned up
+    ctx.taskNoteRepo.insert({
+      projectId: 'proj-res',
+      taskId: 'proj-res/t-rev',
+      kind: 'note',
+      content: 'project_archive_status:{"status":"draft","waitReason":null}',
+    });
+
+    // Archive project (delete without purge)
+    ctx.service.deleteProject('proj-res');
+
+    expect(ctx.taskRepo.get('proj-res/t-rev')!.status).toBe('paused');
+    expect(ctx.taskRepo.get('proj-res/t-q')!.status).toBe('paused');
+
+    // Capture events emitted during restore
+    const emittedEvents: Array<{ type: string; taskId?: string; payload?: unknown }> = [];
+    ctx.scheduler.getEventBus().on('*', (type, taskId, payload) => {
+      emittedEvents.push({ type, taskId, payload });
+    });
+
+    // Restore project
+    ctx.service.restoreProject('proj-res');
+
+    // Verify status restored
+    expect(ctx.taskRepo.get('proj-res/t-rev')!.status).toBe('review');
+    expect(ctx.taskRepo.get('proj-res/t-q')!.status).toBe('queued');
+
+    // Emitted event for review must be standard task.review_ready, NOT task.review
+    const revEvents = emittedEvents.filter((e) => e.taskId === 'proj-res/t-rev');
+    expect(revEvents).toHaveLength(1);
+    expect(revEvents[0].type).toBe('task.review_ready');
+    expect(revEvents[0].payload).toMatchObject({ reason: 'project_restored', status: 'review' });
+
+    // Emitted event for queued task
+    const qEvents = emittedEvents.filter((e) => e.taskId === 'proj-res/t-q');
+    expect(qEvents).toHaveLength(1);
+    expect(qEvents[0].type).toBe('task.queued');
+
+    // Stale/archive notes for this project should be deleted
+    const remainingNotes = ctx.taskNoteRepo.getByProject('proj-res').filter((n) => n.content.startsWith('project_archive_status:'));
+    expect(remainingNotes).toHaveLength(0);
+
+    // Verify timeline understands task.review_ready
+    const timeline = ctx.service.getTaskTimeline('proj-res/t-rev');
+    expect(timeline.some((item) => item.status === 'review')).toBe(true);
+  });
 });

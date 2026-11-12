@@ -389,7 +389,7 @@ describe('Context Bulletin & Overlap Coordination', () => {
       });
 
       // 1. First overlap check
-      const result1 = bulletinService.checkOverlaps();
+      const result1 = await bulletinService.checkOverlaps();
       expect(result1.overlapsFound).toHaveLength(1);
       expect(result1.overlapsFound[0]).toEqual({
         taskId: 'proj/task-1',
@@ -427,7 +427,7 @@ describe('Context Bulletin & Overlap Coordination', () => {
 
       // 2. Second overlap check (both tasks still running, both still modifying shared.ts)
       // Must NOT report duplicate ("không báo trùng lặp")
-      const result2 = bulletinService.checkOverlaps();
+      const result2 = await bulletinService.checkOverlaps();
       expect(result2.overlapsFound).toHaveLength(0);
 
       // No new events emitted

@@ -1,9 +1,12 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
 import { AgentHubConfig } from './config.js';
 import { ProjectRepo, TaskRepo, TaskNoteRepo, TaskNoteRow, TaskRow } from './db/index.js';
 import { EventBus } from './scheduler/index.js';
+
+const execFileAsync = promisify(execFile);
 
 export function parsePorcelainOutput(output: string): string[] {
   const files: string[] = [];
@@ -80,6 +83,42 @@ export function getChangedFilesForWorktree(
     changed.add(f);
   }
 
+  return changed;
+}
+
+const GIT_ASYNC_TIMEOUT_MS = 30_000;
+
+/** Async variant: runs git diff + git status concurrently, timeout 30 s. */
+async function getChangedFilesForWorktreeAsync(worktreePath: string, baseRef: string): Promise<Set<string>> {
+  const changed = new Set<string>();
+  if (!fs.existsSync(worktreePath)) return changed;
+
+  const runGit = async (args: string[]): Promise<string> => {
+    try {
+      const { stdout } = await execFileAsync('git', args, {
+        cwd: worktreePath,
+        encoding: 'utf-8',
+        timeout: GIT_ASYNC_TIMEOUT_MS,
+        maxBuffer: 4 * 1024 * 1024,
+      });
+      return stdout;
+    } catch {
+      return '';
+    }
+  };
+
+  const [diffOut1, statusOut] = await Promise.all([
+    runGit(['-C', worktreePath, 'diff', '--name-only', baseRef]),
+    runGit(['-C', worktreePath, 'status', '--porcelain']),
+  ]);
+
+  let diffOut = diffOut1;
+  if (!diffOut) {
+    diffOut = await runGit(['-C', worktreePath, 'diff', '--name-only', 'HEAD']);
+  }
+
+  for (const f of parseDiffOutput(diffOut)) changed.add(f);
+  for (const f of parsePorcelainOutput(statusOut)) changed.add(f);
   return changed;
 }
 
@@ -168,101 +207,114 @@ export class BulletinService {
     }
   }
 
-  checkOverlaps(): {
+  checkOverlaps(): Promise<{
     overlapsFound: Array<{ taskId: string; otherTaskId: string; file: string }>;
-  } {
-    if (this.isChecking) return { overlapsFound: [] };
+  }> {
+    if (this.isChecking) return Promise.resolve({ overlapsFound: [] });
     this.isChecking = true;
-    try {
-      const runningTasks = this.taskRepo.getByStatus('running');
-      const tasksByProject = new Map<string, TaskRow[]>();
-      for (const t of runningTasks) {
-        const list = tasksByProject.get(t.projectId) || [];
-        list.push(t);
-        tasksByProject.set(t.projectId, list);
+
+    return this._doCheckOverlaps().finally(() => {
+      this.isChecking = false;
+    });
+  }
+
+  private async _doCheckOverlaps(): Promise<{
+    overlapsFound: Array<{ taskId: string; otherTaskId: string; file: string }>;
+  }> {
+    const runningTasks = this.taskRepo.getByStatus('running');
+    const tasksByProject = new Map<string, TaskRow[]>();
+    for (const t of runningTasks) {
+      const list = tasksByProject.get(t.projectId) || [];
+      list.push(t);
+      tasksByProject.set(t.projectId, list);
+    }
+
+    const overlapsFound: Array<{ taskId: string; otherTaskId: string; file: string }> = [];
+
+    for (const [projectId, tasks] of tasksByProject.entries()) {
+      const project = this.projectRepo.get(projectId);
+      if (tasks.length < 2) {
+        continue;
       }
 
-      const overlapsFound: Array<{ taskId: string; otherTaskId: string; file: string }> = [];
+      // Collect changed files for each task in parallel (max 2 concurrent git processes)
+      const CONCURRENCY = 2;
+      const filesByTask = new Map<string, Set<string>>();
+      const eligible = tasks.filter((t) => t.worktreePath && fs.existsSync(t.worktreePath));
 
-      for (const [projectId, tasks] of tasksByProject.entries()) {
-        const project = this.projectRepo.get(projectId);
-        if (tasks.length < 2) {
-          continue;
-        }
-
-        const filesByTask = new Map<string, Set<string>>();
-        for (const task of tasks) {
-          if (!task.worktreePath || !fs.existsSync(task.worktreePath)) continue;
+      for (let i = 0; i < eligible.length; i += CONCURRENCY) {
+        const batch = eligible.slice(i, i + CONCURRENCY);
+        await Promise.all(batch.map(async (task) => {
           const baseRef = task.baseRef || project?.defaultBranch || 'main';
-          const files = getChangedFilesForWorktree(task.worktreePath, baseRef, this.exec);
+          const files = this.exec
+            ? getChangedFilesForWorktree(task.worktreePath!, baseRef, this.exec)
+            : await getChangedFilesForWorktreeAsync(task.worktreePath!, baseRef);
           filesByTask.set(task.id, files);
-        }
+        }));
+      }
 
-        let newOverlapsInProject = false;
+      let newOverlapsInProject = false;
 
-        for (let i = 0; i < tasks.length; i++) {
-          for (let j = i + 1; j < tasks.length; j++) {
-            const taskA = tasks[i];
-            const taskB = tasks[j];
-            const filesA = filesByTask.get(taskA.id);
-            const filesB = filesByTask.get(taskB.id);
-            if (!filesA || !filesB) continue;
+      for (let i = 0; i < tasks.length; i++) {
+        for (let j = i + 1; j < tasks.length; j++) {
+          const taskA = tasks[i];
+          const taskB = tasks[j];
+          const filesA = filesByTask.get(taskA.id);
+          const filesB = filesByTask.get(taskB.id);
+          if (!filesA || !filesB) continue;
 
-            const pairFiles: string[] = [];
-            for (const file of filesA) {
-              if (filesB.has(file)) {
-                const hasA = this.taskNoteRepo.hasOverlap(taskA.id, taskB.id, file);
-                const hasB = this.taskNoteRepo.hasOverlap(taskB.id, taskA.id, file);
+          const pairFiles: string[] = [];
+          for (const file of filesA) {
+            if (filesB.has(file)) {
+              const hasA = this.taskNoteRepo.hasOverlap(taskA.id, taskB.id, file);
+              const hasB = this.taskNoteRepo.hasOverlap(taskB.id, taskA.id, file);
 
-                if (!hasA || !hasB) {
-                  if (!hasA) {
-                    this.taskNoteRepo.insert({
-                      projectId: taskA.projectId,
-                      taskId: taskA.id,
-                      kind: 'overlap',
-                      content: `Trùng sửa file ${file} với task ${taskB.id}`,
-                    });
-                  }
-                  if (!hasB) {
-                    this.taskNoteRepo.insert({
-                      projectId: taskB.projectId,
-                      taskId: taskB.id,
-                      kind: 'overlap',
-                      content: `Trùng sửa file ${file} với task ${taskA.id}`,
-                    });
-                  }
-
-                  newOverlapsInProject = true;
-                  overlapsFound.push({
+              if (!hasA || !hasB) {
+                if (!hasA) {
+                  this.taskNoteRepo.insert({
+                    projectId: taskA.projectId,
                     taskId: taskA.id,
-                    otherTaskId: taskB.id,
-                    file,
+                    kind: 'overlap',
+                    content: `Trùng sửa file ${file} với task ${taskB.id}`,
                   });
-                  pairFiles.push(file);
                 }
+                if (!hasB) {
+                  this.taskNoteRepo.insert({
+                    projectId: taskB.projectId,
+                    taskId: taskB.id,
+                    kind: 'overlap',
+                    content: `Trùng sửa file ${file} với task ${taskA.id}`,
+                  });
+                }
+
+                newOverlapsInProject = true;
+                overlapsFound.push({
+                  taskId: taskA.id,
+                  otherTaskId: taskB.id,
+                  file,
+                });
+                pairFiles.push(file);
               }
             }
-            // One notification per task pair, not one per shared file.
-            if (pairFiles.length > 0) {
-              this.eventBus.emit('task.overlap', taskA.id, {
-                otherTaskId: taskB.id,
-                file: pairFiles.length === 1 ? pairFiles[0] : `${pairFiles[0]} (+${pairFiles.length - 1} file)`,
-                files: pairFiles,
-                projectId,
-              });
-            }
           }
-        }
-
-        if (newOverlapsInProject) {
-          this.updateBulletinsForProject(projectId);
+          // One notification per task pair, not one per shared file.
+          if (pairFiles.length > 0) {
+            this.eventBus.emit('task.overlap', taskA.id, {
+              otherTaskId: taskB.id,
+              file: pairFiles.length === 1 ? pairFiles[0] : `${pairFiles[0]} (+${pairFiles.length - 1} file)`,
+              files: pairFiles,
+              projectId,
+            });
+          }
         }
       }
 
-      return { overlapsFound };
-    } finally {
-      this.isChecking = false;
+      if (newOverlapsInProject) {
+        this.updateBulletinsForProject(projectId);
+      }
     }
+
+    return { overlapsFound };
   }
 
   updateBulletinForTask(task: TaskRow): void {

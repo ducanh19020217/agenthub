@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execFileSync, execSync, spawn, ChildProcess } from 'node:child_process';
-import { findProjectRoot } from '../cli.js';
+import { findProjectRoot } from '../cli-main.js';
 
 function loadBrainPlaybook(): string {
   const candidates = [

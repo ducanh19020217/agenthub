@@ -693,32 +693,12 @@ export const UpdateConfigSchema = z.object({
   }).optional(),
 });
 
-export function toTaskId(idOrParam: string): string {
-  return idOrParam.includes('~') ? idOrParam.replace('~', '/') : idOrParam;
-}
+import { toTaskId, toRouteId } from '../utils/task-id.js';
+export { toTaskId, toRouteId };
 
-export function toRouteId(taskId: string): string {
-  return taskId.replace('/', '~');
-}
-
-export function readLogTail(filePath: string, tailKB = 512): string {
-  if (!fs.existsSync(filePath)) return '';
-  try {
-    const fd = fs.openSync(filePath, 'r');
-    try {
-      const stat = fs.fstatSync(fd);
-      const maxBytes = Math.min(Math.max(1, tailKB), 512) * 1024;
-      const bytesToRead = Math.min(stat.size, maxBytes);
-      const buffer = Buffer.alloc(bytesToRead);
-      fs.readSync(fd, buffer, 0, bytesToRead, stat.size - bytesToRead);
-      return buffer.toString('utf-8');
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return '';
-  }
-}
+import { readLogTail, ReadLogTailOptions } from '../utils/log-tail.js';
+export { readLogTail };
+export type { ReadLogTailOptions };
 
 export async function getGitCommits(
   repoPath: string,
@@ -1632,7 +1612,16 @@ export class AppService {
         hasToken: Boolean(this.telegramBotService?.hasValidToken()),
       },
       tools: this.config.tools,
-      perf: { eventLoop: this.perfCollector?.getEventLoopStats() ?? null },
+      perf: (() => {
+        const mem = process.memoryUsage();
+        return {
+          eventLoop: this.perfCollector?.getEventLoopStats() ?? null,
+          heapUsed: mem.heapUsed,
+          rss: mem.rss,
+          external: mem.external,
+          heapTotal: mem.heapTotal,
+        };
+      })(),
     };
   }
 

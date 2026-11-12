@@ -81,9 +81,36 @@ function systemctlCommand(...args: string[]): string {
   return [shellWord(process.env.AGENTHUB_SYSTEMCTL || 'systemctl'), ...args.map(shellWord)].join(' ');
 }
 
+export function extractCustomEnvironments(existingContent: string): string[] {
+  const lines = existingContent.split(/\r?\n/);
+  const custom: string[] = [];
+  const managedKeys = new Set(['PATH', 'MALLOC_ARENA_MAX', 'MALLOC_TRIM_THRESHOLD_']);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('Environment=')) {
+      const val = trimmed.slice('Environment='.length).trim();
+      const eqIdx = val.indexOf('=');
+      const key = eqIdx >= 0 ? val.slice(0, eqIdx).trim() : val;
+      if (!managedKeys.has(key)) {
+        custom.push(trimmed);
+      }
+    }
+  }
+  return custom;
+}
+
 function installService(opts: { nodePath: string; cliPath: string; currentPath: string; homeDir: string; print: boolean; exec?: (command: string, options: { stdio: 'inherit' }) => void }): ServiceInstallResult {
-  const content = `[Unit]\nDescription=AgentHub Daemon\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=${opts.nodePath} ${opts.cliPath} daemon\nRestart=on-failure\nEnvironment=PATH=${opts.currentPath}\n\n[Install]\nWantedBy=default.target\n`;
   const file = path.join(opts.homeDir, '.config', 'systemd', 'user', 'agenthub.service');
+  let customEnvLines: string[] = [];
+  if (fs.existsSync(file)) {
+    try {
+      customEnvLines = extractCustomEnvironments(fs.readFileSync(file, 'utf8'));
+    } catch {
+      // ignore
+    }
+  }
+  const customEnvBlock = customEnvLines.length > 0 ? `\n${customEnvLines.join('\n')}` : '';
+  const content = `[Unit]\nDescription=AgentHub Daemon\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=${opts.nodePath} ${opts.cliPath} daemon\nRestart=on-failure\nEnvironment=PATH=${opts.currentPath}\nEnvironment=MALLOC_ARENA_MAX=2\nEnvironment=MALLOC_TRIM_THRESHOLD_=131072${customEnvBlock}\n\n[Install]\nWantedBy=default.target\n`;
   const activate = `${systemctlCommand('--user', 'daemon-reload')} && ${systemctlCommand('--user', 'enable', '--now', 'agenthub')}`;
   if (!opts.print) {
     assertServiceWriteAllowed(file);

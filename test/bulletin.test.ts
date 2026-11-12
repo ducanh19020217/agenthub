@@ -17,7 +17,7 @@ import {
   parsePorcelainOutput,
   Semaphore,
 } from '../src/bulletin.js';
-import { cmdNote, cmdNotes } from '../src/cli.js';
+import { cmdNote, cmdNotes } from '../src/cli-main.js';
 
 describe('Context Bulletin & Overlap Coordination', () => {
   let tmpDir: string;

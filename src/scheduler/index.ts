@@ -45,6 +45,7 @@ import { buildReviewerPrompt, parseReviewerOutput, ReviewerVerdict, isAutoReview
 import { CLAUDE_REVIEW_ENGINE_KEY } from '../engines/claude-review.js';
 import { isAutomatedStep, parseReviewChain, reviewerModel, type ReviewChainStep } from '../review-chain.js';
 import { isOrphanProcess, listAllWorktreeProcesses, reap, reapForWorktree } from '../reaper.js';
+import { readLogTail } from '../utils/log-tail.js';
 import { LoadGuard, LoadSnapshot } from '../load.js';
 import { measureProcessTree } from '../process-tree.js';
 import { ReferenceSnapshot, takeReferenceSnapshotsAsync, detectReferenceModificationsAsync, ReferenceModification } from '../references.js';
@@ -2099,11 +2100,7 @@ export class Scheduler {
   }
 
   private logTail(logPath: string | null | undefined, lines: number): string {
-    if (!logPath || !fs.existsSync(logPath)) return '';
-    try {
-      const content = fs.readFileSync(logPath, 'utf8');
-      return content.split('\n').slice(-lines).join('\n');
-    } catch { return ''; }
+    return readLogTail(logPath, { lines, maxBytes: 64 * 1024 });
   }
 
   private async handleRunCompletion(taskId: string, rt: RunningTask): Promise<void> {
@@ -2143,20 +2140,8 @@ export class Scheduler {
     // Read log tail for quota detection
     const run = this.runRepo.get(rt.runId);
     let logTail = '';
-    let fullLog = '';
-    if (run?.logPath && fs.existsSync(run.logPath)) {
-      try {
-        fullLog = fs.readFileSync(run.logPath, 'utf-8');
-        const fd = fs.openSync(run.logPath, 'r');
-        const stat = fs.fstatSync(fd);
-        const size = Math.min(stat.size, 16 * 1024);
-        const buffer = Buffer.alloc(size);
-        fs.readSync(fd, buffer, 0, size, stat.size - size);
-        fs.closeSync(fd);
-        logTail = buffer.toString('utf-8');
-      } catch {
-        // ignore
-      }
+    if (run?.logPath) {
+      logTail = readLogTail(run.logPath, { maxBytes: 64 * 1024 });
     }
 
     // Check worktree markers
@@ -2203,8 +2188,9 @@ export class Scheduler {
 
     // Tokens used for codex
     let tokensUsed: number | null = null;
-    if (rt.engine.id === 'codex') {
-      tokensUsed = parseCodexTokens(fullLog);
+    if (rt.engine.id === 'codex' && run?.logPath) {
+      const codexTail = readLogTail(run.logPath, { maxBytes: 256 * 1024 });
+      tokensUsed = parseCodexTokens(codexTail);
     }
 
     const durationMs = Date.now() - rt.startTime;
@@ -2314,7 +2300,7 @@ export class Scheduler {
       this.eventBus.emit('task.queued', taskId, { reason: 'resume_after_progress' });
     } else {
       const exitCode = rt.exitCode ?? rt.child?.exitCode ?? null;
-      const isLockBusy = durationMs < 3000 && fullLog.trim() === '' && Boolean(rt.lockFile) && exitCode === 1;
+      const isLockBusy = durationMs < 3000 && logTail.trim() === '' && Boolean(rt.lockFile) && exitCode === 1;
 
       if (isLockBusy) {
         if (this.recordWorkerCrash(taskId, rt, 'lock_busy')) return;
@@ -3170,7 +3156,7 @@ export class Scheduler {
     let output = '';
     let logOutput = '';
     if (run?.logPath) {
-      try { logOutput = fs.readFileSync(run.logPath, 'utf8'); } catch { logOutput = ''; }
+      logOutput = readLogTail(run.logPath, { maxBytes: 64 * 1024 });
     }
     try { output = fs.readFileSync(active.outputPath, 'utf8'); } catch { output = ''; }
     // The Claude CLI prints its limit notice on stdout, which lands in the output file, not the log.

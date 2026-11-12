@@ -319,5 +319,25 @@ describe('GET /api/status enrichment', () => {
         waiting_quota: 0,
       });
     });
+
+    it('returns daemon memory performance metrics (heapUsed, rss, external) under perf', async () => {
+      const res = await server.inject({
+        method: 'GET',
+        url: '/api/status',
+        headers: authHeaders(),
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.perf).toBeDefined();
+      expect(typeof body.perf.heapUsed).toBe('number');
+      expect(body.perf.heapUsed).toBeGreaterThan(0);
+      expect(typeof body.perf.rss).toBe('number');
+      expect(body.perf.rss).toBeGreaterThan(0);
+      expect(typeof body.perf.external).toBe('number');
+      expect(body.perf.external).toBeGreaterThanOrEqual(0);
+      expect(typeof body.perf.heapTotal).toBe('number');
+      expect(body.perf.heapTotal).toBeGreaterThan(0);
+    });
   });
 });

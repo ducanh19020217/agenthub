@@ -379,6 +379,47 @@ describe('safe installer and updater commands', () => {
     }
   });
 
+  it('generates systemd unit with malloc arena and trim threshold tuning', () => {
+    const home = makeTemp('agenthub-malloc-unit-');
+    const result = linuxPlatform.installService({
+      nodePath: process.execPath,
+      cliPath: path.join(home, 'dist', 'cli.js'),
+      currentPath: '/tmp/bin',
+      homeDir: home,
+      print: true,
+    });
+    expect(result.content).toContain('Environment=MALLOC_ARENA_MAX=2');
+    expect(result.content).toContain('Environment=MALLOC_TRIM_THRESHOLD_=131072');
+  });
+
+  it('preserves custom Environment variables from existing systemd unit file on reinstallation', () => {
+    const home = makeTemp('agenthub-custom-env-');
+    const serviceDir = path.join(home, '.config', 'systemd', 'user');
+    fs.mkdirSync(serviceDir, { recursive: true });
+    const serviceFile = path.join(serviceDir, 'agenthub.service');
+    fs.writeFileSync(
+      serviceFile,
+      `[Unit]\nDescription=AgentHub Daemon\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=/old/node /old/cli.js daemon\nRestart=on-failure\nEnvironment=PATH=/old/path\nEnvironment=AGENTHUB_WEB_DIR=/custom/web/dir\nEnvironment=AGENTHUB_CUSTOM_PORT=8888\n\n[Install]\nWantedBy=default.target\n`,
+      'utf8',
+    );
+
+    const result = linuxPlatform.installService({
+      nodePath: process.execPath,
+      cliPath: path.join(home, 'dist', 'cli.js'),
+      currentPath: '/new/bin',
+      homeDir: home,
+      print: true,
+    });
+
+    expect(result.content).toContain('Environment=PATH=/new/bin');
+    expect(result.content).toContain('Environment=MALLOC_ARENA_MAX=2');
+    expect(result.content).toContain('Environment=MALLOC_TRIM_THRESHOLD_=131072');
+    expect(result.content).toContain('Environment=AGENTHUB_WEB_DIR=/custom/web/dir');
+    expect(result.content).toContain('Environment=AGENTHUB_CUSTOM_PORT=8888');
+    // Ensure PATH=/old/path is not preserved
+    expect(result.content).not.toContain('Environment=PATH=/old/path');
+  });
+
   it('refuses Vitest writes to the real home service file and keeps uninstall untouched', () => {
     const realHome = os.userInfo().homedir;
     const serviceFile = path.join(realHome, '.config', 'systemd', 'user', 'agenthub.service');

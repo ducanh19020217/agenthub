@@ -312,3 +312,29 @@
      - Để ngăn ngừa việc khoá tài nguyên (lock publish) quá lâu và tốn lượng lớn token / quota khi tích luỹ quá nhiều commit chưa push, hệ thống áp dụng giới hạn số task được audit trong một lần publish: `publish.audit.maxTasks`.
      - Giá trị mặc định là 10 (cấu hình được trong settings của project hoặc preset, giá trị số nguyên tối thiểu là 1).
      - Nếu số task cần audit vượt quá giới hạn (`tasksToAudit.length > maxTasks`), tiến trình publish sẽ huỷ bỏ ngay lập tức (`abort`), không thực hiện push, đánh dấu `pushResult` với lỗi vượt quá giới hạn (`exceededMaxTasks: true`) và phát sự kiện `task.push_failed` để thông báo cho người dùng qua Telegram và desktop notification.
+
+
+## DEC-026: Task baseline khi kích hoạt publish và chống lặp thông báo lỗi
+
+- **Bối cảnh**:
+  - Khi một project được bật tính năng publish (thông qua migration tự động bật mặc định, hoặc người dùng bật lại sau khi tắt), hoặc khi nhánh đích trên remote (`origin/<target>`) chưa có lịch sử/chưa tồn tại, có thể có nhiều hơn 10 task đã `done` và được merge vào nhánh tích hợp trước thời điểm bật publish.
+  - Theo DEC-025, nếu số task cần audit vượt quá `maxTasks` (mặc định 10), hệ thống huỷ publish với lỗi `exceededMaxTasks`. Do auto-publish chạy sau mỗi lần merge task mới, lỗi này lặp lại liên tục sau mỗi task hoàn thành, gửi thông báo spam (Telegram & desktop) và chặn vĩnh viễn việc publish tự động cho đến khi người dùng publish thủ công kèm `skipAudit: true`.
+  - Ngoài ra, trong trường hợp race condition khi đang audit task A, task B được merge vào integration, auto-publish của B nhận 409 từ publish lock. Nếu A merge tip hiện tại của integration thay vì SHA tại thời điểm audit, code của B bị đẩy lên remote mà không qua audit gate.
+- **Quyết định thiết kế**:
+  1. **Lưu mốc thời gian bật publish (`enabledAt`)**:
+     - `projects.settings.publish.enabledAt` ghi nhận thời điểm tính năng publish được bật (hoặc thời điểm chạy migration `migration:publish_default_on_at`, fallback về `project.createdAt`).
+     - Khi người dùng bật lại publish từ trạng thái tắt (`publish.enabled: false` sang `true`), `enabledAt` được cập nhật lại theo thời gian hiện tại (`new Date().toISOString()`).
+  2. **Phân tách task baseline và miễn trừ audit gate**:
+     - Trong `findTasksToAudit`: các task đã hoàn thành và được merge trước mốc `enabledAt` (dựa trên commit date của merge commit hoặc thời điểm tạo/cập nhật task) được phân loại là **task baseline**.
+     - Các task baseline được miễn trừ khỏi audit gate (`tasksToAudit` không chứa task baseline), do đó số lượng task baseline không tính vào ngưỡng `maxTasks`. Chỉ các task được merge sau `enabledAt` mới phải qua audit gate.
+     - Khi git push thành công, cả `tasksToAudit` và `baselineTasks` đều được cập nhật trạng thái `status: 'pushed'`. Riêng task baseline được gắn thêm cờ `baseline: true, auditSkipped: true` trong `pushResult` và payload sự kiện `task.pushed`.
+  3. **Chống spam thông báo lỗi publish lặp lại (`suppressNotification`)**:
+     - Quản lý bộ nhớ đệm `lastProjectPublishError` theo `projectId`.
+     - Nếu một lần publish thất bại với thông điệp lỗi giống hệt lần thất bại liền kề trước đó của cùng project, sự kiện `task.push_failed` được phát kèm cờ `suppressNotification: true`.
+     - Các dịch vụ thông báo (`NotificationService` cho desktop và `TelegramBotService` cho Telegram) kiểm tra cờ này và bỏ qua việc gửi thông báo lặp lại, giữ cho luồng thông báo của người dùng không bị nhiễu.
+     - Khi một lượt publish thành công, bản ghi lỗi của project được xoá để sẵn sàng ghi nhận nếu có lỗi mới phát sinh sau này.
+  4. **Snapshot SHA nguồn trước audit và xếp hàng auto-publish khi gặp xung đột lock (P1)**:
+     - Trước khi audit, SHA của `sourceBranch` được snapshot (`sourceSha`). Publish chỉ audit và merge/push đúng commit `sourceSha` đó, ngăn việc vô tình đẩy code của task merge muộn chưa được audit.
+     - Khi auto-publish nhận 409 do publish khác đang chạy, task được xếp hàng chờ (`enqueueAutoPublish`) và tự động kích hoạt publish lại ngay khi lock được nhả (`onProjectPublishLockReleased`).
+  5. **Bảo toàn trạng thái cuối khi publish nền gặp lỗi (P3)**:
+     - Bọc bắt lỗi trong `startPublishTask` để khi publish nền bị lỗi trước hoặc trong khi xử lý, trạng thái `auditing` luôn được chuyển về trạng thái cuối `push_failed` kèm sự kiện `task.push_failed`, không để lại trạng thái treo trong DB.

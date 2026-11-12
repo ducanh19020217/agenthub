@@ -1211,8 +1211,11 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
     if (!hasMeta || !hasProjects) return { migrated, explicitlyDisabled };
 
     const metaRow = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_default_on'").get() as { value: string } | undefined;
-    if (metaRow && metaRow.value === '1') {
-      return { migrated, explicitlyDisabled };
+    const migrationAtRow = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_default_on_at'").get() as { value: string } | undefined;
+    let migrationAt = migrationAtRow?.value;
+    if (!migrationAt) {
+      migrationAt = new Date().toISOString();
+      db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_default_on_at', ?)").run(migrationAt);
     }
 
     const projects = db.prepare('SELECT id, defaultBranch, settings FROM projects').all() as Array<{
@@ -1221,8 +1224,28 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
       settings: string | null;
     }>;
 
+    const updateStmt = db.prepare('UPDATE projects SET settings = ? WHERE id = ?');
+
+    if (metaRow && metaRow.value === '1') {
+      // Ensure projects with publish.enabled=true have enabledAt populated
+      for (const project of projects) {
+        if (!project.settings) continue;
+        try {
+          const parsed = JSON.parse(project.settings);
+          if (parsed?.publish?.enabled !== false && parsed?.publish && !parsed.publish.enabledAt) {
+            parsed.publish.enabledAt = migrationAt;
+            updateStmt.run(JSON.stringify(parsed), project.id);
+          }
+        } catch {
+          // ignore
+        }
+      }
+      return { migrated, explicitlyDisabled };
+    }
+
     const defaultPublish = {
       enabled: true,
+      enabledAt: migrationAt,
       remote: 'origin',
       pushIntegrationBranch: true,
       audit: {
@@ -1230,8 +1253,6 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
         maxFixRounds: 2,
       },
     };
-
-    const updateStmt = db.prepare('UPDATE projects SET settings = ? WHERE id = ?');
 
     for (const project of projects) {
       if (!project.settings) {
@@ -1260,6 +1281,9 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
         migrated.push(project.id);
       } else if (publishVal.enabled === false) {
         explicitlyDisabled.push(project.id);
+      } else if (!publishVal.enabledAt) {
+        publishVal.enabledAt = migrationAt;
+        updateStmt.run(JSON.stringify(parsed), project.id);
       }
     }
 

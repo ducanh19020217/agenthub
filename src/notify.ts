@@ -786,6 +786,7 @@ export class NotificationService {
       }
 
       case 'task.push_failed': {
+        if (p.suppressNotification) break;
         const err = typeof p.error === 'string' ? `: ${p.error}` : '';
         const title = this.resolveTaskTitle(taskId, p);
         this.notify(`❌ Đẩy git thất bại: ${title}${err}`, 'critical');

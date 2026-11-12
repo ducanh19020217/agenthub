@@ -57,6 +57,7 @@ describe('Publish default-on migration', () => {
     expect(s1.publish.enabled).toBe(true);
     expect(s1.publish.remote).toBe('origin');
     expect(s1.publish.audit?.enabled).toBe(true);
+    expect(s1.publish.enabledAt).toBeDefined();
 
     // Verify row 2 (kept existing settings + added publish)
     const p2 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-existing-settings') as ProjectRow;
@@ -65,21 +66,26 @@ describe('Publish default-on migration', () => {
     expect(s2.integration.enabled).toBe(true);
     expect(s2.publish.enabled).toBe(true);
     expect(s2.publish.remote).toBe('origin');
+    expect(s2.publish.enabledAt).toBe(s1.publish.enabledAt);
 
     // Verify row 3 (explicitly disabled kept as is)
     const p3 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-explicit-disabled') as ProjectRow;
     const s3 = projectSettings(p3);
     expect(s3.publish.enabled).toBe(false);
 
-    // Verify row 4 (custom remote kept as is)
+    // Verify row 4 (custom remote kept as is, enabledAt populated if missing)
     const p4 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-already-enabled') as ProjectRow;
     const s4 = projectSettings(p4);
     expect(s4.publish.enabled).toBe(true);
     expect(s4.publish.remote).toBe('upstream');
+    expect(s4.publish.enabledAt).toBe(s1.publish.enabledAt);
 
     // Verify meta table
     const metaMigration = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_default_on'").get() as { value: string };
     expect(metaMigration.value).toBe('1');
+
+    const metaMigrationAt = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_default_on_at'").get() as { value: string };
+    expect(metaMigrationAt.value).toBe(s1.publish.enabledAt);
 
     const metaDisabled = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_disabled_projects'").get() as { value: string };
     expect(JSON.parse(metaDisabled.value)).toEqual(['proj-explicit-disabled']);

@@ -11,6 +11,7 @@ import { FakeEngine, type Engine } from '../src/engines/index.js';
 import { buildGitUrls, clearPublishLocks } from '../src/publish.js';
 import { clearAuditPassCache } from '../src/pre-publish-audit.js';
 import { toRouteId } from '../src/services/index.js';
+import { NotificationService } from '../src/notify.js';
 
 let tmpDir: string;
 let config: ReturnType<typeof loadConfig>;
@@ -1830,6 +1831,192 @@ describe('Publish Service (t-auto-push-after-done)', () => {
 
       expect(failedEvents.length).toBeGreaterThan(0);
       expect(failedEvents[0].payload.error).toContain('vượt quá giới hạn');
+    });
+
+    it('baseline tasks merged trước enabledAt được miễn audit gate và đánh dấu pushed với baseline: true', async () => {
+      const remotePath = path.join(tmpDir, 'remote-baseline-test.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-baseline-test');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+
+      const pastEnv = {
+        ...testEnv,
+        GIT_AUTHOR_DATE: '2026-01-01T10:00:00Z',
+        GIT_COMMITTER_DATE: '2026-01-01T10:00:00Z',
+      };
+
+      // Create 3 tasks merged in the past (before publish was enabled)
+      for (let i = 1; i <= 3; i++) {
+        execFileSync('git', ['checkout', '-b', `agenthub/base-${i}`], { cwd: repoPath, env: pastEnv });
+        fs.writeFileSync(path.join(repoPath, `base${i}.txt`), `Base task ${i}\n`);
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: pastEnv });
+        execFileSync('git', ['commit', '-m', `feat: base task ${i}`], { cwd: repoPath, env: pastEnv });
+
+        execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: pastEnv });
+        execFileSync('git', ['merge', '--no-ff', `agenthub/base-${i}`, '-m', `Merge branch 'agenthub/base-${i}' into agenthub/integration`], { cwd: repoPath, env: pastEnv });
+      }
+
+      // Project enabled publish at 2026-01-02T00:00:00Z with maxTasks: 2
+      ctx.service.createProject({
+        id: 'proj-baseline',
+        name: 'Baseline Test Project',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            enabledAt: '2026-01-02T00:00:00Z',
+            remote: 'origin',
+            branch: 'main',
+            pushIntegrationBranch: false,
+            audit: { enabled: true, maxTasks: 2 },
+          },
+        },
+      });
+
+      for (let i = 1; i <= 3; i++) {
+        ctx.taskRepo.insert({
+          id: `proj-baseline/task-${i}`,
+          projectId: 'proj-baseline',
+          slug: `base-${i}`,
+          title: `Base Task ${i}`,
+          status: 'done',
+          branch: `agenthub/base-${i}`,
+          baseRef: 'main',
+          createdAt: '2026-01-01T10:00:00Z',
+        });
+      }
+
+      // Create 1 new task merged after enabledAt
+      const recentEnv = {
+        ...testEnv,
+        GIT_AUTHOR_DATE: '2026-01-03T10:00:00Z',
+        GIT_COMMITTER_DATE: '2026-01-03T10:00:00Z',
+      };
+      execFileSync('git', ['checkout', '-b', 'agenthub/new-task'], { cwd: repoPath, env: recentEnv });
+      fs.writeFileSync(path.join(repoPath, 'new.txt'), 'New task content\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: recentEnv });
+      execFileSync('git', ['commit', '-m', 'feat: new task'], { cwd: repoPath, env: recentEnv });
+
+      execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: recentEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/new-task', '-m', "Merge branch 'agenthub/new-task' into agenthub/integration"], { cwd: repoPath, env: recentEnv });
+
+      ctx.taskRepo.insert({
+        id: 'proj-baseline/task-new',
+        projectId: 'proj-baseline',
+        slug: 'new-task',
+        title: 'New Task',
+        status: 'done',
+        branch: 'agenthub/new-task',
+        baseRef: 'main',
+        createdAt: '2026-01-03T10:00:00Z',
+      });
+
+      // Total unpushed tasks = 4 > maxTasks (2). But 3 are baseline.
+      process.env.FAKE_MODE = 'audit-pass';
+      const res = await ctx.service.publishTask('proj-baseline/task-new', { manual: true });
+      expect(res.ok).toBe(true);
+
+      // Verify new task was audited and pushed
+      const updatedNew = ctx.taskRepo.get('proj-baseline/task-new');
+      expect(updatedNew?.status).toBe('pushed');
+      const prNew = JSON.parse(updatedNew?.pushResult || '{}');
+      expect(prNew.auditPassed).toBe(true);
+      expect(prNew.baseline).toBeUndefined();
+
+      // Verify baseline tasks were marked pushed with baseline: true, auditSkipped: true
+      for (let i = 1; i <= 3; i++) {
+        const baseTask = ctx.taskRepo.get(`proj-baseline/task-${i}`);
+        expect(baseTask?.status).toBe('pushed');
+        const prBase = JSON.parse(baseTask?.pushResult || '{}');
+        expect(prBase.baseline).toBe(true);
+        expect(prBase.auditSkipped).toBe(true);
+      }
+    });
+
+    it('không spam thông báo: cùng một lỗi publish thất bại phát suppressNotification: true ở lần lặp lại', async () => {
+      const repoPath = path.join(tmpDir, 'repo-notify-dedup');
+      fs.mkdirSync(repoPath, { recursive: true });
+      execFileSync('git', ['init', repoPath], { env: testEnv });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', '-b', 'main'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'init.txt'), 'init');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-notify-dedup',
+        name: 'Notify Dedup Project',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'non-existent-remote',
+            branch: 'main',
+            pushIntegrationBranch: false,
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-notify-dedup/t1',
+        projectId: 'proj-notify-dedup',
+        slug: 't1',
+        title: 'Task 1',
+        status: 'done',
+        branch: 'main',
+        baseRef: 'main',
+      });
+
+      const pushFailedEvents: any[] = [];
+      ctx.scheduler.getEventBus().on('task.push_failed', (_id, p) => pushFailedEvents.push(p));
+
+      // Attempt 1: should emit suppressNotification: false
+      const res1 = await ctx.service.publishTask('proj-notify-dedup/t1', { manual: true });
+      expect(res1.ok).toBe(false);
+      expect(pushFailedEvents.length).toBe(1);
+      expect(pushFailedEvents[0].suppressNotification).toBe(false);
+
+      // Attempt 2: identical error should emit suppressNotification: true
+      const res2 = await ctx.service.publishTask('proj-notify-dedup/t1', { manual: true });
+      expect(res2.ok).toBe(false);
+      expect(pushFailedEvents.length).toBe(2);
+      expect(pushFailedEvents[1].suppressNotification).toBe(true);
+
+      // Verify NotificationService skips notification when suppressNotification is true
+      const fakeExec = vi.fn();
+      const testConfig = {
+        ...config,
+        notifications: {
+          ...config.notifications,
+          desktop: true,
+          desktopLevel: 'all' as const,
+        },
+      };
+      const notifService = new NotificationService({
+        config: testConfig,
+        eventBus: ctx.scheduler.getEventBus(),
+        exec: fakeExec,
+      });
+      const sentNotifications: any[] = [];
+      const origNotify = notifService.notify.bind(notifService);
+      notifService.notify = (msg: string, level: any) => {
+        sentNotifications.push({ msg, level });
+        return origNotify(msg, level);
+      };
+
+      // Replay events to notification service
+      (notifService as any).handleEvent('task.push_failed', 'proj-notify-dedup/t1', pushFailedEvents[0]);
+      expect(sentNotifications.length).toBe(1);
+
+      (notifService as any).handleEvent('task.push_failed', 'proj-notify-dedup/t1', pushFailedEvents[1]);
+      // Length should still be 1 because suppressNotification: true is skipped!
+      expect(sentNotifications.length).toBe(1);
     });
   });
 });

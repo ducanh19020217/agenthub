@@ -88,23 +88,92 @@ export function getChangedFilesForWorktree(
 
 const GIT_ASYNC_TIMEOUT_MS = 30_000;
 
-/** Async variant: runs git diff + git status concurrently, timeout 30 s. */
-async function getChangedFilesForWorktreeAsync(worktreePath: string, baseRef: string): Promise<Set<string>> {
+export class Semaphore {
+  private running = 0;
+  private readonly queue: Array<() => void> = [];
+
+  constructor(public readonly max: number) {
+    if (max < 1) {
+      throw new Error('Semaphore max concurrency must be at least 1');
+    }
+  }
+
+  async acquire(): Promise<() => void> {
+    if (this.running < this.max) {
+      this.running++;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        this.running--;
+        const next = this.queue.shift();
+        if (next) {
+          this.running++;
+          next();
+        }
+      };
+    }
+
+    return new Promise<() => void>((resolve) => {
+      this.queue.push(() => {
+        let released = false;
+        resolve(() => {
+          if (released) return;
+          released = true;
+          this.running--;
+          const next = this.queue.shift();
+          if (next) {
+            this.running++;
+            next();
+          }
+        });
+      });
+    });
+  }
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    const release = await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
+  get activeCount(): number {
+    return this.running;
+  }
+
+  get pendingCount(): number {
+    return this.queue.length;
+  }
+}
+
+const defaultGitLimiter = new Semaphore(2);
+
+/** Async variant: runs git diff + git status with bounded git concurrency (default 2), timeout 30 s. */
+export async function getChangedFilesForWorktreeAsync(
+  worktreePath: string,
+  baseRef: string,
+  gitLimiter: Semaphore = defaultGitLimiter,
+): Promise<Set<string>> {
   const changed = new Set<string>();
   if (!fs.existsSync(worktreePath)) return changed;
 
   const runGit = async (args: string[]): Promise<string> => {
-    try {
-      const { stdout } = await execFileAsync('git', args, {
-        cwd: worktreePath,
-        encoding: 'utf-8',
-        timeout: GIT_ASYNC_TIMEOUT_MS,
-        maxBuffer: 4 * 1024 * 1024,
-      });
-      return stdout;
-    } catch {
-      return '';
-    }
+    return gitLimiter.run(async () => {
+      try {
+        const { stdout } = await execFileAsync('git', args, {
+          cwd: worktreePath,
+          encoding: 'utf-8',
+          timeout: GIT_ASYNC_TIMEOUT_MS,
+          maxBuffer: 4 * 1024 * 1024,
+        });
+        return stdout;
+      } catch {
+        return '';
+      }
+    });
   };
 
   const [diffOut1, statusOut] = await Promise.all([
@@ -170,6 +239,7 @@ export interface BulletinServiceOptions {
   taskNoteRepo: TaskNoteRepo;
   eventBus: EventBus;
   exec?: (cmd: string, args: string[], opts?: { encoding: 'utf-8' }) => string;
+  gitConcurrency?: number;
 }
 
 export class BulletinService {
@@ -181,6 +251,7 @@ export class BulletinService {
   private exec?: (cmd: string, args: string[], opts?: { encoding: 'utf-8' }) => string;
   private timer: NodeJS.Timeout | null = null;
   private isChecking = false;
+  private readonly gitLimiter: Semaphore;
 
   constructor(opts: BulletinServiceOptions) {
     this.config = opts.config;
@@ -189,6 +260,7 @@ export class BulletinService {
     this.taskNoteRepo = opts.taskNoteRepo;
     this.eventBus = opts.eventBus;
     this.exec = opts.exec;
+    this.gitLimiter = new Semaphore(opts.gitConcurrency ?? 2);
   }
 
   start(): void {
@@ -237,21 +309,17 @@ export class BulletinService {
         continue;
       }
 
-      // Collect changed files for each task in parallel (max 2 concurrent git processes)
-      const CONCURRENCY = 2;
+      // Collect changed files for each task with global git concurrency limited to 2
       const filesByTask = new Map<string, Set<string>>();
       const eligible = tasks.filter((t) => t.worktreePath && fs.existsSync(t.worktreePath));
 
-      for (let i = 0; i < eligible.length; i += CONCURRENCY) {
-        const batch = eligible.slice(i, i + CONCURRENCY);
-        await Promise.all(batch.map(async (task) => {
-          const baseRef = task.baseRef || project?.defaultBranch || 'main';
-          const files = this.exec
-            ? getChangedFilesForWorktree(task.worktreePath!, baseRef, this.exec)
-            : await getChangedFilesForWorktreeAsync(task.worktreePath!, baseRef);
-          filesByTask.set(task.id, files);
-        }));
-      }
+      await Promise.all(eligible.map(async (task) => {
+        const baseRef = task.baseRef || project?.defaultBranch || 'main';
+        const files = this.exec
+          ? getChangedFilesForWorktree(task.worktreePath!, baseRef, this.exec)
+          : await getChangedFilesForWorktreeAsync(task.worktreePath!, baseRef, this.gitLimiter);
+        filesByTask.set(task.id, files);
+      }));
 
       let newOverlapsInProject = false;
 

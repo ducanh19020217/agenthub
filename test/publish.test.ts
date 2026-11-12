@@ -13,6 +13,7 @@ import { clearAuditPassCache } from '../src/pre-publish-audit.js';
 import { toRouteId } from '../src/services/index.js';
 import { NotificationService } from '../src/notify.js';
 import { HttpError } from '../src/errors.js';
+import { projectSettings } from '../src/projects/settings.js';
 
 let tmpDir: string;
 let config: ReturnType<typeof loadConfig>;
@@ -1869,7 +1870,6 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         settings: {
           publish: {
             enabled: true,
-            enabledAt: '2026-01-02T00:00:00Z',
             remote: 'origin',
             branch: 'main',
             pushIntegrationBranch: false,
@@ -1877,6 +1877,12 @@ describe('Publish Service (t-auto-push-after-done)', () => {
           },
         },
       });
+
+      // Simulate system-recorded enabledAt in database (since client input cannot set enabledAt)
+      const baselineProj = ctx.projectRepo.get('proj-baseline')!;
+      const baselineSettings = projectSettings(baselineProj);
+      baselineSettings.publish.enabledAt = '2026-01-02T00:00:00Z';
+      ctx.projectRepo.update('proj-baseline', { settings: JSON.stringify(baselineSettings) });
 
       for (let i = 1; i <= 3; i++) {
         ctx.taskRepo.insert({
@@ -1936,6 +1942,80 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         expect(prBase.baseline).toBe(true);
         expect(prBase.auditSkipped).toBe(true);
       }
+    });
+
+    it('từ chối enabledAt ở tương lai: không coi task là baseline và giữ fail-closed khi vượt maxTasks', async () => {
+      const repoPath = path.join(tmpDir, 'repo-future-enabled');
+      fs.mkdirSync(repoPath, { recursive: true });
+      execFileSync('git', ['init', repoPath], { env: testEnv });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', '-b', 'main'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'init.txt'), 'init');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoPath, env: testEnv });
+
+      const remoteBarePath = path.join(tmpDir, 'remote-future-enabled.git');
+      execFileSync('git', ['init', '--bare', remoteBarePath], { env: testEnv });
+      execFileSync('git', ['remote', 'add', 'origin', remoteBarePath], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['push', '-u', 'origin', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+
+      // Create 11 tasks (exceeding default maxTasks = 10)
+      for (let i = 1; i <= 11; i++) {
+        execFileSync('git', ['checkout', '-b', `agenthub/task-${i}`], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, `f${i}.txt`), `Content ${i}\n`);
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', `feat: task ${i}`], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--no-ff', `agenthub/task-${i}`, '-m', `Merge branch 'agenthub/task-${i}' into agenthub/integration`], { cwd: repoPath, env: testEnv });
+      }
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-future-enabled',
+        name: 'Future Enabled Project',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          integration: { enabled: true, branch: 'agenthub/integration' },
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            pushIntegrationBranch: false,
+          },
+        },
+      });
+
+      // Simulate a future enabledAt maliciously injected into DB
+      const futureDate = new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
+      const proj = ctx.projectRepo.get('proj-future-enabled')!;
+      const s = projectSettings(proj);
+      s.publish.enabledAt = futureDate;
+      ctx.projectRepo.update('proj-future-enabled', { settings: JSON.stringify(s) });
+
+      for (let i = 1; i <= 11; i++) {
+        ctx.taskRepo.insert({
+          id: `proj-future-enabled/task-${i}`,
+          projectId: 'proj-future-enabled',
+          slug: `task-${i}`,
+          title: `Task ${i}`,
+          status: 'done',
+          branch: `agenthub/task-${i}`,
+          baseRef: 'main',
+        });
+      }
+
+      // If future enabledAt were accepted, all 11 tasks would be treated as baseline and push would succeed without audit.
+      // But because future enabledAt is rejected, all 11 tasks must be audited, which exceeds maxTasks (10).
+      process.env.FAKE_MODE = 'audit-pass';
+      const res = await ctx.service.publishTask('proj-future-enabled/task-11', { manual: true });
+      expect(res.ok).toBe(false);
+      expect(res.error).toContain('vượt quá giới hạn tối đa cho phép');
     });
 
     it('không spam thông báo: cùng một lỗi publish thất bại phát suppressNotification: true ở lần lặp lại', async () => {

@@ -322,11 +322,12 @@
   - Ngoài ra, trong trường hợp race condition khi đang audit task A, task B được merge vào integration, auto-publish của B nhận 409 từ publish lock. Nếu A merge tip hiện tại của integration thay vì SHA tại thời điểm audit, code của B bị đẩy lên remote mà không qua audit gate.
 - **Quyết định thiết kế**:
   1. **Lưu mốc thời gian bật publish (`enabledAt`)**:
-     - `projects.settings.publish.enabledAt` ghi nhận thời điểm tính năng publish được bật (hoặc thời điểm chạy migration `migration:publish_default_on_at`, fallback về `project.createdAt`).
+     - `projects.settings.publish.enabledAt` ghi nhận thời điểm tính năng publish được bật (hoặc thời điểm chạy migration `migration:publish_default_on_at`).
+     - Client/API không được quyền tự ý chỉnh sửa `enabledAt`: `enabledAt` chỉ do hệ thống ghi khi tính năng publish chuyển từ tắt sang bật hoặc khi chạy migration. Mọi giá trị client gửi lên đều bị bỏ qua; các giá trị ở tương lai bị từ chối (qua `PublishSettingsSchema` và `PublishSettingsInputSchema`).
      - Khi người dùng bật lại publish từ trạng thái tắt (`publish.enabled: false` sang `true`), `enabledAt` được cập nhật lại theo thời gian hiện tại (`new Date().toISOString()`).
-     - Đối với database đã chạy migration ở bản trước nhưng chưa có `enabledAt`, hệ thống dùng `project.createdAt` (hoặc mốc migration cũ nếu đã ghi) cho các project đã bật publish thay vì gán thời điểm deploy hiện tại, đảm bảo code merge sau khi bật publish không bị vô tình coi là baseline mà không qua audit gate.
-     - **Giới hạn chủ đích**: Dùng `project.createdAt` làm mốc cho project cũ đồng nghĩa với việc toàn bộ backlog chưa push tạo sau mốc này vẫn được tính vào `maxTasks`; đây là sự đánh đổi có chủ đích để bảo đảm an toàn tuyệt đối, không đẩy code chưa audit lên remote.
+     - Đối với database đã chạy migration ở bản trước nhưng thiếu `enabledAt` (hoặc từng bị gán sai theo `project.createdAt`), fallback dùng thời điểm migration `publish_default_on` đã chạy (lấy từ `meta:migration:publish_default_on_at`), hoặc mốc thời điểm sửa lỗi này chạy (và ghi nhận vào `meta`). Tuyệt đối không dùng `project.createdAt` vì sẽ làm toàn bộ task tồn đọng cũ bị coi là sau mốc bật và bị kẹt `maxTasks` không thể publish.
      - Project có `settings` NULL hoặc thiếu cấu hình `publish` trong database đã migrate được bổ sung cấu hình publish mặc định kèm `enabledAt` để backlog cũ được phân loại baseline, không bị kẹt `maxTasks`.
+     - Trong `publishTask`, `enabledAt` ở tương lai bị coi là không hợp lệ để ngăn chặn việc vượt qua audit gate.
   2. **Phân tách task baseline và miễn trừ audit gate**:
      - Trong `findTasksToAudit`: các task đã hoàn thành và được merge trước mốc `enabledAt` được phân loại là **task baseline**.
      - Mốc thời gian hoàn thành của task được xác định ưu tiên theo các mốc ổn định: (1) commit date của merge commit, (2) commit date của nhánh task trên git, (3) thời điểm approved review hoặc hoàn thành run. Khi không xác định được mốc merge thật, hệ thống an toàn đưa task vào diện audit (fail-closed) thay vì dựa vào `createdAt` (có thể làm task tạo trước nhưng merge sau bị lọt thành baseline).

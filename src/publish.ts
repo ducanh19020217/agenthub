@@ -524,11 +524,12 @@ async function findTasksToAudit(
 
   const project = deps.projectRepo.get(projectId);
   const settings = project ? projectSettings(project) : null;
-  const enabledAt = settings?.publish?.enabledAt || project?.createdAt;
+  const enabledAt = settings?.publish?.enabledAt;
   const enabledTime = parseTimestamp(enabledAt);
+  const isValidEnabledTime = !isNaN(enabledTime) && enabledTime <= Date.now() + 60_000;
 
   // Separate baseline tasks merged before publish was enabled/migrated
-  if (!isNaN(enabledTime)) {
+  if (isValidEnabledTime) {
     const tasksToAudit: TaskRow[] = [];
     const baselineTasks: TaskRow[] = [];
 

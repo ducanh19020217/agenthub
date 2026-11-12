@@ -28,14 +28,38 @@ function relativeTime(
 }
 
 /**
+ * Threshold (in non-empty lines) below which a worker log is considered "sparse".
+ * In agy runs without streaming, the log typically contains 0 to 1-2 lines (e.g. startup warnings or error: interrupted)
+ * while the worker is actively progressing.
+ */
+export const SPARSE_LOG_LINE_THRESHOLD = 5;
+
+/**
+ * Returns true if a log is empty or sparse (fewer than or equal to threshold non-empty lines).
+ */
+export function isLogSparse(log: string | undefined | null, threshold = SPARSE_LOG_LINE_THRESHOLD): boolean {
+  if (!log || !log.trim()) return true;
+  const lines = log.trim().split('\n').filter((line) => line.trim().length > 0);
+  return lines.length <= threshold;
+}
+
+export interface WorkerProgressPanelProps {
+  currentRun: WorkerProgress | null | undefined;
+  /** @deprecated use logSparse */
+  logEmpty?: boolean;
+  logSparse?: boolean;
+}
+
+/**
  * Shows a compact worker-progress summary when the log is empty or sparse.
  * Renders: spawn time · activity source · commits · last-commit time · changed files.
  * Hides itself entirely when there is nothing meaningful to show.
  */
-export const WorkerProgressPanel: React.FC<{
-  currentRun: WorkerProgress | null | undefined;
-  logEmpty?: boolean;
-}> = ({ currentRun, logEmpty }) => {
+export const WorkerProgressPanel: React.FC<WorkerProgressPanelProps> = ({
+  currentRun,
+  logEmpty,
+  logSparse,
+}) => {
   const { t } = useLocale();
   const [, tick] = useState(0);
 
@@ -48,9 +72,11 @@ export const WorkerProgressPanel: React.FC<{
 
   const { startedAt, lastActivityAt, activitySource, newCommitCount, lastCommitAt, changedFileCount } = currentRun;
 
-  // Only show when log is empty or we have useful extra data
+  const isSparse = logSparse !== undefined ? logSparse : Boolean(logEmpty);
+
+  // Only show when log is empty/sparse or we have useful extra data
   const hasExtraData = newCommitCount != null || changedFileCount != null;
-  if (!logEmpty && !hasExtraData) return null;
+  if (!isSparse && !hasExtraData) return null;
 
   const spawnedAgo = relativeTime(startedAt, t);
   const activityAgo = relativeTime(lastActivityAt, t);

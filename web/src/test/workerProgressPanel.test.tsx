@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { WorkerProgressPanel } from '../components/WorkerProgressPanel';
+import {
+  WorkerProgressPanel,
+  isLogSparse,
+  SPARSE_LOG_LINE_THRESHOLD,
+} from '../components/WorkerProgressPanel';
 import { LocaleProvider } from '../context/LocaleContext';
 
 describe('WorkerProgressPanel', () => {
@@ -15,10 +19,14 @@ describe('WorkerProgressPanel', () => {
     changedFileCount: null,
   };
 
-  function renderPanel(currentRun: WorkerProgressProp, logEmpty = true) {
+  function renderPanel(currentRun: WorkerProgressProp, logEmpty = true, logSparse?: boolean) {
     return render(
       <LocaleProvider initialLocale="vi">
-        <WorkerProgressPanel currentRun={currentRun} logEmpty={logEmpty} />
+        <WorkerProgressPanel
+          currentRun={currentRun}
+          logEmpty={logEmpty}
+          logSparse={logSparse}
+        />
       </LocaleProvider>,
     );
   }
@@ -68,5 +76,29 @@ describe('WorkerProgressPanel', () => {
 
     const { container: c2 } = renderPanel(undefined, true);
     expect(c2.firstChild).toBeNull();
+  });
+
+  it('6. isLogSparse: xác định chính xác log rỗng hoặc ít dòng theo ngưỡng sparse', () => {
+    expect(isLogSparse('')).toBe(true);
+    expect(isLogSparse('   \n  \n')).toBe(true);
+    expect(isLogSparse(null)).toBe(true);
+    expect(isLogSparse(undefined)).toBe(true);
+    // 1-2 lines (e.g. "error: interrupted")
+    expect(isLogSparse('error: interrupted')).toBe(true);
+    expect(isLogSparse('Starting agent...\nWarning: slow network\n')).toBe(true);
+    // 5 lines (at threshold)
+    const fiveLines = 'line 1\nline 2\nline 3\nline 4\nline 5';
+    expect(isLogSparse(fiveLines)).toBe(true);
+    // 6 lines (exceeds threshold)
+    const sixLines = 'line 1\nline 2\nline 3\nline 4\nline 5\nline 6';
+    expect(isLogSparse(sixLines)).toBe(false);
+    expect(SPARSE_LOG_LINE_THRESHOLD).toBe(5);
+  });
+
+  it('7. Hiển thị tiến độ worker khi logSparse=true dù log không hoàn toàn rỗng', () => {
+    renderPanel(baseRun, false, true);
+    const panel = screen.getByTestId('worker-progress-panel');
+    expect(panel).toBeInTheDocument();
+    expect(screen.getByText(/conversation/i)).toBeInTheDocument();
   });
 });

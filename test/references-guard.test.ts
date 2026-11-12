@@ -219,6 +219,10 @@ describe('Async reference snapshotting and modification detection', () => {
         { name: 'missing', path: missingRef },
       ];
 
+      // Take snapshot individually and concurrently
+      const singleSnapshot = await takeReferenceSnapshotAsync(refs[0]);
+      expect(singleSnapshot.kind).toBe('file');
+
       // Take snapshots concurrently
       const snapshots = await takeReferenceSnapshotsAsync(refs);
       expect(snapshots.length).toBe(4);

@@ -5,9 +5,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { getTokenPath, readExistingToken } from '../auth.js';
-import { toRouteId, toTaskId } from '../services/index.js';
-import { formatRunnableCapacity, QuotaCapacitySnapshot } from '../quota/index.js';
-import { formatYYYYMMDD } from '../integrations/openproject/daily-report.js';
+import { toRouteId, toTaskId } from '../utils/task-id.js';
+import { formatRunnableCapacity, QuotaCapacitySnapshot } from '../quota/format.js';
+import { formatYYYYMMDD } from '../integrations/openproject/time.js';
 
 export class DaemonDownError extends Error {
   constructor(message = 'AgentHub daemon chưa chạy: `agenthub install-service` hoặc `agenthub daemon`') {

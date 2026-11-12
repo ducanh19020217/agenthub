@@ -687,16 +687,12 @@ export const UpdateConfigSchema = z.object({
   }).optional(),
 });
 
-export function toTaskId(idOrParam: string): string {
-  return idOrParam.includes('~') ? idOrParam.replace('~', '/') : idOrParam;
-}
-
-export function toRouteId(taskId: string): string {
-  return taskId.replace('/', '~');
-}
+import { toTaskId, toRouteId } from '../utils/task-id.js';
+export { toTaskId, toRouteId };
 
 import { readLogTail, ReadLogTailOptions } from '../utils/log-tail.js';
-export { readLogTail, ReadLogTailOptions };
+export { readLogTail };
+export type { ReadLogTailOptions };
 
 export async function getGitCommits(
   repoPath: string,

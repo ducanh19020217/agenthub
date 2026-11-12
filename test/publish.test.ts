@@ -1587,6 +1587,59 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
     });
 
+    it('khi background publish thất bại, trạng thái auditing không bị kẹt và chuyển sang push_failed', async () => {
+      const repoPath = path.join(tmpDir, 'local-repo-stuck-auditing');
+      fs.mkdirSync(repoPath, { recursive: true });
+      execFileSync('git', ['init', '-b', 'main'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'README.md'), '# Stuck\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'chore: initial'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-stuck',
+        name: 'Project Stuck',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-stuck/t-stuck',
+        projectId: 'proj-stuck',
+        slug: 't-stuck',
+        title: 'Stuck Task',
+        status: 'done',
+        baseRef: 'main',
+      });
+
+      // Mock publishTask to reject with error (e.g. 409 conflict or network/lock error)
+      vi.spyOn(ctx.service, 'publishTask').mockRejectedValueOnce(new Error('Race 409: Dự án đang trong quá trình publish'));
+
+      let pushFailedEmitted = false;
+      ctx.scheduler.getEventBus().on('task.push_failed', (_id, p) => {
+        if (p.taskId === 'proj-stuck/t-stuck') pushFailedEmitted = true;
+      });
+
+      const res = ctx.service.startPublishTask('proj-stuck/t-stuck', { manual: true });
+      expect(res.started).toBe(true);
+
+      // Verify that after the rejection, pushResult transitions out of 'auditing' to 'push_failed'
+      await vi.waitFor(() => {
+        const t = ctx.taskRepo.get('proj-stuck/t-stuck');
+        const pr = JSON.parse(t?.pushResult || '{}');
+        expect(pr.state).toBe('push_failed');
+        expect(pr.error).toContain('Race 409');
+      });
+      expect(pushFailedEmitted).toBe(true);
+    });
+
     it('huỷ bỏ publish khi số lượng task cần audit vượt quá maxTasks và phát sự kiện push_failed', async () => {
       const remotePath = path.join(tmpDir, 'remote-max-tasks.git');
       initBareRemote(remotePath);

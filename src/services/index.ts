@@ -5652,8 +5652,35 @@ export class AppService {
       });
     }
 
-    void this.publishTask(taskId, options).catch((err) => {
+    void this.publishTask(taskId, options).catch((err: unknown) => {
       console.error(`[publish] Background publish failed for task ${taskId}:`, err);
+      const currentTask = this.taskRepo.get(taskId);
+      if (currentTask && currentTask.status !== 'pushed') {
+        let isAuditingState = false;
+        try {
+          const pr = currentTask.pushResult ? JSON.parse(currentTask.pushResult) : null;
+          isAuditingState = pr?.state === 'auditing' || pr?.state === 'pushing';
+        } catch {
+          isAuditingState = true;
+        }
+        if (isAuditingState) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          const failedAt = new Date().toISOString();
+          this.taskRepo.update(taskId, {
+            pushResult: JSON.stringify({
+              state: 'push_failed',
+              error: errorMsg,
+              failedAt,
+              retryable: true,
+            }),
+          });
+          this.scheduler.getEventBus().emit('task.push_failed', taskId, {
+            taskId,
+            projectId: project.id,
+            error: errorMsg,
+          });
+        }
+      }
     });
 
     return { started: true };

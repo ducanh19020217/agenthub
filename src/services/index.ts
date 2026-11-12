@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { HttpError } from '../errors.js';
 import { DEFAULT_PROJECT_SETTINGS, mergeProjectSettings, ProjectSettingsInputSchema, projectSettings } from '../projects/settings.js';
 import { projectWorktreeRoot, projectWorktreeRoots, validateProjectWorktreeRoot } from '../projects/paths.js';
-import { ensureIntegrationNodeModules, ensureIntegrationWorktree, getIntegrationStatus, removeIntegrationWorktree, validateIntegrationBranch } from '../projects/integration.js';
+import { ensureIntegrationNodeModules, ensureIntegrationWorktree, getIntegrationStatus, removeIntegrationWorktreeAsync, validateIntegrationBranch } from '../projects/integration.js';
 import { resolveProjectFile } from '../projects/paths.js';
 import path from 'node:path';
 import os from 'node:os';
@@ -67,7 +67,7 @@ import type { ClaudeSessionRow } from '../claude-sessions/repo.js';
 import { isClaudeProcessOpen, isClaudeQuotaLimited, ClaudeSessionScanner } from '../claude-sessions/scanner.js';
 import type { PageResult } from '../pagination.js';
 import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
-import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
+import { listAllWorktreeProcesses, reapForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
@@ -1651,14 +1651,14 @@ export class AppService {
       .filter((process) => !process.active);
   }
 
-  reapOrphans() {
+  async reapOrphans() {
     const orphans = this.getOrphans();
     const projects = this.projectRepo.getAll();
     const protectedPaths = [this.config.hubHome, ...projects.map((project) => project.path)];
     const roots = [this.config.worktreesDir, ...projects.flatMap((project) => projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir))];
     const reaped: number[] = [];
     for (const orphan of orphans) {
-      reaped.push(...reapSyncForWorktree(orphan.cwd.replace(/ \(deleted\)$/, ''), {
+      reaped.push(...await reapForWorktree(orphan.cwd.replace(/ \(deleted\)$/, ''), {
         worktreesDir: roots,
         protectedPaths,
       }));
@@ -2319,7 +2319,7 @@ export class AppService {
     return this.getProject(id);
   }
 
-  deleteProject(id: string, options?: { purge?: boolean; confirm?: string }): { ok: boolean; archived?: boolean; counts?: Record<string, number>; warnings?: string[] } {
+  async deleteProject(id: string, options?: { purge?: boolean; confirm?: string }): Promise<{ ok: boolean; archived?: boolean; counts?: Record<string, number>; warnings?: string[] }> {
     const proj = options?.purge ? this.projectRepo.getIncludingArchived(id) : this.projectRepo.get(id);
     if (!proj) {
       throw new HttpError(404, 'not_found', `Project "${id}" không tồn tại`);
@@ -2359,7 +2359,7 @@ export class AppService {
       }
       this.projectRepo.archive(id);
       this.brainRunner?.stopProject(id);
-      const warning = removeIntegrationWorktree(proj, this.config.hubHome);
+      const warning = await removeIntegrationWorktreeAsync(proj, this.config.hubHome);
       this.invalidateOutOfScopeClaudeScanStates();
       const hasData = Object.values(deleteData.counts).some((count) => count > 0);
       return warning
@@ -2372,19 +2372,20 @@ export class AppService {
     }
 
     const warnings: string[] = [];
-    const integrationWarning = removeIntegrationWorktree(proj, this.config.hubHome);
+    const integrationWarning = await removeIntegrationWorktreeAsync(proj, this.config.hubHome);
     if (integrationWarning) warnings.push(integrationWarning);
     for (const task of deleteData.tasks) {
       if (!task.worktreePath || !fs.existsSync(task.worktreePath)) continue;
       let dirty = true;
       try {
-        dirty = execFileSync('git', ['-C', task.worktreePath, 'status', '--porcelain'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim().length > 0;
+        const result = await execFileAsync('git', ['-C', task.worktreePath, 'status', '--porcelain'], { encoding: 'utf8', timeout: 10 * 60 * 1000 });
+        dirty = result.stdout.trim().length > 0;
       } catch { /* keep dirty=true when status cannot be checked */ }
       if (dirty) {
         warnings.push(`Giữ worktree ${task.worktreePath} vì có thay đổi chưa commit`);
         continue;
       }
-      const removed = new WorktreeService(this.config, this.scheduler.getEventBus()).remove(
+      const removed = await new WorktreeService(this.config, this.scheduler.getEventBus()).removeAsync(
         proj.path,
         task.worktreePath,
         { projectId: id, taskId: task.id, slug: task.slug },
@@ -5059,6 +5060,33 @@ export class AppService {
       this.taskRepo.update(taskId, { worktreePath: null, slot: null });
     }
 
+    return { ok: true };
+  }
+
+  async deleteWorktreeAsync(idParam: string): Promise<{ ok: boolean }> {
+    const taskId = toTaskId(idParam);
+    const task = this.taskRepo.get(taskId);
+    if (!task) throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    if (task.status !== 'done' && task.status !== 'cancelled') {
+      throw new HttpError(409, 'conflict', `Chỉ có thể xóa worktree của task đã done hoặc cancelled (hiện tại: ${task.status})`);
+    }
+    if (!task.worktreePath) return { ok: true };
+
+    const project = this.projectRepo.get(task.projectId);
+    let hooks = null;
+    if (project?.hooks) {
+      try { hooks = JSON.parse(project.hooks); } catch { /* ignore invalid json */ }
+    }
+    const removed = await new WorktreeService(this.config, this.scheduler.getEventBus()).removeAsync(
+      project?.path ?? null,
+      task.worktreePath,
+      { slot: task.slot, slug: task.slug, projectId: task.projectId, taskId: task.id, hooks },
+      project ? projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir,
+    );
+    if (!removed) {
+      throw new HttpError(422, 'unprocessable_entity', `Từ chối xóa ${task.worktreePath}: nằm ngoài ${this.config.worktreesDir} hoặc là thư mục project`);
+    }
+    this.taskRepo.update(taskId, { worktreePath: null, slot: null });
     return { ok: true };
   }
 

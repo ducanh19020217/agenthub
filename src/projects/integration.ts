@@ -1,10 +1,14 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { HttpError } from '../errors.js';
 import { projectSettings } from './settings.js';
 import { isProjectWorktreeRootAccessible, projectWorktreeRoot } from './paths.js';
 import { ensureWorktreeNodeModules, type NodeModulesCachePolicy, type EnsureNodeModulesOptions } from '../cache.js';
+
+const execFileAsync = promisify(execFile);
+const INTEGRATION_GIT_TIMEOUT_MS = 10 * 60 * 1000;
 
 export interface IntegrationStatus {
   path: string;
@@ -267,6 +271,114 @@ export function ensureIntegrationWorktree(project: ProjectLike, hubHome: string)
   return integrationPath;
 }
 
+async function branchExistsInRepoAsync(repoPath: string, branch: string): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['-C', repoPath, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
+      timeout: INTEGRATION_GIT_TIMEOUT_MS,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function addExcludeRulesAsync(worktreePath: string): Promise<void> {
+  const excludePaths = new Set<string>();
+  for (const args of [['rev-parse', '--git-path', 'info/exclude'], ['rev-parse', '--git-common-dir'], ['rev-parse', '--git-dir']] as const) {
+    try {
+      const { stdout } = await execFileAsync('git', ['-C', worktreePath, ...args], {
+        encoding: 'utf8', timeout: INTEGRATION_GIT_TIMEOUT_MS,
+      });
+      const value = stdout.trim();
+      if (!value) continue;
+      const resolved = path.isAbsolute(value) ? value : path.join(worktreePath, value);
+      excludePaths.add(args[2] === 'info/exclude' ? resolved : path.join(resolved, 'info', 'exclude'));
+    } catch {
+      // Non-critical, matching addExcludeRules.
+    }
+  }
+  for (const excludePath of excludePaths) {
+    const infoDir = path.dirname(excludePath);
+    await fs.promises.mkdir(infoDir, { recursive: true });
+    let content = '';
+    try { content = await fs.promises.readFile(excludePath, 'utf8'); } catch { /* absent */ }
+    const lines = content.split('\n').map((line) => line.trim());
+    let append = '';
+    if (!lines.includes('.agenthub/')) append += '\n.agenthub/\n';
+    if (!lines.includes('node_modules')) append += 'node_modules\n';
+    if (append) await fs.promises.appendFile(excludePath, append);
+  }
+}
+
+/** Async daemon variant. Git operations are awaited so they never block the event loop. */
+export async function ensureIntegrationWorktreeAsync(project: ProjectLike, hubHome: string): Promise<string> {
+  if (!project.path || !fs.existsSync(project.path)) {
+    throw new HttpError(400, 'bad_request', `Thư mục repo không tồn tại: ${project.path}`);
+  }
+  const settings = projectSettings(project);
+  if (settings.worktree.root && !isProjectWorktreeRootAccessible({
+    id: project.id, path: project.path, settings: project.settings,
+  })) {
+    throw new HttpError(503, 'unavailable', `Worktree root không truy cập được: ${settings.worktree.root}`);
+  }
+  const branch = settings.integration.branch || 'agenthub/integration';
+  const baseRef = settings.integration.baseRef || project.defaultBranch;
+  try {
+    await execFileAsync('git', ['check-ref-format', '--branch', branch], { timeout: INTEGRATION_GIT_TIMEOUT_MS });
+  } catch {
+    throw new HttpError(400, 'bad_request', `Tên nhánh tích hợp không hợp lệ: "${branch}"`);
+  }
+  if ((project.defaultBranch === 'main' || project.defaultBranch === 'master') && branch === project.defaultBranch) {
+    throw new HttpError(400, 'bad_request', `Tên nhánh tích hợp không được trùng với defaultBranch (${project.defaultBranch}) khi defaultBranch là main/master`);
+  }
+
+  const integrationPath = getIntegrationPath(project, hubHome);
+  if (fs.existsSync(integrationPath)) {
+    let inside = '';
+    try {
+      ({ stdout: inside } = await execFileAsync('git', ['-C', integrationPath, 'rev-parse', '--is-inside-work-tree'], {
+        encoding: 'utf8', timeout: INTEGRATION_GIT_TIMEOUT_MS,
+      }));
+    } catch {
+      throw new HttpError(503, 'unavailable', `Worktree tích hợp ${integrationPath} không sử dụng được; kiểm tra quyền truy cập, index.lock hoặc khôi phục repo rồi thử lại`);
+    }
+    if (inside.trim() !== 'true') {
+      throw new HttpError(503, 'unavailable', `Worktree tích hợp ${integrationPath} không sử dụng được; kiểm tra quyền truy cập, index.lock hoặc khôi phục repo rồi thử lại`);
+    }
+    const [{ stdout: checkedOut }, { stdout: status }] = await Promise.all([
+      execFileAsync('git', ['-C', integrationPath, 'symbolic-ref', '--short', 'HEAD'], { encoding: 'utf8', timeout: INTEGRATION_GIT_TIMEOUT_MS }),
+      execFileAsync('git', ['-C', integrationPath, 'status', '--porcelain'], { encoding: 'utf8', timeout: INTEGRATION_GIT_TIMEOUT_MS }),
+    ]);
+    if (checkedOut.trim() === branch) return integrationPath;
+    if (status.trim()) throw new HttpError(409, 'conflict', `Worktree tích hợp ${integrationPath} có thay đổi chưa commit; không thể chuyển sang nhánh ${branch}`);
+    try {
+      const exists = await branchExistsInRepoAsync(project.path, branch);
+      await execFileAsync('git', ['-C', integrationPath, 'switch', ...(exists ? [branch] : ['-c', branch, baseRef])], {
+        timeout: INTEGRATION_GIT_TIMEOUT_MS,
+      });
+    } catch (error) {
+      throwBranchCheckoutError(project.path, branch, error);
+    }
+    await addExcludeRulesAsync(integrationPath);
+    return integrationPath;
+  }
+
+  await fs.promises.mkdir(path.dirname(integrationPath), { recursive: true });
+  try {
+    await execFileAsync('git', ['-C', project.path, 'worktree', 'prune'], { timeout: INTEGRATION_GIT_TIMEOUT_MS });
+  } catch { /* best effort */ }
+  const exists = await branchExistsInRepoAsync(project.path, branch);
+  try {
+    await execFileAsync('git', ['-C', project.path, 'worktree', 'add', ...(exists ? [integrationPath, branch] : ['-b', branch, integrationPath, baseRef])], {
+      timeout: INTEGRATION_GIT_TIMEOUT_MS,
+    });
+  } catch (error) {
+    throwBranchCheckoutError(project.path, branch, error);
+  }
+  await addExcludeRulesAsync(integrationPath);
+  return integrationPath;
+}
+
 /**
  * Ensure node_modules are prepared in the integration worktree according to worktree.install policy.
  */
@@ -412,6 +524,28 @@ export function removeIntegrationWorktree(project: { id: string; path?: string |
     execFileSync('git', ['-C', project.path, 'worktree', 'prune'], {
       stdio: ['pipe', 'pipe', 'ignore'],
     });
+  } catch {
+    return `Không thể gỡ worktree tích hợp ${integrationPath}; giữ nguyên để tránh mất dữ liệu`;
+  }
+  return null;
+}
+
+/** Async counterpart used by the daemon project-delete path. */
+export async function removeIntegrationWorktreeAsync(project: { id: string; path?: string | null; settings?: string | null }, hubHome: string): Promise<string | null> {
+  const integrationPath = getIntegrationPath({ ...project, defaultBranch: '' }, hubHome);
+  if (!fs.existsSync(integrationPath)) return null;
+  if (!isSafeIntegrationPath(integrationPath, hubHome, project)) return `Không thể gỡ worktree tích hợp ${integrationPath}: đường dẫn không an toàn`;
+  if (!project.path || !fs.existsSync(project.path)) return `Không thể gỡ worktree tích hợp ${integrationPath}: repo project không tồn tại`;
+
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', integrationPath, 'status', '--porcelain'], { encoding: 'utf-8', timeout: INTEGRATION_GIT_TIMEOUT_MS });
+    if (stdout.trim()) return `Giữ nguyên worktree tích hợp ${integrationPath} vì có thay đổi chưa commit`;
+  } catch {
+    return `Không thể kiểm tra trạng thái worktree tích hợp ${integrationPath}; giữ nguyên để tránh mất dữ liệu`;
+  }
+  try {
+    await execFileAsync('git', ['-C', project.path, 'worktree', 'remove', integrationPath], { timeout: INTEGRATION_GIT_TIMEOUT_MS });
+    await execFileAsync('git', ['-C', project.path, 'worktree', 'prune'], { timeout: INTEGRATION_GIT_TIMEOUT_MS });
   } catch {
     return `Không thể gỡ worktree tích hợp ${integrationPath}; giữ nguyên để tránh mất dữ liệu`;
   }

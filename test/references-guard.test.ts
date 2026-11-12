@@ -320,7 +320,7 @@ process.exit(0);
       // Wait for the fake worker process to complete
       for (let i = 0; i < 50; i++) {
         await new Promise((resolve) => setTimeout(resolve, 100));
-        scheduler.tick();
+        await scheduler.tick();
         const current = taskRepo.get(task.id);
         if (current && current.status !== 'running') break;
       }
@@ -473,7 +473,7 @@ process.exit(0);
       await scheduler.startTask(task, 'gemini-3.8-flash-high', 'default');
       for (let i = 0; i < 50; i++) {
         await new Promise((resolve) => setTimeout(resolve, 100));
-        scheduler.tick();
+        await scheduler.tick();
         const current = taskRepo.get(task.id);
         if (current && current.status !== 'running') break;
       }

@@ -40,11 +40,11 @@ import { parseCodexTokens, parseShortstat, recalculateTaskLines, measureTaskLine
 
 const execFileAsync = promisify(execFile);
 import { ClaudeFailoverState } from '../chat/failover.js';
-import { ensureIntegrationNodeModules, ensureIntegrationWorktree } from '../projects/integration.js';
+import { ensureIntegrationNodeModules, ensureIntegrationWorktreeAsync } from '../projects/integration.js';
 import { buildReviewerPrompt, parseReviewerOutput, ReviewerVerdict, isAutoReviewer, type ReviewerActor } from '../reviewer.js';
 import { CLAUDE_REVIEW_ENGINE_KEY } from '../engines/claude-review.js';
 import { isAutomatedStep, parseReviewChain, reviewerModel, type ReviewChainStep } from '../review-chain.js';
-import { isOrphanProcess, listAllWorktreeProcesses, reap, reapSyncForWorktree } from '../reaper.js';
+import { isOrphanProcess, listAllWorktreeProcesses, reap, reapForWorktree } from '../reaper.js';
 import { LoadGuard, LoadSnapshot } from '../load.js';
 import { measureProcessTree } from '../process-tree.js';
 import { ReferenceSnapshot, takeReferenceSnapshots, detectReferenceModifications, ReferenceModification } from '../references.js';
@@ -261,6 +261,7 @@ interface RunningTask {
 interface StartingTask {
   projectId: string;
   profileName: string;
+  slot?: number;
 }
 
 
@@ -318,6 +319,7 @@ export class Scheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
   private inTick = false;
+  private tickPromise: Promise<void> | null = null;
   private skipSchedulingOnce = false;
   private diskLow = false;
   private lastDiskLowEmit = 0;
@@ -356,6 +358,8 @@ export class Scheduler {
   private readonly worktreeCleanupRetryAt = new Map<string, number>();
   private readonly worktreeCleanupLogged = new Set<string>();
   private readonly dirtyWorktreeLogged = new Set<string>();
+  private worktreeCleanupInProgress = false;
+  private orphanScanInProgress = false;
   private recheckWaitingOnDiskOk = true;
   private loadGuard: LoadGuard;
   private lastLoadOverloaded = false;
@@ -775,10 +779,10 @@ export class Scheduler {
     // Recover crashed runs on startup
     this.recoverOnStartup();
     this.applyFocus();
-    this.skipSchedulingOnce = true;
+    this.skipSchedulingOnce = false;
 
     // Start the scheduler loop (every 2 seconds)
-    this.timer = setInterval(() => this.tick(), 2000);
+    this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 2000);
     // Measure task resources every 15s
     this.measureAllRunningTaskResources();
     this.resourceTimer = setInterval(() => this.measureAllRunningTaskResources(), 15000);
@@ -791,7 +795,9 @@ export class Scheduler {
     this.retentionTimer = setInterval(() => { void this.runRetentionBatch(); }, 6 * 60 * 60 * 1000);
     this.retentionTimer.unref();
     // Also run immediately
-    this.tick();
+    queueMicrotask(() => {
+      if (!this.stopped) void this.tick().catch(() => {});
+    });
   }
 
   stop(): void {
@@ -1292,9 +1298,20 @@ export class Scheduler {
   /**
    * Main scheduler tick
    */
-  tick(): void {
+  tick(): Promise<void> {
+    if (this.tickPromise) return this.tickPromise;
+    const promise = this.runTick();
+    const tracked = promise.finally(() => {
+      if (this.tickPromise === tracked) this.tickPromise = null;
+    });
+    this.tickPromise = tracked;
+    return tracked;
+  }
+
+  private async runTick(): Promise<void> {
     if (this.inTick) return;
     this.inTick = true;
+    const tickGeneration = this.stopGeneration;
     try {
       this.loadGuard.setConfig(this.config.load);
       const load = this.loadGuard.update();
@@ -1584,7 +1601,8 @@ export class Scheduler {
 
     // 3b. Prune expired worktrees before dispatching tasks. When disk is low,
     // this gives cleanup a chance to free space before queued work is parked.
-    this.cleanExpiredWorktrees();
+    await this.cleanExpiredWorktrees();
+    if (this.stopGeneration !== tickGeneration) return;
 
     // Auto-close tasks that have already been merged elsewhere (e.g. into integration or default branch)
     const nowMergedCheck = Date.now();
@@ -1594,13 +1612,15 @@ export class Scheduler {
     }
 
     // 3c. Start new tasks if possible
-    this.scheduleNewTasks();
+    await this.scheduleNewTasks();
+    if (this.stopGeneration !== tickGeneration) return;
 
     // 4. Scan worktrees and reap orphaned worker processes periodically.
     if (Date.now() - this.lastOrphanScan >= 6 * 60 * 60 * 1000) {
       this.lastOrphanScan = Date.now();
-      this.scanOrphanWorktrees();
-      this.reapOrphans();
+      await this.scanOrphanWorktrees();
+      if (this.stopGeneration !== tickGeneration) return;
+      await this.reapOrphans();
     }
     } finally {
       this.inTick = false;
@@ -1608,7 +1628,7 @@ export class Scheduler {
   }
 
   /** Reap worker descendants left behind after a worktree is deleted or a task stops. */
-  reapOrphans(): void {
+  async reapOrphans(): Promise<void> {
     const oldProcessCutoff = Date.now() - 30 * 60 * 1000;
     const roots = [this.config.worktreesDir, ...this.projectRepo.getAll().flatMap((project) => projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir))];
     const processes = listAllWorktreeProcesses({ worktreesDir: roots, protectedPaths: [this.config.hubHome] });
@@ -1624,7 +1644,7 @@ export class Scheduler {
     for (const info of processes) {
       const dir = info.cwd.replace(/ \(deleted\)$/, '');
       if (info.cwd.endsWith(' (deleted)')) {
-        reapSyncForWorktree(dir, { worktreesDir: roots, protectedPaths: [this.config.hubHome] });
+        await reapForWorktree(dir, { worktreesDir: roots, protectedPaths: [this.config.hubHome] });
         continue;
       }
 
@@ -1632,15 +1652,15 @@ export class Scheduler {
       const active = [...activeWorktrees].some((worktree) => processCwd === worktree || processCwd.startsWith(worktree + path.sep));
       if (active) continue;
       if (info.startedAt > oldProcessCutoff && !isOrphanProcess(info)) continue;
-      reapSyncForWorktree(dir, { worktreesDir: roots, protectedPaths: [this.config.hubHome] });
+      await reapForWorktree(dir, { worktreesDir: roots, protectedPaths: [this.config.hubHome] });
     }
   }
 
   /**
    * Force an immediate tick (for event-driven scheduling)
    */
-  triggerTick(): void {
-    this.tick();
+  triggerTick(): Promise<void> {
+    return this.tick().catch(() => {});
   }
 
   wakeWaitingQuotaTasks(reason = 'quota_unblocked'): void {
@@ -1920,7 +1940,7 @@ export class Scheduler {
     const stalledTask = this.taskRepo.get(taskId);
     if (stalledTask?.worktreePath) {
       const project = this.projectRepo.get(stalledTask.projectId);
-      reapSyncForWorktree(stalledTask.worktreePath, { worktreesDir: project ? projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir, protectedPaths: [this.config.hubHome] });
+      void reapForWorktree(stalledTask.worktreePath, { worktreesDir: project ? projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir, protectedPaths: [this.config.hubHome] });
     }
     this.running.delete(taskId);
     if (rt.lockFile) this.locks.release(rt.profileName, rt.lockFile);
@@ -2417,7 +2437,7 @@ export class Scheduler {
     });
   }
 
-  private scheduleNewTasks(): void {
+  private async scheduleNewTasks(): Promise<void> {
     if (this.paused) {
       return;
     }
@@ -2447,6 +2467,7 @@ export class Scheduler {
       fairUsage.set(departmentId, (fairUsage.get(departmentId) || 0) + 1);
     }
     const blockedDisksInTick = new Map<string, MonitoredDisk>();
+    const starts: Promise<void>[] = [];
     const remainingTasks = [...schedulableTasks];
     while (remainingTasks.length > 0) {
       remainingTasks.sort((a, b) => {
@@ -2509,7 +2530,7 @@ export class Scheduler {
         }
         const departmentId = this.departmentIdForTask(task);
         fairUsage.set(departmentId, (fairUsage.get(departmentId) || 0) + 1);
-        void this.startTask(task, pair.model, pair.profileName)
+        starts.push(this.startTask(task, pair.model, pair.profileName)
           .catch((error) => {
             console.error(`[scheduler] failed to start task ${task.id}:`, error);
           })
@@ -2517,7 +2538,7 @@ export class Scheduler {
             // A failed start can happen before the run is inserted or after an
             // unexpected exception. Never leave a stale capacity reservation.
             if (!this.running.has(task.id)) this.starting.delete(task.id);
-          });
+          }));
       } else if (this.hasBusyMatchingProfile(task)) {
         this.markQueuedWaiting(task, 'profile_busy');
         continue;
@@ -2553,6 +2574,7 @@ export class Scheduler {
         this.markDiskLow(lowDisk);
       }
     }
+    await Promise.all(starts);
   }
 
   private scheduleReviews(): void {
@@ -3560,6 +3582,7 @@ export class Scheduler {
   }
 
   async startTask(task: TaskRow, model: string, profileName: string, retryCount = 0): Promise<void> {
+    if (this.running.has(task.id) || this.starting.has(task.id)) return;
     const stopGeneration = this.stopGeneration;
     const disk = this.getBlockingDiskForTask(task);
     if (disk) {
@@ -3613,7 +3636,12 @@ export class Scheduler {
     if (!worktreePath) {
       let slot: number;
       try {
-        slot = this.worktreeService.allocateSlot(task.projectId, this.taskRepo.getUsedSlots(task.projectId));
+        const startingSlots = Array.from(this.starting.values())
+          .filter((entry) => entry.projectId === task.projectId && entry.slot != null)
+          .map((entry) => entry.slot!);
+        slot = this.worktreeService.allocateSlot(task.projectId, [...this.taskRepo.getUsedSlots(task.projectId), ...startingSlots]);
+        const reservation = this.starting.get(task.id);
+        if (reservation) reservation.slot = slot;
       } catch (error) {
         // All slots are occupied; leave the task queued for a later tick.
         this.locks.release(profile.name, lockFile);
@@ -3622,7 +3650,7 @@ export class Scheduler {
       const branch = task.branch || renderTaskBranch(project, task);
       if (settings.integration?.enabled) {
         try {
-          ensureIntegrationWorktree(project, this.config.hubHome);
+          await ensureIntegrationWorktreeAsync(project, this.config.hubHome);
           if (settings.worktree.install === 'auto') {
             void ensureIntegrationNodeModules(project, this.config.hubHome, {
               cacheDir: this.config.cacheDir,
@@ -3645,7 +3673,7 @@ export class Scheduler {
       }
       const baseRef = this.resolveBaseRef(task, project);
       try {
-        worktreePath = this.worktreeService.create({
+        worktreePath = await this.worktreeService.createAsync({
           projectPath: project.path,
           projectId: project.id,
           projectSettings: project.settings,
@@ -3653,8 +3681,17 @@ export class Scheduler {
           branch,
           baseRef,
         });
+        if (this.stopGeneration !== stopGeneration) {
+          this.starting.delete(task.id);
+          this.locks.release(profile.name, lockFile);
+          return;
+        }
       } catch (e) {
         this.locks.release(profile.name, lockFile);
+        if (this.stopped || this.stopGeneration !== stopGeneration) {
+          this.starting.delete(task.id);
+          return;
+        }
         if (!isProjectAccessible(project.path) || !isProjectWorktreeRootAccessible({ id: project.id, path: project.path, settings: project.settings })) {
           this.markTaskWaitingForProject(task, project);
           return;
@@ -3684,6 +3721,11 @@ export class Scheduler {
               maxEntries: this.config.cacheMaxEntries,
               maxBytes: this.config.cacheMaxGB * 1024 ** 3,
             });
+            if (this.stopped || this.stopGeneration !== stopGeneration) {
+              this.starting.delete(task.id);
+              this.locks.release(profile.name, lockFile);
+              return;
+            }
             installResult = 'prepared';
           } catch (error) {
             installResult = 'failed';
@@ -3736,7 +3778,12 @@ export class Scheduler {
 
     if (task.slot == null) {
       try {
-        const slot = this.worktreeService.allocateSlot(task.projectId, this.taskRepo.getUsedSlots(task.projectId));
+        const startingSlots = Array.from(this.starting.values())
+          .filter((entry) => entry.projectId === task.projectId && entry.slot != null)
+          .map((entry) => entry.slot!);
+        const slot = this.worktreeService.allocateSlot(task.projectId, [...this.taskRepo.getUsedSlots(task.projectId), ...startingSlots]);
+        const reservation = this.starting.get(task.id);
+        if (reservation) reservation.slot = slot;
         this.taskRepo.update(task.id, { slot });
       } catch {
         this.locks.release(profile.name, lockFile);
@@ -4072,7 +4119,7 @@ export class Scheduler {
     const task = this.taskRepo.get(taskId);
     if (task?.worktreePath) {
       const project = this.projectRepo.get(task.projectId);
-      reapSyncForWorktree(task.worktreePath, { worktreesDir: project ? projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir, protectedPaths: [this.config.hubHome] });
+      void reapForWorktree(task.worktreePath, { worktreesDir: project ? projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir, protectedPaths: [this.config.hubHome] });
     }
 
     this.running.delete(taskId);
@@ -4321,7 +4368,10 @@ export class Scheduler {
     this.checkingPromises.delete(taskId);
   }
 
-  private cleanExpiredWorktrees(): void {
+  private async cleanExpiredWorktrees(): Promise<void> {
+    if (this.worktreeCleanupInProgress) return;
+    this.worktreeCleanupInProgress = true;
+    try {
     const afterHours = this.config.cleanup?.worktreeOnDoneAfterHours ?? 24;
     const effectiveAfterHours = this.diskLow ? Math.min(afterHours > 0 ? afterHours : 2, 2) : afterHours;
     if (effectiveAfterHours <= 0) return;
@@ -4351,11 +4401,11 @@ export class Scheduler {
         if (fs.existsSync(task.worktreePath)) {
           let dirty = false;
           try {
-            dirty = execFileSync('git', ['-C', task.worktreePath, 'status', '--porcelain'], {
+            const { stdout } = await execFileAsync('git', ['-C', task.worktreePath, 'status', '--porcelain'], {
               encoding: 'utf8',
               timeout: 30_000,
-              stdio: ['ignore', 'pipe', 'ignore'],
-            }).trim().length > 0;
+            });
+            dirty = stdout.trim().length > 0;
           } catch {
             // A non-git directory is still eligible for a task-owned cleanup.
           }
@@ -4377,7 +4427,7 @@ export class Scheduler {
         try {
           if (!removed) {
             // remove() refuses anything outside worktreesDir or overlapping a project root.
-            removed = this.worktreeService.remove(project?.path ?? null, task.worktreePath, {
+            removed = await this.worktreeService.removeAsync(project?.path ?? null, task.worktreePath, {
             slot: task.slot,
             slug: task.slug,
             projectId: task.projectId,
@@ -4405,9 +4455,15 @@ export class Scheduler {
         }
       }
     }
+    } finally {
+      this.worktreeCleanupInProgress = false;
+    }
   }
 
-  private scanOrphanWorktrees(): void {
+  private async scanOrphanWorktrees(): Promise<void> {
+    if (this.orphanScanInProgress) return;
+    this.orphanScanInProgress = true;
+    try {
     const root = path.resolve(this.config.worktreesDir);
     let projects: fs.Dirent[];
     try {
@@ -4432,7 +4488,7 @@ export class Scheduler {
         if (task && task.status !== 'done' && task.status !== 'cancelled') continue;
         let isGitWorktree = false;
         try {
-          const listed = execFileSync('git', ['-C', project.path, 'worktree', 'list', '--porcelain'], { encoding: 'utf8' });
+          const { stdout: listed } = await execFileAsync('git', ['-C', project.path, 'worktree', 'list', '--porcelain'], { encoding: 'utf8', timeout: 10 * 60 * 1000 });
           isGitWorktree = listed.split(/\n(?=worktree )/).some((block) => block.split('\n')[0] === `worktree ${candidate}`);
         } catch {
           // Keep unknown repositories untouched.
@@ -4442,12 +4498,15 @@ export class Scheduler {
           continue;
         }
         try {
-          execFileSync('git', ['-C', project.path, 'worktree', 'remove', candidate], { timeout: 30000 });
+          await this.worktreeService.removeAsync(project.path, candidate, undefined, this.config.worktreesDir);
           if (!fs.existsSync(candidate)) console.log(`[worktree] Removed orphan ${candidate}`);
         } catch (error) {
           console.warn(`[worktree] Failed to remove orphan ${candidate}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
+    }
+    } finally {
+      this.orphanScanInProgress = false;
     }
   }
 

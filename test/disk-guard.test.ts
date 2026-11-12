@@ -84,7 +84,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     delete process.env.AGENTHUB_AGY_HOMES;
   });
 
-  it('blocks task from starting when disk space is below minFreeGB', () => {
+  it('blocks task from starting when disk space is below minFreeGB', async () => {
     // Inject fake disk reader: 1GB free (less than 3GB threshold)
     fakeDiskReader = (_p: string) => ({ freeGB: 1, totalGB: 100 });
 
@@ -103,7 +103,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     });
 
     // Run scheduler tick
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const task = ctx.taskRepo.get('proj/t1');
     expect(task).toBeDefined();
@@ -125,7 +125,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     expect(ctx.scheduler.getRunning().size).toBe(0);
   });
 
-  it('automatically resumes waiting task when disk space recovers', () => {
+  it('automatically resumes waiting task when disk space recovers', async () => {
     let mockFreeGB = 1; // below 3GB initially
     fakeDiskReader = (_p: string) => ({ freeGB: mockFreeGB, totalGB: 100 });
 
@@ -139,7 +139,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     });
 
     // Tick 1: disk is low -> task moved to waiting_quota
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(ctx.taskRepo.get('proj/t1')!.status).toBe('waiting_quota');
     expect(ctx.scheduler.getRunning().size).toBe(0);
 
@@ -147,14 +147,14 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     mockFreeGB = 10;
 
     // Tick 2: disk recovered -> task re-queued and started
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const taskAfter = ctx.taskRepo.get('proj/t1');
     expect(taskAfter!.status).toBe('running');
     expect(ctx.scheduler.getRunning().has('proj/t1')).toBe(true);
   });
 
-  it('emits disk transitions once even when ticks repeat', () => {
+  it('emits disk transitions once even when ticks repeat', async () => {
     let mockFreeGB = 1;
     fakeDiskReader = (_p: string) => ({ freeGB: mockFreeGB, totalGB: 100 });
 
@@ -172,13 +172,13 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(diskEvents).toEqual(['disk.low']);
 
     mockFreeGB = 10;
-    ctx.scheduler.tick();
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(diskEvents).toEqual(['disk.low', 'disk.ok']);
 
     mockFreeGB = 1;
@@ -190,12 +190,12 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
       status: 'queued',
       level: 'easy',
     });
-    ctx.scheduler.tick();
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(diskEvents).toEqual(['disk.low', 'disk.ok', 'disk.low']);
   });
 
-  it('works with injected low-disk reader', () => {
+  it('works with injected low-disk reader', async () => {
     // 0.5 GB < 3 GB threshold
     fakeDiskReader = (_p: string) => ({ freeGB: 0.5, totalGB: 50 });
 
@@ -208,11 +208,11 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(ctx.taskRepo.get('proj/t1')!.status).toBe('waiting_quota');
   });
 
-  it('blocks on a configured extra disk and includes its label in the wait event', () => {
+  it('blocks on a configured extra disk and includes its label in the wait event', async () => {
     const extraPath = path.join(tmpDir, 'shared-docker');
     fs.mkdirSync(extraPath);
     config.disk.extraPaths = [{ path: extraPath, minFreeGB: 5, label: 'Ổ Docker dùng chung' }];
@@ -225,7 +225,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     ctx.scheduler.getEventBus().on('*', (type, _taskId, payload) => events.push({ type, payload: payload as Record<string, unknown> }));
     ctx.taskRepo.insert({ id: 'proj/t-extra', projectId: 'proj', slug: 't-extra', title: 'Extra disk', status: 'queued', level: 'easy' });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     expect(ctx.taskRepo.get('proj/t-extra')?.status).toBe('waiting_quota');
     expect(events.find((event) => event.type === 'task.waiting_quota')?.payload).toMatchObject({
@@ -236,7 +236,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     });
   });
 
-  it('monitors the configured project worktree root', () => {
+  it('monitors the configured project worktree root', async () => {
     const configuredRoot = path.join(tmpDir, 'encrypted-worktrees');
     fs.mkdirSync(configuredRoot);
     ctx.projectRepo.update('proj', { settings: JSON.stringify({ worktree: { root: configuredRoot } }) });
@@ -247,13 +247,13 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     };
     ctx.taskRepo.insert({ id: 'proj/t-configured-disk', projectId: 'proj', slug: 't-configured-disk', title: 'Configured disk', status: 'queued', level: 'easy' });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     expect(seen).toContain(configuredRoot);
     expect(ctx.taskRepo.get('proj/t-configured-disk')?.status).toBe('waiting_quota');
   });
 
-  it('supports injecting diskSpace via options object in createContext and exposes via getStatus', () => {
+  it('supports injecting diskSpace via options object in createContext and exposes via getStatus', async () => {
     const customCtx = createContext(config, { diskSpace: () => ({ freeGB: 42, totalGB: 100 }) });
     try {
       customCtx.scheduler.stop();
@@ -266,7 +266,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     }
   });
 
-  it('dispatches task for project on free drive even when default worktree drive is low', () => {
+  it('dispatches task for project on free drive even when default worktree drive is low', async () => {
     const configuredRoot = path.join(tmpDir, 'separate-encrypted-drive');
     fs.mkdirSync(configuredRoot);
 
@@ -325,7 +325,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     expect(ctx.taskRepo.get('proj/t-default')?.status).toBe('waiting_quota');
     expect(ctx.taskRepo.get('proj/t-default')?.waitReason).toBe('disk');
@@ -334,7 +334,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     expect(ctx.scheduler.getRunning().has('proj2/t-custom')).toBe(true);
   });
 
-  it('blocks all projects when hub home disk is below hubHomeMinFreeGB', () => {
+  it('blocks all projects when hub home disk is below hubHomeMinFreeGB', async () => {
     config.disk.hubHomeMinFreeGB = 1;
     fakeDiskReader = (p: string) => {
       const normalized = path.resolve(p);
@@ -358,7 +358,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const task = ctx.taskRepo.get('proj/t-hub-home');
     expect(task?.status).toBe('waiting_quota');
@@ -377,7 +377,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     expect(ctx.scheduler.getRunning().size).toBe(0);
   });
 
-  it('formats wait message with label, path, freeGB, and minFreeGB for worktree disk', () => {
+  it('formats wait message with label, path, freeGB, and minFreeGB for worktree disk', async () => {
     fakeDiskReader = (_p: string) => ({ freeGB: 1.2, totalGB: 100 });
 
     const emittedEvents: Array<{ type: string; taskId?: string; payload?: Record<string, unknown> }> = [];
@@ -394,7 +394,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const waitingEvent = emittedEvents.find((e) => e.type === 'task.waiting_quota' && e.taskId === 'proj/t-msg');
     expect(waitingEvent?.payload?.message).toBe(
@@ -457,7 +457,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     expect(ctx.taskRepo.get('proj1/t1')?.status).toBe('waiting_quota');
     expect(ctx.taskRepo.get('proj1/t1')?.waitReason).toBe('disk');
@@ -490,7 +490,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     expect(detail2.blockingDisk?.path).toBe(drive2);
   });
 
-  it('emits disk.low with isBlocking=true and task list when task is blocked by low project disk', () => {
+  it('emits disk.low with isBlocking=true and task list when task is blocked by low project disk', async () => {
     fakeDiskReader = (_p: string) => ({ freeGB: 1, totalGB: 100 });
 
     const emittedEvents: Array<{ type: string; payload?: Record<string, unknown> }> = [];
@@ -515,7 +515,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     expect(ctx.taskRepo.get('proj/t-blocking-1')?.status).toBe('waiting_quota');
     expect(ctx.taskRepo.get('proj/t-blocking-2')?.status).toBe('waiting_quota');
@@ -526,7 +526,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     expect(diskLowEvents[0].payload?.tasks).toEqual(['t-blocking-1', 't-blocking-2']);
   });
 
-  it('filters waiting tasks in disk.low alerts per specific blocking disk when multiple drives are low', () => {
+  it('filters waiting tasks in disk.low alerts per specific blocking disk when multiple drives are low', async () => {
     const driveA = path.join(tmpDir, 'drive-a');
     const driveB = path.join(tmpDir, 'drive-b');
     fs.mkdirSync(driveA, { recursive: true });
@@ -583,7 +583,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     expect(ctx.taskRepo.get('proj-a/t-a')?.status).toBe('waiting_quota');
     expect(ctx.taskRepo.get('proj-b/t-b')?.status).toBe('waiting_quota');
@@ -599,7 +599,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     expect(driveBEvent?.payload?.tasks).toEqual(['t-b']);
   });
 
-  it('emits disk.ok with resumed tasks when one project disk recovers while another project disk remains low', () => {
+  it('emits disk.ok with resumed tasks when one project disk recovers while another project disk remains low', async () => {
     const driveA = path.join(tmpDir, 'recovery-drive-a');
     const driveB = path.join(tmpDir, 'recovery-drive-b');
     fs.mkdirSync(driveA, { recursive: true });
@@ -644,14 +644,14 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     ctx.taskRepo.insert({ id: 'p-rec-a/t1', projectId: 'p-rec-a', slug: 't1', title: 'Task 1', status: 'queued', level: 'easy' });
     ctx.taskRepo.insert({ id: 'p-rec-b/t2', projectId: 'p-rec-b', slug: 't2', title: 'Task 2', status: 'queued', level: 'easy' });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(ctx.taskRepo.get('p-rec-a/t1')?.status).toBe('waiting_quota');
     expect(ctx.taskRepo.get('p-rec-b/t2')?.status).toBe('waiting_quota');
 
     // Drive A recovers to 15 GB, Drive B remains low at 0.5 GB
     driveAFree = 15;
     emittedEvents.length = 0;
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     expect(['queued', 'running']).toContain(ctx.taskRepo.get('p-rec-a/t1')?.status);
     expect(ctx.scheduler.getRunning().has('p-rec-a/t1')).toBe(true);
@@ -668,7 +668,7 @@ describe('Disk Guard (chống đầy ổ đĩa)', () => {
     driveAFree = 0.5;
     emittedEvents.length = 0;
     ctx.taskRepo.insert({ id: 'p-rec-a/t3', projectId: 'p-rec-a', slug: 't3', title: 'Task 3', status: 'queued', level: 'easy' });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     expect(ctx.taskRepo.get('p-rec-a/t3')?.status).toBe('waiting_quota');
     const lowEvents = emittedEvents.filter((e) => e.type === 'disk.low');

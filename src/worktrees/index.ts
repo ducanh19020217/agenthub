@@ -1,9 +1,13 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import { promisify } from 'node:util';
 import path from 'node:path';
 import { AgentHubConfig } from '../config.js';
-import { reapSyncForWorktree } from '../reaper.js';
+import { reap, reapSyncForWorktree } from '../reaper.js';
 import { isProjectWorktreeRootAccessible, projectWorktreeRoot, projectWorktreeRoots, resolveProjectFile } from '../projects/paths.js';
+
+const execFileAsync = promisify(execFile);
+const WORKTREE_GIT_TIMEOUT_MS = 10 * 60 * 1000;
 
 export interface WorktreeInfo {
   worktreePath: string;
@@ -178,6 +182,51 @@ export class WorktreeService {
     return worktreePath;
   }
 
+  /** Async counterpart used by the daemon so slow repositories do not block its event loop. */
+  async createAsync(opts: {
+    projectPath: string;
+    projectId: string;
+    projectSettings?: string | null;
+    slug: string;
+    branch: string;
+    baseRef: string;
+  }): Promise<string> {
+    if (opts.slug === '.integration' || opts.slug === '.logs') {
+      throw new Error(`Slug không được dùng tên dành riêng: ${opts.slug}`);
+    }
+    const project = { id: opts.projectId, path: opts.projectPath, settings: opts.projectSettings };
+    if (!isProjectWorktreeRootAccessible(project)) {
+      throw new Error(`Project worktree root không truy cập được: ${projectWorktreeRoot(project, this.config.hubHome, this.config.worktreesDir)}`);
+    }
+    const worktreePath = path.join(
+      projectWorktreeRoot(project, this.config.hubHome, this.config.worktreesDir),
+      opts.slug,
+    );
+    const parentDir = path.dirname(worktreePath);
+    if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
+
+    if (fs.existsSync(worktreePath)) {
+      await this.removeAsync(opts.projectPath, worktreePath, undefined, projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir));
+    }
+
+    try {
+      await execFileAsync('git', ['-C', opts.projectPath, 'worktree', 'add', worktreePath, '-b', opts.branch, opts.baseRef], {
+        timeout: WORKTREE_GIT_TIMEOUT_MS,
+      });
+    } catch {
+      try {
+        await execFileAsync('git', ['-C', opts.projectPath, 'worktree', 'add', worktreePath, opts.branch], {
+          timeout: WORKTREE_GIT_TIMEOUT_MS,
+        });
+      } catch (e) {
+        throw new Error(`Failed to create worktree: ${e}`);
+      }
+    }
+
+    await this.addToExcludeAsync(worktreePath);
+    return worktreePath;
+  }
+
   /**
    * Add .agenthub/ and node_modules to .git/info/exclude of the worktree
    */
@@ -231,6 +280,42 @@ export class WorktreeService {
     }
   }
 
+  private async addToExcludeAsync(worktreePath: string): Promise<void> {
+    try {
+      const excludePaths: string[] = [];
+      try {
+        const { stdout } = await execFileAsync('git', ['-C', worktreePath, 'rev-parse', '--git-path', 'info/exclude'], {
+          timeout: 30_000,
+          encoding: 'utf-8',
+        });
+        const gitPath = stdout.trim();
+        if (gitPath) excludePaths.push(path.isAbsolute(gitPath) ? gitPath : path.join(worktreePath, gitPath));
+      } catch {
+        // ignore
+      }
+      const { stdout: gitDirOutput } = await execFileAsync('git', ['-C', worktreePath, 'rev-parse', '--git-dir'], {
+        timeout: 30_000,
+        encoding: 'utf-8',
+      });
+      const gitDir = gitDirOutput.trim();
+      const resolvedGitDir = path.isAbsolute(gitDir) ? gitDir : path.join(worktreePath, gitDir);
+      excludePaths.push(path.join(resolvedGitDir, 'info', 'exclude'));
+
+      for (const excludePath of new Set(excludePaths)) {
+        const infoDir = path.dirname(excludePath);
+        if (!fs.existsSync(infoDir)) fs.mkdirSync(infoDir, { recursive: true });
+        const content = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, 'utf-8') : '';
+        const lines = content.split('\n').map((line) => line.trim());
+        let toAppend = '';
+        if (!lines.includes('.agenthub/')) toAppend += '\n.agenthub/\n';
+        if (!lines.includes('node_modules')) toAppend += 'node_modules\n';
+        if (toAppend) fs.appendFileSync(excludePath, toAppend);
+      }
+    } catch {
+      // non-critical
+    }
+  }
+
   /**
    * Remove a worktree
    */
@@ -267,6 +352,87 @@ export class WorktreeService {
     }
 
     this.runOnWorktreeRemovedHooks(projectPath, worktreePath, context);
+    return true;
+  }
+
+  private async runOnWorktreeRemovedHooksAsync(
+    projectPath: string | null | undefined,
+    worktreePath: string,
+    context?: WorktreeHookContext,
+  ): Promise<void> {
+    const hooks = context?.hooks?.onWorktreeRemoved;
+    if (!hooks || !Array.isArray(hooks) || hooks.length === 0) return;
+
+    const eventBus = context?.eventBus || this.eventBus;
+    const slug = context?.slug || path.basename(worktreePath);
+    const taskId = context?.taskId || (context?.projectId ? `${context.projectId}/${slug}` : undefined);
+    if (!slug || !/^[a-z0-9_-]+$/.test(slug)) {
+      console.error(`[worktree] REFUSED hooks for ${worktreePath}: slug "${slug}" contains invalid characters (must match [a-z0-9_-])`);
+      eventBus?.emit('worktree.hook', taskId, { hook: 'onWorktreeRemoved', ok: false, error: `Refused hooks: slug "${slug}" contains invalid characters (must match [a-z0-9_-])`, slug });
+      return;
+    }
+    const slotStr = context?.slot != null ? String(context.slot) : '';
+    const slugUnderscored = slug.replace(/-/g, '_');
+    const project = context?.projectId || (projectPath ? path.basename(projectPath) : '');
+    const cwd = projectPath || undefined;
+    for (const rawCmd of hooks) {
+      if (typeof rawCmd !== 'string' || !rawCmd.trim()) continue;
+      const expandedCmd = rawCmd
+        .replace(/\{slot\}/g, slotStr)
+        .replace(/\{slug\}/g, slug)
+        .replace(/\{slug_underscored\}/g, slugUnderscored)
+        .replace(/\{worktree\}/g, shellWord(worktreePath))
+        .replace(/\{project\}/g, shellWord(project));
+      const startTime = Date.now();
+      try {
+        const { stdout } = await execFileAsync('sh', ['-c', expandedCmd], {
+          cwd, timeout: 60000, encoding: 'utf-8', maxBuffer: 1024 * 1024,
+          env: { ...process.env, AGENTHUB_WORKTREE: worktreePath, AGENTHUB_PROJECT_PATH: projectPath || '' },
+        });
+        eventBus?.emit('worktree.hook', taskId, { hook: 'onWorktreeRemoved', cmd: expandedCmd, rawCmd, ok: true, exitCode: 0, durationMs: Date.now() - startTime, output: stdout });
+      } catch (err) {
+        const error = err as { status?: number; killed?: boolean; stdout?: string | Buffer; stderr?: string | Buffer; message?: string };
+        const exitCode = typeof error.status === 'number' ? error.status : (error.killed ? 137 : 1);
+        const output = (error.stdout ? String(error.stdout) : '') + (error.stderr ? String(error.stderr) : '');
+        console.error(`[worktree] Hook command failed: ${expandedCmd} (exit ${exitCode}): ${error.message ?? String(err)}`);
+        eventBus?.emit('worktree.hook', taskId, { hook: 'onWorktreeRemoved', cmd: expandedCmd, rawCmd, ok: false, exitCode, durationMs: Date.now() - startTime, error: error.message ?? String(err), output });
+      }
+    }
+  }
+
+  /** Async counterpart used by daemon cleanup and task startup. */
+  async removeAsync(
+    projectPath: string | null | undefined,
+    worktreePath: string,
+    context?: WorktreeHookContext,
+    worktreeRoot: string | string[] = this.config.worktreesDir,
+  ): Promise<boolean> {
+    if (!isDeletableWorktreePath(worktreeRoot, worktreePath, [projectPath, this.config.hubHome])) {
+      console.error(`[worktree] REFUSED to remove ${worktreePath}: outside ${worktreeRoot} or a project root`);
+      return false;
+    }
+    await reap(worktreePath, {
+      worktreesDir: worktreeRoot,
+      protectedPaths: [projectPath, this.config.hubHome],
+      graceMs: 5000,
+    });
+    if (projectPath && fs.existsSync(projectPath)) {
+      try {
+        await execFileAsync('git', ['-C', projectPath, 'worktree', 'remove', '--force', worktreePath], {
+          timeout: WORKTREE_GIT_TIMEOUT_MS,
+        });
+      } catch {
+        // fall through to manual cleanup (path already verified to be inside worktreesDir)
+      }
+    }
+    if (fs.existsSync(worktreePath)) {
+      await fs.promises.rm(worktreePath, { recursive: true, force: true });
+    }
+    if (fs.existsSync(worktreePath)) {
+      console.error(`[worktree] Failed to remove worktree path: ${worktreePath}`);
+      return false;
+    }
+    await this.runOnWorktreeRemovedHooksAsync(projectPath, worktreePath, context);
     return true;
   }
 

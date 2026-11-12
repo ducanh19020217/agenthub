@@ -149,7 +149,7 @@ describe('Worktree Auto-Cleanup', () => {
     expect(fs.existsSync(path.join(worktreePath, 'node_modules'))).toBe(true);
   });
 
-  it('prunes expired worktrees for done tasks older than worktreeOnDoneAfterHours, never touching non-done tasks', () => {
+  it('prunes expired worktrees for done tasks older than worktreeOnDoneAfterHours, never touching non-done tasks', async () => {
     config.cleanup.worktreeOnDoneAfterHours = 24;
 
     // Create a real worktree using git so remove() succeeds
@@ -197,7 +197,7 @@ describe('Worktree Auto-Cleanup', () => {
     ctx.db.prepare("UPDATE tasks SET updatedAt = ? WHERE id IN ('proj/t-old-done', 'proj/t-old-review', 'proj/t-old-blocked')").run(oldTime);
 
     // Trigger tick
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     // t-old-done worktree should be completely removed
     expect(fs.existsSync(doneWorktree)).toBe(false);
@@ -211,7 +211,7 @@ describe('Worktree Auto-Cleanup', () => {
     expect(ctx.taskRepo.get('proj/t-old-blocked')?.worktreePath).toBe(blockedWorktree);
   });
 
-  it('prunes cancelled tasks and keeps dirty worktrees', () => {
+  it('prunes cancelled tasks and keeps dirty worktrees', async () => {
     const cancelledWorktree = path.join(tmpDir, 'worktrees', 'proj', 't-cancelled');
     execFileSync('git', ['-C', projectPath, 'worktree', 'add', cancelledWorktree, '-b', 'agenthub/t-cancelled', 'main']);
     const dirtyWorktree = path.join(tmpDir, 'worktrees', 'proj', 't-dirty');
@@ -224,7 +224,7 @@ describe('Worktree Auto-Cleanup', () => {
     const oldTime = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString().replace('T', ' ').replace('Z', '').slice(0, 19);
     ctx.db.prepare("UPDATE tasks SET updatedAt = ? WHERE id IN ('proj/t-cancelled', 'proj/t-dirty')").run(oldTime);
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     expect(fs.existsSync(cancelledWorktree)).toBe(false);
     expect(ctx.taskRepo.get('proj/t-cancelled')?.worktreePath).toBeNull();
@@ -232,7 +232,7 @@ describe('Worktree Auto-Cleanup', () => {
     expect(ctx.taskRepo.get('proj/t-dirty')?.worktreePath).toBe(dirtyWorktree);
   });
 
-  it('backs off re-checking a dirty worktree instead of running git status every tick', () => {
+  it('backs off re-checking a dirty worktree instead of running git status every tick', async () => {
     const dirtyWorktree = path.join(tmpDir, 'worktrees', 'proj', 't-dirty-backoff');
     execFileSync('git', ['-C', projectPath, 'worktree', 'add', dirtyWorktree, '-b', 'agenthub/t-dirty-backoff', 'main']);
     fs.writeFileSync(path.join(dirtyWorktree, 'uncommitted.txt'), 'keep me');
@@ -241,39 +241,39 @@ describe('Worktree Auto-Cleanup', () => {
     const oldTime = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString().replace('T', ' ').replace('Z', '').slice(0, 19);
     ctx.db.prepare("UPDATE tasks SET updatedAt = ? WHERE id = 'proj/t-dirty-backoff'").run(oldTime);
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(fs.existsSync(dirtyWorktree)).toBe(true);
 
     // Now clean: the next tick must not re-check yet (backed off), so the worktree stays.
     fs.rmSync(path.join(dirtyWorktree, 'uncommitted.txt'));
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(fs.existsSync(dirtyWorktree)).toBe(true);
 
     // After the back-off window the clean worktree is pruned.
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 31 * 60 * 1000);
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(fs.existsSync(dirtyWorktree)).toBe(false);
     expect(ctx.taskRepo.get('proj/t-dirty-backoff')?.worktreePath).toBeNull();
   });
 
-  it('keeps the DB path and backs off when worktree removal fails', () => {
+  it('keeps the DB path and backs off when worktree removal fails', async () => {
     const worktreePath = path.join(tmpDir, 'worktrees', 'proj', 't-failing-remove');
     execFileSync('git', ['-C', projectPath, 'worktree', 'add', worktreePath, '-b', 'agenthub/t-failing-remove', 'main']);
     ctx.taskRepo.insert({ id: 'proj/t-failing-remove', projectId: 'proj', slug: 't-failing-remove', title: 'Failing remove', status: 'done' });
     ctx.taskRepo.update('proj/t-failing-remove', { worktreePath });
     const oldTime = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString().replace('T', ' ').replace('Z', '').slice(0, 19);
     ctx.db.prepare("UPDATE tasks SET updatedAt = ? WHERE id = 'proj/t-failing-remove'").run(oldTime);
-    const remove = vi.spyOn(WorktreeService.prototype, 'remove').mockReturnValue(false);
+    const remove = vi.spyOn(WorktreeService.prototype, 'removeAsync').mockResolvedValue(false);
 
-    ctx.scheduler.tick();
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     expect(remove).toHaveBeenCalledTimes(1);
     expect(fs.existsSync(worktreePath)).toBe(true);
     expect(ctx.taskRepo.get('proj/t-failing-remove')?.worktreePath).toBe(worktreePath);
   });
 
-  it('cleans expired worktrees before parking queued work when disk is low', () => {
+  it('cleans expired worktrees before parking queued work when disk is low', async () => {
     config.disk.minFreeGB = Number.MAX_SAFE_INTEGER;
     ctx.profileRepo.upsert({
       name: 'p1',
@@ -297,7 +297,7 @@ describe('Worktree Auto-Cleanup', () => {
     const oldTime = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().replace('T', ' ').replace('Z', '').slice(0, 19);
     ctx.db.prepare("UPDATE tasks SET updatedAt = ? WHERE id = 'proj/t-low-disk-cleanup'").run(oldTime);
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     expect(fs.existsSync(worktreePath)).toBe(false);
     expect(ctx.taskRepo.get('proj/t-low-disk-cleanup')?.worktreePath).toBeNull();
@@ -305,7 +305,33 @@ describe('Worktree Auto-Cleanup', () => {
     expect(ctx.taskRepo.get('proj/queued')?.waitReason).toBe('disk');
   });
 
-  it('removes an orphan git worktree while preserving its branch and ignores outside paths', () => {
+  it('keeps the event loop responsive while cleanup awaits slow git', async () => {
+    const worktreePath = path.join(tmpDir, 'worktrees', 'proj', 't-slow-cleanup');
+    execFileSync('git', ['-C', projectPath, 'worktree', 'add', worktreePath, '-b', 'agenthub/t-slow-cleanup', 'main']);
+    ctx.taskRepo.insert({ id: 'proj/t-slow-cleanup', projectId: 'proj', slug: 't-slow-cleanup', title: 'Slow cleanup', status: 'done' });
+    ctx.taskRepo.update('proj/t-slow-cleanup', { worktreePath });
+    const oldTime = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString().replace('T', ' ').replace('Z', '').slice(0, 19);
+    ctx.db.prepare("UPDATE tasks SET updatedAt = ? WHERE id = 'proj/t-slow-cleanup'").run(oldTime);
+
+    const fakeBin = path.join(tmpDir, 'fake-bin');
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(fakeBin, 'git'), '#!/bin/sh\nsleep 2\nexec /usr/bin/git "$@"\n', { mode: 0o755 });
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}:${originalPath || ''}`;
+    try {
+      let ticks = 0;
+      const timer = setInterval(() => { ticks++; }, 100);
+      await ctx.scheduler.tick();
+      clearInterval(timer);
+      expect(ticks).toBeGreaterThanOrEqual(10);
+      expect(fs.existsSync(worktreePath)).toBe(false);
+      expect(ctx.taskRepo.get('proj/t-slow-cleanup')?.worktreePath).toBeNull();
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it('removes an orphan git worktree while preserving its branch and ignores outside paths', async () => {
     const orphanWorktree = path.join(tmpDir, 'worktrees', 'proj', 'orphan');
     execFileSync('git', ['-C', projectPath, 'worktree', 'add', orphanWorktree, '-b', 'agenthub/orphan', 'main']);
     const outside = path.join(tmpDir, 'outside');
@@ -316,6 +342,7 @@ describe('Worktree Auto-Cleanup', () => {
     ctx.db.prepare("UPDATE tasks SET updatedAt = ? WHERE id = 'proj/outside'").run(oldTime);
 
     ctx.scheduler.start();
+    await ctx.scheduler.tick();
     ctx.scheduler.stop();
 
     expect(fs.existsSync(orphanWorktree)).toBe(false);

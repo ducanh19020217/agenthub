@@ -104,7 +104,7 @@ describe('Project availability and unmounted drive handling', () => {
     });
 
     // 1. First tick: project is inaccessible
-    scheduler.tick();
+    await scheduler.tick();
 
     const waitingTask = taskRepo.get('proj-unavail/task-1')!;
     expect(waitingTask.status).toBe('waiting_quota');
@@ -116,7 +116,7 @@ describe('Project availability and unmounted drive handling', () => {
     expect(unavailEvents[0].payload.projectId).toBe('proj-unavail');
 
     // Another tick while still unavailable should not re-emit project.unavailable
-    scheduler.tick();
+    await scheduler.tick();
     expect(emittedEvents.filter((e) => e.type === 'project.unavailable').length).toBe(1);
 
     // 2. Restore project path (drive mounted)
@@ -137,7 +137,7 @@ describe('Project availability and unmounted drive handling', () => {
     });
 
     // 3. Next tick: project is restored
-    scheduler.tick();
+    await scheduler.tick();
 
     // project.available event emitted
     const availEvents = emittedEvents.filter((e) => e.type === 'project.available');
@@ -199,7 +199,7 @@ describe('Project availability and unmounted drive handling', () => {
     const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines, undefined, undefined, db);
 
     // 1. Tick: worktreePath does not exist
-    scheduler.tick();
+    await scheduler.tick();
 
     const waitingTask = taskRepo.get('proj-wt/task-wt')!;
     expect(waitingTask.status).toBe('waiting_quota');
@@ -209,7 +209,7 @@ describe('Project availability and unmounted drive handling', () => {
     fs.mkdirSync(missingWorktreePath, { recursive: true });
 
     // 3. Next tick: worktree is back
-    scheduler.tick();
+    await scheduler.tick();
 
     const queuedTask = taskRepo.get('proj-wt/task-wt')!;
     expect(queuedTask.status).not.toBe('waiting_quota');

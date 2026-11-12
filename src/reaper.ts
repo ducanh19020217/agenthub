@@ -144,6 +144,11 @@ export async function reap(dir: string, options: ReaperOptions = {}): Promise<nu
   return pids;
 }
 
+/** Async variant for daemon paths; the synchronous counterpart is kept for CLI callers. */
+export async function reapForWorktree(dir: string, options: ReaperOptions = {}): Promise<number[]> {
+  return reap(dir, options);
+}
+
 export function reapSyncForWorktree(dir: string, options: ReaperOptions = {}): number[] {
   return reapSync(dir, options);
 }

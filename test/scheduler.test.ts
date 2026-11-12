@@ -831,6 +831,144 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
+  it('handles reviewer killed by signal as a crash and emits review.waiting for retry', async () => {
+    const projectPath = path.join(tmpDir, 'review-repo-signal');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'codex-signal', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const worktreePath = path.join(tmpDir, 'review-worktree-signal');
+    fs.cpSync(projectPath, worktreePath, { recursive: true });
+    taskRepo.insert({ id: 'test-project/review-signal', projectId: 'test-project', slug: 'review-signal', title: 'Review signal', body: 'Check signal.', status: 'review' });
+    taskRepo.update('test-project/review-signal', { worktreePath });
+    db.prepare('INSERT INTO runs (id, taskId, engine, model, profileName) VALUES (?, ?, ?, ?, ?)')
+      .run('autocheck-signal', 'test-project/review-signal', 'agy', 'gemini-3.8-flash-low', 'codex-signal');
+    db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run('test-project/review-signal', 'autocheck-signal', 'test', 1, 0, 10, 'OK');
+
+    const mockChild = new EventEmitter() as unknown as ChildProcess;
+    mockChild.pid = 99998;
+    mockChild.unref = vi.fn();
+
+    const mockEngine: Engine = {
+      id: 'codex',
+      family: () => 'codex',
+      spawn: () => {
+        setTimeout(() => {
+          mockChild.emit('exit', null, 'SIGTERM');
+          mockChild.emit('close', null, 'SIGTERM');
+        }, 10);
+        return mockChild;
+      },
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    };
+
+    config.reviewer.enabled = true;
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', mockEngine]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-signal.json'));
+    failover.activate(3600);
+    scheduler.configureReviewer(reviewRepo, failover);
+
+    scheduler.tick();
+
+    await vi.waitFor(() => {
+      const run = runRepo.getByTask('test-project/review-signal').find((r) => r.kind === 'reviewer');
+      expect(run?.outcome).toBe('crashed');
+    }, { timeout: 3000 });
+
+    const waitingEvents = eventRepo.getRecent(20).filter((e) => e.taskId === 'test-project/review-signal' && e.type === 'review.waiting');
+    expect(waitingEvents).toHaveLength(1);
+    expect(waitingEvents[0].payload).toContain('"reason":"crash"');
+
+    // Ensure it was NOT marked as malformed_output
+    const failedEvents = eventRepo.getRecent(20).filter((e) => e.taskId === 'test-project/review-signal' && e.type === 'review.failed');
+    expect(failedEvents).toHaveLength(0);
+
+    scheduler.stop();
+  });
+
+  it('does not overwrite or clear exitTimeout of a new run on late close or exit from an old run', async () => {
+    const projectPath = path.join(tmpDir, 'review-repo-late');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'codex-late', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const worktreePath = path.join(tmpDir, 'review-worktree-late');
+    fs.cpSync(projectPath, worktreePath, { recursive: true });
+    taskRepo.insert({ id: 'test-project/review-late', projectId: 'test-project', slug: 'review-late', title: 'Review late', body: 'Check late.', status: 'review' });
+    taskRepo.update('test-project/review-late', { worktreePath });
+    db.prepare('INSERT INTO runs (id, taskId, engine, model, profileName) VALUES (?, ?, ?, ?, ?)')
+      .run('autocheck-late', 'test-project/review-late', 'agy', 'gemini-3.8-flash-low', 'codex-late');
+    db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run('test-project/review-late', 'autocheck-late', 'test', 1, 0, 10, 'OK');
+
+    const mockChild1 = new EventEmitter() as unknown as ChildProcess;
+    mockChild1.pid = 99991;
+    mockChild1.unref = vi.fn();
+
+    const mockChild2 = new EventEmitter() as unknown as ChildProcess;
+    mockChild2.pid = 99992;
+    mockChild2.unref = vi.fn();
+
+    let spawnCount = 0;
+    const mockEngine: Engine = {
+      id: 'codex',
+      family: () => 'codex',
+      spawn: () => {
+        spawnCount++;
+        return spawnCount === 1 ? mockChild1 : mockChild2;
+      },
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    };
+
+    config.reviewer.enabled = true;
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', mockEngine]]), undefined, undefined, db);
+    const reviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-late.json'));
+    failover.activate(3600);
+    scheduler.configureReviewer(reviewRepo, failover);
+
+    // Spawn run 1
+    scheduler.tick();
+    const active1 = scheduler.getReviewerRun('test-project/review-late');
+    expect(active1).toBeDefined();
+    const run1Id = active1!.runId;
+
+    // Simulate timeout of run 1
+    (scheduler as unknown as { finishReview: (...args: unknown[]) => void }).finishReview(
+      'test-project/review-late', run1Id, 'codex-late', 'timeout'
+    );
+    expect(scheduler.getReviewerRun('test-project/review-late')).toBeUndefined();
+
+    // Now spawn run 2 for the same task
+    // Clear backoff on codex-late so it can spawn run 2
+    (scheduler as unknown as { reviewerBackoffUntil: Map<string, number> }).reviewerBackoffUntil.clear();
+    scheduler.tick();
+    const active2 = scheduler.getReviewerRun('test-project/review-late');
+    expect(active2).toBeDefined();
+    expect(active2!.runId).not.toBe(run1Id);
+
+    // Give run 2 an existing exitTimeout
+    const fakeTimer = setTimeout(() => {}, 10000);
+    active2!.exitTimeout = fakeTimer;
+
+    // Now mockChild1 emits a late exit or error or close
+    mockChild1.emit('exit', 0);
+    // run 2's exitTimeout must NOT have been overwritten
+    expect(active2!.exitTimeout).toBe(fakeTimer);
+
+    mockChild1.emit('close', 0);
+    // run 2's exitTimeout must NOT have been cleared
+    expect(active2!.exitTimeout).toBe(fakeTimer);
+    expect(scheduler.getReviewerRun('test-project/review-late')?.runId).toBe(active2!.runId);
+
+    clearTimeout(fakeTimer);
+    scheduler.stop();
+  });
+
   it('does not change authState when Codex reviewer times out with 401 in log', async () => {
     const { scheduler } = makeReviewer('reviewer-chatter');
     profileRepo.updateAuthState('codex-1', 'ok', null, null);

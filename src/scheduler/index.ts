@@ -3435,9 +3435,10 @@ export class Scheduler {
     let finished = false;
     let hasError = false;
     let savedExitCode: number | null = null;
+    let savedSignal: NodeJS.Signals | string | null = null;
     let safetyTimer: NodeJS.Timeout | null = null;
 
-    const doFinish = (reason: 'exit' | 'error', code: number | null) => {
+    const doFinish = (reason: 'exit' | 'error', code: number | null, signal: string | null = null) => {
       if (finished) return;
       finished = true;
       if (safetyTimer) {
@@ -3445,12 +3446,12 @@ export class Scheduler {
         safetyTimer = null;
       }
       const run = this.reviewerRuns.get(task.id);
-      if (run?.exitTimeout) {
+      if (run && run.runId === runId && run.exitTimeout) {
         clearTimeout(run.exitTimeout);
         delete run.exitTimeout;
       }
       if (!this.stopped) {
-        this.finishReview(task.id, runId, profileName, reason, code);
+        this.finishReview(task.id, runId, profileName, reason, code, signal);
       }
     };
 
@@ -3458,26 +3459,28 @@ export class Scheduler {
       if (finished || this.stopped) return;
       hasError = true;
       if (!safetyTimer) {
-        safetyTimer = setTimeout(() => doFinish('error', null), 2000);
+        safetyTimer = setTimeout(() => doFinish('error', savedExitCode, savedSignal), 2000);
         const run = this.reviewerRuns.get(task.id);
-        if (run) run.exitTimeout = safetyTimer;
+        if (run && run.runId === runId) run.exitTimeout = safetyTimer;
       }
     });
 
-    child.once('exit', (code) => {
+    child.once('exit', (code, signal) => {
       if (finished || this.stopped) return;
       savedExitCode = code;
+      savedSignal = signal;
       if (!safetyTimer) {
-        safetyTimer = setTimeout(() => doFinish(hasError ? 'error' : 'exit', savedExitCode), 2000);
+        safetyTimer = setTimeout(() => doFinish(hasError ? 'error' : 'exit', savedExitCode, savedSignal), 2000);
         const run = this.reviewerRuns.get(task.id);
-        if (run) run.exitTimeout = safetyTimer;
+        if (run && run.runId === runId) run.exitTimeout = safetyTimer;
       }
     });
 
-    child.once('close', (code) => {
+    child.once('close', (code, signal) => {
       if (finished || this.stopped) return;
-      const finalCode = code ?? savedExitCode ?? 0;
-      doFinish(hasError ? 'error' : 'exit', finalCode);
+      const finalSignal = signal ?? savedSignal;
+      const finalCode = code ?? savedExitCode;
+      doFinish(hasError ? 'error' : 'exit', finalCode, finalSignal);
     });
   }
 
@@ -3502,7 +3505,7 @@ export class Scheduler {
     }
   }
 
-  private finishReview(taskId: string, runId: string, profileName: string, reason: 'exit' | 'timeout' | 'error', exitCode: number | null = 0): void {
+  private finishReview(taskId: string, runId: string, profileName: string, reason: 'exit' | 'timeout' | 'error', exitCode: number | null = 0, signal: string | null = null): void {
     if (this.stopped) return;
     const active = this.reviewerRuns.get(taskId);
     if (!active || active.runId !== runId) return;
@@ -3543,7 +3546,7 @@ export class Scheduler {
 
     const combinedLog = `${logOutput}\n${output}`;
     const isClaudeReviewer = active.actor === 'claude-reviewer' || active.engine.id === 'claude';
-    const isFailedRun = reason === 'timeout' || reason === 'error' || exitCode !== 0;
+    const isFailedRun = reason === 'timeout' || reason === 'error' || Boolean(signal) || exitCode === null || exitCode !== 0;
 
     if (isFailedRun) {
       // Only detect auth error from trusted error sources for Claude reviewer; never for Codex reviewer

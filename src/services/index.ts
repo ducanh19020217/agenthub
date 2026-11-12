@@ -5030,6 +5030,33 @@ export class AppService {
     return { ok: true };
   }
 
+  async deleteWorktreeAsync(idParam: string): Promise<{ ok: boolean }> {
+    const taskId = toTaskId(idParam);
+    const task = this.taskRepo.get(taskId);
+    if (!task) throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    if (task.status !== 'done' && task.status !== 'cancelled') {
+      throw new HttpError(409, 'conflict', `Chỉ có thể xóa worktree của task đã done hoặc cancelled (hiện tại: ${task.status})`);
+    }
+    if (!task.worktreePath) return { ok: true };
+
+    const project = this.projectRepo.get(task.projectId);
+    let hooks = null;
+    if (project?.hooks) {
+      try { hooks = JSON.parse(project.hooks); } catch { /* ignore invalid json */ }
+    }
+    const removed = await new WorktreeService(this.config, this.scheduler.getEventBus()).removeAsync(
+      project?.path ?? null,
+      task.worktreePath,
+      { slot: task.slot, slug: task.slug, projectId: task.projectId, taskId: task.id, hooks },
+      project ? projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir) : this.config.worktreesDir,
+    );
+    if (!removed) {
+      throw new HttpError(422, 'unprocessable_entity', `Từ chối xóa ${task.worktreePath}: nằm ngoài ${this.config.worktreesDir} hoặc là thư mục project`);
+    }
+    this.taskRepo.update(taskId, { worktreePath: null, slot: null });
+    return { ok: true };
+  }
+
   getTaskLog(idParam: string, query?: { run?: string; tail?: string | number }): string {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);

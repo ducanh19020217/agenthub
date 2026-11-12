@@ -69,6 +69,30 @@ describe('worktree deletion safety (sự cố 16/10: hub xóa nhầm thư mục 
     expect(fs.existsSync(path.join(project, 'README.md'))).toBe(true);
   });
 
+  it('removeAsync không chặn event loop khi git chậm', async () => {
+    const { root, worktreesDir, project, service } = setup();
+    const wt = path.join(worktreesDir, 'xfarm', 'slow-task');
+    execFileSync('git', ['-C', project, 'worktree', 'add', '-q', '-b', 'slow-task', wt]);
+
+    const fakeBin = path.join(root, 'fake-bin');
+    fs.mkdirSync(fakeBin);
+    const fakeGit = path.join(fakeBin, 'git');
+    fs.writeFileSync(fakeGit, '#!/bin/sh\nsleep 2\nexec /usr/bin/git "$@"\n', { mode: 0o755 });
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}:${originalPath || ''}`;
+    try {
+      let ticks = 0;
+      const timer = setInterval(() => { ticks++; }, 100);
+      const removed = await service.removeAsync(project, wt);
+      clearInterval(timer);
+      expect(removed).toBe(true);
+      expect(ticks).toBeGreaterThanOrEqual(10);
+      expect(fs.existsSync(wt)).toBe(false);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
   it('hoạt động đúng khi worktreesDir đi qua symlink nhưng target chưa tồn tại (macOS /var -> /private/var)', () => {
     const { root, project } = setup();
     const realDir = path.join(root, 'real-worktrees');

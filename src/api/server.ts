@@ -672,7 +672,7 @@ export async function createServer(
 
   fastify.delete('/api/tasks/:id/worktree', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
-    return service.deleteWorktree(id);
+    return service.deleteWorktreeAsync(id);
   });
 
   fastify.get('/api/tasks/:id/log', async (req: FastifyRequest, reply: FastifyReply) => {

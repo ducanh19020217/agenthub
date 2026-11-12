@@ -190,6 +190,8 @@ function apiTask(task: TaskRow, blockingDisk?: BlockingDiskInfo | null): TaskRow
     ...task,
     waitReason: task.waitReason ?? null,
     blockingDisk: blockingDisk !== undefined ? blockingDisk : (task.blockingDisk ?? null),
+    statusChangedAt: toApiTime(task.statusChangedAt ?? task.updatedAt)!,
+    statusChangedAtEstimated: Boolean(task.statusChangedAtEstimated),
     createdAt: toApiTime(task.createdAt)!,
     updatedAt: toApiTime(task.updatedAt)!,
   };

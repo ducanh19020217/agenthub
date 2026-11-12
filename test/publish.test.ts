@@ -8,10 +8,11 @@ import { createContext } from '../src/daemon.js';
 import { createServer } from '../src/api/server.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { FakeEngine, type Engine } from '../src/engines/index.js';
-import { buildGitUrls, clearPublishLocks } from '../src/publish.js';
+import { buildGitUrls, clearPublishLocks, normalizePublishErrorKey } from '../src/publish.js';
 import { clearAuditPassCache } from '../src/pre-publish-audit.js';
 import { toRouteId } from '../src/services/index.js';
 import { NotificationService } from '../src/notify.js';
+import { HttpError } from '../src/errors.js';
 
 let tmpDir: string;
 let config: ReturnType<typeof loadConfig>;
@@ -1976,17 +1977,23 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       const pushFailedEvents: any[] = [];
       ctx.scheduler.getEventBus().on('task.push_failed', (_id, p) => pushFailedEvents.push(p));
 
-      // Attempt 1: should emit suppressNotification: false
-      const res1 = await ctx.service.publishTask('proj-notify-dedup/t1', { manual: true });
+      // Attempt 1: auto-publish should emit suppressNotification: false
+      const res1 = await ctx.service.publishTask('proj-notify-dedup/t1');
       expect(res1.ok).toBe(false);
       expect(pushFailedEvents.length).toBe(1);
       expect(pushFailedEvents[0].suppressNotification).toBe(false);
 
-      // Attempt 2: identical error should emit suppressNotification: true
-      const res2 = await ctx.service.publishTask('proj-notify-dedup/t1', { manual: true });
+      // Attempt 2: identical error in auto-publish should emit suppressNotification: true
+      const res2 = await ctx.service.publishTask('proj-notify-dedup/t1');
       expect(res2.ok).toBe(false);
       expect(pushFailedEvents.length).toBe(2);
       expect(pushFailedEvents[1].suppressNotification).toBe(true);
+
+      // Attempt 3: manual retry with same error should NOT suppress notification (manual = true)
+      const res3 = await ctx.service.publishTask('proj-notify-dedup/t1', { manual: true });
+      expect(res3.ok).toBe(false);
+      expect(pushFailedEvents.length).toBe(3);
+      expect(pushFailedEvents[2].suppressNotification).toBe(false);
 
       // Verify NotificationService skips notification when suppressNotification is true
       const fakeExec = vi.fn();
@@ -2017,6 +2024,179 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       (notifService as any).handleEvent('task.push_failed', 'proj-notify-dedup/t1', pushFailedEvents[1]);
       // Length should still be 1 because suppressNotification: true is skipped!
       expect(sentNotifications.length).toBe(1);
+    });
+
+    it('normalizePublishErrorKey chuẩn hoá thông điệp lỗi chứa số đếm và hash động để chống spam', () => {
+      const err1 = 'Số lượng task cần audit (11) vượt quá giới hạn tối đa cho phép (10). Vui lòng kiểm tra hoặc điều chỉnh maxTasks.';
+      const err2 = 'Số lượng task cần audit (12) vượt quá giới hạn tối đa cho phép (10). Vui lòng kiểm tra hoặc điều chỉnh maxTasks.';
+      expect(normalizePublishErrorKey(err1)).toBe(normalizePublishErrorKey(err2));
+
+      const err3 = 'Commit a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4 failed for task proj/task-abc123';
+      const err4 = 'Commit fedcba9876543210fedcba9876543210fedcba98 failed for task proj/task-xyz789';
+      expect(normalizePublishErrorKey(err3)).toBe(normalizePublishErrorKey(err4));
+    });
+
+    it('root task không có branch và không có merge commit vẫn được audit và đánh dấu pushed thành công', async () => {
+      const remotePath = path.join(tmpDir, 'remote-no-branch.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-no-branch');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      // Create integration branch
+      execFileSync('git', ['checkout', '-b', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'base.txt'), 'base\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'chore: integration base'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['push', '-u', 'origin', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-no-branch',
+        name: 'Project No Branch',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          integration: { enabled: true, branch: 'agenthub/integration' },
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            pushIntegrationBranch: false,
+            audit: { enabled: true },
+          },
+        },
+      });
+
+      // Insert root task without a branch and without merge commit
+      ctx.taskRepo.insert({
+        id: 'proj-no-branch/task-root-nobranch',
+        projectId: 'proj-no-branch',
+        slug: 'task-root-nobranch',
+        title: 'Task Root No Branch',
+        status: 'done',
+        branch: null,
+      });
+
+      process.env.FAKE_MODE = 'audit-pass';
+      const res = await ctx.service.publishTask('proj-no-branch/task-root-nobranch');
+      expect(res.ok).toBe(true);
+
+      const updated = ctx.taskRepo.get('proj-no-branch/task-root-nobranch');
+      expect(updated?.status).toBe('pushed');
+      const pr = JSON.parse(updated!.pushResult!);
+      expect(pr.state).toBe('pushed');
+      expect(pr.auditPassed).toBe(true);
+    });
+
+    it('task có nhánh nhưng chưa được merge vào sourceSha -> báo lỗi push_failed thay vì trả ok im lặng', async () => {
+      const remotePath = path.join(tmpDir, 'remote-unmerged.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-unmerged');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'base.txt'), 'base\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'chore: integration base'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['push', '-u', 'origin', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+
+      // Create branch for task-unmerged with a commit that is NOT merged into integration
+      execFileSync('git', ['checkout', '-b', 'agenthub/task-unmerged'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'unmerged.txt'), 'unmerged\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: unmerged change'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-unmerged',
+        name: 'Project Unmerged',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          integration: { enabled: true, branch: 'agenthub/integration' },
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            pushIntegrationBranch: false,
+            audit: { enabled: true },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-unmerged/task-unmerged',
+        projectId: 'proj-unmerged',
+        slug: 'task-unmerged',
+        title: 'Task Unmerged',
+        status: 'done',
+        branch: 'agenthub/task-unmerged',
+      });
+
+      const pushFailedEvents: any[] = [];
+      ctx.scheduler.getEventBus().on('task.push_failed', (_id, p) => pushFailedEvents.push(p));
+
+      const res = await ctx.service.publishTask('proj-unmerged/task-unmerged');
+      expect(res.ok).toBe(false);
+      expect(res.error).toContain('not included in the push commit');
+
+      const updated = ctx.taskRepo.get('proj-unmerged/task-unmerged');
+      expect(updated?.status).not.toBe('pushed');
+      const pr = JSON.parse(updated!.pushResult!);
+      expect(pr.state).toBe('push_failed');
+      expect(pushFailedEvents.length).toBe(1);
+    });
+
+    it('enqueueAutoPublish: lock nhả trước khi đăng ký listener 409 -> tự động drain và publish ngay', async () => {
+      const projectId = 'proj-lock-race';
+      const taskId = 'proj-lock-race/t-race';
+
+      const repoPath = path.join(tmpDir, 'repo-lock-race');
+      fs.mkdirSync(repoPath, { recursive: true });
+      execFileSync('git', ['init', '-b', 'main'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: projectId,
+        name: 'Project Lock Race',
+        path: repoPath,
+        defaultBranch: 'main',
+      });
+
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId,
+        slug: 't-race',
+        title: 'Task Race',
+        status: 'done',
+      });
+
+      let callCount = 0;
+      const origPublishTask = ctx.service.publishTask.bind(ctx.service);
+      ctx.service.publishTask = vi.fn(async (id: string, options?: any) => {
+        callCount++;
+        if (callCount === 1) {
+          // First call throws 409, while publish lock is ALREADY NOT active (simulating race)
+          throw new HttpError(409, 'conflict', 'Dự án đang trong quá trình publish');
+        }
+        // Second call (drain) succeeds
+        ctx.taskRepo.update(taskId, { status: 'pushed' });
+        return { ok: true, remote: 'origin', branch: 'main', commit: 'abc', pushedIntegrationBranch: false };
+      }) as any;
+
+      ctx.service.enqueueAutoPublish(projectId, taskId);
+
+      // Wait a short tick for promise chain
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(callCount).toBe(2);
+      const task = ctx.taskRepo.get(taskId);
+      expect(task?.status).toBe('pushed');
+      const pendingSet = (ctx.service as any).pendingAutoPublishTasks.get(projectId);
+      expect(pendingSet?.size ?? 0).toBe(0);
+
+      ctx.service.publishTask = origPublishTask;
     });
   });
 });

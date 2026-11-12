@@ -5702,6 +5702,7 @@ export class AppService {
         profileRepo: this.profileRepo,
         quotaService: this.scheduler.getQuotaService(),
         reviewRepo: this.reviewRepo,
+        runRepo: this.runRepo,
         config: this.config,
       },
       options,
@@ -5736,23 +5737,33 @@ export class AppService {
           }
           set.add(tId);
 
-          onProjectPublishLockReleased(projectId, () => {
-            const set = this.pendingAutoPublishTasks.get(projectId);
-            if (!set || set.size === 0) return;
+          const drain = () => {
+            const currentSet = this.pendingAutoPublishTasks.get(projectId);
+            if (!currentSet || currentSet.size === 0) return;
             let nextId: string | null = null;
-            for (const id of Array.from(set)) {
+            for (const id of Array.from(currentSet)) {
               const t = this.taskRepo.get(id);
               if (!t || t.status === 'pushed') {
-                set.delete(id);
+                currentSet.delete(id);
               } else {
                 nextId = id;
               }
             }
             if (nextId) {
-              set.delete(nextId);
+              currentSet.delete(nextId);
               this.enqueueAutoPublish(projectId, nextId);
             }
+          };
+
+          const unsubscribe = onProjectPublishLockReleased(projectId, () => {
+            drain();
           });
+
+          // Check if lock was already released before listener was registered
+          if (!isProjectPublishing(projectId)) {
+            unsubscribe();
+            drain();
+          }
           return;
         }
         console.error(`[publish] Auto-publish failed for task ${tId}:`, err);

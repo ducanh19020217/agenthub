@@ -359,6 +359,7 @@ export class Scheduler {
   private lastLoadHighEventSnapshot: LoadSnapshot | null = null;
   private notifiedSkippedModels = new Set<string>();
   private resourceTimer: ReturnType<typeof setInterval> | null = null;
+  private retentionTimer: ReturnType<typeof setInterval> | null = null;
   private diskReader: (p: string) => DiskSpace = getDiskSpaceSync;
   private usageService?: QuotaUsageService;
   private checkingQueue: QueuedCheck[] = [];
@@ -776,6 +777,8 @@ export class Scheduler {
     this.measureAllRunningTaskResources();
     this.resourceTimer = setInterval(() => this.measureAllRunningTaskResources(), 15000);
     this.resourceTimer.unref();
+    this.retentionTimer = setInterval(() => this.runRetentionBatch(), 6 * 60 * 60 * 1000);
+    this.retentionTimer.unref();
     // Also run immediately
     this.tick();
   }
@@ -788,6 +791,10 @@ export class Scheduler {
     if (this.resourceTimer) {
       clearInterval(this.resourceTimer);
       this.resourceTimer = null;
+    }
+    if (this.retentionTimer) {
+      clearInterval(this.retentionTimer);
+      this.retentionTimer = null;
     }
 
     // Requirement 4: Khi daemon tắt/khởi động lại: mọi task đang paused phải được SIGCONT trước (không để tiến trình đứng mãi).
@@ -4297,7 +4304,7 @@ export class Scheduler {
     const thresholdMs = effectiveAfterHours * 60 * 60 * 1000;
     const now = Date.now();
 
-    const completedTasks = this.taskRepo.getAll().filter((task) => task.status === 'done' || task.status === 'cancelled');
+    const completedTasks = this.taskRepo.getCompletedWithWorktrees();
     for (const task of completedTasks) {
       if (!task.worktreePath) continue;
 
@@ -4383,7 +4390,7 @@ export class Scheduler {
     } catch {
       return;
     }
-    const tasks = this.taskRepo.getAll();
+    const tasks = this.taskRepo.getWorktreeReferences();
     const referenced = new Set(tasks.filter((task) => task.worktreePath).map((task) => path.resolve(task.worktreePath!)));
     for (const projectDir of projects) {
       if (!projectDir.isDirectory()) continue;
@@ -4417,6 +4424,29 @@ export class Scheduler {
         }
       }
     }
+  }
+
+  private runRetentionBatch(): void {
+    if (!this.db) return;
+    const now = Date.now();
+    const sqliteTime = (days: number): string => new Date(now - days * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19);
+    const noisyTypes = [
+      'brain.updated', 'brain.status', 'deploy.restart_waiting', 'claude.quota_available',
+      'claude.fallback_changed', 'load.high', 'load.ok', 'task.overlap', 'review.waiting',
+    ];
+    const retainedTypes = [
+      'review.fallback', 'review.auto_merge_skipped', 'review.completed', 'review.escalated',
+      'merge.conflict', 'task.merged',
+    ];
+    const deletedEvents = this.eventRepo.deleteExpired(
+      noisyTypes,
+      retainedTypes,
+      sqliteTime(this.config.retention.noisyEventDays),
+      sqliteTime(this.config.retention.eventDays),
+      1000,
+    );
+    const deletedNotes = this.taskNoteRepo?.deleteOldCompletedOverlaps(sqliteTime(this.config.retention.taskNoteDays), 1000) || 0;
+    if (deletedEvents > 0 || deletedNotes > 0) this.db.pragma('optimize');
   }
 
   setTaskMerging(taskId: string, merging: boolean): void {

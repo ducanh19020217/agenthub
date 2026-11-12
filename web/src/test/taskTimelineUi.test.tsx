@@ -146,9 +146,10 @@ describe('Workflow Timeline UI & Status Timestamps', () => {
     expect(within(step4).getByTestId('workflow-duration-4')).toHaveTextContent('15 phút');
     expect(step4.textContent).toContain('(run run-102)');
 
-    // Verify current step displays "đang ở bước này từ"
-    const currentStepText = screen.getByTestId('workflow-current-step');
-    expect(currentStepText).toHaveTextContent(/đang ở bước này từ/i);
+    // For finished/terminal status, current step does not show running duration or "đang ở bước này từ"
+    expect(screen.queryByTestId('workflow-current-step')).toBeNull();
+    expect(screen.queryByTestId('workflow-duration-6')).toBeNull();
+    expect(screen.getByTestId('workflow-step-6')).toBeInTheDocument();
   });
 
   it('renders current step in English with "currently at this step since" and localized duration', async () => {
@@ -205,6 +206,34 @@ describe('Workflow Timeline UI & Status Timestamps', () => {
 
     const workflowSection = await screen.findByTestId('workflow-timeline');
     expect(workflowSection.textContent).toContain('ước lượng');
+  });
+
+  it('suppresses running duration and currentStepSince on terminal statuses (cancelled, failed, merged, pushed)', async () => {
+    const terminalStatuses = ['cancelled', 'failed', 'merged', 'pushed'] as const;
+
+    for (const status of terminalStatuses) {
+      const terminalTimeline: TaskTimelineItem[] = [
+        { status: 'running', at: '2026-11-12T02:00:00.000Z', durationMs: 10 * 60 * 1000 },
+        { status, at: '2026-11-12T02:10:00.000Z' },
+      ];
+
+      vi.spyOn(client, 'getTask').mockResolvedValue({
+        ...baseTask,
+        status: status as any,
+        timeline: terminalTimeline,
+      });
+
+      const { unmount } = renderDetailPage();
+      await screen.findByTestId('workflow-timeline');
+
+      // Step 1 (terminal) must not display running duration or current step indicator
+      expect(screen.queryByTestId('workflow-current-step')).toBeNull();
+      expect(screen.queryByTestId('workflow-duration-1')).toBeNull();
+      // But step 0 (running) should have duration
+      expect(screen.getByTestId('workflow-duration-0')).toHaveTextContent('10 phút');
+
+      unmount();
+    }
   });
 
   it('displays estimated indicator on FlowTaskList cards in vi and en', async () => {

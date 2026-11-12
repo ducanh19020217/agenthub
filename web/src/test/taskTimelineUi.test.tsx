@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TaskDetailPage } from '../pages/TaskDetailPage';
 import { LocaleProvider } from '../context/LocaleContext';
+import type { Locale } from '../locales';
 import * as client from '../api/client';
 import * as sse from '../api/sse';
 import type { TaskDetail, TaskTimelineItem } from '../types/api';
@@ -52,7 +53,7 @@ describe('Workflow Timeline UI & Status Timestamps', () => {
     vi.restoreAllMocks();
   });
 
-  function renderDetailPage(taskId = 'proj-1~t1', locale = 'vi') {
+  function renderDetailPage(taskId = 'proj-1~t1', locale: Locale = 'vi') {
     return render(
       <QueryClientProvider client={queryClient}>
         <LocaleProvider initialLocale={locale}>

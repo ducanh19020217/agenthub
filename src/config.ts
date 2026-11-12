@@ -301,6 +301,7 @@ export const DEFAULT_UPDATES_CONFIG: UpdatesConfig = {
 
 export interface WorkersConfig {
   codexSandbox: 'off' | 'workspace-write';
+  agyStreamOutput?: boolean;
 }
 
 export interface UiConfig {
@@ -309,6 +310,7 @@ export interface UiConfig {
 
 export const DEFAULT_WORKERS_CONFIG: WorkersConfig = {
   codexSandbox: 'off',
+  agyStreamOutput: false,
 };
 
 /** Đọc cấu hình đánh thức quota, bỏ giá trị sai và dùng mặc định cho phần thiếu. */
@@ -1220,6 +1222,7 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
   const rawWorkers = (userConfig.workers as Record<string, unknown>) || {};
   const workers: WorkersConfig = {
     codexSandbox: rawWorkers.codexSandbox === 'workspace-write' ? 'workspace-write' : DEFAULT_WORKERS_CONFIG.codexSandbox,
+    agyStreamOutput: typeof rawWorkers.agyStreamOutput === 'boolean' ? rawWorkers.agyStreamOutput : DEFAULT_WORKERS_CONFIG.agyStreamOutput,
   };
   const rawChecks = (userConfig.checks as Record<string, unknown>) || {};
   const checks: ChecksConfig = {

@@ -99,9 +99,11 @@ export class AgyEngine implements Engine {
   id = 'agy' as const;
 
   private agyPath: string | null;
+  private streamOutput: boolean;
 
-  constructor(agyPath?: string, customHome?: string) {
+  constructor(agyPath?: string, customHome?: string, streamOutput = false) {
     this.agyPath = agyPath || findAgyBin(customHome);
+    this.streamOutput = streamOutput;
   }
 
   family(model: string): string {
@@ -122,6 +124,14 @@ export class AgyEngine implements Engine {
       '--print-timeout',
       '0',
     ];
+
+    // Add stream-json output format when explicitly requested or configured.
+    // This causes agy to emit NDJSON progress events to stdout (→ logFile),
+    // so the log file is non-empty during long runs.
+    const streamOutput = opts.streamOutput ?? this.streamOutput;
+    if (streamOutput) {
+      args.push('--output-format', 'stream-json');
+    }
 
     const env: Record<string, string> = { ...process.env as Record<string, string>, BROWSER: '/bin/false' };
 

@@ -232,7 +232,7 @@ export function createContext(
     (fakeCodex as { id: 'agy' | 'codex' }).id = 'codex';
     engines.set('codex', fakeCodex);
   } else {
-    engines.set('agy', new AgyEngine());
+    engines.set('agy', new AgyEngine(undefined, undefined, Boolean(config.workers?.agyStreamOutput)));
     const codexPath = CodexEngine.findCodexPath();
     if (codexPath) {
       engines.set('codex', new CodexEngine(codexPath, config.workers?.codexSandbox || 'off'));

@@ -32,8 +32,11 @@ import { formatEventType, formatReason } from '../utils/events';
 import { useLocale } from '../context/LocaleContext';
 import { CollapsibleList } from '../components/CollapsibleList';
 import { Pagination } from '../components/ui/Pagination';
+import { Modal } from '../components/ui';
+import { StatusBadge } from '../components/StatusBadge';
+import { FlowTaskList } from '../components/TaskFlow';
 import { QuotaUsage } from '../components/QuotaUsage';
-import { Profile, QuotaUsageItem, ProjectBrain } from '../types/api';
+import { Profile, QuotaUsageItem, ProjectBrain, TaskStatus } from '../types/api';
 import { ClaudeQuotaCard } from '../components/ClaudeQuotaCard';
 import { GettingStartedChecklist } from '../components/GettingStartedChecklist';
 
@@ -87,6 +90,7 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
     : { status: 15_000, eventHistory: 30_000, fast: 30_000, slow: 30_000, queue: 15_000 };
   const { t, locale } = useLocale();
   const [liveEvents, setLiveEvents] = useState<EventItem[]>([]);
+  const [selectedStatus, setSelectedStatus] = useState<TaskStatus | null>(null);
   const [isReaping, setIsReaping] = useState(false);
   const [urlParams, setUrlParams] = useSearchParams();
   const [eventPageNumber, setEventPageNumber] = useState(Math.max(1, Number(urlParams.get('eventsPage') || 1)));
@@ -457,7 +461,17 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
           return (
             <div
               key={m.label}
-              className="p-5 rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] shadow-xs flex items-center justify-between transition-colors"
+              role="button"
+              tabIndex={0}
+              data-testid={`dashboard-metric-${m.statusKey}`}
+              onClick={() => setSelectedStatus(m.statusKey as TaskStatus)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setSelectedStatus(m.statusKey as TaskStatus);
+                }
+              }}
+              className="p-5 rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] shadow-xs flex items-center justify-between transition-colors cursor-pointer hover:border-[var(--t-accent)]"
             >
               <div className="space-y-1">
                 <p className="text-xs font-medium text-[var(--t-text-2)]">{m.label}</p>
@@ -477,6 +491,21 @@ export const DashboardPage: React.FC<{ pollingProfile?: DashboardPollingProfile 
           );
         })}
       </div>
+
+      <Modal
+        isOpen={selectedStatus !== null}
+        onClose={() => setSelectedStatus(null)}
+        maxWidth="max-w-[95vw] md:max-w-[70vw]"
+        className="h-[85vh] md:h-[70vh]"
+        title={selectedStatus ? (
+          <span className="flex items-center gap-2">
+            <StatusBadge status={selectedStatus} size="sm" />
+            <span className="text-sm font-normal text-[var(--t-text-2)]">{t('tasks.flow.modalCount', { count: String(taskCounts[selectedStatus] || 0) })}</span>
+          </span>
+        ) : undefined}
+      >
+        {selectedStatus && <FlowTaskList status={selectedStatus} project="" search="" />}
+      </Modal>
 
       <div data-testid="dashboard-project-summary" className="order-2 rounded-xl border border-[var(--t-border)] bg-[var(--t-surface)] p-5 space-y-3">
         <div className="flex items-center justify-between gap-2">

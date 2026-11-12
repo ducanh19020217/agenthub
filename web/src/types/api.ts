@@ -382,6 +382,15 @@ export interface BlockingDiskInfo {
   minFreeGB: number;
 }
 
+export interface TaskTimelineItem {
+  status: TaskStatus | string;
+  at: string;
+  durationMs?: number;
+  runId?: string | null;
+  actor?: string | null;
+  estimated?: boolean;
+}
+
 export interface Task {
   id: string; // project~slug or project/slug
   projectId: string;
@@ -423,6 +432,9 @@ export interface Task {
   reviewChain?: ReviewChainStep[];
   createdAt: string;
   updatedAt: string;
+  statusChangedAt?: string | null;
+  statusChangedAtEstimated?: boolean;
+  timeline?: TaskTimelineItem[];
   pushedAt?: string | null;
   pushResult?: string | null | {
     remote?: string;

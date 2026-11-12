@@ -24,6 +24,7 @@ import { StatusBadge } from './StatusBadge';
 import { Modal } from './ui';
 import { ProjectTag } from './ProjectTag';
 import { useProjectColor } from '../utils/projectColor';
+import { formatDateTime, formatStatusTimeLabel } from '../lib/time';
 
 /** Sơ đồ quy trình: mỗi node là một trạng thái task, bấm vào để xem danh sách task. */
 
@@ -491,13 +492,13 @@ const FlowEdges: React.FC<{
   );
 };
 
-const FlowTaskList: React.FC<{ status: TaskStatus; project: string; search: string }> = ({ status, project, search }) => {
-  const { t } = useLocale();
+export const FlowTaskList: React.FC<{ status: TaskStatus; project?: string; search?: string }> = ({ status, project = '', search = '' }) => {
+  const { t, locale } = useLocale();
   const colorOf = useProjectColor();
   const pageSize = 20;
   const { data, isLoading, isError } = useQuery({
     queryKey: ['tasks-kanban', 'flow-list', project, status, search],
-    queryFn: () => getTasksPage({ project, status, search, limit: pageSize, sort: 'createdAt', order: 'desc' }),
+    queryFn: () => getTasksPage({ project, status, search, limit: pageSize, sort: 'statusChangedAt', order: 'desc' }),
   });
   const [items, setItems] = useState<Task[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -511,7 +512,7 @@ const FlowTaskList: React.FC<{ status: TaskStatus; project: string; search: stri
     if (!cursor || loadingMore) return;
     setLoadingMore(true);
     try {
-      const next = await getTasksPage({ project, status, search, limit: pageSize, cursor, sort: 'createdAt', order: 'desc' });
+      const next = await getTasksPage({ project, status, search, limit: pageSize, cursor, sort: 'statusChangedAt', order: 'desc' });
       setItems((current) => [...current, ...next.items]);
       setCursor(next.nextCursor);
     } finally {
@@ -542,7 +543,18 @@ const FlowTaskList: React.FC<{ status: TaskStatus; project: string; search: stri
               </div>
               <div className="mt-1 line-clamp-2 text-sm font-semibold text-[var(--t-text)]">{task.title}</div>
               <div className="mt-auto flex items-center justify-between gap-2 pt-3 text-xs">
-                <ProjectTag projectId={task.projectId} />
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <ProjectTag projectId={task.projectId} />
+                  {task.statusChangedAt && (
+                    <span
+                      className="truncate text-[11px] text-[var(--t-text-3)]"
+                      title={`${formatDateTime(task.statusChangedAt, locale)}${task.statusChangedAtEstimated ? ` (${t('taskDetail.stepEstimated')})` : ''}`}
+                      data-testid="task-status-time"
+                    >
+                      {formatStatusTimeLabel(task.status, task.statusChangedAt, locale, undefined, t, task.statusChangedAtEstimated)}
+                    </span>
+                  )}
+                </div>
                 <span className="inline-flex shrink-0 items-center gap-1 text-[var(--t-text-3)]">
                   {task.level === 'hard' ? <Flame className="h-3 w-3" /> : <Zap className="h-3 w-3" />}
                   {task.level === 'hard' ? t('tasks.flow.levelHard') : t('tasks.flow.levelEasy')}

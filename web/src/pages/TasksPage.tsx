@@ -17,6 +17,7 @@ import { filterTasksForDag } from '../components/dag/dagUtils';
 import { DataTable } from '../components/ui';
 import { useShowMore } from '../components/CollapsibleList';
 import { autoMergeReasonKey } from '../utils/autoMerge';
+import { formatDateTime, formatStatusTimeLabel } from '../lib/time';
 
 type TasksViewMode = 'kanban' | 'flow' | 'dag' | 'list' | 'project';
 /** View mở mặc định khi vào trang Task (không có ?view= trên URL). */
@@ -29,7 +30,7 @@ export interface KanbanColumnProps {
 }
 
 const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project, search }) => {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const colorOf = useProjectColor();
   const queryClient = useQueryClient();
   const resumeMutation = useMutation({
@@ -237,9 +238,20 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
               )}
 
               <div className="flex items-center justify-between gap-2 pt-2 border-t border-[var(--t-border)] text-[11px]">
-                <ProjectTag projectId={task.projectId} />
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <ProjectTag projectId={task.projectId} />
+                  {task.statusChangedAt && (
+                    <span
+                      className="truncate text-[var(--t-text-3)]"
+                      title={`${formatDateTime(task.statusChangedAt, locale)}${task.statusChangedAtEstimated ? ` (${t('taskDetail.stepEstimated')})` : ''}`}
+                      data-testid="task-status-time"
+                    >
+                      {formatStatusTimeLabel(task.status, task.statusChangedAt, locale, undefined, t, task.statusChangedAtEstimated)}
+                    </span>
+                  )}
+                </div>
 
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5 shrink-0">
                   {task.level === 'hard' ? (
                     <span className="inline-flex items-center gap-0.5 text-[var(--t-purple)] font-medium">
                       <Flame className="w-3 h-3" /> {t('common.hard')}
@@ -274,7 +286,7 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
 export const KanbanColumn = memo(KanbanColumnComponent);
 
 const ProjectTaskGroup: React.FC<{ project: { id: string; name: string }; tasks: Task[] }> = ({ project, tasks }) => {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const colorOf = useProjectColor();
   const visible = useShowMore(tasks, 20, 20, `agenthub:tasks:project:${project.id}`);
   return (
@@ -296,7 +308,7 @@ const ProjectTaskGroup: React.FC<{ project: { id: string; name: string }; tasks:
                 {task.externalUrl ? t('taskDetail.openTicket') : task.externalRef}
               </a>
             )}
-            <div className="mt-2">
+            <div className="mt-2 flex items-center justify-between gap-2">
               <StatusBadge
                 status={task.status}
                 waitReason={task.waitReason}
@@ -307,6 +319,15 @@ const ProjectTaskGroup: React.FC<{ project: { id: string; name: string }; tasks:
                 projectId={task.projectId}
                 size="sm"
               />
+              {task.statusChangedAt && (
+                <span
+                  className="truncate text-[11px] text-[var(--t-text-3)]"
+                  title={`${formatDateTime(task.statusChangedAt, locale)}${task.statusChangedAtEstimated ? ` (${t('taskDetail.stepEstimated')})` : ''}`}
+                  data-testid="task-status-time"
+                >
+                  {formatStatusTimeLabel(task.status, task.statusChangedAt, locale, undefined, t, task.statusChangedAtEstimated)}
+                </span>
+              )}
             </div>
           </div>
         ))}</div> : <div className="rounded-lg border border-dashed border-[var(--t-border)] p-5 text-center text-xs italic text-[var(--t-text-3)]">{t('common.empty')}</div>}
@@ -317,7 +338,7 @@ const ProjectTaskGroup: React.FC<{ project: { id: string; name: string }; tasks:
 };
 
 export const TasksPage: React.FC = () => {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const navigate = useNavigate();
   const [urlParams, setUrlParams] = useSearchParams();
   const [viewMode, setViewMode] = useState<TasksViewMode>((urlParams.get('view') as TasksViewMode) || DEFAULT_TASKS_VIEW);
@@ -631,16 +652,27 @@ export const TasksPage: React.FC = () => {
               key: 'status',
               title: t('tasks.status'),
               render: (task) => (
-                <StatusBadge
-                  status={task.status}
-                  waitReason={task.waitReason}
-                  blockingDisk={task.blockingDisk}
-                  diskFreeGB={task.blockingDisk?.freeGB}
-                  diskMinFreeGB={task.blockingDisk?.minFreeGB}
-                  diskLabel={task.blockingDisk?.label}
-                  projectId={task.projectId}
-                  size="sm"
-                />
+                <div className="flex flex-col gap-0.5">
+                  <StatusBadge
+                    status={task.status}
+                    waitReason={task.waitReason}
+                    blockingDisk={task.blockingDisk}
+                    diskFreeGB={task.blockingDisk?.freeGB}
+                    diskMinFreeGB={task.blockingDisk?.minFreeGB}
+                    diskLabel={task.blockingDisk?.label}
+                    projectId={task.projectId}
+                    size="sm"
+                  />
+                  {task.statusChangedAt && (
+                    <span
+                      className="text-[11px] text-[var(--t-text-3)]"
+                      title={`${formatDateTime(task.statusChangedAt, locale)}${task.statusChangedAtEstimated ? ` (${t('taskDetail.stepEstimated')})` : ''}`}
+                      data-testid="task-status-time"
+                    >
+                      {formatStatusTimeLabel(task.status, task.statusChangedAt, locale, undefined, t, task.statusChangedAtEstimated)}
+                    </span>
+                  )}
+                </div>
               ),
             },
             { key: 'project', title: t('tasks.project'), render: (task) => <ProjectTag projectId={task.projectId} /> },

@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import { decodeCursor, encodeCursor, parsePageSize, PageResult } from '../pagination.js';
+import { toApiTime } from './time.js';
 
 function normalizeSearchText(text: string): string {
   return text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[đĐ]/g, (c) => c === 'đ' ? 'd' : 'D').toLowerCase();
@@ -1085,6 +1086,12 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE runs ADD COLUMN lockFile TEXT;
   ALTER TABLE runs ADD COLUMN handoffAt TEXT;
   `,
+  // Migration 75: record statusChangedAt timestamp and estimation flag on tasks
+  `
+  ALTER TABLE tasks ADD COLUMN statusChangedAt TEXT;
+  ALTER TABLE tasks ADD COLUMN statusChangedAtEstimated INTEGER NOT NULL DEFAULT 0;
+  CREATE INDEX IF NOT EXISTS idx_tasks_status_changed ON tasks(status, statusChangedAt);
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -1134,6 +1141,7 @@ export function openDatabase(dbPath: string): Database.Database {
   ensureCheckResultsColumns(db);
   cleanExpiredClaudeLimits(db);
   ensureProjectPublishMigration(db);
+  ensureStatusChangedAtBackfill(db);
 
   return db;
 }
@@ -1336,6 +1344,204 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
   return { migrated, explicitlyDisabled };
 }
 
+export function backfillTaskStatusChangedAt(db: Database.Database): { updated: number; estimated: number } {
+  if (!hasColumn(db, 'tasks', 'statusChangedAt') || !hasColumn(db, 'tasks', 'statusChangedAtEstimated')) {
+    return { updated: 0, estimated: 0 };
+  }
+
+  const rows = db.prepare(`
+    SELECT id, status, createdAt, updatedAt, pushedAt
+    FROM tasks
+    WHERE statusChangedAt IS NULL
+  `).all() as Array<{
+    id: string;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+    pushedAt?: string | null;
+  }>;
+
+  if (rows.length === 0) return { updated: 0, estimated: 0 };
+
+  const findEventStmt = db.prepare(`
+    SELECT ts FROM events
+    WHERE taskId = ? AND type = ?
+    ORDER BY id DESC LIMIT 1
+  `);
+
+  const findDoneEventStmt = db.prepare(`
+    SELECT ts FROM events
+    WHERE taskId = ? AND type IN ('task.done', 'task.merged')
+    ORDER BY id DESC LIMIT 1
+  `);
+
+  const findRunStmt = db.prepare(`
+    SELECT startedAt FROM runs
+    WHERE taskId = ?
+    ORDER BY rowid DESC LIMIT 1
+  `);
+
+  const findReviewChangesRequestedStmt = db.prepare(`
+    SELECT createdAt FROM reviews
+    WHERE taskId = ? AND verdict = 'changes_requested'
+    ORDER BY id DESC LIMIT 1
+  `);
+
+  const updateStmt = db.prepare(`
+    UPDATE tasks
+    SET statusChangedAt = ?, statusChangedAtEstimated = ?
+    WHERE id = ?
+  `);
+
+  let updated = 0;
+  let estimated = 0;
+
+  const updateMany = db.transaction(() => {
+    for (const task of rows) {
+      let ts: string | null = null;
+      let isEstimated = false;
+
+      switch (task.status) {
+        case 'queued': {
+          const row = findEventStmt.get(task.id, 'task.queued') as { ts: string } | undefined;
+          if (row?.ts) ts = row.ts;
+          break;
+        }
+        case 'running': {
+          const row = findEventStmt.get(task.id, 'task.running') as { ts: string } | undefined;
+          if (row?.ts) {
+            ts = row.ts;
+          } else {
+            const run = findRunStmt.get(task.id) as { startedAt: string } | undefined;
+            if (run?.startedAt) ts = run.startedAt;
+          }
+          break;
+        }
+        case 'checking': {
+          const row = findEventStmt.get(task.id, 'task.checking') as { ts: string } | undefined;
+          if (row?.ts) ts = row.ts;
+          break;
+        }
+        case 'review': {
+          const row = findEventStmt.get(task.id, 'task.review_ready') as { ts: string } | undefined;
+          if (row?.ts) {
+            ts = row.ts;
+          } else {
+            const rowGate = findEventStmt.get(task.id, 'review.gate_started') as { ts: string } | undefined;
+            if (rowGate?.ts) ts = rowGate.ts;
+          }
+          break;
+        }
+        case 'done': {
+          const row = findDoneEventStmt.get(task.id) as { ts: string } | undefined;
+          if (row?.ts) ts = row.ts;
+          break;
+        }
+        case 'pushed': {
+          const row = findEventStmt.get(task.id, 'task.pushed') as { ts: string } | undefined;
+          if (row?.ts) {
+            ts = row.ts;
+          } else if (task.pushedAt) {
+            ts = task.pushedAt;
+          }
+          break;
+        }
+        case 'failed': {
+          const row = findEventStmt.get(task.id, 'task.failed') as { ts: string } | undefined;
+          if (row?.ts) ts = row.ts;
+          break;
+        }
+        case 'blocked': {
+          const row = findEventStmt.get(task.id, 'task.blocked') as { ts: string } | undefined;
+          if (row?.ts) ts = row.ts;
+          break;
+        }
+        case 'cancelled': {
+          const row = findEventStmt.get(task.id, 'task.cancelled') as { ts: string } | undefined;
+          if (row?.ts) ts = row.ts;
+          break;
+        }
+        case 'waiting_quota': {
+          const row = findEventStmt.get(task.id, 'task.waiting_quota') as { ts: string } | undefined;
+          if (row?.ts) ts = row.ts;
+          break;
+        }
+        case 'paused': {
+          const row = findEventStmt.get(task.id, 'task.paused') as { ts: string } | undefined;
+          if (row?.ts) ts = row.ts;
+          break;
+        }
+        case 'draft': {
+          ts = task.createdAt;
+          break;
+        }
+        case 'merged': {
+          const row = findEventStmt.get(task.id, 'task.merged') as { ts: string } | undefined;
+          if (row?.ts) {
+            ts = row.ts;
+          } else {
+            const doneRow = findDoneEventStmt.get(task.id) as { ts: string } | undefined;
+            if (doneRow?.ts) ts = doneRow.ts;
+          }
+          break;
+        }
+        case 'changes_requested': {
+          const row = findReviewChangesRequestedStmt.get(task.id) as { createdAt: string } | undefined;
+          if (row?.createdAt) {
+            ts = row.createdAt;
+          } else {
+            const eventRow = findEventStmt.get(task.id, 'review.completed') as { ts: string } | undefined;
+            if (eventRow?.ts) ts = eventRow.ts;
+          }
+          break;
+        }
+        case 'publishing': {
+          const row = findEventStmt.get(task.id, 'task.publishing') as { ts: string } | undefined;
+          if (row?.ts) ts = row.ts;
+          break;
+        }
+        case 'auditing': {
+          const row = findEventStmt.get(task.id, 'task.auditing') as { ts: string } | undefined;
+          if (row?.ts) ts = row.ts;
+          break;
+        }
+      }
+
+      if (!ts) {
+        ts = task.updatedAt || task.createdAt;
+        isEstimated = task.status !== 'draft';
+      }
+
+      const iso = toApiTime(ts)!;
+      updateStmt.run(iso, isEstimated ? 1 : 0, task.id);
+      updated++;
+      if (isEstimated) estimated++;
+    }
+  });
+
+  updateMany();
+  return { updated, estimated };
+}
+
+export function ensureStatusChangedAtBackfill(db: Database.Database): { updated: number; estimated: number } {
+  try {
+    const metaRow = db.prepare("SELECT value FROM meta WHERE key = 'migration:status_changed_at_backfill'").get() as { value: string } | undefined;
+    if (metaRow && metaRow.value === '1') {
+      return { updated: 0, estimated: 0 };
+    }
+  } catch {
+    return { updated: 0, estimated: 0 };
+  }
+
+  const result = backfillTaskStatusChangedAt(db);
+  try {
+    db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:status_changed_at_backfill', '1')").run();
+  } catch {
+    // meta table might not be writable in rare tests
+  }
+  return result;
+}
+
 // Repository helpers
 export interface ProjectHooks {
   onWorktreeRemoved?: string[];
@@ -1522,6 +1728,8 @@ export interface TaskRow {
   creationGoal?: string | null;
   pushedAt?: string | null;
   pushResult?: string | null;
+  statusChangedAt?: string | null;
+  statusChangedAtEstimated?: number | boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -2086,7 +2294,7 @@ export class TaskRepo {
     }
     const cursor = decodeCursor(filter?.cursor);
     if (filter?.cursor && !cursor) throw new Error('Invalid pagination cursor');
-    const sortColumn = filter?.sort === 'updatedAt' ? 'updatedAt' : filter?.sort === 'title' ? 'title' : filter?.sort === 'slug' ? 'slug' : 'createdAt';
+    const sortColumn = filter?.sort === 'statusChangedAt' ? 'statusChangedAt' : filter?.sort === 'updatedAt' ? 'updatedAt' : filter?.sort === 'title' ? 'title' : filter?.sort === 'slug' ? 'slug' : 'createdAt';
     const descending = filter?.order !== 'asc';
     const comparison = descending ? '<' : '>';
     if (cursor) {
@@ -2157,13 +2365,19 @@ export class TaskRepo {
     batchId?: string | null;
     creationSessionId?: string | null;
     creationGoal?: string | null;
+    statusChangedAt?: string | null;
+    statusChangedAtEstimated?: number | boolean;
     skipDeps?: boolean;
   }): void {
     const deps = JSON.stringify(row.dependsOn || []);
+    const statusChangedAt = row.statusChangedAt ?? new Date().toISOString();
+    const statusChangedAtEstimated = typeof row.statusChangedAtEstimated === 'boolean'
+      ? (row.statusChangedAtEstimated ? 1 : 0)
+      : (row.statusChangedAtEstimated ?? 0);
     this.db
       .prepare(
-        `INSERT INTO tasks (id, projectId, slug, title, externalRef, body, level, modelChain, baseRef, branch, dependsOn, status, waitReason, worktreePath, doneReport, blockedReport, diffStat, sourceRef, batchId, creationSessionId, creationGoal)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, projectId, slug, title, externalRef, body, level, modelChain, baseRef, branch, dependsOn, status, waitReason, worktreePath, doneReport, blockedReport, diffStat, sourceRef, batchId, creationSessionId, creationGoal, statusChangedAt, statusChangedAtEstimated)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -2187,6 +2401,8 @@ export class TaskRepo {
         row.batchId || null,
         row.creationSessionId || null,
         row.creationGoal || null,
+        statusChangedAt,
+        statusChangedAtEstimated,
       );
 
     // Populate task_deps
@@ -2206,15 +2422,28 @@ export class TaskRepo {
     }
   }
 
-  updateStatus(id: string, status: string, waitReason: WaitReason = null): void {
-    if (status === 'waiting_quota' || (status === 'queued' && waitReason !== null)) {
+  updateStatus(id: string, status: string, waitReason: WaitReason = null, statusChangedAt?: string): void {
+    const waitClause = (status === 'waiting_quota' || (status === 'queued' && waitReason !== null))
+      ? 'waitReason = ?,'
+      : 'waitReason = NULL,';
+    const waitArgs = (status === 'waiting_quota' || (status === 'queued' && waitReason !== null))
+      ? [waitReason]
+      : [];
+
+    if (statusChangedAt !== undefined) {
       this.db
-        .prepare("UPDATE tasks SET status = ?, waitReason = ?, updatedAt = datetime('now') WHERE id = ?")
-        .run(status, waitReason, id);
+        .prepare(`UPDATE tasks SET status = ?, ${waitClause} statusChangedAt = ?, statusChangedAtEstimated = 0, updatedAt = datetime('now') WHERE id = ?`)
+        .run(status, ...waitArgs, statusChangedAt, id);
     } else {
+      const now = new Date().toISOString();
       this.db
-        .prepare("UPDATE tasks SET status = ?, waitReason = NULL, updatedAt = datetime('now') WHERE id = ?")
-        .run(status, id);
+        .prepare(
+          `UPDATE tasks SET status = ?, ${waitClause} ` +
+          `statusChangedAt = CASE WHEN status = ? THEN coalesce(statusChangedAt, ?) ELSE ? END, ` +
+          `statusChangedAtEstimated = CASE WHEN status = ? THEN statusChangedAtEstimated ELSE 0 END, ` +
+          `updatedAt = datetime('now') WHERE id = ?`
+        )
+        .run(status, ...waitArgs, status, now, now, status, id);
     }
   }
 
@@ -2241,15 +2470,30 @@ export class TaskRepo {
 
   update(
     id: string,
-    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'blockedReport' | 'diffStat' | 'cancelReason' | 'cancelledBy' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId' | 'pushedAt' | 'pushResult'>>,
+    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'blockedReport' | 'diffStat' | 'cancelReason' | 'cancelledBy' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId' | 'pushedAt' | 'pushResult' | 'statusChangedAt' | 'statusChangedAtEstimated'>>,
   ): void {
     const sets: string[] = ["updatedAt = datetime('now')"];
     const values: unknown[] = [];
     const fieldsToApply = { ...fields };
-    if ('status' in fieldsToApply && fieldsToApply.status !== 'waiting_quota' && fieldsToApply.waitReason === undefined) {
-      fieldsToApply.waitReason = null;
+    if ('status' in fieldsToApply) {
+      if (fieldsToApply.status !== 'waiting_quota' && fieldsToApply.waitReason === undefined) {
+        fieldsToApply.waitReason = null;
+      }
+      if (fieldsToApply.statusChangedAt === undefined) {
+        const now = new Date().toISOString();
+        sets.push("statusChangedAt = CASE WHEN status = ? THEN coalesce(statusChangedAt, ?) ELSE ? END");
+        values.push(fieldsToApply.status, now, now);
+        if (fieldsToApply.statusChangedAtEstimated === undefined) {
+          sets.push("statusChangedAtEstimated = CASE WHEN status = ? THEN statusChangedAtEstimated ELSE 0 END");
+          values.push(fieldsToApply.status);
+        }
+      } else if (fieldsToApply.statusChangedAtEstimated === undefined) {
+        fieldsToApply.statusChangedAtEstimated = 0;
+      }
     }
     for (const [key, value] of Object.entries(fieldsToApply)) {
+      if (key === 'statusChangedAt' && fields.statusChangedAt === undefined) continue;
+      if (key === 'statusChangedAtEstimated' && fields.statusChangedAtEstimated === undefined && 'status' in fields) continue;
       sets.push(`${key} = ?`);
       values.push(value);
     }

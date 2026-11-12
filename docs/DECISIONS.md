@@ -347,3 +347,26 @@
      - Khi nhận 409, `enqueueAutoPublish` kiểm tra `isProjectPublishing` ngay sau khi đăng ký listener để kích hoạt xử lý ngay nếu lock đã được nhả trước thời điểm đăng ký callback.
   5. **Bảo toàn trạng thái cuối khi publish nền gặp lỗi (P3)**:
      - Bọc bắt lỗi trong `startPublishTask` để khi publish nền bị lỗi trước hoặc trong khi xử lý, trạng thái `auditing` luôn được chuyển về trạng thái cuối `push_failed` kèm sự kiện `task.push_failed`, không để lại trạng thái treo trong DB.
+
+## DEC-027: Rà soát phát sinh sự kiện chuyển trạng thái task và kiến trúc tái hiện dòng thời gian (timeline)
+
+- **Bối cảnh**:
+  - Đề bài yêu cầu hiển thị thời điểm task vào trạng thái hiện tại (`statusChangedAt`) và dòng thời gian workflow (`GET /api/tasks/:id/timeline`).
+  - Hệ thống cần xác định nguồn dữ liệu chính xác cho các mốc chuyển trạng thái, hạn chế tối đa việc phải đoán từ `updatedAt`.
+  - Cần rà soát toàn bộ các đường chuyển trạng thái trong Scheduler và AppService để đảm bảo không bị thiếu event, đồng thời làm rõ lý do tại sao dòng thời gian kết hợp dữ liệu từ `events`, `reviews` và `runs`.
+- **Quyết định thiết kế**:
+  1. **Rà soát và bổ sung sự kiện chuyển trạng thái**:
+     - Tất cả các trạng thái chính thức của task (`draft`, `queued`, `running`, `checking`, `review`, `done`, `blocked`, `failed`, `cancelled`, `waiting_quota`, `paused`, `pushed`) đều phát sự kiện tương ứng qua `eventBus` và lưu vào bảng `events`: `task.draft`, `task.queued`, `task.running`, `task.checking`, `task.review_ready`, `task.done`, `task.blocked`, `task.failed`, `task.cancelled`, `task.waiting_quota`, `task.paused`, `task.pushed`, cũng như `task.merged`, `task.publishing`, `task.auditing`.
+     - Bổ sung phát sự kiện cho các đường chuyển trạng thái trước đây chưa phát event:
+       - Khi huỷ đợt task nháp (`discardDraftBatch`): các task nháp bị chuyển sang `cancelled` nay phát sự kiện `task.cancelled` kèm ghi vào bảng `events`.
+       - Khi khôi phục project (`restoreProject`): các task được khôi phục về trạng thái trước đó nay phát sự kiện `task.<status>` tương ứng.
+  2. **Lý do suy luận `changes_requested` từ bảng `reviews`**:
+     - Trong mô hình vòng đời của AgentHub, `changes_requested` là một **phán quyết review** (verdict), không phải một trạng thái nghỉ độc lập trong schema `tasks.status` (schema DB ràng buộc `CHECK(status IN ('draft','queued','running','checking','review','done','blocked','failed','cancelled','waiting_quota','paused','pushed'))`).
+     - Khi reviewer yêu cầu sửa đổi (`changes_requested`), hệ thống lưu kết quả và nhận xét vào bảng `reviews` (`verdict: 'changes_requested'`), đồng thời lập tức đưa task trở lại hàng đợi `queued` với cờ `resume: 1` để worker tiếp tục xử lý vòng tiếp theo.
+     - Vì vậy, bảng `reviews` là nguồn chân lý bền vững (`source of truth`) lưu trữ thời điểm, người review và nội dung feedback của từng vòng. API `getTaskTimeline` đọc trực tiếp từ `reviews` để thể hiện rõ ràng bước `changes_requested` giữa các vòng chạy mà không làm biến dạng schema DB.
+  3. **Lý do kết hợp bảng `runs` cho bước `running`**:
+     - Bảng `runs` ghi nhận chi tiết mọi lượt chạy của worker (`startedAt`, `finishedAt`, `runId`, `profileName`, `model`).
+     - Khi daemon khởi động lại hoặc khi sự kiện cũ trong bảng `events` bị dọn dẹp / không đầy đủ trên các task lịch sử, bảng `runs` đảm bảo tái hiện đầy đủ và không bị gộp mất các vòng chạy (multi-round rework & retry).
+  4. **Cập nhật migration backfill (migration 75)**:
+     - Hàm `backfillTaskStatusChangedAt` hỗ trợ đầy đủ các nhánh trạng thái của task (`queued`, `running`, `checking`, `review`, `done`, `pushed`, `failed`, `blocked`, `cancelled`, `waiting_quota`, `paused`, `draft`, cũng như `merged`, `changes_requested`, `publishing`, `auditing`) để ưu tiên lấy timestamp chính xác từ event hoặc review tương ứng, chỉ fallback về `updatedAt` kèm cờ `statusChangedAtEstimated: 1` khi thực sự không có lịch sử.
+     - `TaskRepo.updateStatus` và `TaskRepo.update` chỉ cập nhật lại `statusChangedAt` khi trạng thái thực sự thay đổi, tránh làm mới sai mốc thời gian khi chỉ cập nhật các trường phụ (như `waitReason`).

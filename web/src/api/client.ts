@@ -20,6 +20,7 @@ import {
   Task,
   TaskDetail,
   TaskNote,
+  TaskTimelineItem,
   UpdateProjectInput,
   UpdateTaskInput,
   VersionResponse,
@@ -665,7 +666,7 @@ export interface TaskQuery {
   limit?: number;
   cursor?: string;
   offset?: number;
-  sort?: 'createdAt' | 'updatedAt' | 'title' | 'slug';
+  sort?: 'createdAt' | 'updatedAt' | 'title' | 'slug' | 'statusChangedAt';
   order?: 'asc' | 'desc';
 }
 
@@ -755,6 +756,10 @@ export async function createTaskFromError(data: CaptureTaskInput): Promise<Task>
 
 export async function getTask(id: string): Promise<TaskDetail> {
   return apiFetch<TaskDetail>(`/api/tasks/${encodeURIComponent(id)}`);
+}
+
+export async function getTaskTimeline(id: string): Promise<TaskTimelineItem[]> {
+  return apiFetch<TaskTimelineItem[]>(`/api/tasks/${encodeURIComponent(id)}/timeline`);
 }
 
 export async function updateTask(id: string, data: UpdateTaskInput): Promise<Task> {

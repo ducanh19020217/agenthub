@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { AgentHubConfig } from '../config.js';
-import { reapSyncForWorktree } from '../reaper.js';
+import { reap, reapSyncForWorktree } from '../reaper.js';
 import { isProjectWorktreeRootAccessible, projectWorktreeRoot, projectWorktreeRoots, resolveProjectFile } from '../projects/paths.js';
 
 const execFileAsync = promisify(execFile);
@@ -355,6 +355,51 @@ export class WorktreeService {
     return true;
   }
 
+  private async runOnWorktreeRemovedHooksAsync(
+    projectPath: string | null | undefined,
+    worktreePath: string,
+    context?: WorktreeHookContext,
+  ): Promise<void> {
+    const hooks = context?.hooks?.onWorktreeRemoved;
+    if (!hooks || !Array.isArray(hooks) || hooks.length === 0) return;
+
+    const eventBus = context?.eventBus || this.eventBus;
+    const slug = context?.slug || path.basename(worktreePath);
+    const taskId = context?.taskId || (context?.projectId ? `${context.projectId}/${slug}` : undefined);
+    if (!slug || !/^[a-z0-9_-]+$/.test(slug)) {
+      console.error(`[worktree] REFUSED hooks for ${worktreePath}: slug "${slug}" contains invalid characters (must match [a-z0-9_-])`);
+      eventBus?.emit('worktree.hook', taskId, { hook: 'onWorktreeRemoved', ok: false, error: `Refused hooks: slug "${slug}" contains invalid characters (must match [a-z0-9_-])`, slug });
+      return;
+    }
+    const slotStr = context?.slot != null ? String(context.slot) : '';
+    const slugUnderscored = slug.replace(/-/g, '_');
+    const project = context?.projectId || (projectPath ? path.basename(projectPath) : '');
+    const cwd = projectPath || undefined;
+    for (const rawCmd of hooks) {
+      if (typeof rawCmd !== 'string' || !rawCmd.trim()) continue;
+      const expandedCmd = rawCmd
+        .replace(/\{slot\}/g, slotStr)
+        .replace(/\{slug\}/g, slug)
+        .replace(/\{slug_underscored\}/g, slugUnderscored)
+        .replace(/\{worktree\}/g, shellWord(worktreePath))
+        .replace(/\{project\}/g, shellWord(project));
+      const startTime = Date.now();
+      try {
+        const { stdout } = await execFileAsync('sh', ['-c', expandedCmd], {
+          cwd, timeout: 60000, encoding: 'utf-8', maxBuffer: 1024 * 1024,
+          env: { ...process.env, AGENTHUB_WORKTREE: worktreePath, AGENTHUB_PROJECT_PATH: projectPath || '' },
+        });
+        eventBus?.emit('worktree.hook', taskId, { hook: 'onWorktreeRemoved', cmd: expandedCmd, rawCmd, ok: true, exitCode: 0, durationMs: Date.now() - startTime, output: stdout });
+      } catch (err) {
+        const error = err as { status?: number; killed?: boolean; stdout?: string | Buffer; stderr?: string | Buffer; message?: string };
+        const exitCode = typeof error.status === 'number' ? error.status : (error.killed ? 137 : 1);
+        const output = (error.stdout ? String(error.stdout) : '') + (error.stderr ? String(error.stderr) : '');
+        console.error(`[worktree] Hook command failed: ${expandedCmd} (exit ${exitCode}): ${error.message ?? String(err)}`);
+        eventBus?.emit('worktree.hook', taskId, { hook: 'onWorktreeRemoved', cmd: expandedCmd, rawCmd, ok: false, exitCode, durationMs: Date.now() - startTime, error: error.message ?? String(err), output });
+      }
+    }
+  }
+
   /** Async counterpart used by daemon cleanup and task startup. */
   async removeAsync(
     projectPath: string | null | undefined,
@@ -366,7 +411,7 @@ export class WorktreeService {
       console.error(`[worktree] REFUSED to remove ${worktreePath}: outside ${worktreeRoot} or a project root`);
       return false;
     }
-    reapSyncForWorktree(worktreePath, {
+    await reap(worktreePath, {
       worktreesDir: worktreeRoot,
       protectedPaths: [projectPath, this.config.hubHome],
       graceMs: 5000,
@@ -387,7 +432,7 @@ export class WorktreeService {
       console.error(`[worktree] Failed to remove worktree path: ${worktreePath}`);
       return false;
     }
-    this.runOnWorktreeRemovedHooks(projectPath, worktreePath, context);
+    await this.runOnWorktreeRemovedHooksAsync(projectPath, worktreePath, context);
     return true;
   }
 

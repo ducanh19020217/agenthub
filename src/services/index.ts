@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { HttpError } from '../errors.js';
 import { DEFAULT_PROJECT_SETTINGS, mergeProjectSettings, ProjectSettingsInputSchema, projectSettings } from '../projects/settings.js';
 import { projectWorktreeRoot, projectWorktreeRoots, validateProjectWorktreeRoot } from '../projects/paths.js';
-import { ensureIntegrationNodeModules, ensureIntegrationWorktree, getIntegrationStatus, removeIntegrationWorktree, validateIntegrationBranch } from '../projects/integration.js';
+import { ensureIntegrationNodeModules, ensureIntegrationWorktree, getIntegrationStatus, removeIntegrationWorktreeAsync, validateIntegrationBranch } from '../projects/integration.js';
 import { resolveProjectFile } from '../projects/paths.js';
 import path from 'node:path';
 import os from 'node:os';
@@ -2310,7 +2310,7 @@ export class AppService {
     return this.getProject(id);
   }
 
-  deleteProject(id: string, options?: { purge?: boolean; confirm?: string }): { ok: boolean; archived?: boolean; counts?: Record<string, number>; warnings?: string[] } {
+  async deleteProject(id: string, options?: { purge?: boolean; confirm?: string }): Promise<{ ok: boolean; archived?: boolean; counts?: Record<string, number>; warnings?: string[] }> {
     const proj = options?.purge ? this.projectRepo.getIncludingArchived(id) : this.projectRepo.get(id);
     if (!proj) {
       throw new HttpError(404, 'not_found', `Project "${id}" không tồn tại`);
@@ -2350,7 +2350,7 @@ export class AppService {
       }
       this.projectRepo.archive(id);
       this.brainRunner?.stopProject(id);
-      const warning = removeIntegrationWorktree(proj, this.config.hubHome);
+      const warning = await removeIntegrationWorktreeAsync(proj, this.config.hubHome);
       this.invalidateOutOfScopeClaudeScanStates();
       const hasData = Object.values(deleteData.counts).some((count) => count > 0);
       return warning
@@ -2363,19 +2363,20 @@ export class AppService {
     }
 
     const warnings: string[] = [];
-    const integrationWarning = removeIntegrationWorktree(proj, this.config.hubHome);
+    const integrationWarning = await removeIntegrationWorktreeAsync(proj, this.config.hubHome);
     if (integrationWarning) warnings.push(integrationWarning);
     for (const task of deleteData.tasks) {
       if (!task.worktreePath || !fs.existsSync(task.worktreePath)) continue;
       let dirty = true;
       try {
-        dirty = execFileSync('git', ['-C', task.worktreePath, 'status', '--porcelain'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim().length > 0;
+        const result = await execFileAsync('git', ['-C', task.worktreePath, 'status', '--porcelain'], { encoding: 'utf8', timeout: 10 * 60 * 1000 });
+        dirty = result.stdout.trim().length > 0;
       } catch { /* keep dirty=true when status cannot be checked */ }
       if (dirty) {
         warnings.push(`Giữ worktree ${task.worktreePath} vì có thay đổi chưa commit`);
         continue;
       }
-      const removed = new WorktreeService(this.config, this.scheduler.getEventBus()).remove(
+      const removed = await new WorktreeService(this.config, this.scheduler.getEventBus()).removeAsync(
         proj.path,
         task.worktreePath,
         { projectId: id, taskId: task.id, slug: task.slug },

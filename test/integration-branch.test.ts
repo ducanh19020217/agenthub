@@ -748,7 +748,7 @@ describe('Integration branch and cross-project dependencies', () => {
     }).toThrow(/Tên nhánh tích hợp không được trùng với defaultBranch/);
   });
 
-  it('reports integrationStatus with ahead / behind and removes worktree without deleting branch on delete', () => {
+  it('reports integrationStatus with ahead / behind and removes worktree without deleting branch on delete', async () => {
     const repo = path.join(tmpDir, 'status-repo');
     initGitRepo(repo, 'main');
 
@@ -798,7 +798,7 @@ describe('Integration branch and cross-project dependencies', () => {
     expect(proj.integrationStatus?.behind).toBe(1);
 
     // Delete project: removes worktree at intPath, but branch agenthub/integration remains
-    ctx.service.deleteProject('stat-proj');
+    await ctx.service.deleteProject('stat-proj');
     expect(fs.existsSync(intPath)).toBe(false);
 
     const branchCheck = execFileSync(
@@ -848,7 +848,7 @@ describe('Integration branch and cross-project dependencies', () => {
     expect(fs.existsSync(marker)).toBe(true);
   });
 
-  it('keeps a dirty integration worktree when deleting a project and returns a warning', () => {
+  it('keeps a dirty integration worktree when deleting a project and returns a warning', async () => {
     const repo = path.join(tmpDir, 'dirty-delete-repo');
     initGitRepo(repo, 'main');
     ctx.service.createProject({
@@ -861,7 +861,7 @@ describe('Integration branch and cross-project dependencies', () => {
     const intPath = path.join(tmpDir, 'integration', 'dirty-delete');
     fs.writeFileSync(path.join(intPath, 'uncommitted.txt'), 'keep me\n');
 
-    const result = ctx.service.deleteProject('dirty-delete');
+    const result = await ctx.service.deleteProject('dirty-delete');
     expect(result.warnings?.[0]).toContain('thay đổi chưa commit');
     expect(fs.existsSync(path.join(intPath, 'uncommitted.txt'))).toBe(true);
   });
@@ -982,7 +982,7 @@ exec /usr/bin/git "$@"
           },
         },
       });
-      ctx.service.deleteProject('no-push-empty');
+      await ctx.service.deleteProject('no-push-empty');
 
       expect(fs.existsSync(gitLog)).toBe(false);
     } finally {

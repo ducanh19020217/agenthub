@@ -1,10 +1,14 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { HttpError } from '../errors.js';
 import { projectSettings } from './settings.js';
 import { isProjectWorktreeRootAccessible, projectWorktreeRoot } from './paths.js';
 import { ensureWorktreeNodeModules, type NodeModulesCachePolicy, type EnsureNodeModulesOptions } from '../cache.js';
+
+const execFileAsync = promisify(execFile);
+const INTEGRATION_GIT_TIMEOUT_MS = 10 * 60 * 1000;
 
 export interface IntegrationStatus {
   path: string;
@@ -412,6 +416,28 @@ export function removeIntegrationWorktree(project: { id: string; path?: string |
     execFileSync('git', ['-C', project.path, 'worktree', 'prune'], {
       stdio: ['pipe', 'pipe', 'ignore'],
     });
+  } catch {
+    return `Không thể gỡ worktree tích hợp ${integrationPath}; giữ nguyên để tránh mất dữ liệu`;
+  }
+  return null;
+}
+
+/** Async counterpart used by the daemon project-delete path. */
+export async function removeIntegrationWorktreeAsync(project: { id: string; path?: string | null; settings?: string | null }, hubHome: string): Promise<string | null> {
+  const integrationPath = getIntegrationPath({ ...project, defaultBranch: '' }, hubHome);
+  if (!fs.existsSync(integrationPath)) return null;
+  if (!isSafeIntegrationPath(integrationPath, hubHome, project)) return `Không thể gỡ worktree tích hợp ${integrationPath}: đường dẫn không an toàn`;
+  if (!project.path || !fs.existsSync(project.path)) return `Không thể gỡ worktree tích hợp ${integrationPath}: repo project không tồn tại`;
+
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', integrationPath, 'status', '--porcelain'], { encoding: 'utf-8', timeout: INTEGRATION_GIT_TIMEOUT_MS });
+    if (stdout.trim()) return `Giữ nguyên worktree tích hợp ${integrationPath} vì có thay đổi chưa commit`;
+  } catch {
+    return `Không thể kiểm tra trạng thái worktree tích hợp ${integrationPath}; giữ nguyên để tránh mất dữ liệu`;
+  }
+  try {
+    await execFileAsync('git', ['-C', project.path, 'worktree', 'remove', integrationPath], { timeout: INTEGRATION_GIT_TIMEOUT_MS });
+    await execFileAsync('git', ['-C', project.path, 'worktree', 'prune'], { timeout: INTEGRATION_GIT_TIMEOUT_MS });
   } catch {
     return `Không thể gỡ worktree tích hợp ${integrationPath}; giữ nguyên để tránh mất dữ liệu`;
   }

@@ -62,6 +62,74 @@ describe('mergeTaskIntoBase', () => {
     expect(git(f.integration, 'rev-parse', 'HEAD')).not.toBe(f.before);
   });
 
+  it('does not abort merge in progress in a user-declared worktree and returns 409', async () => {
+    const f = fixture();
+    git(f.integration, 'checkout', '-b', 'conflict-branch');
+    fs.writeFileSync(path.join(f.integration, 'file.txt'), 'conflict user\n');
+    git(f.integration, 'add', 'file.txt');
+    git(f.integration, 'commit', '-m', 'user commit');
+    try {
+      execFileSync('git', ['merge', '--no-ff', f.branch], { cwd: f.integration, stdio: 'pipe' });
+    } catch {
+      // expected conflict -> leaves MERGE_HEAD
+    }
+    expect(git(f.integration, 'rev-parse', '-q', '--verify', 'MERGE_HEAD')).toBeTruthy();
+
+    await expect(mergeTaskIntoBase(
+      { slug: 'task', branch: f.branch, baseRef: 'conflict-branch' },
+      {
+        defaultBranch: 'main',
+        settings: JSON.stringify({ integration: { enabled: false } }),
+        merge: JSON.stringify({ enabled: true, worktrees: { 'conflict-branch': f.integration }, checks: [] }),
+      },
+    )).rejects.toMatchObject<Partial<MergeError>>({ statusCode: 409 });
+
+    // Verify MERGE_HEAD was NOT aborted and remains intact for the user
+    expect(git(f.integration, 'rev-parse', '-q', '--verify', 'MERGE_HEAD')).toBeTruthy();
+  });
+
+  it('aborts dangling MERGE_HEAD from an interrupted merge in a hub-managed integration worktree and proceeds', async () => {
+    const f = fixture();
+    const hubHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-home-'));
+    tempDirs.push(hubHome);
+
+    const project = {
+      id: 'test-proj',
+      path: f.root,
+      defaultBranch: 'main',
+      settings: JSON.stringify({ integration: { enabled: true, branch: 'agenthub/integration' } }),
+    };
+
+    const { ensureIntegrationWorktree } = await import('../src/projects/integration.js');
+    const integrationWorktree = ensureIntegrationWorktree(project, hubHome);
+
+    git(f.root, 'branch', 'other-branch');
+    git(f.root, 'checkout', 'other-branch');
+    fs.writeFileSync(path.join(f.root, 'conflict.txt'), 'from other\n');
+    git(f.root, 'add', 'conflict.txt');
+    git(f.root, 'commit', '-m', 'conflict commit');
+
+    fs.writeFileSync(path.join(integrationWorktree, 'conflict.txt'), 'from integration\n');
+    git(integrationWorktree, 'add', 'conflict.txt');
+    git(integrationWorktree, 'commit', '-m', 'integration conflict commit');
+
+    try {
+      execFileSync('git', ['merge', '--no-ff', 'other-branch'], { cwd: integrationWorktree, stdio: 'pipe' });
+    } catch {
+      // conflict -> leaves MERGE_HEAD
+    }
+    expect(git(integrationWorktree, 'rev-parse', '-q', '--verify', 'MERGE_HEAD')).toBeTruthy();
+
+    const result = await mergeTaskIntoBase(
+      { slug: 'task', branch: f.branch },
+      project,
+      { hubHome },
+    );
+
+    expect(result.mergeCommit).toBeDefined();
+    expect(git(integrationWorktree, 'status', '--porcelain')).toBe('');
+  });
+
   it('rolls back only the merge commit when checks fail', async () => {
     const f = fixture();
     await expect(mergeTaskIntoBase(

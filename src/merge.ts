@@ -323,15 +323,28 @@ export async function mergeTaskIntoBase(
   const env = workerEnvironment(hubHome, process.env, { project, cwd: repo, guards: false });
 
   // If a previous merge was killed in-flight during handoff, abort it cleanly before status check
-  try {
-    await execFileAsync('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd: repo });
-    await execFileAsync('git', ['merge', '--abort'], { cwd: repo, env });
-  } catch {
-    // Not in middle of a merge, ignore
+  // ONLY if this is a hub-managed integration worktree. For user-declared worktrees, never abort;
+  // keep returning 409 uncommitted changes if a merge is in progress.
+  if (settings.integration.enabled) {
+    try {
+      await execFileAsync('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd: repo });
+      await execFileAsync('git', ['merge', '--abort'], { cwd: repo, env });
+    } catch {
+      // Not in middle of a merge, ignore
+    }
   }
 
+  const hasMergeHead = await (async () => {
+    try {
+      await execFileAsync('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd: repo });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
   const status = await git(repo, ['status', '--porcelain']);
-  if (status) throw new MergeError(409, 'conflict', 'worktree tích hợp có thay đổi chưa commit');
+  if (hasMergeHead || status) throw new MergeError(409, 'conflict', 'worktree tích hợp có thay đổi chưa commit');
 
   const before = await git(repo, ['rev-parse', 'HEAD']);
   const identity = await gitIdentityArgs(repo, env);

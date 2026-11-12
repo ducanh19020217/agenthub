@@ -615,6 +615,9 @@ export async function startDaemon(
   ctx: DaemonContext;
   shutdown: () => Promise<void>;
 }> {
+  const shutdownFlagPath = path.join(config.hubHome || path.join(os.homedir(), '.agenthub'), 'shutdown_requested');
+  try { fs.unlinkSync(shutdownFlagPath); } catch { /* ignore */ }
+
   const ctx = createContext(config, engineOverrides);
   let tempCleanupTimer: NodeJS.Timeout | undefined;
 
@@ -766,10 +769,19 @@ export async function startDaemon(
     if (ctx.userShutdownRequested || ctx.service?.isUserShutdownRequested?.()) return true;
     const shutdownFlagPath = path.join(config.hubHome || path.join(os.homedir(), '.agenthub'), 'shutdown_requested');
     if (fs.existsSync(shutdownFlagPath)) {
-      try { fs.unlinkSync(shutdownFlagPath); } catch { /* ignore */ }
-      ctx.userShutdownRequested = true;
-      ctx.service?.setUserShutdownRequested?.(true);
-      return true;
+      try {
+        const stat = fs.statSync(shutdownFlagPath);
+        fs.unlinkSync(shutdownFlagPath);
+        // Ignore stale marker older than 30s so future restarts are not misclassified as user stops
+        if (Date.now() - stat.mtimeMs > 30_000) {
+          return false;
+        }
+        ctx.userShutdownRequested = true;
+        ctx.service?.setUserShutdownRequested?.(true);
+        return true;
+      } catch {
+        return false;
+      }
     }
     return false;
   };

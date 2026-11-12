@@ -1156,7 +1156,7 @@ export class AppService {
       childPids: [...(result.childPids || []), ...chatPids],
     };
   }
-  getPerf() { return { samples: this.perfCollector?.getSamples() || [], latest: this.perfCollector?.latest() || null }; }
+  getPerf() { return { samples: this.perfCollector?.getSamples() || [], latest: this.perfCollector?.latest() || null, eventLoop: this.perfCollector?.getEventLoopStats() ?? null }; }
 
   async getSetupStatus() {
     if (!this.setupManager) throw new HttpError(500, 'internal_error', 'Setup service chưa sẵn sàng');
@@ -1623,6 +1623,7 @@ export class AppService {
         hasToken: Boolean(this.telegramBotService?.hasValidToken()),
       },
       tools: this.config.tools,
+      perf: { eventLoop: this.perfCollector?.getEventLoopStats() ?? null },
     };
   }
 

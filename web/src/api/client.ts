@@ -40,6 +40,7 @@ import {
   ApplyPresetResult,
   EffectiveConfigResponse,
   OpenProjectSource, OpenProjectSourceInput, OpenProjectStatusDto, OpenProjectTypeDto, OpenProjectSyncResult, GiteaStatus, RemoteDeployStatus, ProjectGitStatus,
+  CockpitScanResult, CockpitImportResult, CockpitSource,
 } from '../types/api';
 import { getActiveLocale, translateApiErrorMessage } from '../utils/apiError';
 
@@ -82,6 +83,8 @@ export const getSetupLog = (tool: string) => apiFetch<string>(`/api/setup/log/${
 
 const TOKEN_STORAGE_KEY = 'agenthub_token';
 export const API_REQUEST_TIMEOUT_MS = 15_000;
+/** Claude usage is read by driving the CLI's /usage screen, which the server allows up to 45s. */
+export const USAGE_REFRESH_TIMEOUT_MS = 60_000;
 
 let unauthorizedListeners: Array<() => void> = [];
 
@@ -144,7 +147,12 @@ export function initTokenFromHash(): string | null {
   return getToken();
 }
 
-export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+export interface ApiFetchOptions extends RequestInit {
+  responseType?: 'json' | 'text' | 'blob';
+  timeoutMs?: number;
+}
+
+export async function apiFetch<T>(path: string, { timeoutMs = API_REQUEST_TIMEOUT_MS, ...options }: ApiFetchOptions = {}): Promise<T> {
   const token = getToken();
   if (!token) {
     notifyUnauthorized();
@@ -168,7 +176,7 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
   } else {
     options.signal?.addEventListener('abort', onAbort, { once: true });
   }
-  const timeout = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(path, {
@@ -218,15 +226,28 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
     }
 
     // Handle empty or text responses
+    if (options.responseType === 'blob') {
+      return (await response.blob()) as unknown as T;
+    }
+    if (options.responseType === 'text') {
+      return (await response.text()) as unknown as T;
+    }
     const contentType = response.headers.get('content-type');
     if (contentType && contentType.includes('application/json')) {
       return (await response.json()) as T;
+    }
+    if (contentType && contentType.startsWith('image/')) {
+      return (await response.blob()) as unknown as T;
     }
     return (await response.text()) as unknown as T;
   } finally {
     clearTimeout(timeout);
     options.signal?.removeEventListener('abort', onAbort);
   }
+}
+
+export async function apiFetchBlob(path: string, options: ApiFetchOptions = {}): Promise<Blob> {
+  return apiFetch<Blob>(path, { ...options, responseType: 'blob' });
 }
 
 // API methods
@@ -323,6 +344,8 @@ export async function cleanResetClaudeSessions(): Promise<{ ok: boolean; cleared
 export async function getProjects(): Promise<Project[]> {
   return apiFetch<Project[]>('/api/projects');
 }
+
+export const getProject = (id: string) => apiFetch<Project>(`/api/projects/${encodeURIComponent(id)}`);
 
 export const getProjectGitStatus = (projectId: string) =>
   apiFetch<ProjectGitStatus>(`/api/projects/${encodeURIComponent(projectId)}/git`);
@@ -504,9 +527,14 @@ export async function getProfiles(): Promise<Profile[]> {
   return apiFetch<Profile[]>('/api/profiles');
 }
 
+export async function getProfileAvatarBlob(name: string, signal?: AbortSignal): Promise<Blob> {
+  return apiFetchBlob(`/api/profiles/${encodeURIComponent(name)}/avatar`, { signal });
+}
+
 export async function refreshProfileUsage(name: string): Promise<Profile> {
   return apiFetch<Profile>(`/api/profiles/${encodeURIComponent(name)}/usage/refresh`, {
     method: 'POST',
+    timeoutMs: USAGE_REFRESH_TIMEOUT_MS,
   });
 }
 
@@ -533,6 +561,33 @@ export async function importAgyTokens(data: {
   return apiFetch<ImportTokensResult>('/api/profiles/import-tokens', {
     method: 'POST',
     body: JSON.stringify(data),
+  });
+}
+
+export async function scanCockpit(dataDir?: string): Promise<CockpitScanResult> {
+  const query = dataDir ? `?dataDir=${encodeURIComponent(dataDir)}` : '';
+  return apiFetch<CockpitScanResult>(`/api/integrations/cockpit/scan${query}`);
+}
+
+/** Nhập file Export của Cockpit (có thể lẫn Antigravity, Codex, Claude). */
+export async function importCockpitExport(content: string, options?: { verify?: boolean }): Promise<ImportTokensResult> {
+  return apiFetch<ImportTokensResult>('/api/integrations/cockpit/import-export', {
+    method: 'POST',
+    body: JSON.stringify({ content, verify: options?.verify }),
+  });
+}
+
+export async function importCockpit(
+  items: Array<{ source: CockpitSource; cockpitId: string }>,
+  options?: { verify?: boolean; dataDir?: string },
+): Promise<CockpitImportResult> {
+  return apiFetch<CockpitImportResult>('/api/integrations/cockpit/import', {
+    method: 'POST',
+    body: JSON.stringify({
+      items,
+      verify: options?.verify,
+      dataDir: options?.dataDir,
+    }),
   });
 }
 
@@ -684,7 +739,7 @@ export async function getTaskGraph(params?: {
   includeDone?: string | boolean;
 }): Promise<TaskGraphResponse> {
   const query = new URLSearchParams();
-  if (params?.project) query.set('project', params.project);
+  if (params?.project && params.project !== 'all') query.set('project', params.project);
   if (params?.includeDone !== undefined) query.set('includeDone', String(params.includeDone));
   const qStr = query.toString();
   return apiFetch<TaskGraphResponse>(`/api/tasks/graph${qStr ? `?${qStr}` : ''}`);
@@ -734,9 +789,10 @@ export async function startTask(id: string): Promise<Task> {
   });
 }
 
-export async function cancelTask(id: string): Promise<Task> {
+export async function cancelTask(id: string, reason?: string): Promise<Task> {
   return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/cancel`, {
     method: 'POST',
+    body: JSON.stringify({ reason: reason?.trim() || null, by: 'dashboard' }),
   });
 }
 
@@ -851,6 +907,12 @@ export async function retryReviewer(id: string): Promise<Task> {
   });
 }
 
+export async function publishTask(id: string): Promise<{ ok: boolean; error?: string; remote?: string; branch?: string; commit?: string; compareUrl?: string; skipped?: boolean; reason?: string }> {
+  return apiFetch<{ ok: boolean; error?: string; remote?: string; branch?: string; commit?: string; compareUrl?: string; skipped?: boolean; reason?: string }>(`/api/tasks/${encodeURIComponent(id)}/publish`, {
+    method: 'POST',
+  });
+}
+
 export async function deleteWorktree(id: string): Promise<{ ok: boolean }> {
   return apiFetch<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(id)}/worktree`, {
     method: 'DELETE',
@@ -923,6 +985,20 @@ export async function shutdownHub(disable = false): Promise<{ ok: boolean; queue
   return apiFetch('/api/hub/shutdown', { method: 'POST', body: JSON.stringify({ disable }) });
 }
 
+export interface RestartState {
+  draining: boolean;
+  since: number | null;
+  reason: string | null;
+  timeoutAt: number | null;
+  waitingFor: Array<{ taskId: string; kind: 'run' | 'check' | 'review'; startedAt: number }>;
+}
+
+export async function getRestartState(): Promise<RestartState> { return apiFetch('/api/system/restart'); }
+export async function requestRestart(mode: 'when-idle' | 'now' = 'when-idle'): Promise<RestartState> {
+  return apiFetch('/api/system/restart', { method: 'POST', body: JSON.stringify({ mode }) });
+}
+export async function cancelRestart(): Promise<RestartState> { return apiFetch('/api/system/restart', { method: 'DELETE' }); }
+
 export async function uploadBrandingLogo(file: File): Promise<{ ok: boolean; logo: string }> {
   const data = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -985,6 +1061,9 @@ export interface TelegramStatus {
     quotaAllExhausted: boolean;
     fallback: boolean;
     disk: boolean;
+    taskDone: boolean;
+    projectIdle: boolean;
+    interrupted: boolean;
   };
 }
 

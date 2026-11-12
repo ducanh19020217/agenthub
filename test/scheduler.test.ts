@@ -699,6 +699,87 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
+  it('backs off task-local reviewer spawn crashes and blocks after five attempts', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    const throwingEngine = Object.assign(Object.create(Object.getPrototypeOf(new FakeEngine())) as FakeEngine, {
+      id: 'codex' as const,
+      spawn: () => { throw Object.assign(new Error('spawn E2BIG'), { code: 'E2BIG' }); },
+    });
+    (scheduler as unknown as { engines: Map<string, Engine> }).engines.set('codex', throwingEngine);
+    // No fallback reviewer engine here: keep retrying the Codex reviewer so the crash limit is reached.
+    // (With fallback.onError the second crash hands the task to the Claude reviewer instead.)
+    const schedulerConfig = (scheduler as unknown as { config: { reviewer: Record<string, unknown> } }).config;
+    schedulerConfig.reviewer = { ...schedulerConfig.reviewer, fallback: { onError: false } };
+
+    scheduler.tick();
+    let reviewerRuns = runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer');
+    expect(reviewerRuns).toHaveLength(1);
+    expect(reviewerRuns[0].reason).toBe('Error: spawn E2BIG');
+    scheduler.tick();
+    scheduler.tick();
+    expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(1);
+
+    const internals = scheduler as unknown as { reviewerTaskBackoffUntil: Map<string, number>; reviewerBackoffUntil: Map<string, number> };
+    expect(internals.reviewerBackoffUntil.has('codex-1')).toBe(false);
+    for (let attempt = 2; attempt <= 5; attempt += 1) {
+      internals.reviewerTaskBackoffUntil.set('test-project/review', 0);
+      scheduler.tick();
+      reviewerRuns = runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer');
+      expect(reviewerRuns).toHaveLength(attempt);
+      if (attempt < 5) expect(taskRepo.get('test-project/review')?.status).toBe('review');
+    }
+    expect(taskRepo.get('test-project/review')?.status).toBe('blocked');
+    const blocked = eventRepo.getRecent(30).find((event) => event.type === 'task.blocked' && event.taskId === 'test-project/review');
+    expect(blocked?.payload).toContain('reviewer_crash_limit');
+    expect(blocked?.payload).toContain('E2BIG');
+    scheduler.tick();
+    expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(5);
+    scheduler.stop();
+  });
+
+  it('returns a dirty review worktree to the worker once, then blocks if it is still dirty', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    const worktreePath = taskRepo.get('test-project/review')!.worktreePath!;
+    fs.mkdirSync(path.join(worktreePath, 'docs'), { recursive: true });
+    fs.writeFileSync(path.join(worktreePath, 'docs', 'notes.md'), 'human note');
+
+    scheduler.tick();
+    expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(0);
+    expect(['queued', 'running']).toContain(taskRepo.get('test-project/review')?.status);
+    expect(taskRepo.get('test-project/review')?.body).toContain('docs/notes.md');
+
+    taskRepo.updateStatus('test-project/review', 'review');
+    scheduler.tick();
+    expect(taskRepo.get('test-project/review')?.status).toBe('blocked');
+    const blocked = eventRepo.getRecent(30).find((event) => event.type === 'task.blocked' && event.taskId === 'test-project/review');
+    expect(blocked?.payload).toContain('uncommitted_changes');
+    expect(blocked?.payload).toContain('docs/notes.md');
+    scheduler.stop();
+  });
+
+  it('ignores untracked .agenthub artifacts before reviewer spawn', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    const worktreePath = taskRepo.get('test-project/review')!.worktreePath!;
+    fs.mkdirSync(path.join(worktreePath, '.agenthub'), { recursive: true });
+    fs.writeFileSync(path.join(worktreePath, '.agenthub', 'prompt-scratch.md'), 'ignored');
+    scheduler.tick();
+    expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(1);
+    scheduler.cancelAll();
+    scheduler.stop();
+  });
+
+  it('leaves a dirty worktree parked at a human Claude review gate', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'claude', mode: 'gate' }]) });
+    const worktreePath = taskRepo.get('test-project/review')!.worktreePath!;
+    fs.writeFileSync(path.join(worktreePath, 'human-note.md'), 'reviewer note');
+    scheduler.tick();
+    expect(taskRepo.get('test-project/review')?.status).toBe('review');
+    expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(0);
+    expect(eventRepo.getRecent(30).some((event) => event.type === 'review.gate_ready' && event.taskId === 'test-project/review')).toBe(true);
+    scheduler.stop();
+  });
+
   it('routes changes_requested back to queued with feedback', async () => {
     const { scheduler, reviewRepo } = makeReviewer('reviewer-changes');
     scheduler.tick();
@@ -750,6 +831,17 @@ describe('Codex reviewer failover lifecycle', () => {
     });
     expect(taskRepo.get('test-project/review')?.status).toBe('review');
     expect(new QuotaService(quotaMarkRepo, profileRepo).isExhausted('codex-1', 'codex')).toBe(true);
+    scheduler.stop();
+  });
+
+  it('does not mark quota when a valid verdict mentions 429 or rate limit', async () => {
+    const { scheduler, reviewRepo } = makeReviewer('reviewer-mentions-limit');
+    scheduler.tick();
+    await vi.waitFor(() => {
+      expect(reviewRepo.getByTask('test-project/review')[0]?.verdict).toBe('approved');
+    });
+    expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).not.toBe('quota');
+    expect(new QuotaService(quotaMarkRepo, profileRepo).isExhausted('codex-1', 'codex')).toBe(false);
     scheduler.stop();
   });
 

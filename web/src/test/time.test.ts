@@ -1,9 +1,57 @@
 import { describe, expect, it } from 'vitest';
-import { formatReset, formatResetCompact, formatTimeAgo, parseApiTime } from '../lib/time';
+import {
+  formatDateTime,
+  formatDateTimeWithAgo,
+  formatIsoTitle,
+  formatReset,
+  formatResetCompact,
+  formatTime,
+  formatTimeAgo,
+  parseApiTime,
+} from '../lib/time';
 
 describe('API time helpers', () => {
   it('treats legacy SQLite timestamps as UTC', () => {
     expect(parseApiTime('2026-10-15 08:20:00')).toBe(Date.parse('2026-10-15T08:20:00Z'));
+  });
+
+  it('parses various input types in parseApiTime', () => {
+    const expectedUtc = Date.parse('2026-11-06T17:52:44.000Z');
+
+    // SQLite string without Z
+    expect(parseApiTime('2026-11-06 17:52:44')).toBe(expectedUtc);
+
+    // ISO string without Z (treated as UTC)
+    expect(parseApiTime('2026-11-06T17:52:44')).toBe(expectedUtc);
+
+    // ISO string with Z
+    expect(parseApiTime('2026-11-06T17:52:44Z')).toBe(expectedUtc);
+    expect(parseApiTime('2026-11-06T17:52:44.000Z')).toBe(expectedUtc);
+
+    // ISO string with offset
+    expect(parseApiTime('2026-11-07T00:52:44+07:00')).toBe(expectedUtc);
+
+    // Epoch ms
+    expect(parseApiTime(expectedUtc)).toBe(expectedUtc);
+
+    // Epoch seconds (< 1e11)
+    const epochSec = Math.floor(expectedUtc / 1000);
+    expect(parseApiTime(epochSec)).toBe(epochSec * 1000);
+
+    // Numeric strings
+    expect(parseApiTime(String(epochSec))).toBe(epochSec * 1000);
+    expect(parseApiTime(String(expectedUtc))).toBe(expectedUtc);
+
+    // Date object
+    expect(parseApiTime(new Date(expectedUtc))).toBe(expectedUtc);
+
+    // Invalid / empty / null / undefined values
+    expect(parseApiTime('invalid-date')).toBeNaN();
+    expect(parseApiTime('')).toBeNaN();
+    expect(parseApiTime('   ')).toBeNaN();
+    expect(parseApiTime(null)).toBeNaN();
+    expect(parseApiTime(undefined)).toBeNaN();
+    expect(parseApiTime(NaN)).toBeNaN();
   });
 
   it('formats legacy timestamps as relative time', () => {
@@ -81,6 +129,90 @@ describe('API time helpers', () => {
       const now = Date.parse('2026-10-22T08:50:00Z'); // 15:50 VN
       expect(formatResetCompact(now - 1000, now, 'vi')).toBe('đã reset 15:49');
       expect(formatResetCompact(null, now, 'vi')).toBe('chưa rõ');
+    });
+  });
+
+  describe('formatDateTime', () => {
+    it('proves SQLite 2026-11-06 17:52:44 displays correctly as 07/11/2026 00:52:44 in Asia/Ho_Chi_Minh without day shift', () => {
+      const sqliteTime = '2026-11-06 17:52:44';
+      expect(formatDateTime(sqliteTime, 'vi', { timeZone: 'Asia/Ho_Chi_Minh' })).toBe('07/11/2026 00:52:44');
+      expect(formatDateTime(sqliteTime, 'en', { timeZone: 'Asia/Ho_Chi_Minh' })).toBe('07/11/2026, 00:52:44');
+    });
+
+    it('formats ISO, offset, and epoch values for both vi and en locales', () => {
+      // ISO with Z
+      expect(formatDateTime('2026-11-06T17:52:44Z', 'vi', { timeZone: 'Asia/Ho_Chi_Minh' })).toBe('07/11/2026 00:52:44');
+      expect(formatDateTime('2026-11-06T17:52:44.000Z', 'en', { timeZone: 'Asia/Ho_Chi_Minh' })).toBe('07/11/2026, 00:52:44');
+
+      // ISO with offset (+07:00)
+      expect(formatDateTime('2026-11-06T17:52:44+07:00', 'vi', { timeZone: 'Asia/Ho_Chi_Minh' })).toBe('06/11/2026 17:52:44');
+
+      // Epoch ms and seconds
+      const ms = Date.parse('2026-11-06T17:52:44Z');
+      expect(formatDateTime(ms, 'vi', { timeZone: 'Asia/Ho_Chi_Minh' })).toBe('07/11/2026 00:52:44');
+      expect(formatDateTime(Math.floor(ms / 1000), 'vi', { timeZone: 'Asia/Ho_Chi_Minh' })).toBe('07/11/2026 00:52:44');
+    });
+
+    it('supports seconds: false option', () => {
+      const sqliteTime = '2026-11-06 17:52:44';
+      expect(formatDateTime(sqliteTime, 'vi', { seconds: false, timeZone: 'Asia/Ho_Chi_Minh' })).toBe('07/11/2026 00:52');
+      expect(formatDateTime(sqliteTime, 'en', { seconds: false, timeZone: 'Asia/Ho_Chi_Minh' })).toBe('07/11/2026, 00:52');
+    });
+
+    it('handles invalid and empty inputs gracefully without throwing', () => {
+      expect(formatDateTime('invalid', 'vi')).toBe('—');
+      expect(formatDateTime('', 'en')).toBe('—');
+      expect(formatDateTime(null, 'vi')).toBe('—');
+      expect(formatDateTime(undefined, 'vi')).toBe('—');
+      expect(formatDateTime(NaN, 'vi')).toBe('—');
+      expect(formatDateTime('invalid', 'vi', { fallback: 'chưa rõ thời gian' })).toBe('chưa rõ thời gian');
+      expect(formatDateTime('invalid', 'en', { fallback: 'time unknown' })).toBe('time unknown');
+    });
+  });
+
+  describe('formatTime', () => {
+    it('formats 24h clock with seconds and without seconds', () => {
+      const sqliteTime = '2026-11-06 17:52:44';
+      expect(formatTime(sqliteTime, 'vi', { timeZone: 'Asia/Ho_Chi_Minh' })).toBe('00:52:44');
+      expect(formatTime(sqliteTime, 'vi', { seconds: false, timeZone: 'Asia/Ho_Chi_Minh' })).toBe('00:52');
+      expect(formatTime(sqliteTime, 'en', { timeZone: 'Asia/Ho_Chi_Minh' })).toBe('00:52:44');
+    });
+
+    it('returns fallback for invalid inputs', () => {
+      expect(formatTime('invalid', 'vi')).toBe('—');
+      expect(formatTime('', 'vi', { fallback: '--:--' })).toBe('--:--');
+    });
+  });
+
+  describe('formatDateTimeWithAgo', () => {
+    it('formats date time and relative time combined', () => {
+      const sqliteTime = '2026-11-06 17:52:44';
+      // 3 hours later in UTC = 2026-11-06T20:52:44Z
+      const now = Date.parse('2026-11-06T20:52:44Z');
+      expect(formatDateTimeWithAgo(sqliteTime, 'vi', now, { timeZone: 'Asia/Ho_Chi_Minh' })).toBe('07/11/2026 00:52 · 3 giờ trước');
+      expect(formatDateTimeWithAgo(sqliteTime, 'en', now, { timeZone: 'Asia/Ho_Chi_Minh' })).toBe('07/11/2026, 00:52 · 3h ago');
+    });
+
+    it('handles invalid inputs with localized fallback', () => {
+      expect(formatDateTimeWithAgo('invalid', 'vi')).toBe('chưa rõ thời gian');
+      expect(formatDateTimeWithAgo('invalid', 'en')).toBe('time unknown');
+      expect(formatDateTimeWithAgo(null, 'vi')).toBe('chưa rõ thời gian');
+    });
+  });
+
+  describe('formatIsoTitle', () => {
+    it('returns complete ISO string for title attributes', () => {
+      expect(formatIsoTitle('2026-11-06 17:52:44')).toBe('2026-11-06T17:52:44.000Z');
+      expect(formatIsoTitle('2026-11-06T17:52:44Z')).toBe('2026-11-06T17:52:44.000Z');
+      expect(formatIsoTitle(1793987564000)).toBe('2026-11-06T17:52:44.000Z');
+    });
+
+    it('returns empty string for invalid inputs', () => {
+      expect(formatIsoTitle('invalid')).toBe('');
+      expect(formatIsoTitle('')).toBe('');
+      expect(formatIsoTitle(null)).toBe('');
+      expect(formatIsoTitle(undefined)).toBe('');
+      expect(formatIsoTitle(NaN)).toBe('');
     });
   });
 });

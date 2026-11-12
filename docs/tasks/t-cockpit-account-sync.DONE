@@ -1,0 +1,81 @@
+# Task t-cockpit-account-sync hoàn tất: Đồng bộ một chiều tài khoản từ Cockpit Tools sang AgentHub
+
+## 1. Tóm tắt việc đã làm
+
+1. **Backend Scanner (`src/profiles/cockpit.ts`)**:
+   - `resolveCockpitDir()`: Xác định đường dẫn thư mục dữ liệu Cockpit theo thứ tự ưu tiên: biến môi trường `COCKPIT_TOOLS_DATA_DIR` → `~/.cockpit_tools` → `~/.antigravity_cockpit` → cấu hình `integrations.cockpit.dataDir`.
+   - `scanCockpit()`: Đọc kho Cockpit ở chế độ chỉ đọc (read-only), trả về danh sách metadata `{ source, cockpitId, email, disabled, importable, skipReason, hubStatus }`. Tuyệt đối không trả token ra API.
+   - Xử lý lỗi try/catch độc lập cho từng file JSON, file hỏng chỉ đánh dấu bỏ qua mục đó mà không làm hỏng toàn bộ lượt quét.
+   - So khớp `hubStatus` (`new`, `exists`, `conflict`) theo engine và email với các hồ sơ hiện có trong SQLite `profiles`.
+   - Các hàm trợ giúp đọc server-only: `readCockpitAgyAccount`, `readCockpitCodexAccount`, `readCockpitClaudeAccount`.
+
+2. **Claude Isolated Profile & OAuth Token Verification (`src/profiles/claudeToken.ts`)**:
+   - `parseClaudeTokenItem`: Chuẩn hoá dữ liệu token Claude từ Cockpit hoặc JSON đầu vào.
+   - `verifyClaudeOAuthToken`: Xác thực token Claude qua Anthropic OAuth profile endpoint (`https://api.anthropic.com/api/oauth/profile`) để lấy email, account/org UUID, và plan. Không chạy binary `claude` CLI thật trên máy.
+   - `writeClaudeIsolatedFiles`: Tạo/cập nhật hồ sơ Claude isolated gồm `<home>/.credentials.json` (chứa `claudeAiOauth`) chmod `0600` và `<home>/.claude.json` (chứa `oauthAccount.emailAddress`) chmod `0600`.
+
+3. **Chính sách xoay vòng token (Token Rotation Policy) & Nhập tài khoản (`src/services/index.ts`)**:
+   - `importFromCockpit`: Xử lý nhập tài khoản chạy nối tiếp (không quá 3 kết nối mạng đồng thời).
+   - Antigravity: Hỗ trợ đồng bộ lặp lại vì Google OAuth refresh token không bị xoay vòng khi refresh.
+   - Codex & Claude: Chỉ **nhập một lần**, đánh dấu hồ sơ `source: 'cockpit'` và `cockpitId`. Các lần sync tiếp theo không ghi đè token của hồ sơ đã tồn tại để tránh việc cả 2 bên cùng làm mới token làm thu hồi refresh token gây logout; báo `action: 'skipped'`.
+   - Bỏ qua các định dạng không hỗ trợ: Antigravity envelope mã hoá cũ (`account-token.key`), Codex API key / ChatGPT plan nội bộ, Claude `desktop_oauth` / API key.
+   - Phát sự kiện `profile.imported` với payload `{ engine, email, source: 'cockpit' }`, đảm bảo không chứa token trong log và event payload.
+
+4. **API Endpoints & MCP Server (`src/api/server.ts`, `src/mcp/index.ts`)**:
+   - `GET /api/integrations/cockpit/scan`: Quét thư mục Cockpit (hỗ trợ query param `dataDir`).
+   - `POST /api/integrations/cockpit/import`: Nhập danh sách tài khoản được chọn, hỗ trợ cờ `verify` và `dataDir`.
+   - MCP tool `hub_cockpit_scan`: Cho phép AI/agent quét và xem metadata các tài khoản trong kho Cockpit (chỉ metadata, không có tool import qua MCP).
+
+5. **Tự động đồng bộ định kỳ (`src/daemon.ts`, `src/services/index.ts`, `src/config.ts`)**:
+   - Cấu hình `integrations.cockpit.autoSync: { enabled: false, intervalMinutes: 30, engines: ['antigravity'] }`.
+   - Timer tự động quét và chỉ nhập các **tài khoản mới** thuộc engine được bật.
+   - Gửi thông báo ngắn qua Telegram: "Đã nhập N tài khoản mới từ Cockpit" khi N > 0.
+
+6. **Giao diện Web (`web/src/pages/ProfilesPage.tsx`, `web/src/components/CockpitSyncModal.tsx`)**:
+   - Thêm nút "Đồng bộ từ Cockpit" trên header trang Quản lý Tài khoản mở modal `CockpitSyncModal`.
+   - Cho phép nhập và sửa đường dẫn thư mục Cockpit kèm nút Quét lại.
+   - Hiển thị banner cảnh báo và hướng dẫn cài đặt nếu không tìm thấy thư mục Cockpit.
+   - Gom nhóm tài khoản thành 3 nhóm: Antigravity, Codex, Claude.
+   - Hiển thị rõ ràng email, checkbox (mặc định tick các mục Mới importable), và các huy hiệu trạng thái (Mới, Đã có, Xung đột, Bị tắt trong Cockpit, Bỏ qua kèm lý do).
+   - Hiển thị cảnh báo về xoay vòng token cho nhóm Codex và Claude.
+   - Nút "Nhập N tài khoản" kèm hiển thị kết quả chi tiết từng dòng và tổng kết.
+   - Khu vực cài đặt tự đồng bộ định kỳ: bật/tắt, chỉnh chu kỳ phút, chọn các engine tự đồng bộ và lưu cấu hình.
+   - Giữ nguyên tab "Nhập Refresh Token" hiện có trong AddProfileModal.
+   - Bổ sung locale đầy đủ cho cả tiếng Việt (`vi.ts`) và tiếng Anh (`en.ts`).
+
+7. **Quyết định kiến trúc (`docs/DECISIONS.md`)**:
+   - Bổ sung `DEC-021`: Tài liệu hoá đầy đủ về cơ chế đồng bộ một chiều từ Cockpit Tools, phiên bản tham chiếu v1.3.81 (giấy phép CC BY-NC-SA 4.0), đường dẫn file tham chiếu, các định dạng hỗ trợ, trường hợp bỏ qua, phương pháp xác thực token Claude và chính sách an toàn dữ liệu.
+
+## 2. Kết quả kiểm tra
+
+- `npm run lint`: Đạt, 0 lỗi, 80 warnings (từ các file test có sẵn ngoài phạm vi task).
+- `npx tsc --noEmit -p .`: Đạt, 0 lỗi.
+- `npx tsc --noEmit -p web`: Đạt, 0 lỗi.
+- `npm run test -- --run`: Đạt, 133/133 test files passed, 1639/1639 tests passed.
+  - Bao gồm `test/cockpit-integration.test.ts` (10 tests) kiểm tra toàn diện:
+    - (a) Scan trả đúng 3 nhóm metadata, không chứa token string.
+    - (b) Antigravity import mới và cho phép sync cập nhật lặp lại.
+    - (c) Codex import mới, các lần sync sau không ghi đè token (bảo vệ xoay vòng token).
+    - (d) Claude import tạo isolated profile với `.credentials.json` (chmod 0600) và `.claude.json`.
+    - (e) Bỏ qua `desktop_oauth`, API key, ChatGPT plan nội bộ, envelope mã hoá cũ kèm lý do.
+    - (f) File JSON hỏng được cô lập lỗi theo từng mục, không ảnh hưởng các tài khoản khác.
+    - (g) Thư mục Cockpit chỉ đọc: so sánh hash SHA-256 và mtime toàn bộ thư mục trước và sau không đổi.
+    - (h) autoSync chỉ nhập tài khoản mới và gửi thông báo Telegram.
+    - (i) Event bus `profile.imported` và log không chứa token chuỗi.
+    - (j) API HTTP POST import hoạt động chính xác.
+  - Bao gồm `test/cockpit-scan.test.ts` (6 tests).
+- `npm run test:web -- --run`: Đạt, 69/69 test files passed, 612/612 tests passed.
+  - Bao gồm `web/src/test/cockpitSyncModal.test.tsx` (5 tests) kiểm tra giao diện gom nhóm, cảnh báo xoay vòng token, checkbox mặc định, gọi import API đúng danh sách tick, cảnh báo thiếu thư mục và cấu hình autoSync.
+  - Bao gồm `web/src/test/profilesPage.test.tsx` (26 tests).
+- `npm run build:web`: Đạt, hoàn thành build Vite production bundle cho frontend.
+
+## 3. Việc chưa làm được
+
+Không có. Mọi yêu cầu và tiêu chí nghiệm thu của task đều đã được hoàn thành đầy đủ.
+
+## 4. Danh sách commit
+
+- `c99c7c61`: feat: add Cockpit directory resolution and storage scanner
+- `5b1d18da`: feat(backend): implement Cockpit account import, Claude isolated profile, and autoSync
+- `d316901e`: feat(web): add Cockpit account sync modal and auto-sync settings
+- `fa9d4e06`: docs: add DEC-021 documenting Cockpit tools one-way account sync architecture

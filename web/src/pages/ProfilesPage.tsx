@@ -21,6 +21,7 @@ import {
   deleteProfile,
   deleteQuota,
   getProfiles,
+  getProfileAvatarBlob,
   getConfig,
   getStatus,
   importAgyTokens,
@@ -38,9 +39,10 @@ import { QuotaUsage } from '../components/QuotaUsage';
 import { useLocale } from '../context/LocaleContext';
 import { ToastViewport, useToasts, type ToastKind } from '../components/ui/Toast';
 import { Profile } from '../types/api';
-import { formatReset, formatTimeTitle } from '../lib/time';
+import { formatReset, formatTime, formatTimeTitle, formatIsoTitle } from '../lib/time';
 import { useTour } from '../components/tour/TourContext';
 import { AgentIcon } from '../components/AgentIcon';
+import { CockpitSyncModal } from '../components/CockpitSyncModal';
 import { UI_Z_INDEX } from '../components/ui/layers';
 
 const LoginTerminal = lazy(() => import('../components/LoginTerminal').then((m) => ({ default: m.LoginTerminal })));
@@ -66,7 +68,9 @@ function StatusBadge({ profile }: { profile: Profile }) {
   const { t } = useLocale();
   const loggedIn = profile.loggedIn ?? Boolean(profile.email);
   const state =
-    profile.authState === 'needs_verification'
+    profile.authState === 'not_logged_in' && profile.engine === 'claude'
+      ? 'off'
+      : profile.authState === 'needs_verification'
       ? 'verify'
       : profile.authState === 'error'
         ? 'error'
@@ -112,6 +116,7 @@ export const ProfilesPage: React.FC = () => {
   const { hash } = useLocation();
   const queryClient = useQueryClient();
   const [showAdd, setShowAdd] = useState(false);
+  const [showCockpit, setShowCockpit] = useState(false);
   const [activeLogin, setActiveLogin] = useState<{ name: string; engine: Provider; sessionId: string } | null>(null);
   const [menu, setMenu] = useState<string | null>(null);
   const [editing, setEditing] = useState<Profile | null>(null);
@@ -259,18 +264,32 @@ export const ProfilesPage: React.FC = () => {
             {t('profiles.subtitle')}
           </p>
         </div>
-        <button
-          type="button"
-          data-tour="add-account"
-          onClick={(e) => {
-            e.stopPropagation();
-            setShowAdd(true);
-          }}
-          className="inline-flex items-center gap-2 rounded-lg bg-[var(--t-accent)] px-4 py-2 text-sm font-semibold text-[var(--t-on-accent)]"
-        >
-          <Plus className="h-4 w-4" />
-          {t('profiles.addBtn')}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            data-tour="sync-cockpit"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowCockpit(true);
+            }}
+            className="inline-flex items-center gap-2 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-sm font-semibold text-[var(--t-text)] hover:bg-[var(--t-hover)] cursor-pointer"
+          >
+            <RefreshCw className="h-4 w-4" />
+            {t('profiles.syncCockpitBtn')}
+          </button>
+          <button
+            type="button"
+            data-tour="add-account"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowAdd(true);
+            }}
+            className="inline-flex items-center gap-2 rounded-lg bg-[var(--t-accent)] px-4 py-2 text-sm font-semibold text-[var(--t-on-accent)] cursor-pointer"
+          >
+            <Plus className="h-4 w-4" />
+            {t('profiles.addBtn')}
+          </button>
+        </div>
       </div>
       <ToastViewport toasts={toasts} onDismiss={dismissToast} closeLabel={t('common.close')} />
       {isLoading ? (
@@ -429,6 +448,15 @@ export const ProfilesPage: React.FC = () => {
           }}
         />
       )}
+      {showCockpit && (
+        <CockpitSyncModal
+          isOpen={showCockpit}
+          onClose={() => setShowCockpit(false)}
+          onProfilesUpdated={() => {
+            queryClient.invalidateQueries({ queryKey: ['profiles'] });
+          }}
+        />
+      )}
       {/* Floating Action Button (FAB) khi cuộn trang */}
       <button
         type="button"
@@ -461,22 +489,121 @@ function getAvatarGradient(name: string): string {
   return `linear-gradient(135deg, hsl(${h1}, 65%, 45%), hsl(${h2}, 75%, 35%))`;
 }
 
-function ProfileAvatar({ profile }: { profile: Profile }) {
+interface AvatarCacheEntry {
+  objectUrl?: string;
+  promise?: Promise<string>;
+  refCount: number;
+}
+
+export const avatarObjectUrlCache = new Map<string, AvatarCacheEntry>();
+
+export function getAvatarCacheKey(name: string, avatarUrl: string): string {
+  return `${name}:${avatarUrl}`;
+}
+
+export async function acquireAvatar(name: string, avatarUrl: string): Promise<string> {
+  const key = getAvatarCacheKey(name, avatarUrl);
+  let entry = avatarObjectUrlCache.get(key);
+  if (entry) {
+    entry.refCount++;
+    if (entry.objectUrl) return entry.objectUrl;
+    if (entry.promise) return await entry.promise;
+  }
+
+  entry = { refCount: 1 };
+  const fetchPromise = (async () => {
+    try {
+      const blob = await getProfileAvatarBlob(name);
+      const objectUrl = URL.createObjectURL(blob);
+      entry!.objectUrl = objectUrl;
+      if (entry!.refCount <= 0) {
+        try { URL.revokeObjectURL(objectUrl); } catch { /* ignore */ }
+        avatarObjectUrlCache.delete(key);
+      }
+      return objectUrl;
+    } catch (err) {
+      avatarObjectUrlCache.delete(key);
+      throw err;
+    }
+  })();
+
+  entry.promise = fetchPromise;
+  avatarObjectUrlCache.set(key, entry);
+  return await fetchPromise;
+}
+
+export function releaseAvatar(name: string, avatarUrl: string): void {
+  const key = getAvatarCacheKey(name, avatarUrl);
+  const entry = avatarObjectUrlCache.get(key);
+  if (!entry) return;
+  entry.refCount--;
+  if (entry.refCount <= 0) {
+    if (entry.objectUrl) {
+      try { URL.revokeObjectURL(entry.objectUrl); } catch { /* ignore */ }
+    }
+    avatarObjectUrlCache.delete(key);
+  }
+}
+
+export const MAX_AVATAR_RETRIES = 3;
+export const AVATAR_RETRY_DELAY_MS = 30_000;
+
+export function ProfileAvatar({ profile }: { profile: Profile }) {
+  const [src, setSrc] = useState<string | null>(null);
   const [imgError, setImgError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
   const avatarUrl = profile.avatarUrl;
 
   useEffect(() => {
-    setImgError(false);
-  }, [avatarUrl]);
+    setRetryCount(0);
+  }, [profile.name, avatarUrl]);
 
-  if (avatarUrl && !imgError) {
+  useEffect(() => {
+    if (!avatarUrl) {
+      setSrc(null);
+      setImgError(false);
+      return;
+    }
+
+    let active = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+    acquireAvatar(profile.name, avatarUrl)
+      .then((url) => {
+        if (!active) return;
+        setSrc(url);
+        setImgError(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setSrc(null);
+        setImgError(true);
+        if (retryCount < MAX_AVATAR_RETRIES) {
+          retryTimer = setTimeout(() => {
+            if (active) {
+              setRetryCount((c) => c + 1);
+            }
+          }, AVATAR_RETRY_DELAY_MS);
+        }
+      });
+
+    return () => {
+      active = false;
+      if (retryTimer) clearTimeout(retryTimer);
+      releaseAvatar(profile.name, avatarUrl);
+    };
+  }, [profile.name, avatarUrl, retryCount]);
+
+  if (avatarUrl && src && !imgError) {
     return (
       <div className="relative shrink-0">
         <img
-          src={avatarUrl}
+          src={src}
           alt={profile.label || profile.name}
-          referrerPolicy="no-referrer"
-          onError={() => setImgError(true)}
+          onError={() => {
+            setImgError(true);
+            setSrc(null);
+          }}
           className="h-9 w-9 rounded-xl object-cover shadow-xs ring-1 ring-[var(--t-border)]"
         />
       </div>
@@ -638,9 +765,12 @@ function ProfileCard({
                 </span>
               )}
               {profile.coolingUntil && profile.coolingUntil > Math.floor(Date.now() / 1000) && (
-                <span className="rounded bg-[var(--t-warn)]/15 px-1.5 py-0.5 text-[10px] font-bold text-[var(--t-warn)]">
+                <span
+                  className="rounded bg-[var(--t-warn)]/15 px-1.5 py-0.5 text-[10px] font-bold text-[var(--t-warn)]"
+                  title={formatIsoTitle(profile.coolingUntil * 1000)}
+                >
                   {t('profiles.coolingUntil', {
-                    time: new Date(profile.coolingUntil * 1000).toLocaleTimeString(locale === 'vi' ? 'vi-VN' : 'en-US'),
+                    time: formatTime(profile.coolingUntil * 1000, locale),
                   })}
                 </span>
               )}
@@ -780,14 +910,17 @@ function ProfileCard({
       {profile.authState === 'needs_verification' && (
         <p className="mt-1 text-xs text-[var(--t-text-3)]">{t('profiles.verificationTip')}</p>
       )}
+      {profile.authState === 'not_logged_in' && profile.engine === 'claude' && (
+        <p className="mt-1 text-xs text-[var(--t-crit)]">{profile.authMessage || t('profiles.notLoggedIn')} · <code>{profile.kind === 'isolated' && profile.home ? `CLAUDE_CONFIG_DIR=${profile.home} claude /login` : 'claude /login'}</code></p>
+      )}
       <div className="mt-2.5 rounded-lg bg-[var(--t-surface-2)] p-2.5">
         <div className="flex items-center justify-between text-xs">
           <span className="font-medium text-[11px] text-[var(--t-text-2)]">{t('profiles.quotaTitle')}</span>
-          <span className="text-[11px] text-[var(--t-text-3)]">{usageText(profile)}</span>
+          <span className="text-[11px] text-[var(--t-text-3)]">{profile.authState === 'not_logged_in' && profile.engine === 'claude' ? (profile.authMessage || t('profiles.notLoggedIn')) : usageText(profile)}</span>
         </div>
-        <div className="mt-1.5">
+        {!(profile.authState === 'not_logged_in' && profile.engine === 'claude') && <div className="mt-1.5">
           <QuotaUsage usage={profile.usage} onRefresh={() => onRefresh()} refreshing={refreshing} />
-        </div>
+        </div>}
         {activeMarks.map((mark) => (
           <div key={mark.family} data-testid={`quota-mark-${mark.family}`} title={mark.reason || undefined} className="mt-2 flex items-center justify-between rounded border border-[var(--t-warn)] px-2 py-1 text-xs text-[var(--t-warn)]">
             <span title={formatTimeTitle(mark.until, locale, mark.reason || 'quota mark')}>{t('profiles.quotaLocked', { family: mark.family, time: formatReset(mark.until, Date.now(), locale) })}</span>

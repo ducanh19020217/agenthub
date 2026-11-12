@@ -194,3 +194,69 @@
 - `wait` dùng các event trạng thái chờ check/review/merge làm mốc bắt đầu, kéo dài tới mốc kế tiếp hoặc hết ngày, rồi giới hạn không vượt `run`. Đây là xấp xỉ vì schema event hiện chưa lưu khoảng chờ riêng.
 - `chat` tính các event review/comment/question/decision/blocked trong ngày; mỗi lượt quy đổi thành 10 phút. Nội dung `## Cần quyết định` trong payload được tính thêm khi event không có type tương ứng.
 - Khi nhiều task cùng ticket có level khác nhau, `weight` cộng theo từng task; trường `level` hiển thị là level hiệu dụng (trung bình có trọng số) để khớp với tổng weight.
+
+## DEC-017: Không gán profileName cho các bước trong task.reviewChain
+
+- **Bối cảnh**: Task `t-model-agent-badge` yêu cầu hiển thị agent (engine và profile) cạnh model. Đối với `task.reviewChain`, task quy định: nếu việc lấy `profileName` từ review tương ứng cho từng bước review chain phức tạp thì ghi vào `docs/DECISIONS.md` và bỏ qua, phần UI dùng engine suy từ `reviewer`.
+- **Vấn đề**: Bảng `reviews` trong SQLite không lưu `reviewStep`. Hơn nữa, khi một task bị `changes_requested` và scheduler quay lại vòng lặp mới (`reviewStep` được reset về 0), lịch sử review có thể chứa nhiều lượt đánh giá của cùng một loại reviewer qua các vòng. Việc ánh xạ theo chỉ số mảng dẫn tới gán sai profile giữa các bước hoặc giữa các vòng review (như trường hợp chain gồm nhiều bước cùng engine hoặc task lặp lại nhiều vòng).
+- **Quyết định**: Không cố gắng suy đoán hoặc gán `profileName` cho các bước của `task.reviewChain` khi trả về API (`profileName` luôn là `null`). API trả về `engine` suy ra từ `step.reviewer` (`codex` nếu bắt đầu bằng `codex:`, `claude` nếu là `claude`). Phần UI `ModelBadge` sử dụng `engine` này và icon tương ứng để hiển thị bên cạnh tên model của bước review. Profile thực tế đã chạy từng review vẫn được hiển thị chính xác và đầy đủ trong mục Lịch sử review (`task.reviews[]`) và Timeline sự kiện.
+
+## DEC-018: Ô review trong sơ đồ Quy trình được coi là đang hoạt động khi có task chờ duyệt
+
+- **Bối cảnh**: Yêu cầu task t-flow-live-animation quy định ô trạng thái "đang hoạt động" gồm `running`, `checking`, và "review khi reviewer đang chạy". Tuy nhiên, view Quy trình (`TaskFlow.tsx`) truy vấn số đếm task theo trạng thái (`useStatusTotal`) và API REST hiện tại không trả về tín hiệu phân biệt liệu một task ở trạng thái `review` có tiến trình reviewer nền đang thực thi hay đang ở hàng chờ / chờ người dùng duyệt qua UI.
+- **Quyết định**: Coi ô `review` là "đang hoạt động" (`data-active="true"`, có viền sáng pulse, icon review chớp nhẹ, cạnh luồng animated) mỗi khi tổng số task ở trạng thái `review` > 0 (`total > 0`), đồng bộ với cách xử lý của `running` và `checking`.
+- **Hệ quả**: Giữ logic frontend đơn giản, không phát sinh thêm truy vấn kiểm tra subprocess nền của reviewer làm tăng tải API, đảm bảo trải nghiệm người dùng trực quan khi có task ở bước duyệt.
+
+## DEC-019: Cấu hình publish thuộc phạm vi project thay vì hệ thống
+
+- **Bối cảnh**: Tính năng tự động push sau khi hoàn thành task (`t-auto-push-after-done`) cần cấu hình bật/tắt, remote (`origin`), nhánh đích, và tùy chọn push cả nhánh integration.
+- **Quyết định**: `publish` được đặt ở cấp độ project (`projects.settings.publish`, tương tự `integration`, `worktree`, `gitea`, `remoteDeploy`) thay vì cấu hình toàn hệ thống (`AgentHubConfig`):
+  1. Mỗi git repository có cấu hình remote (`origin`, `upstream`...) và chính sách phân nhánh (default branch, target branch) riêng biệt.
+  2. Các preset (`safe`, `balanced`, `auto`) cấu hình cờ `publish.enabled` khi áp dụng cho project: `auto` bật `true`, `safe` và `balanced` để `false`.
+  3. Tránh việc một cấu hình remote/nhánh toàn cục gây ảnh hưởng ngoài ý muốn lên các repo khác nhau trong cùng một hub.
+
+## DEC-020: Múi giờ hiển thị thời gian phía web và duy trì tương thích các hàm quota reset
+
+- **Bối cảnh**: `web/src/lib/time.ts` ban đầu cố định `TIME_ZONE = 'Asia/Ho_Chi_Minh'`. Yêu cầu mới đặt ra là giao diện phải hiển thị thời gian theo múi giờ địa phương trên máy của người dùng (trình duyệt). Tuy nhiên, các hàm tính thời điểm reset quota của Claude (`formatReset`, `formatResetCompact`, `formatExpiry`, `formatTimeTitle`) đang phục vụ các component thuộc phạm vi task song song `web-time-format-rest` và có bộ test hiện tại gắn liền với múi giờ Việt Nam.
+- **Quyết định**:
+  1. Các hàm định dạng thời gian chung mới (`formatDateTime`, `formatTime`, `formatDateTimeWithAgo`) mặc định không truyền `timeZone` cố định vào `Intl.DateTimeFormat`, cho phép sử dụng múi giờ của máy người dùng/trình duyệt. Hỗ trợ tùy chọn `timeZone` trong `opts` để phục vụ unit test và các ngữ cảnh cần cố định timezone.
+  2. Các hàm reset quota cũ (`formatReset*`, `formatExpiry`, `formatTimeTitle`) tiếp tục sử dụng `TIME_ZONE = 'Asia/Ho_Chi_Minh'` làm mặc định để giữ nguyên vẹn kết quả test và tương thích với component quota đang do task song song xử lý.
+- **Hệ quả**: Đảm bảo hiển thị ngày giờ chuẩn xác theo môi trường người dùng ở các trang chính (Task Detail, Dashboard...) mà không gây xung đột chéo hay phá vỡ test của các tính năng quota.
+
+## DEC-021: Đồng bộ một chiều tài khoản từ Cockpit Tools (t-cockpit-account-sync)
+
+- **Bối cảnh & Bản quyền**: Người dùng quản lý tài khoản qua Cockpit Tools (Rust/Tauri, bản tham chiếu v1.3.81, giấy phép CC BY-NC-SA 4.0). AgentHub chỉ đọc dữ liệu định dạng JSON từ thư mục lưu trữ ngoài (`~/.cockpit_tools` hoặc `~/.antigravity_cockpit` hoặc `COCKPIT_TOOLS_DATA_DIR`), tuyệt đối không sao chép bất kỳ mã nguồn nào của Cockpit Tools vào repo AgentHub.
+- **Nguồn tham chiếu từ Cockpit Tools v1.3.81**:
+  - `crates/cockpit-core/src/modules/data_paths.rs`: xác định thư mục `DATA_DIR` (`~/.cockpit_tools` và fallback `~/.antigravity_cockpit`).
+  - `accounts.json` và `accounts/<id>.json`: cấu trúc Antigravity chứa `email`, `token: { access_token, refresh_token, expires_in }`.
+  - `codex_accounts.json` và `codex_accounts/<id>.json`: cấu trúc Codex chứa `email`, `auth_mode`, `tokens: { id_token, access_token, refresh_token }`, `account_id`.
+  - `claude_accounts.json` và `claude_accounts/<id>.json` (và logic sync CLI trong `src-tauri/src/modules/claude_account_cli_sync.rs`): cấu trúc Claude chứa `email`, `auth_mode`, `claude_credentials_raw: { claudeAiOauth: { accessToken, refreshToken, subscriptionType } }`.
+- **Định dạng Cockpit hỗ trợ & Các trường hợp bỏ qua**:
+  - *Antigravity*: Nhập tài khoản OAuth (email + refresh_token). Cho phép đồng bộ lặp lại vì Google OAuth refresh token không bị xoay vòng khi đổi access token. Bỏ qua các envelope token mã hoá kiểu cũ (`account-token.key`, ciphertext) với lý do yêu cầu người dùng mở Cockpit để nâng cấp.
+  - *Codex*: Nhập tài khoản `auth_mode = "oauth"`. Bỏ qua tài khoản API key (`auth_mode != "oauth"` hoặc có `openai_api_key`) và tài khoản ChatGPT plan nội bộ của Cockpit (`cockpit_chatgpt_plan`).
+  - *Claude*: Nhập tài khoản `auth_mode = "oauth"`. Bỏ qua tài khoản `desktop_oauth` và tài khoản `api_key`.
+  - *File hỏng*: Xử lý try/catch độc lập cho từng file tài khoản, đánh dấu `importable: false` kèm `skipReason = "File JSON hỏng"` mà không làm gián đoạn cả phiên quét.
+- **Chính sách xoay vòng token (Token Rotation Policy)**:
+  - Token OAuth của Codex và Claude có thể bị xoay vòng (refresh token cũ bị thu hồi khi cấp refresh token mới). Nếu cả Cockpit và AgentHub cùng chạy tiến trình refresh độc lập, tài khoản sẽ bị đăng xuất ở một trong hai bên.
+  - Vì vậy, hồ sơ Codex và Claude chỉ được **nhập một lần**, đánh dấu `source: 'cockpit'` và `cockpitId`. Các lần sync tiếp theo không ghi đè token của hồ sơ đã tồn tại, chỉ báo `exists` / `skipped`. Giao diện hiển thị cảnh báo rõ ràng cho người dùng.
+- **Phương pháp xác thực token Claude**:
+  - Không chạy binary `claude` CLI thật trên máy.
+  - Sử dụng Anthropic OAuth profile endpoint (`https://api.anthropic.com/api/oauth/profile`) để lấy email, uuid, và subscription/billing plan.
+  - Hồ sơ Claude isolated được tạo với `<home>/.credentials.json` (chứa `claudeAiOauth`) và `<home>/.claude.json` với quyền file nghiêm ngặt `0600`.
+- **Tính an toàn và bảo mật**:
+  - Thư mục Cockpit chỉ đọc (read-only), kiểm tra hash/mtime trước và sau đảm bảo không ghi bất kỳ byte nào vào thư mục Cockpit.
+  - API scan chỉ trả về metadata, không trả token ra ngoài.
+  - Sự kiện `profile.imported` và log hệ thống tuyệt đối không chứa token hay JWT secret.
+  - MCP tool `hub_cockpit_scan` chỉ cung cấp metadata phục vụ tham khảo, không có công cụ import tự động qua MCP.
+- **Giải mã kho Cockpit bản mới (2026-11-10, người dùng đồng ý)**:
+  - Cockpit từ bản có `secure_account_storage` (tham chiếu v1.3.81, `src-tauri/src/modules/secure_account_storage.rs`) mã hoá file chi tiết từng tài khoản bằng AES-256-GCM; file chỉ mục (`accounts.json`, `codex_accounts.json`, `claude_accounts.json`) vẫn để dạng thường và có `email`, `name`, `plan_type`.
+  - Khoá là 32 byte ngẫu nhiên, base64, trong `<dataDir>/secure-account-storage.key`, tạo một lần và không đổi; "rotation 30 ngày" của Cockpit chỉ mã hoá lại bằng nonce mới với cùng khoá. Envelope: `{ version, kind, algorithm, key_id, encrypted_at, nonce, ciphertext }`, nonce 12 byte, ciphertext có tag 16 byte nối ở cuối.
+  - AgentHub đọc khoá này để giải mã **chỉ phía server**, khi quét (để biết tài khoản có nhập được không) và khi nhập. Kết quả giải mã không trả ra API, không log. Vẫn chỉ đọc, không ghi vào thư mục Cockpit. Khoá chỉ bảo vệ khi file bị chép riêng ra ngoài; mọi tiến trình cùng user đều đọc được, nên việc hub đọc không làm giảm thêm độ an toàn trên máy.
+  - Thiếu khoá, sai khoá, hoặc thuật toán lạ: báo lý do theo từng tài khoản và gợi ý nhập file Export. Đường dự phòng `POST /api/integrations/cockpit/import-export` nhận file Export của Cockpit, tự nhận diện Antigravity/Codex/Claude theo từng mục.
+  - Mã giải mã viết lại bằng `node:crypto`, không chép code Cockpit (giấy phép CC BY-NC-SA 4.0).
+
+## DEC-022: Sửa migration 73 để giữ bộ đếm task khi rebuild bảng
+
+- **Bối cảnh**: Migration 73 rebuild `tasks`, trong khi `runCount` và `consecutiveCrashes` được thêm ngoài danh sách migration sau vòng lặp. Bản rebuild cũ dùng `SELECT *`, gây lỗi trên DB đã có hai cột và có thể để lại bảng `tasks_new` rỗng.
+- **Quyết định**: Sửa migration 73 tại chỗ vì migration này chưa được khóa và chưa chạy thành công trên DB thật có các cột bộ đếm. Migration xóa `tasks_new` cũ bằng `DROP TABLE IF EXISTS`, sao chép theo danh sách cột tường minh, và mang theo cả hai bộ đếm. Trước khi chạy migration 73, đảm bảo hai cột bộ đếm đã tồn tại; DB mới cũng cần bước này vì các cột vẫn được quản lý ngoài danh sách migration.
+- **Hệ quả**: DB bị bỏ lại bảng tạm có thể tự chạy tiếp; dữ liệu bộ đếm được giữ nguyên qua rebuild.

@@ -8,6 +8,7 @@ import { getTokenPath, readExistingToken } from '../auth.js';
 import { toRouteId, toTaskId } from '../services/index.js';
 import { formatRunnableCapacity, QuotaCapacitySnapshot } from '../quota/index.js';
 import { formatYYYYMMDD } from '../integrations/openproject/daily-report.js';
+import { claudeLoginCommand } from '../profiles/auth.js';
 
 export class DaemonDownError extends Error {
   constructor(message = 'AgentHub daemon chưa chạy: `agenthub install-service` hoặc `agenthub daemon`') {
@@ -106,11 +107,11 @@ export function formatProfileSummary(p: {
 }
 
 function formatBestQuotaLine(
-  profiles: Array<{ name: string; usage?: Array<{ grp: string; window: string; remainingPct: number }> }>,
+  profiles: Array<{ name: string; authState?: string | null; usage?: Array<{ grp: string; window: string; remainingPct: number }> }>,
   family: 'gemini' | 'claude',
 ): string {
   const groupPrefix = family === 'gemini' ? 'Gemini' : 'Claude';
-  const values = profiles.flatMap((p) => (p.usage || [])
+  const values = profiles.filter((p) => p.authState !== 'not_logged_in').flatMap((p) => (p.usage || [])
     .filter((u) => u.window === '5h' && (family === 'gemini' ? u.grp.startsWith('Gemini') : !u.grp.startsWith('Gemini')))
     .map((u) => ({ name: p.name, remainingPct: u.remainingPct })));
   if (!values.length) return `Nhiều quota ${groupPrefix} 5h nhất: chưa có số liệu`;
@@ -260,6 +261,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             profileName: string;
             model: string;
             engine: string;
+            kind?: string;
+            home?: string | null;
             elapsedMs: number;
             title?: string;
             projectId?: string;
@@ -537,6 +540,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           Array<{
             name: string;
             engine: string;
+            kind?: string;
+            home?: string | null;
             enabled: boolean | number;
             email?: string | null;
             busy?: boolean;
@@ -565,13 +570,36 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           if (p.authState === 'needs_verification') {
             authStr = ` [Cần xác minh${p.verifyUrl ? `: ${p.verifyUrl}` : ''}]`;
           } else if (p.authState === 'not_logged_in') {
-            authStr = ' [Chưa đăng nhập]';
+            const command = p.engine === 'claude' ? claudeLoginCommand(p) : undefined;
+            authStr = ` [Cần đăng nhập lại${p.authMessage ? `: ${p.authMessage}` : ''}${command ? ` · ${command}` : ''}]`;
           } else if (p.authState === 'error') {
             authStr = ` [Lỗi xác thực${p.authMessage ? `: ${p.authMessage}` : ''}]`;
           }
           lines.push(`- ${p.name} [${p.engine}]: ${formatProfileSummary(p)}${authStr}${marksStr}${dupeStr}`);
         }
         return { content: [{ type: 'text', text: lines.join('\n') }] };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
+  server.tool(
+    'hub_cockpit_scan',
+    'Quét danh sách tài khoản trong kho Cockpit Tools (chỉ metadata, không chứa token)',
+    { dataDir: z.string().optional() },
+    async (args) => {
+      try {
+        const query = args.dataDir ? `?dataDir=${encodeURIComponent(args.dataDir)}` : '';
+        const result = await callApi('GET', `/api/integrations/cockpit/scan${query}`);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
       } catch (err: unknown) {
         return handleError(err);
       }
@@ -1227,18 +1255,51 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     },
   );
 
-  // 11. hub_cancel
+  // 10b. hub_publish
   server.tool(
-    'hub_cancel',
-    'Hủy một task đang chạy hoặc trong hàng đợi',
+    'hub_publish',
+    'Đẩy task đã hoàn thành (done/pushed) lên git remote',
     {
       id: z.string().describe('ID của task'),
     },
     async (args) => {
       try {
+        assertTaskId(args.id, 'Publish task');
+        const routeId = toRouteId(args.id);
+        const res = (await callApi('POST', `/api/tasks/${routeId}/publish`)) as {
+          ok: boolean;
+          error?: string;
+          commit?: string;
+          remote?: string;
+          branch?: string;
+        };
+        if (res && res.ok) {
+          return {
+            content: [{ type: 'text', text: `✓ Đã đẩy task "${args.id}" lên ${res.remote}/${res.branch} (commit ${res.commit})` }],
+          };
+        }
+        return {
+          content: [{ type: 'text', text: `✗ Đẩy task "${args.id}" thất bại: ${res?.error || 'Lỗi không xác định'}` }],
+        };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
+  // 11. hub_cancel
+  server.tool(
+    'hub_cancel',
+    'Hủy một task đang chạy hoặc trong hàng đợi. Bắt buộc ghi lý do để người dùng xem lại được vì sao task bị hủy.',
+    {
+      id: z.string().describe('ID của task'),
+      reason: z.string().min(3).describe('Lý do hủy, viết cho người dùng đọc (ví dụ: "Trùng với task T52 vừa tạo trong batch")'),
+    },
+    async (args) => {
+      try {
         assertTaskId(args.id, 'Huỷ task');
         const routeId = toRouteId(args.id);
-        await callApi('POST', `/api/tasks/${routeId}/cancel`);
+        await callApi('POST', `/api/tasks/${routeId}/cancel`, { reason: args.reason, by: 'mcp' });
         return {
           content: [{ type: 'text', text: `✓ Đã hủy task "${args.id}"` }],
         };
@@ -1291,7 +1352,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         const targetIds = args.ids && args.ids.length > 0 ? args.ids.map(toTaskId) : undefined;
 
         // 1. Check if any target task is ALREADY in an actionable/terminal status
-        const terminalStatuses = new Set(['review', 'blocked', 'failed', 'waiting_quota', 'done']);
+        const terminalStatuses = new Set(['review', 'blocked', 'failed', 'waiting_quota', 'done', 'pushed']);
         const isWaitable = (task: Record<string, unknown>): boolean => {
           if (String(task.status) !== 'review') return terminalStatuses.has(String(task.status));
           const chain = Array.isArray(task.reviewChain) ? task.reviewChain as Array<{ mode?: string }> : [];
@@ -1348,6 +1409,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             'task.failed': 'failed',
             'task.waiting_quota': 'waiting_quota',
             'task.done': 'done',
+            'task.pushed': 'pushed',
           };
 
           const url = `${getBaseUrl()}/api/events?token=${token}`;

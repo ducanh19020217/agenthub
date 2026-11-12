@@ -518,4 +518,58 @@ describe('Task waitReason (lý do chờ)', () => {
       payload: { reason: 'department_changed' },
     });
   });
+
+  it('marks queued tasks while restart drain is active and clears the reason on cancel', () => {
+    ctx.profileRepo.upsert({
+      name: 'restart-profile',
+      engine: 'agy',
+      kind: 'isolated',
+      home: path.join(tmpDir, 'agy-homes', 'restart-profile'),
+      email: 'restart@example.com',
+      enabled: 1,
+    });
+    ctx.taskRepo.insert({
+      id: 'proj/t-restart-wait',
+      projectId: 'proj',
+      slug: 't-restart-wait',
+      title: 'Restart wait',
+      status: 'queued',
+      level: 'easy',
+    });
+
+    ctx.scheduler.beginRestartDrain(120, 'test');
+    expect(ctx.taskRepo.get('proj/t-restart-wait')?.waitReason).toBe('restart');
+
+    ctx.scheduler.cancelRestartDrain();
+    expect(ctx.taskRepo.get('proj/t-restart-wait')?.waitReason).toBeNull();
+    expect(ctx.scheduler.getRestartState().draining).toBe(false);
+  });
+
+  it('times out a drain without killing work and records restart_timeout', () => {
+    vi.useFakeTimers();
+    try {
+      ctx.taskRepo.insert({ id: 'proj/t-restart-timeout', projectId: 'proj', slug: 't-restart-timeout', title: 'Restart timeout', status: 'queued' });
+      (ctx.scheduler as any).running.set('proj/t-active', { taskId: 'proj/t-active', startTime: Date.now() });
+      ctx.scheduler.beginRestartDrain(1, 'test-timeout');
+      vi.advanceTimersByTime(60_001);
+      vi.runOnlyPendingTimers();
+
+      expect(ctx.scheduler.getRestartState().draining).toBe(false);
+      expect(ctx.taskRepo.get('proj/t-restart-timeout')?.status).toBe('queued');
+      expect(ctx.eventRepo.getRecent(10).some((event) => event.type === 'hub.restart_timeout')).toBe(true);
+      (ctx.scheduler as any).running.clear();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears persisted drain state when a new scheduler starts', () => {
+    ctx.scheduler.beginRestartDrain(120, 'unclean-stop');
+    expect(ctx.db.prepare("SELECT value FROM meta WHERE key = 'restart.drain'").get()).toBeTruthy();
+
+    const replacement = createContext(config, new Map<string, Engine>([['agy', fakeEngine]]), (p) => fakeDiskReader(p));
+    replacement.scheduler.stop();
+    expect(replacement.db.prepare("SELECT value FROM meta WHERE key = 'restart.drain'").get()).toBeUndefined();
+    replacement.db.close();
+  });
 });

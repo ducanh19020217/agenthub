@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TaskDetailPage } from '../pages/TaskDetailPage';
@@ -119,13 +119,14 @@ describe('TaskDetailPage', () => {
 
     // Mở lại modal và bấm Xác nhận hủy
     fireEvent.click(cancelBtn);
+    fireEvent.change(screen.getByTestId('cancel-reason-input'), { target: { value: 'Trùng việc' } });
     const confirmCancelBtn = screen.getByRole('button', { name: /Xác nhận hủy/i });
     await act(async () => {
       fireEvent.click(confirmCancelBtn);
       await Promise.resolve();
     });
 
-    expect(cancelSpy).toHaveBeenCalledWith('proj-1~t1');
+    expect(cancelSpy).toHaveBeenCalledWith('proj-1~t1', 'Trùng việc');
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['task', 'proj-1~t1'] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['tasks'] });
     expect(screen.queryByRole('heading', { name: /Xác nhận hủy task/i })).not.toBeInTheDocument();
@@ -144,7 +145,7 @@ describe('TaskDetailPage', () => {
       unmount();
     }
 
-    const statusesToHide = ['done', 'cancelled'] as const;
+    const statusesToHide = ['done', 'pushed', 'cancelled'] as const;
     for (const status of statusesToHide) {
       queryClient.clear();
       vi.spyOn(client, 'getTask').mockResolvedValue({
@@ -767,6 +768,217 @@ describe('TaskDetailPage', () => {
     fireEvent.change(input, { target: { value: 'log từ server' } });
     fireEvent.click(screen.getByRole('button', { name: /Gửi thêm thông tin/i }));
     await vi.waitFor(() => expect(client.submitOpenProjectTriageInput).toHaveBeenCalledWith('demo', 42, 'log từ server'));
+  });
+
+  it('22. Hiển thị agent badge (icon/engine/profileName) cạnh model ở review chain, review history, runs, và running header', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'running',
+      currentRun: {
+        startedAt: '2026-10-15T00:00:00Z',
+        lastOutputAt: '2026-10-15T00:05:00Z',
+        lastActivityAt: '2026-10-15T00:05:00Z',
+        activitySource: 'log',
+        model: 'gemini-3.8-flash-high',
+        profileName: 'gemini-fast',
+        engine: 'agy',
+        paused: false,
+        rss: 1024 * 1024 * 100,
+        cpu: 15.5,
+      },
+      reviewChain: [
+        { reviewer: 'codex:gpt-5.6-luna', mode: 'gate', engine: 'codex', profileName: 'codex-worker' },
+        { reviewer: 'claude', mode: 'final', engine: 'claude', profileName: null },
+      ],
+      reviews: [
+        {
+          id: 'rev-1',
+          taskId: 'proj-1~t1',
+          verdict: 'approved',
+          feedback: 'LGTM',
+          actor: 'codex-reviewer',
+          model: 'codex:gpt-5.6-luna',
+          engine: 'codex',
+          profileName: 'codex-worker',
+          createdAt: '2026-10-15T00:08:00Z',
+        },
+      ],
+      runs: [
+        {
+          id: 'run-1',
+          taskId: 'proj-1~t1',
+          engine: 'agy',
+          model: 'gemini-3.8-flash-high',
+          profileName: 'gemini-fast',
+          outcome: 'done',
+          startedAt: '2026-10-15T00:00:00Z',
+          endedAt: '2026-10-15T00:10:00Z',
+        },
+      ],
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const badges = screen.getAllByTestId('model-badge');
+    expect(badges.length).toBeGreaterThanOrEqual(3);
+
+    const profiles = screen.getAllByTestId('model-badge-profile');
+    const profileTexts = profiles.map((p) => p.textContent);
+    expect(profileTexts).toContain('gemini-fast');
+    expect(profileTexts).toContain('codex-worker');
+
+    const runsTabBtn = screen.getByRole('button', { name: /Runs/i });
+    fireEvent.click(runsTabBtn);
+    expect(screen.getAllByText('gemini-fast').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('23. Task với trạng thái pushed: hiển thị khối Đẩy lên git với remote, nhánh, commit, link so sánh và thời điểm', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'pushed',
+      pushedAt: '2026-11-07T03:30:00Z',
+      pushResult: JSON.stringify({
+        remote: 'origin',
+        branch: 'main',
+        commit: 'abcdef1234567890',
+        compareUrl: 'https://github.com/org/repo/commit/abcdef1234567890',
+      }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const publishSection = await screen.findByTestId('task-publish-section');
+    expect(publishSection).toBeInTheDocument();
+    expect(within(publishSection).getByText('origin')).toBeInTheDocument();
+    expect(within(publishSection).getByText('main')).toBeInTheDocument();
+    expect(within(publishSection).getByText('abcdef1')).toBeInTheDocument();
+    const compareLink = within(publishSection).getByTestId('publish-compare-link');
+    expect(compareLink).toHaveAttribute('href', 'https://github.com/org/repo/commit/abcdef1234567890');
+  });
+
+  it('24. Task đẩy git thất bại: hiển thị banner lỗi, lý do, outputTail và nút Đẩy lại gọi publishTask', async () => {
+    const publishSpy = vi.spyOn(client, 'publishTask').mockResolvedValue({
+      ok: true,
+      remote: 'origin',
+      branch: 'main',
+      commit: '1234567',
+    });
+
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      pushResult: JSON.stringify({
+        remote: 'origin',
+        branch: 'main',
+        error: 'Remote rejected push due to protected branch',
+        reason: 'publish_failed',
+        outputTail: 'error: failed to push some refs to remote',
+      }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const publishSection = await screen.findByTestId('task-publish-section');
+    expect(publishSection).toBeInTheDocument();
+
+    const errorBanner = within(publishSection).getByTestId('publish-error-banner');
+    expect(errorBanner).toHaveTextContent(/Remote rejected push due to protected branch/i);
+    expect(errorBanner).toHaveTextContent(/error: failed to push some refs to remote/i);
+
+    const retryBtn = within(publishSection).getByTestId('btn-publish-task');
+    expect(retryBtn).toHaveTextContent(/Đẩy lại/i);
+
+    await act(async () => {
+      fireEvent.click(retryBtn);
+    });
+    await waitFor(() => {
+      expect(publishSpy).toHaveBeenCalledWith('proj-1~t1');
+    });
+  });
+
+  it('25. Task done khi project bật publish: hiển thị nút Đẩy lên git và click gọi publishTask', async () => {
+    const publishSpy = vi.spyOn(client, 'publishTask').mockResolvedValue({
+      ok: true,
+      remote: 'origin',
+      branch: 'main',
+      commit: '7654321',
+    });
+
+    vi.spyOn(client, 'getProject').mockResolvedValue({
+      id: 'proj-1',
+      name: 'Project 1',
+      path: '/tmp/proj-1',
+      defaultBranch: 'main',
+      settings: {
+        publish: { enabled: true, remote: 'origin', branch: 'main', pushIntegrationBranch: true },
+      },
+    } as any);
+
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      pushResult: null,
+      pushedAt: null,
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const headerPublishBtn = await screen.findByTestId('header-btn-publish');
+    expect(headerPublishBtn).toBeInTheDocument();
+    expect(headerPublishBtn).toHaveTextContent(/Đẩy lên git/i);
+
+    await act(async () => {
+      fireEvent.click(headerPublishBtn);
+    });
+    await waitFor(() => {
+      expect(publishSpy).toHaveBeenCalledWith('proj-1~t1');
+    });
+  });
+
+  it('26. Timeline TaskDetailPage: render event với ts dạng SQLite và ISO, không có text ISO thô trong nội dung hiển thị', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      events: [
+        {
+          id: 1,
+          type: 'task.running',
+          ts: '2026-11-06 17:52:44',
+          taskId: 'proj-1~t1',
+        },
+        {
+          id: 2,
+          type: 'worktree.cleaned',
+          ts: '2026-11-07T18:22:34.000Z',
+          taskId: 'proj-1~t1',
+        },
+      ],
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+    const timeline = await screen.findByTestId('task-timeline');
+    expect(timeline).toBeInTheDocument();
+
+    const runningEvent = screen.getByTestId('timeline-event-task.running');
+    const cleanedEvent = screen.getByTestId('timeline-event-worktree.cleaned');
+
+    expect(runningEvent).toBeInTheDocument();
+    expect(cleanedEvent).toBeInTheDocument();
+
+    // Khẳng định không có text khớp regex \d{4}-\d{2}-\d{2}T\d{2}:\d{2} trong nội dung hiển thị
+    const isoRegex = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+    expect(timeline.textContent).not.toMatch(isoRegex);
+
+    // Thuộc tính title được phép chứa chuỗi ISO đầy đủ
+    const eventTimeSpans = timeline.querySelectorAll('span[title]');
+    const titles = Array.from(eventTimeSpans).map((el) => el.getAttribute('title'));
+    expect(titles).toContain('2026-11-06T17:52:44.000Z');
+    expect(titles).toContain('2026-11-07T18:22:34.000Z');
   });
 });
 

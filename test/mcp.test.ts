@@ -573,6 +573,23 @@ describe('AgentHub MCP Server Tools', () => {
     })) as { content: Array<{ type: string; text: string }> };
     expect(retryRes.content[0].text).toContain('✓ Đã retry task "proj/t-fail"');
     expect(['queued', 'waiting_quota']).toContain(ctx.taskRepo.get('proj/t-fail')?.status);
+
+    // Done task hub_publish
+    ctx.taskRepo.insert({
+      id: 'proj/t-pub',
+      projectId: 'proj',
+      slug: 't-pub',
+      title: 'Pub Task',
+      status: 'done',
+    });
+
+    const pubRes = (await client.callTool({
+      name: 'hub_publish',
+      arguments: {
+        id: 'proj/t-pub',
+      },
+    })) as { content: Array<{ type: string; text: string }> };
+    expect(pubRes.content[0].text).toBeDefined();
   });
 
   it('hub_review supports source: operational without incrementing reviewerChangesRequested', async () => {
@@ -642,10 +659,15 @@ describe('AgentHub MCP Server Tools', () => {
 
     const cancelRes = (await client.callTool({
       name: 'hub_cancel',
-      arguments: { id: 'proj/t-queued' },
+      arguments: { id: 'proj/t-queued', reason: 'Trùng với task khác trong batch' },
     })) as { content: Array<{ type: string; text: string }> };
     expect(cancelRes.content[0].text).toContain('✓ Đã hủy task "proj/t-queued"');
     expect(ctx.taskRepo.get('proj/t-queued')?.status).toBe('cancelled');
+    expect(ctx.taskRepo.get('proj/t-queued')?.cancelReason).toBe('Trùng với task khác trong batch');
+    expect(ctx.taskRepo.get('proj/t-queued')?.cancelledBy).toBe('mcp');
+
+    const noReason = (await client.callTool({ name: 'hub_cancel', arguments: { id: 'proj/t-queued' } })) as { isError?: boolean; content: Array<{ type: string; text: string }> };
+    expect(noReason.isError ?? /validation/i.test(noReason.content[0]?.text || '')).toBeTruthy();
   });
 
   it('hub_wait returns immediately when target task is already terminal or wakes on SSE event', async () => {

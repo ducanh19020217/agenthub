@@ -5,6 +5,7 @@ import { lastNLines, type AuthDetection, type Engine, type QuotaDetection, type 
 import { lowPriority } from '../priority.js';
 import { lockCommand } from '../profiles/locks.js';
 import { findClaudeBin } from '../chat/claude.js';
+import { isClaudeAuthError } from '../profiles/auth.js';
 
 /** Key of the Claude reviewer in the scheduler's engine map (kept apart from worker engines). */
 export const CLAUDE_REVIEW_ENGINE_KEY = 'claude-review';
@@ -69,7 +70,7 @@ export class ClaudeReviewEngine implements Engine {
 
   detectAuthError(logTail: string): AuthDetection {
     const tail = lastNLines(logTail, 8);
-    return { expired: /not logged in|invalid api key|please run \/login|\b401\b/i.test(tail) };
+    return { expired: isClaudeAuthError(tail) };
   }
 
   detectTransientError(logTail: string): boolean {

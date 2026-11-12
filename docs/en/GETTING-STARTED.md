@@ -125,6 +125,10 @@ systemctl --user status agenthub  # Check daemon running status
 agenthub open                     # Opens http://127.0.0.1:7700/#token=... in your default browser
 ```
 
+`agenthub restart` drains by default; add `--wait` to wait until the drain completes. Use `--now`/`--force` only when you accept stopping active workers. `./scripts/run-prod.sh --restart` and `./scripts/stop-prod.sh` also drain by default, while `--force` stops immediately.
+
+If the service was installed before safe restart support, run `agenthub install-service` again (or `./scripts/run-prod.sh --build-only` followed by `node dist/cli.js install-service`) so the systemd unit receives `KillMode=process`; verify with `systemctl --user cat agenthub`. This does not require interrupting active workers: the drain restarts the hub when it becomes idle.
+
 - The Web Dashboard binds strictly to `127.0.0.1` and requires an authentication token (which can also be retrieved via `agenthub open --no-browser`).
 - To access the dashboard from a remote machine, **use an SSH tunnel** rather than exposing port 7700 to the public network:
   ```bash
@@ -289,7 +293,7 @@ If you prefer working within your IDE or terminal:
 | `hub_create_task`, `hub_update_task` | Create tasks (prompt, base branch, model, dependencies) or edit draft tasks |
 | `hub_create_batch`, `hub_dispatch_batch` | Create multi-task batches with dependency graphs and dispatch them |
 | `hub_review` | Approve (`approved`, with auto-merge if configured) or request changes (`changes_requested` + comments) |
-| `hub_retry`, `hub_cancel` | Retry failed/blocked tasks or cancel running tasks |
+| `hub_retry`, `hub_cancel` | Retry failed/blocked tasks or cancel tasks (`hub_cancel` requires a `reason`, shown on the task detail page) |
 | `hub_wait` | Block and wait until tasks require review |
 | `hub_projects`, `hub_register_project`, `hub_profiles`, `hub_mark_quota` | Manage projects, worker profiles, and record quota limits |
 | `hub_git`, `hub_savings`, `hub_claude_usage`, `hub_brain` | Inspect git diffs, review token savings analytics, and monitor Claude usage |

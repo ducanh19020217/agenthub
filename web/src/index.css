@@ -243,6 +243,12 @@
   --status-done-border: color-mix(in srgb, var(--t-ok) 25%, transparent);
   --status-done-dot: var(--t-ok);
 
+  --status-pushed-color: #0f766e;
+  --status-pushed-bg: color-mix(in srgb, #0f766e 15%, transparent);
+  --status-pushed-text: #0f766e;
+  --status-pushed-border: color-mix(in srgb, #0f766e 25%, transparent);
+  --status-pushed-dot: #0f766e;
+
   --status-blocked-color: var(--t-warn);
   --status-blocked-bg: color-mix(in srgb, var(--t-warn) 15%, transparent);
   --status-blocked-text: var(--t-warn);
@@ -447,6 +453,12 @@
   --status-done-text: var(--t-ok);
   --status-done-border: color-mix(in srgb, var(--t-ok) 25%, transparent);
   --status-done-dot: var(--t-ok);
+
+  --status-pushed-color: #2dd4bf;
+  --status-pushed-bg: color-mix(in srgb, #2dd4bf 15%, transparent);
+  --status-pushed-text: #2dd4bf;
+  --status-pushed-border: color-mix(in srgb, #2dd4bf 25%, transparent);
+  --status-pushed-dot: #2dd4bf;
 
   --status-blocked-color: var(--t-warn);
   --status-blocked-bg: color-mix(in srgb, var(--t-warn) 15%, transparent);
@@ -714,3 +726,145 @@ em,
   .toast-enter { animation: none; }
   .toast-progress { animation: none; display: none; }
 }
+
+/* TaskFlow live animation (components/TaskFlow.tsx) */
+@keyframes flow-pulse {
+  0%, 100% {
+    opacity: 0.35;
+    stroke-width: 2px;
+  }
+  50% {
+    opacity: 0.9;
+    stroke-width: 3px;
+  }
+}
+
+@keyframes flow-edge-flow {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: 22;
+  }
+}
+
+@keyframes flow-count-bounce {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.25);
+    fill: var(--t-accent);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes flow-dot-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.75);
+  }
+}
+
+@keyframes flow-icon-play {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.15) translateX(1px);
+  }
+}
+
+@keyframes flow-icon-flask {
+  0%, 100% {
+    transform: rotate(0deg);
+  }
+  25% {
+    transform: rotate(-9deg);
+  }
+  75% {
+    transform: rotate(9deg);
+  }
+}
+
+@keyframes flow-icon-review {
+  0%, 90%, 100% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+  95% {
+    transform: scaleY(0.2);
+    opacity: 0.7;
+  }
+}
+
+.flow-node-pulse {
+  animation: flow-pulse 1.8s ease-in-out infinite;
+}
+
+.flow-edge-animated {
+  animation: flow-edge-flow 1.2s linear infinite;
+  stroke: var(--t-text-2) !important;
+  stroke-opacity: 0.9 !important;
+}
+
+.flow-count-bounce {
+  transform-origin: center;
+  transform-box: fill-box;
+  animation: flow-count-bounce 400ms ease-in-out;
+}
+
+.flow-dot-pulse {
+  animation: flow-dot-pulse 1.2s ease-in-out infinite;
+  transform-origin: center;
+  transform-box: fill-box;
+}
+
+.flow-icon-running {
+  transform-origin: center;
+  transform-box: fill-box;
+  animation: flow-icon-play 1.6s ease-in-out infinite;
+}
+
+.flow-icon-checking {
+  transform-origin: center;
+  transform-box: fill-box;
+  animation: flow-icon-flask 1.8s ease-in-out infinite;
+}
+
+.flow-icon-review {
+  transform-origin: center;
+  transform-box: fill-box;
+  animation: flow-icon-review 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-node-pulse {
+    animation: none;
+    opacity: 0.55;
+    stroke-width: 2px;
+  }
+  .flow-edge-animated {
+    animation: none;
+  }
+  .flow-count-bounce {
+    animation: none;
+  }
+  .flow-dot-pulse {
+    animation: none;
+    opacity: 1;
+  }
+  .flow-icon-running,
+  .flow-icon-checking,
+  .flow-icon-review {
+    animation: none;
+    transform: none;
+  }
+}
+

@@ -326,4 +326,22 @@ describe('PlansPage', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Kế hoạch');
     expect(screen.getByText(/Xem các đợt task, tiến độ và sơ đồ phụ thuộc của Claude/)).toBeInTheDocument();
   });
+
+  it('13. Tiến độ đợt tính task có trạng thái pushed vào số task hoàn thành', async () => {
+    const batchWithPushed: TaskBatch & { tasks: Task[] } = {
+      ...mockBatch1,
+      id: 'b-pushed',
+      status: 'dispatched',
+      progress: undefined,
+      tasks: [
+        { ...mockTask1, id: 'agenthub~task-pushed-1', status: 'pushed' },
+        { ...mockTask2, id: 'agenthub~task-done-2', status: 'done' },
+      ],
+    };
+    vi.spyOn(client, 'getBatchesPage').mockResolvedValue({ items: [batchWithPushed], total: 1, nextCursor: null });
+    vi.spyOn(client, 'getBatch').mockResolvedValue(batchWithPushed);
+
+    renderPlansPage('/plans/b-pushed');
+    expect(await screen.findByText('2/2 xong')).toBeInTheDocument();
+  });
 });

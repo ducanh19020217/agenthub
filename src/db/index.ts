@@ -996,6 +996,103 @@ export const MIGRATIONS: string[] = [
     PRIMARY KEY (source_id, spent_on)
   );
   `,
+  // Migration 68: lý do task bị hủy, để người dùng xem lại vì sao.
+  `ALTER TABLE tasks ADD COLUMN cancelReason TEXT;`,
+  // Migration 69: ai/nguồn nào hủy task (dashboard, telegram:@user, mcp, system:*).
+  `ALTER TABLE tasks ADD COLUMN cancelledBy TEXT;`,
+  // Migration 70: engine and profileName for reviews
+  `
+  ALTER TABLE reviews ADD COLUMN engine TEXT;
+  ALTER TABLE reviews ADD COLUMN profileName TEXT;
+  `,
+  // Migration 71: check execution sequence and startedAt timestamp.
+  `
+  ALTER TABLE check_results ADD COLUMN seq INTEGER;
+  ALTER TABLE check_results ADD COLUMN startedAt TEXT;
+  `,
+  // Migration 72: allow pushed task status and add pushedAt, pushResult columns.
+  `
+  PRAGMA foreign_keys = OFF;
+  CREATE TABLE tasks_new (
+    id TEXT PRIMARY KEY, projectId TEXT NOT NULL, slug TEXT NOT NULL, title TEXT NOT NULL, body TEXT,
+    level TEXT NOT NULL DEFAULT 'easy' CHECK(level IN ('easy','hard')), modelChain TEXT, baseRef TEXT,
+    branch TEXT, worktreePath TEXT,
+    status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','queued','running','checking','review','done','blocked','failed','cancelled','waiting_quota','paused','pushed')),
+    dependsOn TEXT NOT NULL DEFAULT '[]', attempt INTEGER NOT NULL DEFAULT 0, resume INTEGER NOT NULL DEFAULT 0,
+    createdAt TEXT NOT NULL DEFAULT (datetime('now')), updatedAt TEXT NOT NULL DEFAULT (datetime('now')),
+    notBefore INTEGER, transientRetries INTEGER NOT NULL DEFAULT 0, slot INTEGER, checkFixAttempts INTEGER NOT NULL DEFAULT 0,
+    reviewerChangesRequested INTEGER NOT NULL DEFAULT 0, reviewerEscalated INTEGER NOT NULL DEFAULT 0,
+    reviewerEscalatedAt TEXT, reviewerEscalationReason TEXT,
+    waitReason TEXT CHECK(waitReason IS NULL OR waitReason IN ('disk','quota','no_department_profile','no_matching_profile','parallel','department_parallel','profile_busy','project_unavailable','focus','slot','load','dependency')),
+    doneReport TEXT, blockedReport TEXT, diffStat TEXT, sourceRef TEXT, reviewStep INTEGER NOT NULL DEFAULT 0, batchId TEXT,
+    creationSessionId TEXT, creationGoal TEXT, externalRef TEXT,
+    cancelReason TEXT, cancelledBy TEXT,
+    pushedAt TEXT, pushResult TEXT,
+    FOREIGN KEY (projectId) REFERENCES projects(id)
+  );
+  INSERT INTO tasks_new (
+    id, projectId, slug, title, body, level, modelChain, baseRef, branch, worktreePath,
+    status, dependsOn, attempt, resume, createdAt, updatedAt, notBefore, transientRetries, slot,
+    checkFixAttempts, reviewerChangesRequested, reviewerEscalated, reviewerEscalatedAt,
+    reviewerEscalationReason, waitReason, doneReport, blockedReport, diffStat, sourceRef, reviewStep, batchId,
+    creationSessionId, creationGoal, externalRef, cancelReason, cancelledBy
+  ) SELECT
+    id, projectId, slug, title, body, level, modelChain, baseRef, branch, worktreePath,
+    status, dependsOn, attempt, resume, createdAt, updatedAt, notBefore, transientRetries, slot,
+    checkFixAttempts, reviewerChangesRequested, reviewerEscalated, reviewerEscalatedAt,
+    reviewerEscalationReason, waitReason, doneReport, blockedReport, diffStat, sourceRef, reviewStep, batchId,
+    creationSessionId, creationGoal, externalRef, cancelReason, cancelledBy
+  FROM tasks;
+  DROP TABLE tasks;
+  ALTER TABLE tasks_new RENAME TO tasks;
+  CREATE INDEX IF NOT EXISTS idx_tasks_project_created ON tasks(projectId, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_tasks_project_status_created ON tasks(projectId, status, createdAt);
+  PRAGMA foreign_keys = ON;
+  `,
+  // Migration 73: explain queued tasks while a safe restart drain is active.
+  `
+  PRAGMA foreign_keys = OFF;
+  DROP TABLE IF EXISTS tasks_new;
+  CREATE TABLE tasks_new (
+    id TEXT PRIMARY KEY, projectId TEXT NOT NULL, slug TEXT NOT NULL, title TEXT NOT NULL, body TEXT,
+    level TEXT NOT NULL DEFAULT 'easy' CHECK(level IN ('easy','hard')), modelChain TEXT, baseRef TEXT,
+    branch TEXT, worktreePath TEXT,
+    status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','queued','running','checking','review','done','blocked','failed','cancelled','waiting_quota','paused','pushed')),
+    dependsOn TEXT NOT NULL DEFAULT '[]', attempt INTEGER NOT NULL DEFAULT 0, resume INTEGER NOT NULL DEFAULT 0,
+    createdAt TEXT NOT NULL DEFAULT (datetime('now')), updatedAt TEXT NOT NULL DEFAULT (datetime('now')),
+    notBefore INTEGER, transientRetries INTEGER NOT NULL DEFAULT 0, slot INTEGER, checkFixAttempts INTEGER NOT NULL DEFAULT 0,
+    reviewerChangesRequested INTEGER NOT NULL DEFAULT 0, reviewerEscalated INTEGER NOT NULL DEFAULT 0,
+    reviewerEscalatedAt TEXT, reviewerEscalationReason TEXT,
+    waitReason TEXT CHECK(waitReason IS NULL OR waitReason IN ('disk','quota','no_department_profile','no_matching_profile','parallel','department_parallel','profile_busy','project_unavailable','focus','slot','load','dependency','restart')),
+    doneReport TEXT, blockedReport TEXT, diffStat TEXT, sourceRef TEXT, reviewStep INTEGER NOT NULL DEFAULT 0, batchId TEXT,
+    creationSessionId TEXT, creationGoal TEXT, externalRef TEXT,
+    cancelReason TEXT, cancelledBy TEXT, pushedAt TEXT, pushResult TEXT,
+    runCount INTEGER NOT NULL DEFAULT 0, consecutiveCrashes INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (projectId) REFERENCES projects(id)
+  );
+  INSERT INTO tasks_new (
+    id, projectId, slug, title, body, level, modelChain, baseRef, branch, worktreePath,
+    status, dependsOn, attempt, resume, createdAt, updatedAt, notBefore, transientRetries, slot,
+    checkFixAttempts, reviewerChangesRequested, reviewerEscalated, reviewerEscalatedAt,
+    reviewerEscalationReason, waitReason, doneReport, blockedReport, diffStat, sourceRef, reviewStep, batchId,
+    creationSessionId, creationGoal, externalRef, cancelReason, cancelledBy, pushedAt, pushResult,
+    runCount, consecutiveCrashes
+  ) SELECT
+    id, projectId, slug, title, body, level, modelChain, baseRef, branch, worktreePath,
+    status, dependsOn, attempt, resume, createdAt, updatedAt, notBefore, transientRetries, slot,
+    checkFixAttempts, reviewerChangesRequested, reviewerEscalated, reviewerEscalatedAt,
+    reviewerEscalationReason, waitReason, doneReport, blockedReport, diffStat, sourceRef, reviewStep, batchId,
+    creationSessionId, creationGoal, externalRef, cancelReason, cancelledBy, pushedAt, pushResult,
+    runCount, consecutiveCrashes
+  FROM tasks;
+  DROP TABLE tasks;
+  ALTER TABLE tasks_new RENAME TO tasks;
+  CREATE INDEX IF NOT EXISTS idx_tasks_project_created ON tasks(projectId, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_tasks_project_status_created ON tasks(projectId, status, createdAt);
+  PRAGMA foreign_keys = ON;
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -1017,15 +1114,34 @@ export function openDatabase(dbPath: string): Database.Database {
 
   let currentVersion = versionRow ? parseInt(versionRow.value, 10) : -1;
   currentVersion = repairForkAvatarMigration(db, currentVersion);
+  repairMissingTimesheetTable(db, currentVersion);
 
   for (let i = currentVersion + 1; i < MIGRATIONS.length; i++) {
-    db.exec(MIGRATIONS[i]);
+    try {
+      if (i === 73) ensureTaskCounterColumns(db);
+      db.exec(MIGRATIONS[i]);
+    } catch (error) {
+      if (String(error).includes('duplicate column name')) {
+        for (const stmt of MIGRATIONS[i].split(';')) {
+          const trimmed = stmt.trim();
+          if (!trimmed) continue;
+          try {
+            db.exec(trimmed);
+          } catch (inner) {
+            if (!String(inner).includes('duplicate column name')) throw inner;
+          }
+        }
+      } else {
+        throw error;
+      }
+    }
     db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(
       String(i),
     );
   }
   ensureProfileAvatarColumn(db);
   ensureSchedulerLimitColumns(db);
+  ensureCheckResultsColumns(db);
   cleanExpiredClaudeLimits(db);
 
   return db;
@@ -1058,10 +1174,28 @@ function repairForkAvatarMigration(db: Database.Database, currentVersion: number
   return 40;
 }
 
+/**
+ * DB đã ghi schema_version = 64 nhưng không có bảng timesheet_entries (gặp ngày 07/11, có thể do hai bản
+ * build khác nhau cùng migrate một hub.db): migration 65 copy từ bảng đó nên lỗi và daemon không khởi động.
+ * Tạo lại bảng theo migration 64 và bỏ bảng tạm rỗng mà lần migration 65 lỗi để lại.
+ */
+function repairMissingTimesheetTable(db: Database.Database, currentVersion: number): void {
+  const hasTable = (name: string) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+  if (currentVersion !== 64 || hasTable('timesheet_entries')) return;
+  if (hasTable('timesheet_entries_new')) {
+    const { c } = db.prepare('SELECT COUNT(*) AS c FROM timesheet_entries_new').get() as { c: number };
+    if (c > 0) return;
+    db.exec('DROP TABLE timesheet_entries_new');
+  }
+  db.exec(MIGRATIONS[64]);
+}
+
 /** Cột riêng của bản fork (avatarUrl, plan) nằm ngoài MIGRATIONS để không giành số migration với upstream. */
 function ensureProfileAvatarColumn(db: Database.Database): void {
   if (!hasColumn(db, 'profiles', 'avatarUrl')) db.exec('ALTER TABLE profiles ADD COLUMN avatarUrl TEXT');
   if (!hasColumn(db, 'profiles', 'plan')) db.exec('ALTER TABLE profiles ADD COLUMN plan TEXT');
+  if (!hasColumn(db, 'profiles', 'source')) db.exec('ALTER TABLE profiles ADD COLUMN source TEXT');
+  if (!hasColumn(db, 'profiles', 'cockpitId')) db.exec('ALTER TABLE profiles ADD COLUMN cockpitId TEXT');
 }
 
 /** Scheduler safety state is appended outside numbered migrations to preserve the public schema sequence. */
@@ -1072,11 +1206,29 @@ function ensureSchedulerLimitColumns(db: Database.Database): void {
       if (!String(error).includes('duplicate column name')) throw error;
     }
   };
-  add('tasks', 'runCount', 'INTEGER NOT NULL DEFAULT 0');
-  add('tasks', 'consecutiveCrashes', 'INTEGER NOT NULL DEFAULT 0');
+  ensureTaskCounterColumns(db);
   add('profiles', 'consecutiveCrashes', 'INTEGER NOT NULL DEFAULT 0');
   add('profiles', 'lastCrashAt', 'INTEGER');
   add('profiles', 'coolingUntil', 'INTEGER');
+}
+
+/** Counters live outside MIGRATIONS, but later table rebuilds must carry them forward. */
+function ensureTaskCounterColumns(db: Database.Database): void {
+  if (!hasColumn(db, 'tasks', 'runCount')) db.exec('ALTER TABLE tasks ADD COLUMN runCount INTEGER NOT NULL DEFAULT 0');
+  if (!hasColumn(db, 'tasks', 'consecutiveCrashes')) db.exec('ALTER TABLE tasks ADD COLUMN consecutiveCrashes INTEGER NOT NULL DEFAULT 0');
+}
+
+function ensureCheckResultsColumns(db: Database.Database): void {
+  const add = (column: string, definition: string) => {
+    if (hasColumn(db, 'check_results', column)) return;
+    try {
+      db.exec(`ALTER TABLE check_results ADD COLUMN ${column} ${definition}`);
+    } catch (error) {
+      if (!String(error).includes('duplicate column name')) throw error;
+    }
+  };
+  add('seq', 'INTEGER');
+  add('startedAt', 'TEXT');
 }
 
 // Repository helpers
@@ -1175,6 +1327,8 @@ export interface ProfileRow {
   /** Gói tài khoản đã chuẩn hoá (free, plus, pro, team, max_20x…); xem src/profiles/plan.ts. */
   plan?: string | null;
   deletedAt?: string | null;
+  source?: string | null;
+  cockpitId?: string | null;
   consecutiveCrashes?: number;
   lastCrashAt?: number | null;
   coolingUntil?: number | null;
@@ -1196,7 +1350,7 @@ export interface QuotaUsageRow {
   fetchedAt: number;
 }
 
-export type WaitReason = 'disk' | 'quota' | 'no_department_profile' | 'no_matching_profile' | 'parallel' | 'department_parallel' | 'profile_busy' | 'project_unavailable' | 'focus' | 'slot' | 'load' | 'dependency' | null;
+export type WaitReason = 'disk' | 'quota' | 'no_department_profile' | 'no_matching_profile' | 'parallel' | 'department_parallel' | 'profile_busy' | 'project_unavailable' | 'focus' | 'slot' | 'load' | 'dependency' | 'restart' | null;
 
 export interface BlockingDiskInfo {
   path: string;
@@ -1204,6 +1358,20 @@ export interface BlockingDiskInfo {
   freeGB: number;
   minFreeGB: number;
 }
+
+export type TaskStatus =
+  | 'draft'
+  | 'queued'
+  | 'running'
+  | 'checking'
+  | 'review'
+  | 'done'
+  | 'blocked'
+  | 'failed'
+  | 'cancelled'
+  | 'waiting_quota'
+  | 'paused'
+  | 'pushed';
 
 export interface TaskRow {
   id: string;
@@ -1239,10 +1407,16 @@ export interface TaskRow {
   doneReport?: string | null;
   blockedReport?: string | null;
   diffStat?: string | null;
+  /** Lý do task bị hủy (người dùng nhập hoặc hệ thống ghi). */
+  cancelReason?: string | null;
+  /** Ai hủy: dashboard, telegram:<user>, mcp:<client>, system, batch… */
+  cancelledBy?: string | null;
   slot: number | null;
   batchId?: string | null;
   creationSessionId?: string | null;
   creationGoal?: string | null;
+  pushedAt?: string | null;
+  pushResult?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1543,8 +1717,8 @@ export class ProfileRepo {
   upsert(row: Omit<ProfileRow, 'createdAt'>): void {
     this.db
       .prepare(
-        `INSERT INTO profiles (name, engine, kind, home, email, enabled, authState, authMessage, verifyUrl, label, notes, priority, deletedAt, accountType, avatarUrl)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO profiles (name, engine, kind, home, email, enabled, authState, authMessage, verifyUrl, label, notes, priority, deletedAt, accountType, avatarUrl, source, cockpitId)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            engine=excluded.engine,
            kind=excluded.kind,
@@ -1558,7 +1732,9 @@ export class ProfileRepo {
            priority=COALESCE(excluded.priority, profiles.priority),
            accountType=COALESCE(excluded.accountType, profiles.accountType),
            avatarUrl=COALESCE(excluded.avatarUrl, profiles.avatarUrl),
-           deletedAt=COALESCE(excluded.deletedAt, profiles.deletedAt)`,
+           deletedAt=COALESCE(excluded.deletedAt, profiles.deletedAt),
+           source=COALESCE(excluded.source, profiles.source),
+           cockpitId=COALESCE(excluded.cockpitId, profiles.cockpitId)`,
       )
       .run(
         row.name,
@@ -1576,6 +1752,8 @@ export class ProfileRepo {
         row.deletedAt ?? null,
         row.accountType ?? 'personal',
         row.avatarUrl ?? null,
+        row.source ?? null,
+        row.cockpitId ?? null,
       );
   }
 
@@ -1587,9 +1765,13 @@ export class ProfileRepo {
     this.db.prepare('UPDATE profiles SET avatarUrl = ? WHERE name = ?').run(avatarUrl, name);
   }
 
+  updateCockpitSource(name: string, source: string | null, cockpitId: string | null): void {
+    this.db.prepare('UPDATE profiles SET source = ?, cockpitId = ? WHERE name = ?').run(source, cockpitId, name);
+  }
+
   update(
     name: string,
-    fields: Partial<Pick<ProfileRow, 'label' | 'notes' | 'priority' | 'enabled'>>,
+    fields: Partial<Pick<ProfileRow, 'label' | 'notes' | 'priority' | 'enabled' | 'source' | 'cockpitId'>>,
   ): void {
     const sets: string[] = [];
     const values: unknown[] = [];
@@ -1770,7 +1952,8 @@ export class TaskRepo {
   list(filter?: { project?: string; status?: string }): TaskRow[] {
     const conditions: string[] = [];
     const values: string[] = [];
-    if (filter?.project) {
+    // The dashboard sends project=all for "every project"; page() below treats it the same way.
+    if (filter?.project && filter.project !== 'all') {
       conditions.push('projectId = ?');
       values.push(filter.project);
     }
@@ -1949,7 +2132,7 @@ export class TaskRepo {
 
   update(
     id: string,
-    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'blockedReport' | 'diffStat' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId'>>,
+    fields: Partial<Pick<TaskRow, 'status' | 'waitReason' | 'worktreePath' | 'attempt' | 'resume' | 'branch' | 'baseRef' | 'body' | 'notBefore' | 'transientRetries' | 'runCount' | 'consecutiveCrashes' | 'checkFixAttempts' | 'slot' | 'reviewerChangesRequested' | 'reviewerEscalated' | 'reviewerEscalatedAt' | 'reviewerEscalationReason' | 'reviewStep' | 'doneReport' | 'blockedReport' | 'diffStat' | 'cancelReason' | 'cancelledBy' | 'title' | 'externalRef' | 'level' | 'modelChain' | 'dependsOn' | 'batchId' | 'pushedAt' | 'pushResult'>>,
   ): void {
     const sets: string[] = ["updatedAt = datetime('now')"];
     const values: unknown[] = [];
@@ -1982,7 +2165,7 @@ export class TaskRepo {
 
   getUsedSlots(projectId: string): number[] {
     const rows = this.db
-      .prepare("SELECT slot FROM tasks WHERE projectId = ? AND slot IS NOT NULL AND status NOT IN ('done', 'cancelled')")
+      .prepare("SELECT slot FROM tasks WHERE projectId = ? AND slot IS NOT NULL AND status NOT IN ('done', 'cancelled', 'pushed')")
       .all(projectId) as Array<{ slot: number }>;
     return rows.map((row) => row.slot);
   }
@@ -2191,6 +2374,12 @@ export class EventRepo {
       .all(afterId) as EventRow[];
   }
 
+  getLatestProfileAuthExpired(profileName: string): EventRow | undefined {
+    return this.db.prepare(`SELECT * FROM events
+      WHERE type = 'profile.auth_expired' AND json_extract(payload, '$.name') = ?
+      ORDER BY id DESC LIMIT 1`).get(profileName) as EventRow | undefined;
+  }
+
   getByTask(taskId: string): EventRow[] {
     return this.db
       .prepare('SELECT * FROM events WHERE taskId = ? ORDER BY id')
@@ -2232,6 +2421,8 @@ export interface ReviewRow {
   feedback: string | null;
   createdAt: string;
   actor: string;
+  engine: string | null;
+  profileName: string | null;
 }
 
 export class ReviewRepo {
@@ -2247,12 +2438,28 @@ export class ReviewRepo {
       .all(taskId) as ReviewRow[];
   }
 
-  insert(row: { id: string; taskId: string; verdict: string; feedback?: string | null; actor?: string }): void {
+  insert(row: {
+    id: string;
+    taskId: string;
+    verdict: string;
+    feedback?: string | null;
+    actor?: string;
+    engine?: string | null;
+    profileName?: string | null;
+  }): void {
     this.db
       .prepare(
-        'INSERT INTO reviews (id, taskId, verdict, feedback, actor) VALUES (?, ?, ?, ?, ?)',
+        'INSERT INTO reviews (id, taskId, verdict, feedback, actor, engine, profileName) VALUES (?, ?, ?, ?, ?, ?, ?)',
       )
-      .run(row.id, row.taskId, row.verdict, row.feedback || null, row.actor || 'claude');
+      .run(
+        row.id,
+        row.taskId,
+        row.verdict,
+        row.feedback || null,
+        row.actor || 'claude',
+        row.engine || null,
+        row.profileName || null,
+      );
   }
 }
 

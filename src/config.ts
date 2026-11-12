@@ -177,6 +177,12 @@ export interface TelegramNotifyConfig {
   fallback: boolean;
   brainWaiting?: boolean;
   disk?: boolean;
+  /** Báo khi một task hoàn thành (kể cả khi bộ não ở chế độ auto). */
+  taskDone?: boolean;
+  /** Báo khi một project không còn task nào đang chờ/chạy. */
+  projectIdle?: boolean;
+  /** Báo khi task bị ngắt: hủy, quá thời gian, lặp lệnh, không commit, chuyển tài khoản, tự đóng. */
+  interrupted?: boolean;
 }
 
 export interface TelegramChat {
@@ -234,6 +240,9 @@ export const DEFAULT_TELEGRAM_NOTIFY: TelegramNotifyConfig = {
   fallback: true,
   brainWaiting: true,
   disk: true,
+  taskDone: true,
+  projectIdle: true,
+  interrupted: true,
 };
 
 export const DEFAULT_STALL_CONFIG: StallConfig = {
@@ -390,14 +399,39 @@ export const OpenProjectIntegrationSchema = z.object({
   sources: z.array(OpenProjectSourceSchema).default([]),
 });
 
+export const CockpitIntegrationSchema = z.object({
+  dataDir: z.string().optional(),
+  autoSync: z.object({
+    enabled: z.boolean().default(false),
+    intervalMinutes: z.number().default(30),
+    engines: z.array(z.enum(['antigravity', 'codex', 'claude'])).default(['antigravity']),
+  }).default({ enabled: false, intervalMinutes: 30, engines: ['antigravity'] }),
+});
+
+export type CockpitIntegrationConfig = z.infer<typeof CockpitIntegrationSchema>;
+
+export type CockpitIntegrationPatch = {
+  dataDir?: string;
+  autoSync?: Partial<CockpitIntegrationConfig['autoSync']>;
+};
+
 export interface IntegrationsConfig {
   openproject: {
     sources: OpenProjectSource[];
   };
+  cockpit: CockpitIntegrationConfig;
 }
 
 export const DEFAULT_INTEGRATIONS_CONFIG: IntegrationsConfig = {
   openproject: { sources: [] },
+  cockpit: {
+    dataDir: undefined,
+    autoSync: {
+      enabled: false,
+      intervalMinutes: 30,
+      engines: ['antigravity'],
+    },
+  },
 };
 
 export function parseOpenProjectSources(raw: unknown): OpenProjectSource[] {
@@ -555,7 +589,7 @@ export function saveConfig(
     profileCooling?: Partial<ProfileCoolingConfig>;
     ui?: Partial<UiConfig>;
     branding?: Partial<BrandingConfig>;
-    integrations?: Partial<{ openproject: { sources: unknown[] } }>;
+    integrations?: Partial<{ openproject: { sources: unknown[] }; cockpit: CockpitIntegrationPatch }>;
   }>,
 ): void {
   const configFilePath = path.join(hubHome, 'config.json');
@@ -758,7 +792,7 @@ export function updateConfigInMemory(
     profileCooling?: Partial<ProfileCoolingConfig>;
     ui?: Partial<UiConfig>;
     branding?: Partial<BrandingConfig>;
-    integrations?: Partial<{ openproject: { sources: unknown[] } }>;
+    integrations?: Partial<{ openproject: { sources: unknown[] }; cockpit: CockpitIntegrationPatch }>;
   }>,
 ): void {
   if (patch.modelChainHard) {
@@ -996,6 +1030,21 @@ export function updateConfigInMemory(
       },
     };
   }
+  if (patch.integrations?.cockpit) {
+    const prev = config.integrations.cockpit;
+    const incoming = patch.integrations.cockpit;
+    config.integrations = {
+      ...config.integrations,
+      cockpit: {
+        ...prev,
+        ...incoming,
+        autoSync: {
+          ...prev.autoSync,
+          ...(incoming.autoSync || {}),
+        },
+      },
+    };
+  }
 }
 
 export interface ConfigPaths {
@@ -1207,6 +1256,9 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
       fallback: rawTelegramNotify.fallback !== false,
       brainWaiting: rawTelegramNotify.brainWaiting !== false,
       disk: rawTelegramNotify.disk !== false,
+      taskDone: rawTelegramNotify.taskDone !== false,
+      projectIdle: rawTelegramNotify.projectIdle !== false,
+      interrupted: rawTelegramNotify.interrupted !== false,
     },
   };
 
@@ -1230,7 +1282,10 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
   const rawTools = (userConfig.tools as Record<string, unknown>) || {};
   const integrationsRaw = userConfig.integrations && typeof userConfig.integrations === 'object'
     ? userConfig.integrations : {};
-  const integrationsResult = z.object({ openproject: OpenProjectIntegrationSchema.default({}) }).safeParse(integrationsRaw);
+  const integrationsResult = z.object({
+    openproject: OpenProjectIntegrationSchema.default({}),
+    cockpit: CockpitIntegrationSchema.default({}),
+  }).safeParse(integrationsRaw);
   const integrations: IntegrationsConfig = integrationsResult.success
     ? integrationsResult.data
     : DEFAULT_INTEGRATIONS_CONFIG;

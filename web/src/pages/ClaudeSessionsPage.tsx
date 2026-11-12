@@ -3,8 +3,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { apiFetch, getClaudeSessionsPage, rescanClaudeSessions, ClaudeSession } from '../api/client';
 import { Card, DataTable } from '../components/ui';
+import { ModelBadge } from '../components/ModelBadge';
 import { useLocale } from '../context/LocaleContext';
 import { formatNumber } from '../utils/format';
+import { formatDateTime, formatIsoTitle } from '../lib/time';
 
 type TaskUsage = { taskId: string; effectiveTokens: number };
 type Session = ClaudeSession;
@@ -21,10 +23,10 @@ const SessionTable: React.FC<{ sessions: Session[]; page: number; pageSize: numb
       columns={[
         { key: 'title', title: t('extra.claudeSessions'), sortable: true, sortValue: (session) => session.title || session.sessionId, render: (session) => <div className="min-w-[260px]"><Link className="hover:text-[var(--t-accent)]" to={`/claude-sessions/${encodeURIComponent(session.sessionId)}`}><span className={`inline-block w-2 h-2 rounded-full mr-2 ${session.active ? 'bg-[var(--t-ok)]' : 'bg-[var(--t-text-3)]'}`} title={session.active ? t('claudeSessions.active') : ''} />{session.title || (session.sessionId.length > 8 ? session.sessionId.slice(0, 8) : session.sessionId)}</Link><div className="text-xs text-[var(--t-text-3)] truncate max-w-[320px]" title={session.cwd}>{session.cwd}</div></div> },
         { key: 'messages', title: t('extra.messages'), sortable: true, sortValue: (session) => session.messages, render: (session) => session.messages },
-        { key: 'model', title: t('extra.model'), render: (session) => session.model || t('extra.unknown') },
+        { key: 'model', title: t('extra.model'), render: (session) => session.model ? <ModelBadge model={session.model} engine="claude" /> : t('extra.unknown') },
         { key: 'tokens', title: t('extra.token'), render: (session) => formatTokens(session.effectiveTokens, locale) },
         { key: 'task', title: t('extra.task'), render: (session) => session.topTasks.length > 0 ? session.topTasks.map((task) => `${formatTaskId(task.taskId, t('claudeSessions.outsideTask'))} (${formatTokens(task.effectiveTokens, locale)})`).join(', ') : t('claudeSessions.outsideTask') },
-        { key: 'lastAt', title: t('extra.lastActive'), sortable: true, sortValue: (session) => session.lastAt || '', render: (session) => session.lastAt ? new Date(session.lastAt).toLocaleString(locale === 'vi' ? 'vi-VN' : 'en-US') : '' },
+        { key: 'lastAt', title: t('extra.lastActive'), sortable: true, sortValue: (session) => session.lastAt || '', render: (session) => session.lastAt ? <span title={formatIsoTitle(session.lastAt)}>{formatDateTime(session.lastAt, locale)}</span> : '' },
       ]}
       page={page}
       pageSize={pageSize}
@@ -67,7 +69,7 @@ const SessionDetail: React.FC<{ data: SessionDetail; sessionId: string }> = ({ d
             </span>
           )}
         </div>
-        <p className="text-sm text-[var(--t-text-3)] mt-1 break-all">{data.cwd} · {data.model || t('extra.unknown')}</p>
+        <p className="text-sm text-[var(--t-text-3)] mt-1 break-all flex items-center gap-1.5 flex-wrap"><span>{data.cwd}</span><span>·</span>{data.model ? <ModelBadge model={data.model} engine="claude" /> : <span>{t('extra.unknown')}</span>}</p>
         <label className="flex items-center gap-2 mt-4 text-sm cursor-pointer">
           <input
             type="checkbox"
@@ -82,9 +84,9 @@ const SessionDetail: React.FC<{ data: SessionDetail; sessionId: string }> = ({ d
           {t('claudeSessions.autoResumeLimit')}
         </label>
         {data.limitResetAt ? (
-          <p className="text-sm text-[var(--t-warn)] mt-2">
+          <p className="text-sm text-[var(--t-warn)] mt-2" title={formatIsoTitle(data.limitResetAt * 1000 + 60_000)}>
             {t('claudeSessions.rateLimit5h', {
-              time: new Date(data.limitResetAt * 1000 + 60_000).toLocaleString(locale === 'vi' ? 'vi-VN' : 'en-US'),
+              time: formatDateTime(data.limitResetAt * 1000 + 60_000, locale),
             })}
           </p>
         ) : null}
@@ -102,7 +104,7 @@ const SessionDetail: React.FC<{ data: SessionDetail; sessionId: string }> = ({ d
             <tbody>
               {data.turns.map((turn) => (
                 <tr className="border-t border-[var(--t-border)]" key={`${turn.turnId}-${turn.ts}`}>
-                  <td className="py-2">{new Date(turn.ts).toLocaleString(locale === 'vi' ? 'vi-VN' : 'en-US')}</td>
+                  <td className="py-2" title={formatIsoTitle(turn.ts)}>{formatDateTime(turn.ts, locale)}</td>
                   <td>{formatTokens(turn.effectiveTokens, locale)}</td>
                   <td>
                     {turn.tasks.length > 0

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getProfiles, getModelOptions, getPresets, applyPreset, getCurrentPreset } from '../api/client';
+import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getRestartState, requestRestart, cancelRestart, getProfiles, getModelOptions, getPresets, applyPreset, getCurrentPreset } from '../api/client';
 import type { ReviewerFallback, ReviewerOrderItem, PresetLevel, ApplyPresetResult, GlobalPresetField } from '../types/api';
 import { Save, CheckCircle2, AlertCircle, Info, MessageSquare, Bell, ArrowUp, ArrowDown, Plus, Trash2 } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
@@ -95,7 +95,10 @@ export const SettingsPage: React.FC = () => {
   const [shutdownDisable, setShutdownDisable] = useState(false);
   const [shutdownDone, setShutdownDone] = useState(false);
   const hubStatus = useQuery({ queryKey: ['status'], queryFn: getStatus, staleTime: 3000 });
+  const restartState = useQuery({ queryKey: ['restart'], queryFn: getRestartState, refetchInterval: 3000 });
   const shutdownMutation = useMutation({ mutationFn: () => shutdownHub(shutdownDisable), onSuccess: () => { setShutdownOpen(false); setShutdownDone(true); } });
+  const restartMutation = useMutation({ mutationFn: () => requestRestart('when-idle'), onSuccess: () => { void restartState.refetch(); } });
+  const cancelRestartMutation = useMutation({ mutationFn: cancelRestart, onSuccess: () => { void restartState.refetch(); } });
 
   const { data: presets = [] } = useQuery({ queryKey: ['presets'], queryFn: getPresets });
   // Under ['config'] so every config save/apply that invalidates the config also refreshes it.
@@ -1756,6 +1759,8 @@ export const SettingsPage: React.FC = () => {
 
           <section className="bg-[var(--t-surface)] rounded-xl border border-[var(--t-border)] p-6 space-y-3" data-testid="shutdown-settings">
             <h2 className="text-sm font-semibold">{t('settings.shutdownTitle')}</h2>
+            {restartState.data?.draining && <div className="rounded-lg border border-[var(--t-accent)] p-3 text-sm" role="status">{t('settings.restartDraining', { count: String(restartState.data.waitingFor.length) })}<button type="button" className="ml-3 underline" onClick={() => cancelRestartMutation.mutate()}>{t('settings.restartCancel')}</button></div>}
+            {!restartState.data?.draining && <button type="button" onClick={() => restartMutation.mutate()} className="rounded-lg bg-[var(--t-accent)] px-4 py-2 text-xs font-semibold text-[var(--t-on-accent)]">{t('settings.restartWhenIdle')}</button>}
             {shutdownDone ? <p className="text-sm text-[var(--t-ok)]">{t('settings.shutdownDone')} <code>agenthub start</code></p> : <>
               <p className="text-xs text-[var(--t-text-3)]">{t('settings.shutdownDescription', { count: String((hubStatus.data?.tasks?.running || 0) + (hubStatus.data?.tasks?.checking || 0)) })}</p>
               <button type="button" onClick={() => setShutdownOpen(true)} className="rounded-lg bg-[var(--t-crit)] px-4 py-2 text-xs font-semibold text-[var(--t-on-accent)]">{t('settings.shutdownButton')}</button>

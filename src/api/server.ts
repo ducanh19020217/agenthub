@@ -39,6 +39,7 @@ export async function createServer(
   options?: {
     webDir?: string;
     onShutdown?: (disable: boolean) => void;
+    onRestart?: () => void;
     openProjectSync?: (sourceId: string) => Promise<OpenProjectSyncResult>;
     openProjectDailyReport?: (sourceId: string, date?: string) => Promise<{ path: string; content: string }>;
     openProjectTimesheetPreview?: (sourceId: string, date?: string) => Promise<unknown>;
@@ -207,6 +208,24 @@ export async function createServer(
     const result = service.shutdownForUser();
     options?.onShutdown?.(disable);
     return { ok: true, daemonPid: process.pid, ...result };
+  });
+
+  fastify.get('/api/system/restart', async () => service.getRestartState());
+  fastify.delete('/api/system/restart', async () => service.cancelRestartDrain());
+  fastify.post('/api/system/restart', async (req) => {
+    const body = (req.body || {}) as { mode?: unknown; timeoutMinutes?: unknown; reason?: unknown };
+    const mode = body.mode === undefined || body.mode === 'when-idle' ? 'when-idle' : body.mode === 'now' ? 'now' : null;
+    if (!mode) throw new HttpError(400, 'bad_request', "mode phải là 'when-idle' hoặc 'now'");
+    const timeoutMinutes = body.timeoutMinutes === undefined ? 120 : Number(body.timeoutMinutes);
+    if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) throw new HttpError(400, 'bad_request', 'timeoutMinutes phải lớn hơn 0');
+    const reason = typeof body.reason === 'string' ? body.reason : undefined;
+    if (mode === 'now') {
+      const waiting = service.getRestartState().waitingFor;
+      const result = service.shutdownForUser('hub_restart');
+      options?.onRestart?.();
+      return { ...service.getRestartState(), mode, waitingFor: waiting, ...result };
+    }
+    return service.beginRestartDrain(timeoutMinutes, reason, () => options?.onRestart?.());
   });
 
   fastify.get('/api/perf', async () => service.getPerf());
@@ -534,6 +553,17 @@ export async function createServer(
     return service.listProfiles();
   });
 
+  fastify.get('/api/profiles/:name/avatar', async (req: FastifyRequest, reply: FastifyReply) => {
+    const { name } = req.params as { name: string };
+    const avatar = await service.getProfileAvatar(name);
+    return reply
+      .header('Content-Type', avatar.contentType)
+      .header('Cache-Control', 'private, max-age=86400')
+      .header('X-Content-Type-Options', 'nosniff')
+      .header('Content-Security-Policy', "default-src 'none'")
+      .send(avatar.data);
+  });
+
   fastify.post('/api/profiles/:name/usage/refresh', async (req: FastifyRequest) => {
     const { name } = req.params as { name: string };
     return service.refreshUsage(name);
@@ -558,6 +588,37 @@ export async function createServer(
 
   fastify.post('/api/profiles/import-tokens', async (req: FastifyRequest, reply: FastifyReply) => {
     const result = await service.importTokens(req.body);
+    return reply.status(200).send(result);
+  });
+
+  // --- Cockpit Tools Integration ---
+  fastify.get('/api/integrations/cockpit/scan', async (req: FastifyRequest) => {
+    const query = req.query as { dataDir?: string };
+    return service.scanCockpit(query?.dataDir);
+  });
+
+  fastify.post('/api/integrations/cockpit/import-export', async (req: FastifyRequest, reply: FastifyReply) => {
+    const body = (req.body || {}) as { content?: unknown; verify?: boolean };
+    if (body.content === undefined || body.content === null || body.content === '') {
+      throw new HttpError(400, 'bad_request', 'Thiếu nội dung file Export ("content")');
+    }
+    const result = await service.importCockpitExport(body.content, { verify: body.verify });
+    return reply.status(200).send(result);
+  });
+
+  fastify.post('/api/integrations/cockpit/import', async (req: FastifyRequest, reply: FastifyReply) => {
+    const body = (req.body || {}) as {
+      items?: Array<{ source: 'antigravity' | 'codex' | 'claude'; cockpitId: string }>;
+      verify?: boolean;
+      dataDir?: string;
+    };
+    if (!Array.isArray(body.items)) {
+      throw new HttpError(400, 'bad_request', 'Trường "items" phải là một mảng');
+    }
+    const result = await service.importFromCockpit(body.items, {
+      verify: body.verify,
+      customDir: body.dataDir,
+    });
     return reply.status(200).send(result);
   });
 
@@ -636,7 +697,11 @@ export async function createServer(
 
   fastify.post('/api/tasks/:id/cancel', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
-    return service.cancelTask(id);
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as { reason?: unknown; by?: unknown };
+    return service.cancelTask(id, {
+      reason: typeof body.reason === 'string' ? body.reason.slice(0, 2000) : null,
+      by: typeof body.by === 'string' ? body.by.slice(0, 120) : 'api',
+    });
   });
 
   fastify.post('/api/tasks/:id/split', async (req: FastifyRequest) => {
@@ -668,6 +733,11 @@ export async function createServer(
   fastify.post('/api/tasks/:id/review/retry-reviewer', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
     return service.retryReviewer(id);
+  });
+
+  fastify.post('/api/tasks/:id/publish', async (req: FastifyRequest) => {
+    const { id } = req.params as { id: string };
+    return service.publishTask(id, { manual: true });
   });
 
   fastify.delete('/api/tasks/:id/worktree', async (req: FastifyRequest) => {

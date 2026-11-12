@@ -12,6 +12,7 @@ export interface GraphTaskItem {
   currentRun?: {
     model?: string;
     profileName?: string;
+    engine?: string | null;
   } | null;
 }
 
@@ -26,6 +27,7 @@ export interface TaskGraphNode {
   currentRun?: {
     model?: string;
     profileName?: string;
+    engine?: string | null;
   } | null;
   blockedCount: number;
   isCritical: boolean;
@@ -125,7 +127,7 @@ export function filterTasksForGraph(
   }
 
   // Check if a task has any unfinished descendant
-  const unfinishedIds = new Set(list.filter((t) => t.status !== 'done').map((t) => t.id));
+  const unfinishedIds = new Set(list.filter((t) => t.status !== 'done' && t.status !== 'pushed').map((t) => t.id));
   const hasUnfinishedDescendant = (taskId: string, visited = new Set<string>()): boolean => {
     if (visited.has(taskId)) return false;
     visited.add(taskId);
@@ -139,7 +141,7 @@ export function filterTasksForGraph(
 
   const now = Date.now();
   return list.filter((t) => {
-    if (t.status !== 'done') return true;
+    if (t.status !== 'done' && t.status !== 'pushed') return true;
 
     // Active chain check: part of a chain with remaining work
     if (hasUnfinishedDescendant(t.id)) return true;
@@ -197,12 +199,12 @@ export function computeTaskGraph(tasks: GraphTaskItem[]): TaskGraphResult {
 
   // 1. Calculate blocked counts for each task:
   // Count reachable unfinished tasks downstream from task (only if task is unfinished)
-  const unfinishedTasks = tasks.filter((t) => t.status !== 'done');
+  const unfinishedTasks = tasks.filter((t) => t.status !== 'done' && t.status !== 'pushed');
   const unfinishedIdSet = new Set(unfinishedTasks.map((t) => t.id));
 
   const blockedCounts = new Map<string, number>();
   for (const task of tasks) {
-    if (task.status === 'done') {
+    if (task.status === 'done' || task.status === 'pushed') {
       blockedCounts.set(task.id, 0);
       continue;
     }

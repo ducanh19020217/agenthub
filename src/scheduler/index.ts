@@ -32,6 +32,7 @@ import { ensureWorktreeNodeModules, nodeModulesCacheSummary, pruneNodeModulesCac
 import { AgentHubConfig, DEFAULT_SCHEDULER_LIMITS } from '../config.js';
 import { ProfileLockService } from '../profiles/locks.js';
 import { sameAccount } from '../profiles/account.js';
+import { markClaudeProfileAuthExpired } from '../profiles/auth.js';
 import { QuotaUsageService } from '../quota/usage.js';
 import { CheckRunner, getCheckResults } from '../checks.js';
 import { parseDbTime } from '../db/time.js';
@@ -297,10 +298,31 @@ interface QueuedCheck {
   resolve: () => void;
 }
 
+export type RestartActivityKind = 'run' | 'check' | 'review';
+export interface RestartWaitingActivity {
+  taskId: string;
+  kind: RestartActivityKind;
+  startedAt: number;
+}
+export interface RestartState {
+  draining: boolean;
+  since: number | null;
+  reason: string | null;
+  timeoutAt: number | null;
+  waitingFor: RestartWaitingActivity[];
+}
+
 const STALL_NOTE = 'Lượt trước bị kẹt khi chờ tác vụ nền. Chạy lệnh trực tiếp với timeout.';
 
 export interface SchedulerOptions {
   diskSpace?: (path: string) => DiskSpace;
+}
+
+export interface CancelInfo {
+  /** Lý do hủy do người/hệ thống đưa ra. */
+  reason?: string | null;
+  /** Nguồn hủy: dashboard, telegram:<user>, mcp:<client>, system:<what>. */
+  by?: string | null;
 }
 
 export class Scheduler {
@@ -343,6 +365,9 @@ export class Scheduler {
   private reviewWaitingNotified = new Map<string, { reason: string; at: number }>();
   private failoverWasActive = false;
   private reviewerErrorCounts = new Map<string, number>();
+  private reviewerTaskBackoffUntil = new Map<string, number>();
+  private reviewerLastCrash = new Map<string, string>();
+  private dirtyReviewAttempts = new Map<string, number>();
   private reviewerFallbackNotified = new Set<string>();
   private lastOrphanScan = 0;
   private lastMergedTasksCheck = 0;
@@ -365,6 +390,9 @@ export class Scheduler {
   private checkingPromises = new Map<string, Promise<void>>();
   private checkingRunIds = new Map<string, string>();
   private checkingWorktrees = new Set<string>();
+  private restartState: Omit<RestartState, 'waitingFor'> = { draining: false, since: null, reason: null, timeoutAt: null };
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private restartReady?: () => void;
 
   constructor(
     private config: AgentHubConfig,
@@ -389,6 +417,9 @@ export class Scheduler {
     this.loadGuard = new LoadGuard(config.load);
     this.locks = locks || new ProfileLockService(path.join(config.agyHomesDir, '.state'), config.slotsPerAgyProfile, config.slotsPerCodexProfile);
     this.db = db;
+    // Drain is process-local. A daemon started after an unclean kill must not
+    // inherit a stale flag that would stop dispatch forever.
+    if (this.db) this.db.prepare("DELETE FROM meta WHERE key = 'restart.drain'").run();
     this.runMetricsRepo = runMetricsRepo;
     this.knowledgeRepo = knowledgeRepo;
     if (db) {
@@ -446,9 +477,13 @@ export class Scheduler {
         }
       }
     });
-    this.eventBus.on('task.done', (taskId) => this.onTaskDoneOrCancelled(taskId));
-    this.eventBus.on('task.cancelled', (taskId) => this.onTaskDoneOrCancelled(taskId));
-    this.eventBus.on('task.queued', (taskId) => this.invalidateChecks(taskId));
+    this.eventBus.on('task.done', (taskId) => { this.clearReviewerTaskState(taskId); this.dirtyReviewAttempts.delete(taskId); this.onTaskDoneOrCancelled(taskId); });
+    this.eventBus.on('task.cancelled', (taskId) => { this.clearReviewerTaskState(taskId); this.dirtyReviewAttempts.delete(taskId); this.onTaskDoneOrCancelled(taskId); });
+    this.eventBus.on('task.queued', (taskId) => {
+      this.clearReviewerTaskState(taskId);
+      this.invalidateChecks(taskId);
+      if (this.restartState.draining) this.markRestartWaiter(taskId);
+    });
   }
 
   getCheckResults(taskId: string) { return this.db ? getCheckResults(this.db, taskId) : []; }
@@ -456,6 +491,14 @@ export class Scheduler {
 
   private schedulerLimits() {
     return this.config.scheduler || this.config.schedulerLimits;
+  }
+
+  private clearReviewerTaskState(taskId: string): void {
+    this.reviewerErrorCounts.delete(taskId);
+    this.reviewerTaskBackoffUntil.delete(taskId);
+    this.reviewerLastCrash.delete(taskId);
+    // dirtyReviewAttempts survives task.queued on purpose: the dirty-worktree requeue itself (and
+    // autofix/lock_busy requeues during the worker rerun) emit it, and the second dirty review must block.
   }
 
   private isProfileCooling(profile: ProfileRow, now = Date.now()): boolean {
@@ -551,6 +594,80 @@ export class Scheduler {
   getRunning(): Map<string, RunningTask> {
     for (const runningTask of this.running.values()) this.refreshActivity(runningTask);
     return this.running;
+  }
+
+  getRestartState(): RestartState {
+    const waitingFor: RestartWaitingActivity[] = [
+      ...[...this.running.values()].map((run) => ({ taskId: run.taskId, kind: 'run' as const, startedAt: run.startTime })),
+      ...[...this.checkingActive.values()].map((check) => ({ taskId: check.taskId, kind: 'check' as const, startedAt: check.queuedAt })),
+      ...[...this.reviewerRuns.values()].map((review) => ({ taskId: review.taskId, kind: 'review' as const, startedAt: review.startedAt })),
+    ];
+    return { ...this.restartState, waitingFor };
+  }
+
+  isDraining(): boolean { return this.restartState.draining; }
+
+  beginRestartDrain(timeoutMinutes = 120, reason?: string, onReady?: () => void): RestartState {
+    const now = Date.now();
+    const timeoutAt = now + Math.max(1, timeoutMinutes) * 60_000;
+    this.restartState = { draining: true, since: this.restartState.since || now, reason: reason?.trim() || null, timeoutAt };
+    this.restartReady = onReady;
+    this.markQueuedTasksForRestart();
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = setTimeout(() => {
+      if (!this.restartState.draining) return;
+      const waitingFor = this.getRestartState().waitingFor;
+      this.restartState = { draining: false, since: null, reason: null, timeoutAt: null };
+      this.restartReady = undefined;
+      this.eventBus.emit('hub.restart_timeout', undefined, { waitingFor });
+      this.persistRestartState();
+    }, Math.max(1, timeoutMinutes) * 60_000);
+    this.restartTimer.unref?.();
+    this.persistRestartState();
+    this.eventBus.emit('hub.restart_requested', undefined, { reason: this.restartState.reason, timeoutAt });
+    this.eventBus.emit('hub.restart_draining', undefined, { waiting: this.getRestartState().waitingFor.length });
+    this.maybeFinishRestartDrain();
+    return this.getRestartState();
+  }
+
+  cancelRestartDrain(): RestartState {
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
+    const wasDraining = this.restartState.draining;
+    this.restartState = { draining: false, since: null, reason: null, timeoutAt: null };
+    this.restartReady = undefined;
+    for (const task of this.taskRepo.getByStatus('queued')) {
+      if (task.waitReason === 'restart') this.taskRepo.update(task.id, { status: 'queued', waitReason: null });
+    }
+    this.persistRestartState();
+    if (wasDraining) this.eventBus.emit('hub.restart_cancelled');
+    this.triggerTick();
+    return this.getRestartState();
+  }
+
+  private persistRestartState(): void {
+    if (!this.db) return;
+    if (this.restartState.draining) this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('restart.drain', ?)").run(JSON.stringify(this.restartState));
+    else this.db.prepare("DELETE FROM meta WHERE key = 'restart.drain'").run();
+  }
+
+  private markRestartWaiter(taskId: string): void {
+    const task = this.taskRepo.get(taskId);
+    if (task?.status === 'queued' && task.waitReason !== 'restart') {
+      this.taskRepo.update(taskId, { status: 'queued', waitReason: 'restart' });
+    }
+  }
+
+  private markQueuedTasksForRestart(): void {
+    for (const task of this.taskRepo.getByStatus('queued')) this.markRestartWaiter(task.id);
+  }
+
+  private maybeFinishRestartDrain(): void {
+    if (!this.restartState.draining || this.getRestartState().waitingFor.length > 0) return;
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
+    this.eventBus.emit('hub.restarting', undefined, { reason: this.restartState.reason });
+    this.restartReady?.();
   }
 
   effectiveParallel(project: { maxParallel: number; id?: string; departmentId?: string }): number {
@@ -827,12 +944,25 @@ export class Scheduler {
 
   cancelAll(): void {
     for (const taskId of [...this.running.keys()]) {
+      this.pendingCancel.set(taskId, { reason: 'AgentHub dừng, task đang chạy bị hủy', by: 'system:shutdown' });
       this.killTask(taskId, 'cancelled');
     }
   }
 
+  /** Lý do/người hủy chờ ghi khi run kết thúc với outcome "cancelled". */
+  private pendingCancel = new Map<string, CancelInfo>();
+
+  private recordCancel(taskId: string, info?: CancelInfo): CancelInfo {
+    const resolved: CancelInfo = {
+      reason: info?.reason?.trim() || null,
+      by: info?.by?.trim() || null,
+    };
+    this.taskRepo.update(taskId, { status: 'cancelled', cancelReason: resolved.reason, cancelledBy: resolved.by });
+    return resolved;
+  }
+
   /** Persist a resumable state before the service manager terminates the daemon. */
-  shutdownForUser(): { queued: number; reviewers: number; childPids: number[] } {
+  shutdownForUser(reason = 'user_stop'): { queued: number; reviewers: number; childPids: number[] } {
     const childPids: number[] = [];
     let queued = 0;
     for (const rt of [...this.running.values()]) {
@@ -841,9 +971,10 @@ export class Scheduler {
       this.running.delete(rt.taskId);
       if (rt.lockFile) this.locks.release(rt.profileName, rt.lockFile);
       this.locks.invalidate(rt.profileName);
-      this.runRepo.finish(rt.runId, 'crashed', undefined, 'user_stop');
+      this.runRepo.finish(rt.runId, 'crashed', undefined, reason);
+      if (reason === 'hub_restart') this.appendRestartLog(rt.runId);
       this.taskRepo.update(rt.taskId, { status: 'queued', resume: 1 });
-      this.eventBus.emit('task.queued', rt.taskId, { reason: 'user_stop', note: 'dừng bởi người dùng' });
+      this.eventBus.emit('task.queued', rt.taskId, { reason, note: reason === 'hub_restart' ? 'hub khởi động lại' : 'dừng bởi người dùng' });
       queued++;
     }
 
@@ -851,7 +982,7 @@ export class Scheduler {
       const task = this.taskRepo.get(entry.taskId);
       if (task && (task.status === 'checking' || task.status === 'running')) {
         this.taskRepo.update(entry.taskId, { status: 'queued', resume: 1 });
-        this.eventBus.emit('task.queued', entry.taskId, { reason: 'user_stop', note: 'dừng bởi người dùng' });
+        this.eventBus.emit('task.queued', entry.taskId, { reason, note: reason === 'hub_restart' ? 'hub khởi động lại' : 'dừng bởi người dùng' });
         queued++;
       }
     }
@@ -867,12 +998,19 @@ export class Scheduler {
       clearTimeout(active.timeout);
       if (active.exitTimeout) clearTimeout(active.exitTimeout);
       if (active.lockFile) this.locks.release(active.profileName, active.lockFile);
-      this.runRepo.finish(active.runId, 'crashed', undefined, 'user_stop');
+      this.runRepo.finish(active.runId, 'crashed', undefined, reason);
+      if (reason === 'hub_restart') this.appendRestartLog(active.runId);
       this.reviewerRuns.delete(active.taskId);
       reviewers++;
     }
-    this.eventBus.emit('daemon.shutdown_requested', undefined, { queued, reviewers, note: 'dừng bởi người dùng' });
+    this.eventBus.emit('daemon.shutdown_requested', undefined, { queued, reviewers, reason, note: 'dừng bởi người dùng' });
     return { queued, reviewers, childPids };
+  }
+
+  private appendRestartLog(runId: string): void {
+    const run = this.runRepo.get(runId);
+    if (!run?.logPath) return;
+    try { fs.appendFileSync(run.logPath, `\n[agenthub] Run bị dừng vì hub khởi động lại lúc ${new Date().toISOString()}\n`); } catch { /* best effort */ }
   }
 
   /**
@@ -929,9 +1067,14 @@ export class Scheduler {
         this.runRepo.finish(run.id, 'crashed');
         // Terminal tasks must remain terminal even when an old worker row is
         // found during daemon recovery.
-        if (task.status === 'done' || task.status === 'cancelled') continue;
+        if (task.status === 'done' || task.status === 'pushed' || task.status === 'cancelled') continue;
         this.taskRepo.update(run.taskId, { status: 'queued', resume: 1 });
-        this.eventBus.emit('run.crashed', run.taskId, { runId: run.id });
+        this.eventBus.emit('run.crashed', run.taskId, {
+          runId: run.id,
+          model: run.model,
+          engine: run.engine,
+          profile: run.profileName,
+        });
         this.eventBus.emit('task.queued', run.taskId);
         continue;
       }
@@ -1088,6 +1231,7 @@ export class Scheduler {
 
   async runChecksForTask(taskId: string, runId: string, reuseSavedResults = false): Promise<void> {
     if (this.stopped) return;
+    if (this.restartState.draining) return;
     const task = this.taskRepo.get(taskId);
     if (!task) return;
     // Checks are only admitted for the task state written by the worker
@@ -1580,6 +1724,7 @@ export class Scheduler {
       this.reapOrphans();
     }
     } finally {
+      this.maybeFinishRestartDrain();
       this.inTick = false;
     }
   }
@@ -1890,7 +2035,12 @@ export class Scheduler {
     if (rt.lockFile) this.locks.release(rt.profileName, rt.lockFile);
     this.locks.invalidate(rt.profileName);
     this.runRepo.finish(rt.runId, 'crashed', undefined, 'stalled');
-    this.eventBus.emit('run.stalled', taskId, { runId: rt.runId });
+    this.eventBus.emit('run.stalled', taskId, {
+      runId: rt.runId,
+      model: rt.model,
+      engine: rt.engine.id,
+      profile: rt.profileName,
+    });
 
     const stalledCount = this.runRepo.getByTask(taskId).filter((run) => run.reason === 'stalled').length;
     if (stalledCount <= 2) {
@@ -1898,7 +2048,13 @@ export class Scheduler {
       if (!task) return;
       const body = `${task.body || task.title}\n\n${STALL_NOTE}`;
       this.taskRepo.update(taskId, { status: 'queued', resume: 1, body });
-      this.eventBus.emit('task.queued', taskId, { reason: 'stalled_retry', note: STALL_NOTE });
+      this.eventBus.emit('task.queued', taskId, {
+        reason: 'stalled_retry',
+        note: STALL_NOTE,
+        model: rt.model,
+        engine: rt.engine.id,
+        profile: rt.profileName,
+      });
     } else {
       this.taskRepo.updateStatus(taskId, 'failed');
       this.eventBus.emit('task.failed', taskId, { reason: 'stalled_limit' });
@@ -2261,18 +2417,32 @@ export class Scheduler {
           this.eventBus.emit('task.failover', taskId, {
             from: { profile: rt.profileName, model: rt.model, engine: rt.engine.id },
             to: next ? { profile: next.profileName, model: next.model, engine: getModelEngine(next.model) } : null,
+            model: next?.model || rt.model,
+            engine: next ? getModelEngine(next.model) : rt.engine.id,
+            profile: next?.profileName || rt.profileName,
             reason,
             runId: rt.runId,
             worktreePath: task.worktreePath,
           });
           this.taskRepo.update(taskId, { status: 'queued', resume: 1, transientRetries: 0, notBefore: null });
-          this.eventBus.emit('task.queued', taskId, { reason: 'quota_retry', failover: next ? 'available' : 'waiting_quota' });
+          this.eventBus.emit('task.queued', taskId, {
+            reason: 'quota_retry',
+            failover: next ? 'available' : 'waiting_quota',
+            model: rt.model,
+            engine: rt.engine.id,
+            profile: rt.profileName,
+          });
         } else if (rt.engine.detectAuthError(logTail).expired) {
           this.runRepo.finish(rt.runId, 'crashed', undefined, 'auth');
           this.markProfileAuthExpired(rt.profileName);
 
           this.taskRepo.update(taskId, { status: 'queued', attempt: task.attempt, resume: 1, transientRetries: 0, notBefore: null });
-          this.eventBus.emit('task.queued', taskId, { reason: 'auth_retry', profile: rt.profileName });
+          this.eventBus.emit('task.queued', taskId, {
+            reason: 'auth_retry',
+            profile: rt.profileName,
+            model: rt.model,
+            engine: rt.engine.id,
+          });
         } else {
           // Check for transient errors
           if (rt.engine.detectTransientError(logTail) && task.transientRetries < 3) {
@@ -2284,7 +2454,13 @@ export class Scheduler {
               notBefore: Math.floor(Date.now() / 1000) + Math.ceil(delay / 1000),
               transientRetries: task.transientRetries + 1,
             });
-            this.eventBus.emit('task.queued', taskId, { reason: 'transient_retry', delay });
+            this.eventBus.emit('task.queued', taskId, {
+              reason: 'transient_retry',
+              delay,
+              model: rt.model,
+              engine: rt.engine.id,
+              profile: rt.profileName,
+            });
           } else {
             // Failed
             if (this.recordWorkerCrash(taskId, rt)) return;
@@ -2386,6 +2562,10 @@ export class Scheduler {
   }
 
   private scheduleNewTasks(): void {
+    if (this.restartState.draining) {
+      this.markQueuedTasksForRestart();
+      return;
+    }
     if (this.paused) {
       return;
     }
@@ -2405,7 +2585,7 @@ export class Scheduler {
         }
         continue;
       }
-      if (task.waitReason === 'focus') this.taskRepo.update(task.id, { status: 'queued', waitReason: null });
+      if (task.waitReason === 'focus' || task.waitReason === 'restart') this.taskRepo.update(task.id, { status: 'queued', waitReason: null });
       schedulableTasks.push(task);
     }
 
@@ -2524,6 +2704,7 @@ export class Scheduler {
   }
 
   private scheduleReviews(): void {
+    if (this.restartState.draining) return;
     const state = this.failoverState;
     if (!this.reviewRepo || this.config.reviewer?.enabled === false) return;
     const snapshot = state?.snapshot() || { active: false, step: undefined };
@@ -2535,6 +2716,7 @@ export class Scheduler {
       const focus = this.getFocus();
       if (focus.projectId && task.projectId !== focus.projectId) continue;
       if (this.reviewerRuns.has(task.id)) continue;
+      if ((this.reviewerTaskBackoffUntil.get(task.id) || 0) > Date.now()) continue;
       if (task.reviewerEscalated) {
         const last = this.reviewRepo.getByTask(task.id).at(-1);
         if (last && isAutoReviewer(last.actor) && last.verdict === 'approved') {
@@ -2626,7 +2808,14 @@ export class Scheduler {
           const key = `${task.id}:${index}`;
           if (!this.reviewerFallbackNotified.has(key)) {
             this.reviewerFallbackNotified.add(key);
-            this.eventBus.emit('review.fallback', task.id, { from: order[index - 1].engine, to: item.engine, reason: 'available', profile: free[0].name });
+            this.eventBus.emit('review.fallback', task.id, {
+              from: order[index - 1].engine,
+              to: item.engine,
+              engine: item.engine,
+              model,
+              reason: 'available',
+              profile: free[0].name,
+            });
           }
         }
         return { engine, model, profile: free[0] };
@@ -2641,7 +2830,13 @@ export class Scheduler {
         const key = `${task.id}:${index + 1}`;
         if (!this.reviewerFallbackNotified.has(key)) {
           this.reviewerFallbackNotified.add(key);
-          this.eventBus.emit('review.fallback', task.id, { from: item.engine, to: order[index + 1].engine, reason: unavailable ? 'unavailable' : busy ? 'busy' : 'error' });
+          this.eventBus.emit('review.fallback', task.id, {
+            from: item.engine,
+            to: order[index + 1].engine,
+            engine: order[index + 1].engine,
+            model: normalizeReviewerModel(order[index + 1].engine, order[index + 1].model),
+            reason: unavailable ? 'unavailable' : busy ? 'busy' : 'error',
+          });
         }
       }
     }
@@ -2752,7 +2947,14 @@ export class Scheduler {
     const key = `${task.id}:chain:codex:claude`;
     if (!this.reviewerFallbackNotified.has(key)) {
       this.reviewerFallbackNotified.add(key);
-      this.eventBus.emit('review.fallback', task.id, { from: 'codex', to: 'claude', reason: 'unavailable', profile: profile.name });
+      this.eventBus.emit('review.fallback', task.id, {
+        from: 'codex',
+        to: 'claude',
+        engine: 'claude',
+        model: normalizeReviewerModel('claude', item.model),
+        reason: 'unavailable',
+        profile: profile.name,
+      });
     }
     return { engine, model: normalizeReviewerModel('claude', item.model), profile };
   }
@@ -2890,7 +3092,14 @@ export class Scheduler {
         rank(a.name) - rank(b.name) || (b.priority ?? 0) - (a.priority ?? 0));
     const profile = candidates[0];
     if (!profile) return 'unavailable';
-    this.eventBus.emit('review.fallback', task.id, { from: 'reviewer', to: arbiter.engine, reason: 'arbiter', profile: profile.name });
+    this.eventBus.emit('review.fallback', task.id, {
+      from: 'reviewer',
+      to: arbiter.engine,
+      engine: arbiter.engine,
+      model: normalizeReviewerModel(arbiter.engine, arbiter.model),
+      reason: 'arbiter',
+      profile: profile.name,
+    });
     this.startReview(task, profile.name, engine, normalizeReviewerModel(arbiter.engine, arbiter.model), arbiter.engine === 'claude' ? 'claude-reviewer' : 'codex-reviewer');
     return 'started';
   }
@@ -2920,9 +3129,17 @@ export class Scheduler {
           (b.priority ?? 0) - (a.priority ?? 0));
       const profile = candidates[0];
       if (!profile) return;
-      this.eventBus.emit('review.fallback', task.id, { from: 'codex', to: 'claude', profile: profile.name, reason: 'arbiter_unavailable' });
       const claudeConfig = this.config.reviewer?.order?.find((item) => item.engine === 'claude');
-      this.startReview(task, profile.name, claudeEngine, `claude:${claudeConfig?.model || 'sonnet'}`, 'claude-reviewer');
+      const claudeModel = `claude:${claudeConfig?.model || 'sonnet'}`;
+      this.eventBus.emit('review.fallback', task.id, {
+        from: 'codex',
+        to: 'claude',
+        engine: 'claude',
+        model: claudeModel,
+        profile: profile.name,
+        reason: 'arbiter_unavailable',
+      });
+      this.startReview(task, profile.name, claudeEngine, claudeModel, 'claude-reviewer');
       return;
     }
 
@@ -2939,9 +3156,17 @@ export class Scheduler {
         (b.priority ?? 0) - (a.priority ?? 0));
     const profile = candidates[0];
     if (!profile) return;
-    this.eventBus.emit('review.fallback', task.id, { from: 'claude', to: 'codex', profile: profile.name, reason: 'arbiter_unavailable' });
     const codexConfig = this.config.reviewer?.order?.find((item) => item.engine === 'codex');
-    this.startReview(task, profile.name, codexEngine, `codex:${codexConfig?.model || 'gpt-5.6-luna'}`, 'codex-reviewer');
+    const codexModel = `codex:${codexConfig?.model || 'gpt-5.6-luna'}`;
+    this.eventBus.emit('review.fallback', task.id, {
+      from: 'claude',
+      to: 'codex',
+      engine: 'codex',
+      model: codexModel,
+      profile: profile.name,
+      reason: 'arbiter_unavailable',
+    });
+    this.startReview(task, profile.name, codexEngine, codexModel, 'codex-reviewer');
   }
 
   private reviewerInBackoff(profileName: string): boolean {
@@ -2982,10 +3207,53 @@ export class Scheduler {
     return path.join(this.config.logsDir, task.id.replace('/', '_'));
   }
 
+  private reviewerDirtyPaths(worktreePath: string): string[] | null {
+    try {
+      const status = execFileSync('git', ['-C', worktreePath, 'status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' });
+      return status.split('\n').filter(Boolean).map((line) => line.slice(3).replace(/^.* -> /, '')).filter((file) => file !== '.agenthub' && !file.startsWith('.agenthub/'));
+    } catch { return null; }
+  }
+
+  private handleDirtyReview(task: TaskRow, paths: string[], reason: 'uncommitted changes' | 'unable to read git status'): void {
+    const attempt = (this.dirtyReviewAttempts.get(task.id) || 0) + 1;
+    this.dirtyReviewAttempts.set(task.id, attempt);
+    const listing = paths.slice(0, 20).map((file) => `- ${file}`).join('\n');
+    const extra = paths.length > 20 ? `\n- …và ${paths.length - 20} đường dẫn khác` : '';
+    const detail = listing ? `\n${listing}${extra}` : '';
+    if (attempt === 1) {
+      this.reviewTask(task.id, 'changes_requested', `Worktree chưa sạch (${reason}). Hãy commit các thay đổi sau hoặc xóa nếu là file tạm:${detail}`, 'uncommitted-changes');
+      return;
+    }
+    const message = `Worktree vẫn chưa sạch sau khi worker đã chạy lại (${reason}).${detail}`;
+    this.taskRepo.update(task.id, { status: 'blocked', waitReason: null, notBefore: null });
+    this.eventBus.emit('task.blocked', task.id, { reason: 'uncommitted_changes', message });
+  }
+
+  private recordReviewerCrash(taskId: string, reason: string): void {
+    const crashes = (this.reviewerErrorCounts.get(taskId) || 0) + 1;
+    this.reviewerErrorCounts.set(taskId, crashes);
+    this.reviewerLastCrash.set(taskId, reason);
+    const delays = [30_000, 120_000, 600_000, 1_800_000];
+    this.reviewerTaskBackoffUntil.set(taskId, Date.now() + delays[Math.min(crashes - 1, delays.length - 1)]);
+    // Deterministic launch failures such as E2BIG/ENOENT are task configuration failures;
+    // retain the normal five-crash limit, but never cool or rotate a healthy profile.
+    if (crashes >= 5) {
+      const message = `Reviewer bị lỗi liên tiếp ${crashes} lần; lỗi cuối: ${reason}`;
+      this.taskRepo.update(taskId, { status: 'blocked', waitReason: null, notBefore: null });
+      this.eventBus.emit('task.blocked', taskId, { reason: 'reviewer_crash_limit', message, consecutiveCrashes: crashes });
+    }
+  }
+
   private startReview(task: TaskRow, profileName: string, engine: Engine, reviewerModel: string, reviewerActor = 'codex-reviewer'): void {
     const actor: ReviewerActor = engine.id === 'claude' ? 'claude-reviewer' : 'codex-reviewer';
     const profile = this.profileRepo.get(profileName);
     if (!profile || !task.worktreePath || this.reviewerRuns.has(task.id)) return;
+    if ((this.reviewerTaskBackoffUntil.get(task.id) || 0) > Date.now()) return;
+    const dirtyPaths = this.reviewerDirtyPaths(task.worktreePath);
+    if (dirtyPaths === null || dirtyPaths.length > 0) {
+      this.handleDirtyReview(task, dirtyPaths || [], dirtyPaths === null ? 'unable to read git status' : 'uncommitted changes');
+      return;
+    }
     const lockSlot = this.locks.findFreeSlotSync(profile);
     if (lockSlot === null) return;
     const lockFile = this.locks.lockPath(profile, lockSlot);
@@ -3010,6 +3278,8 @@ export class Scheduler {
         verdict: review.verdict as ReviewerVerdict,
         feedback: review.feedback,
         createdAt: review.createdAt,
+        engine: review.engine,
+        profileName: review.profileName,
       })) || [];
       child = engine.spawn({
         profile,
@@ -3038,7 +3308,9 @@ export class Scheduler {
       this.runRepo.updatePid(runId, child.pid, this.getProcessStartTime(child.pid));
     } catch (error) {
       this.locks.release(profile.name, lockFile);
-      this.runRepo.finish(runId, 'crashed', undefined, String(error));
+      const crashReason = String(error);
+      this.runRepo.finish(runId, 'crashed', undefined, crashReason);
+      this.recordReviewerCrash(task.id, crashReason);
       this.eventBus.emit('review.failed', task.id, { actor, reason: 'spawn_failed' });
       return;
     }
@@ -3050,9 +3322,10 @@ export class Scheduler {
     this.reviewerRuns.set(task.id, { taskId: task.id, runId, pid: child.pid, profileName, engine, actor, outputPath, lockSlot, lockFile, startedAt: Date.now(), timeout });
     this.locks.invalidate(profileName);
     child.unref();
-    this.eventBus.emit('review.started', task.id, { actor: reviewerActor, model: reviewerModel, profile: profileName, runId });
-    child.once('error', () => {
-      if (!this.stopped) this.finishReview(task.id, runId, profileName, 'error', null);
+    const actualEngine = engine.id;
+    this.eventBus.emit('review.started', task.id, { actor: reviewerActor, model: reviewerModel, profile: profileName, engine: actualEngine, runId });
+    child.once('error', (error) => {
+      if (!this.stopped) this.finishReview(task.id, runId, profileName, 'error', null, String(error));
     });
     child.once('exit', (code) => {
       if (this.stopped) return;
@@ -3062,7 +3335,7 @@ export class Scheduler {
     });
   }
 
-  private finishReview(taskId: string, runId: string, profileName: string, reason: 'exit' | 'timeout' | 'error', exitCode: number | null = 0): void {
+  private finishReview(taskId: string, runId: string, profileName: string, reason: 'exit' | 'timeout' | 'error', exitCode: number | null = 0, errorDetail?: string): void {
     if (this.stopped) return;
     const active = this.reviewerRuns.get(taskId);
     if (!active || active.runId !== runId) return;
@@ -3081,7 +3354,9 @@ export class Scheduler {
     }
     try { output = fs.readFileSync(active.outputPath, 'utf8'); } catch { output = ''; }
     // The Claude CLI prints its limit notice on stdout, which lands in the output file, not the log.
-    const quota = active.engine.detectQuota(`${logOutput}\n${output}`).exhausted;
+    // A valid verdict means the model answered, so a "429"/"rate limit" inside its feedback is review
+    // content, not a limit notice (it locked every Claude reviewer on a task about HTTP 429 handling).
+    const quota = !parseReviewerOutput(output) && active.engine.detectQuota(`${logOutput}\n${output}`).exhausted;
     const duration = Date.now() - active.startedAt;
     const isLockBusy = duration < 3000 && logOutput.trim() === '' && Boolean(active.lockFile) && exitCode === 1;
     if (isLockBusy) {
@@ -3091,9 +3366,10 @@ export class Scheduler {
       return;
     }
     if (reason === 'timeout' || reason === 'error' || exitCode !== 0 || quota) {
-      if (!quota) this.reviewerErrorCounts.set(taskId, (this.reviewerErrorCounts.get(taskId) || 0) + 1);
-      this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
-      this.runRepo.finish(runId, quota ? 'quota' : reason === 'timeout' ? 'timeout' : 'crashed');
+      const crashReason = errorDetail || (reason === 'timeout' ? 'reviewer timeout' : `reviewer exited with code ${exitCode}`);
+      if (!quota) this.recordReviewerCrash(taskId, crashReason);
+      else this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
+      this.runRepo.finish(runId, quota ? 'quota' : reason === 'timeout' ? 'timeout' : 'crashed', undefined, quota ? undefined : crashReason);
       if (quota) this.quotaService.mark(profileName, active.actor === 'claude-reviewer' ? 'claude' : 'codex', this.config.reviewer?.failoverSec || 5 * 60 * 60, `${active.actor} quota`);
       this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: quota ? 'quota' : reason === 'timeout' ? 'timeout' : 'crash' });
       return;
@@ -3107,7 +3383,7 @@ export class Scheduler {
     }
     const result = parseReviewerOutput(output);
     if (!result) {
-      this.reviewerErrorCounts.set(taskId, (this.reviewerErrorCounts.get(taskId) || 0) + 1);
+      this.recordReviewerCrash(taskId, 'malformed reviewer output');
       this.runRepo.finish(runId, 'crashed', undefined, 'malformed reviewer output');
       this.eventBus.emit('review.failed', taskId, { actor: active.actor, reason: 'malformed_output' });
       return;
@@ -3118,24 +3394,34 @@ export class Scheduler {
       return;
     }
     if (result.verdict === 'approved' && task?.worktreePath) {
-      try {
-        const status = execFileSync('git', ['-C', task.worktreePath, 'status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' }).trim();
-        if (status) {
-          this.runRepo.finish(runId, 'crashed', undefined, 'uncommitted changes');
-          this.eventBus.emit('review.failed', taskId, { actor: active.actor, reason: 'uncommitted_changes' });
-          return;
-        }
-      } catch {
-        this.runRepo.finish(runId, 'crashed', undefined, 'unable to read git status');
-        this.eventBus.emit('review.failed', taskId, { actor: active.actor, reason: 'git_unreadable' });
+      const dirtyPaths = this.reviewerDirtyPaths(task.worktreePath);
+      if (dirtyPaths === null || dirtyPaths.length > 0) {
+        const dirtyReason = dirtyPaths === null ? 'unable to read git status' : 'uncommitted changes';
+        this.runRepo.finish(runId, 'crashed', undefined, dirtyReason);
+        this.handleDirtyReview(task, dirtyPaths || [], dirtyReason);
         return;
       }
     }
+    const reviewerEngine = run?.engine || active.engine.id;
+    const reviewerProfile = run?.profileName || active.profileName;
     this.runRepo.finish(runId, 'done');
     this.reviewerErrorCounts.delete(taskId);
-    this.reviewTask(taskId, result.verdict, result.feedback, active.actor);
+    this.reviewerTaskBackoffUntil.delete(taskId);
+    this.reviewerLastCrash.delete(taskId);
+    this.dirtyReviewAttempts.delete(taskId);
+    this.reviewTask(taskId, result.verdict, result.feedback, active.actor, 'content', {
+      engine: reviewerEngine,
+      profileName: reviewerProfile,
+    });
     const defaultReviewer = this.config.reviewer?.order?.[0];
-    this.eventBus.emit('review.completed', taskId, { actor: active.actor, verdict: result.verdict, model: run?.model || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna'), runId });
+    this.eventBus.emit('review.completed', taskId, {
+      actor: active.actor,
+      verdict: result.verdict,
+      model: run?.model || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna'),
+      runId,
+      engine: reviewerEngine,
+      profile: reviewerProfile,
+    });
     if (!this.stopped) this.triggerTick();
   }
 
@@ -3192,7 +3478,7 @@ export class Scheduler {
     const deps: string[] = JSON.parse(task.dependsOn);
     for (const depId of deps) {
       const dep = this.taskRepo.get(depId);
-      if (!dep || dep.status !== 'done') return false;
+      if (!dep || (dep.status !== 'done' && dep.status !== 'pushed')) return false;
     }
     return true;
   }
@@ -3409,12 +3695,23 @@ export class Scheduler {
   private markProfileAuthExpired(profileName: string): void {
     const profile = this.profileRepo.get(profileName);
     if (!profile) return;
+    if (profile.engine === 'claude') {
+      markClaudeProfileAuthExpired(this.profileRepo, (type, taskId, payload) => this.eventBus.emit(type, taskId, payload), profileName);
+      return;
+    }
     const related = profile.email
       ? this.profileRepo.getAll().filter((candidate) => sameAccount(candidate, profile))
       : [profile];
     for (const candidate of related) {
+      if (candidate.authState === 'not_logged_in') continue;
       this.profileRepo.updateAuthState(candidate.name, 'not_logged_in', 'Phiên đăng nhập hết hạn (401) – cần đăng nhập lại', null);
-      this.eventBus.emit('profile.auth_expired', undefined, { name: candidate.name, email: candidate.email });
+      const home = candidate.home || undefined;
+      this.eventBus.emit('profile.auth_expired', undefined, {
+        name: candidate.name,
+        email: candidate.email,
+        engine: candidate.engine,
+        home,
+      });
     }
   }
 
@@ -3431,6 +3728,7 @@ export class Scheduler {
         this.notifiedSkippedModels.add(key);
         this.eventBus.emit('task.model_skipped', task.id, {
           model,
+          engine: getModelEngine(model) || null,
           message: `Bỏ qua model không thuộc engine đã cấu hình: ${model}`,
         });
       }
@@ -3851,7 +4149,7 @@ export class Scheduler {
       // Unref so the child doesn't prevent daemon from exiting
       child.unref();
 
-      this.eventBus.emit('task.running', task.id, { runId, model, profile: profileName });
+      this.eventBus.emit('task.running', task.id, { runId, model, profile: profileName, engine: engine.id });
 
       // Listen for exit
       child.on('exit', (code) => {
@@ -3864,7 +4162,7 @@ export class Scheduler {
       });
     } catch (e) {
       this.locks.release(profile.name, lockFile);
-      this.runRepo.finish(runId, 'crashed');
+      this.runRepo.finish(runId, 'crashed', undefined, String(e));
       this.taskRepo.updateStatus(task.id, 'failed');
       this.eventBus.emit('task.failed', task.id, { error: String(e) });
     }
@@ -3898,13 +4196,14 @@ export class Scheduler {
   /**
    * Cancel a running or pending/idle task
    */
-  cancelTask(taskId: string): void {
+  cancelTask(taskId: string, info?: CancelInfo): void {
     const rt = this.running.get(taskId);
     if (rt) {
+      this.pendingCancel.set(taskId, info || {});
       this.killTask(taskId, 'cancelled');
     } else {
       const task = this.taskRepo.get(taskId);
-      if (task?.status === 'done' || task?.status === 'cancelled') return;
+      if (task?.status === 'done' || task?.status === 'pushed' || task?.status === 'cancelled') return;
 
       const reviewerRun = this.reviewerRuns.get(taskId);
       if (reviewerRun) {
@@ -3932,25 +4231,44 @@ export class Scheduler {
       this.reviewerFallbackNotified.delete(taskId);
       this.reviewerErrorCounts.delete(taskId);
       this.resetReviewerEscalation(taskId);
-      this.taskRepo.updateStatus(taskId, 'cancelled');
-      this.eventBus.emit('task.cancelled', taskId);
+      const recorded = this.recordCancel(taskId, info);
+      this.eventBus.emit('task.cancelled', taskId, { reason: recorded.reason, by: recorded.by, previousStatus: task?.status ?? null });
     }
   }
 
   /**
    * Review a task
    */
-  reviewTask(taskId: string, verdict: 'approved' | 'changes_requested', feedback?: string, by?: string, source: ReviewSource = 'content'): void {
+  reviewTask(
+    taskId: string,
+    verdict: 'approved' | 'changes_requested',
+    feedback?: string,
+    by?: string,
+    source: ReviewSource = 'content',
+    options?: { engine?: string | null; profileName?: string | null },
+  ): void {
     const task = this.taskRepo.get(taskId);
     if (!task || task.status !== 'review') return;
     this.reviewNotified.delete(taskId);
     const chain = this.reviewChainForTask(task);
     const step = chain[task.reviewStep ?? 0];
 
+    const fallbackEngine = by === 'claude-reviewer' || by === 'claude-review' ? 'claude' : by === 'codex-reviewer' ? 'codex' : null;
+    const reviewEngine = options?.engine ?? fallbackEngine;
+    const reviewProfile = options?.profileName ?? null;
+
     if (verdict === 'approved') {
       if (isAutoReviewer(by) && (!feedback || feedback.trim() === '')) return;
       if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
-        this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback: feedback || null, actor: by || 'reviewer' });
+        this.reviewRepo.insert({
+          id: crypto.randomUUID(),
+          taskId,
+          verdict,
+          feedback: feedback || null,
+          actor: by || 'reviewer',
+          engine: reviewEngine,
+          profileName: reviewProfile,
+        });
       }
       if ((isAutoReviewer(by) || by === 'claude-review') && isAutomatedStep(step)) {
         this.advanceReviewStep(task, chain, 'approved');
@@ -3982,7 +4300,15 @@ export class Scheduler {
         throw new Error('Feedback is required when requesting changes');
       }
       if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
-        this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback, actor: by || 'reviewer' });
+        this.reviewRepo.insert({
+          id: crypto.randomUUID(),
+          taskId,
+          verdict,
+          feedback,
+          actor: by || 'reviewer',
+          engine: reviewEngine,
+          profileName: reviewProfile,
+        });
       }
       if (isContentReview(by, source)) {
         const count = (task.reviewerChangesRequested || 0) + 1;
@@ -4066,8 +4392,10 @@ export class Scheduler {
     }
 
     if (outcome === 'cancelled') {
-      this.taskRepo.updateStatus(taskId, 'cancelled');
-      this.eventBus.emit('task.cancelled', taskId);
+      const info = this.pendingCancel.get(taskId);
+      this.pendingCancel.delete(taskId);
+      const recorded = this.recordCancel(taskId, info);
+      this.eventBus.emit('task.cancelled', taskId, { reason: recorded.reason, by: recorded.by, previousStatus: 'running' });
     } else if (outcome === 'timeout') {
       this.taskRepo.updateStatus(taskId, 'failed');
       this.eventBus.emit('task.timeout', taskId);
@@ -4296,7 +4624,7 @@ export class Scheduler {
     const thresholdMs = effectiveAfterHours * 60 * 60 * 1000;
     const now = Date.now();
 
-    const completedTasks = this.taskRepo.getAll().filter((task) => task.status === 'done' || task.status === 'cancelled');
+    const completedTasks = this.taskRepo.getAll().filter((task) => task.status === 'done' || task.status === 'pushed' || task.status === 'cancelled');
     for (const task of completedTasks) {
       if (!task.worktreePath) continue;
 
@@ -4389,7 +4717,7 @@ export class Scheduler {
         if (referenced.has(path.resolve(candidate)) || !isDeletableWorktreePath(this.config.worktreesDir, candidate, [this.config.hubHome, project.path])) continue;
         const task = tasks.find((row) => row.projectId === project.id && row.slug === entry.name);
         if (task?.worktreePath) continue;
-        if (task && task.status !== 'done' && task.status !== 'cancelled') continue;
+        if (task && task.status !== 'done' && task.status !== 'pushed' && task.status !== 'cancelled') continue;
         let isGitWorktree = false;
         try {
           const listed = execFileSync('git', ['-C', project.path, 'worktree', 'list', '--porcelain'], { encoding: 'utf8' });

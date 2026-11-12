@@ -144,6 +144,18 @@ describe('c-chat-history-ui Tests', () => {
       expect(el).toBeInTheDocument();
       expect(el).toHaveTextContent('Đã nén ngữ cảnh');
     });
+
+    it('MessageItem không hiển thị chuỗi ISO thô trong nội dung hiển thị', () => {
+      const msg: ChatMessage = {
+        id: 'msg-time-check',
+        role: 'assistant',
+        content: 'Nội dung phản hồi hoàn chỉnh.',
+        createdAt: '2026-10-20T10:00:00.000Z',
+      };
+      const { container } = render(<MessageItem message={msg} />);
+      const isoRegex = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+      expect(container.textContent).not.toMatch(isoRegex);
+    });
   });
 
   describe('2. ToolStep - Gộp bước công cụ và hiển thị bước thời gian thực', () => {
@@ -327,6 +339,28 @@ describe('c-chat-history-ui Tests', () => {
       expect(exportBtns.length).toBeGreaterThan(0);
       fireEvent.click(exportBtns[0]);
       expect(onExportMock).toHaveBeenCalled();
+    });
+
+    it('SessionList hiển thị thời gian định dạng, không có chuỗi ISO thô và có title ISO đầy đủ', () => {
+      const { container } = render(
+        <SessionList
+          sessions={mockSessions}
+          activeSessionId="s1"
+          onSelectSession={vi.fn()}
+          onNewSession={vi.fn()}
+          onDeleteSession={vi.fn()}
+        />,
+      );
+
+      // Nội dung hiển thị không được chứa chuỗi ISO thô
+      const isoRegex = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+      expect(container.textContent).not.toMatch(isoRegex);
+
+      // Tooltip title chứa chuỗi ISO đầy đủ
+      const titleSpans = container.querySelectorAll('span[title]');
+      const titles = Array.from(titleSpans).map((el) => el.getAttribute('title'));
+      expect(titles).toContain('2026-10-20T10:00:00.000Z');
+      expect(titles).toContain('2026-10-20T09:00:00.000Z');
     });
   });
 

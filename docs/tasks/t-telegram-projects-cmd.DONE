@@ -1,0 +1,57 @@
+# Task: t-telegram-projects-cmd – Lệnh `/projects` trên Telegram
+
+## Tóm tắt việc đã làm
+1. **Lệnh `/projects`**:
+   - Đăng ký lệnh `projects` trong `TELEGRAM_BOT_COMMANDS` ngay sau `use`: `{ command: 'projects', description: 'Danh sách dự án, bấm để chọn nhanh' }`.
+   - Bổ sung hướng dẫn lệnh trong `renderHelp()`.
+   - Thêm `case '/projects':` trong `switch (cmd)` điều hướng tới `handleProjectsCommand(chatId)`.
+   - Liệt kê các dự án chưa ẩn (`projectRepo.getAll().filter(p => !p.archivedAt)`). Nếu chưa có dự án, thông báo `"Chưa có dự án nào"` kèm link dashboard.
+   - Mỗi dòng nội dung tin nhắn bao gồm: dấu ✅ nếu là dự án đang chọn của chat (hoặc `• ` nếu chưa chọn), tên + `id` (`<b>Tên</b> (<code>id</code>)`), nhánh mặc định (`<code>branch</code>`), và số task theo trạng thái gọn: `<x> đang chạy, <y> chờ, <z> chờ duyệt` (đếm `running`+`checking`, `queued`, `review`; bỏ qua `pushed`).
+   - Xây dựng bàn phím inline picker qua `buildProjectPicker(chatId)`: mỗi dự án một nút `📁 <tên>` (thêm `✅ ` ở đầu nếu đang chọn: `✅ 📁 <tên>`), `callback_data: use:select:<id>`. Từ 6 dự án trở lên xếp 2 nút một hàng. Hàng cuối có nút `🚫 Bỏ chọn` (`use:clear:`) khi đang có dự án được chọn.
+2. **Callback queries**:
+   - `use:select:<id>`: cập nhật `selectedProject` và lưu config; thực hiện `editMessage` tại chỗ trên `query.message.message_id` để cập nhật dấu ✅ trong nội dung tin và bàn phím; phản hồi ngắn qua `answerCallbackQuery`. Nếu `editMessage` thất bại (tin quá cũ hoặc không có message_id), gửi tin nhắn mới như trước.
+   - `use:clear:`: bỏ chọn dự án (`selectedProject.delete`), lưu config, cập nhật tin nhắn tại chỗ (bỏ dấu ✅ và nút Bỏ chọn) và phản hồi `answerCallbackQuery`.
+   - Từ chối dự án đã ẩn (`project.archivedAt`) hoặc không tồn tại với thông báo rõ qua `answerCallbackQuery`.
+   - Kế thừa kiểm tra quyền hạn `allowedChatIds` sẵn có trong `handleCallbackQuery`.
+3. **Lệnh `/use` không đối số**:
+   - Khi đã có dự án được chọn, ngoài dòng `"Dự án đang chọn: <b>...</b>"` còn gắn kèm bàn phím inline picker từ `buildProjectPicker(chatId)` để đổi dự án nhanh hoặc bấm bỏ chọn.
+
+## Giao diện tin nhắn
+- Tin nhắn danh sách dự án `/projects`:
+  ```
+  📁 Danh sách dự án:
+
+  ✅ Active Project (p-active) · main — 1 đang chạy, 1 chờ, 1 chờ duyệt
+  • Other Project (p-other) · develop — 0 đang chạy, 0 chờ, 0 chờ duyệt
+  ```
+  Bàn phím inline buttons:
+  - Dưới 6 dự án: 1 nút / dòng:
+    `[ ✅ 📁 Active Project ]`
+    `[ 📁 Other Project ]`
+    `[ 🚫 Bỏ chọn ]`
+  - Từ 6 dự án trở lên: 2 nút / dòng theo dạng lưới, nút `🚫 Bỏ chọn` ở dòng cuối cùng.
+- Tin nhắn `/use` khi đã chọn dự án:
+  ```
+  📁 Dự án đang chọn: Active Project (p-active)
+
+  Gõ /use <dự án> để đổi, hoặc /use none để bỏ chọn.
+  ```
+  Kèm bàn phím chọn dự án tương tự trên.
+
+## Danh sách file đã sửa
+- `src/telegram.ts`: Thêm lệnh `projects` trong menu & help, xử lý command `/projects`, hàm tạo danh sách & picker `buildProjectsListText`, `buildProjectPicker`, xử lý callback `use:select` và `use:clear` với `editMessageText`, gắn picker vào `/use`.
+- `test/telegram.test.ts`: Thêm suite test `Lệnh /projects trên Telegram (t-telegram-projects-cmd)` gồm 8 test case kiểm thử toàn diện các yêu cầu (a) đến (f), bố cục lưới 2 cột và thông báo khi rỗng.
+
+## Kết quả kiểm tra
+- `npm run lint`: Passed (0 errors, 80 warnings cũ trong test suite khác).
+- `npx tsc --noEmit -p .`: Passed (0 errors).
+- `npm run test -- --run test/telegram.test.ts`: Passed (140/140 tests).
+- `npm run test -- --run`: Passed (131 test files, 1623 tests).
+- `npm run build`: Passed.
+
+## Việc chưa làm được
+- Không có. Hoàn thành 100% yêu cầu.
+
+## Danh sách commit
+- `a87f0cb0 feat: add /projects command and project picker inline keyboard`
+- `94a4eea0 test: add unit tests for /projects command and inline project picker`

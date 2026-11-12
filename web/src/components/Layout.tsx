@@ -5,8 +5,9 @@ import { useTheme } from '../context/ThemeContext';
 import { useLocale } from '../context/LocaleContext';
 import { VersionBanner } from './VersionBanner';
 import { subscribeConnectionState } from '../api/sse';
-import { getBatches, getStatus, setFocus } from '../api/client';
+import { cancelRestart, getBatches, getStatus, requestRestart, setFocus } from '../api/client';
 import { useBranding } from '../context/BrandingContext';
+import { useAuthedImage } from '../hooks/useAuthedImage';
 import {
   Activity,
   CheckSquare,
@@ -27,6 +28,8 @@ import {
 } from 'lucide-react';
 import { CircleHelp } from 'lucide-react';
 import { HelpPanel } from './tour/HelpPanel';
+
+const DEFAULT_AGENTHUB_LOGO = '/branding/agenthub-logo-v3.png';
 
 const PlansBadgeInner: React.FC = () => {
   const { data: batches = [] } = useQuery({
@@ -78,6 +81,33 @@ const FocusBanner: React.FC = () => {
   return <FocusBannerInner />;
 };
 
+const RestartBannerInner: React.FC = () => {
+  const { t } = useLocale();
+  const queryClient = useQueryClient();
+  const { data: status } = useQuery({ queryKey: ['status'], queryFn: getStatus, staleTime: 2000 });
+  const cancel = useMutation({ mutationFn: cancelRestart, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['status'] }) });
+  const forceRestart = useMutation({
+    mutationFn: () => requestRestart('now'),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['status'] }),
+  });
+  const restart = (status as { restart?: { draining?: boolean; waitingFor?: unknown[] } } | undefined)?.restart;
+  if (!restart?.draining) return null;
+  const workerCount = restart.waitingFor?.length || 0;
+  return <div className="flex items-center justify-between gap-3 px-6 py-2 text-sm bg-[var(--t-selected)] border-b border-[var(--t-accent)]/30" role="status">
+    <span>🔄 {t('settings.restartDraining', { count: String(workerCount) })}</span>
+    <span className="flex items-center gap-3">
+      <button type="button" className="underline" onClick={() => cancel.mutate()} disabled={cancel.isPending || forceRestart.isPending}>{t('settings.restartCancel')}</button>
+      <button type="button" className="underline text-[var(--t-crit)]" onClick={() => { if (window.confirm(t('settings.restartNowConfirm', { count: String(workerCount) }))) forceRestart.mutate(); }} disabled={cancel.isPending || forceRestart.isPending}>{t('settings.restartNow')}</button>
+    </span>
+  </div>;
+};
+
+export const RestartBanner: React.FC = () => {
+  const client = React.useContext(QueryClientContext);
+  if (!client) return null;
+  return <RestartBannerInner />;
+};
+
 export const Layout: React.FC = () => {
   const { mode, setMode } = useTheme();
   const { t, toggleLocale, locale } = useLocale();
@@ -107,6 +137,13 @@ export const Layout: React.FC = () => {
 
   const connected = isOnline && sseConnected;
   const branding = useBranding();
+  const logoUrl = branding.logo ? `/api/branding/logo?v=${branding.logoVersion ?? encodeURIComponent(branding.logo)}` : null;
+  const { src: logoSrc, error: logoError } = useAuthedImage(logoUrl, branding.logoVersion ?? branding.logo);
+  const [logoImgFailed, setLogoImgFailed] = useState(false);
+
+  useEffect(() => {
+    setLogoImgFailed(false);
+  }, [logoSrc]);
 
   const navItems = [
     { to: '/', label: t('common.dashboard'), icon: Activity },
@@ -170,7 +207,24 @@ export const Layout: React.FC = () => {
             className="flex items-center gap-3 overflow-hidden rounded-lg focus:outline-hidden focus-visible:ring-2 focus-visible:ring-[var(--t-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--t-surface)]"
           >
             <div className="w-8 h-8 rounded-lg bg-[var(--t-accent)] flex items-center justify-center text-[var(--t-on-accent)] shrink-0 shadow-xs">
-              {branding.logo ? <img src={`/api/branding/logo?v=${branding.logoVersion ?? encodeURIComponent(branding.logo)}`} alt="" className="w-full h-full rounded-lg object-contain" /> : <Bot size={18} />}
+              {branding.logo && logoSrc && !logoError && !logoImgFailed ? (
+                <img
+                  src={logoSrc}
+                  alt=""
+                  data-testid="branding-logo"
+                  onError={() => setLogoImgFailed(true)}
+                  className="w-full h-full rounded-lg object-contain"
+                />
+              ) : !branding.logo ? (
+                <img
+                  src={DEFAULT_AGENTHUB_LOGO}
+                  alt=""
+                  data-testid="branding-logo"
+                  className="w-full h-full rounded-lg object-contain"
+                />
+              ) : (
+                <Bot size={18} />
+              )}
             </div>
             <span className="font-bold text-base tracking-tight text-[var(--t-text)] max-[1100px]:hidden truncate">
               {branding.name}
@@ -212,6 +266,7 @@ export const Layout: React.FC = () => {
       <div className="flex-1 min-w-0 flex flex-col">
         <VersionBanner />
         <FocusBanner />
+        <RestartBanner />
 
         {/* Header 56px */}
         <header className="h-[56px] sticky top-0 z-20 bg-[var(--t-surface)]/90 backdrop-blur border-b border-[var(--t-border)] px-6 flex items-center justify-between gap-4">

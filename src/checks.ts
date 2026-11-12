@@ -10,7 +10,7 @@ import { taskCommitRef } from './commit-convention.js';
 const MAX_OUTPUT = 8192;
 const CONFLICT_MARKER_REGEX = /^(<{7}|={7}|>{7})( |$)/m;
 export interface CheckDefinition { name: string; cmd: string[]; timeoutSec?: number }
-export interface CheckResult { name: string; ok: boolean; exitCode: number | null; durationMs: number; outputTail: string; runId?: string; runStartedAt?: string }
+export interface CheckResult { name: string; ok: boolean; exitCode: number | null; durationMs: number; outputTail: string; runId?: string; runStartedAt?: string; seq?: number; startedAt?: string; skipped?: boolean }
 export interface CheckRunOptions { reuseSavedResults?: boolean; onlyNames?: string[] }
 
 /** Release packaging is deliberately opt-in: it may run npm ci and rebuild the hub. */
@@ -203,21 +203,35 @@ export class CheckRunner {
     }
     const head = worktreeHead(repo);
     const existingRows = options.reuseSavedResults
-      ? this.db.prepare('SELECT name, ok, exitCode, durationMs, outputTail, head FROM check_results WHERE taskId = ? AND runId = ?')
-        .all(task.id, runId) as Array<{ name: string; ok: number; exitCode: number | null; durationMs: number; outputTail: string; head: string | null }>
+      ? this.db.prepare('SELECT name, ok, exitCode, durationMs, outputTail, head, seq, startedAt FROM check_results WHERE taskId = ? AND runId = ?')
+        .all(task.id, runId) as Array<{ name: string; ok: number; exitCode: number | null; durationMs: number; outputTail: string; head: string | null; seq?: number | null; startedAt?: string | null }>
       : [];
     const existing = new Map(existingRows.filter((row) => row.head === head && head !== null).map((row) => [row.name, row] as const));
     const results: CheckResult[] = [];
+    let seq = 1;
     for (const check of checks) {
-      const saved = existing.get(check.name) as CheckResult | undefined;
+      const saved = existing.get(check.name);
       if (saved) {
-        results.push({ ...saved, ok: Boolean(saved.ok) });
+        results.push({
+          name: saved.name,
+          ok: Boolean(saved.ok),
+          exitCode: saved.exitCode,
+          durationMs: saved.durationMs,
+          outputTail: saved.outputTail,
+          seq: saved.seq ?? seq,
+          startedAt: saved.startedAt ?? undefined,
+        });
+        seq++;
         continue;
       }
+      const startedAt = new Date().toISOString();
       const result = await runOne(check, repo, hubHome, project, task);
+      result.seq = seq;
+      result.startedAt = startedAt;
       results.push(result);
-      this.db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(task.id, runId, result.name, result.ok ? 1 : 0, result.exitCode, result.durationMs, result.outputTail, head);
+      this.db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head, seq, startedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(task.id, runId, result.name, result.ok ? 1 : 0, result.exitCode, result.durationMs, result.outputTail, head, seq, startedAt);
+      seq++;
     }
     return { passed: results.every((r) => r.ok), failed: results.filter((r) => !r.ok).map((r) => r.name), results };
   }
@@ -233,13 +247,13 @@ export class CheckRunner {
   }
 }
 export function getCheckResults(db: Database.Database, taskId: string): CheckResult[] {
-  const rows = db.prepare(`SELECT c.name, c.ok, c.exitCode, c.durationMs, c.outputTail, c.runId, r.startedAt AS runStartedAt
+  const rows = db.prepare(`SELECT c.name, c.ok, c.exitCode, c.durationMs, c.outputTail, c.runId, r.startedAt AS runStartedAt, c.seq, c.startedAt
     FROM check_results c JOIN runs r ON r.id = c.runId
     WHERE c.taskId = ? AND c.runId = (
       SELECT c2.runId FROM check_results c2 JOIN runs r2 ON r2.id = c2.runId
       WHERE c2.taskId = ? GROUP BY c2.runId ORDER BY r2.startedAt DESC, r2.rowid DESC LIMIT 1
     )
-    ORDER BY c.rowid`).all(taskId, taskId) as Array<{
+    ORDER BY c.seq, c.rowid`).all(taskId, taskId) as Array<{
     name: string;
     ok: number;
     exitCode: number | null;
@@ -247,6 +261,13 @@ export function getCheckResults(db: Database.Database, taskId: string): CheckRes
     outputTail: string;
     runId: string;
     runStartedAt: string;
+    seq?: number | null;
+    startedAt?: string | null;
   }>;
-  return rows.map((r) => ({ ...r, ok: Boolean(r.ok) }));
+  return rows.map((r) => ({
+    ...r,
+    ok: Boolean(r.ok),
+    seq: r.seq ?? undefined,
+    startedAt: r.startedAt ?? undefined,
+  }));
 }

@@ -37,6 +37,7 @@ import { SetupTools } from './setup-tools.js';
 import { OpenProjectWritebackService } from './integrations/openproject/writeback.js';
 import { GiteaSyncService } from './integrations/gitea/service.js';
 import { ProfileService } from './profiles/index.js';
+import { AvatarService } from './avatar.js';
 import { Scheduler } from './scheduler/index.js';
 import { Engine, AgyEngine, CodexEngine, FakeEngine } from './engines/index.js';
 import { AppService } from './services/index.js';
@@ -70,6 +71,7 @@ import { PerfCollector } from './perf.js';
 import { pruneNodeModulesCache } from './cache.js';
 import { cleanupStaleAgentHubTempDirs } from './temp-cleanup.js';
 import { getOrCreateToken } from './auth.js';
+import { getPlatform } from './platform/index.js';
 
 export interface DaemonContext {
   config: AgentHubConfig;
@@ -91,6 +93,7 @@ export interface DaemonContext {
   chatRetryRepo: ChatRetryRepo;
   permissionBroker: PermissionBroker;
   profileService: ProfileService;
+  avatarService: AvatarService;
   scheduler: Scheduler;
   service: AppService;
   chatService: ChatService;
@@ -480,6 +483,7 @@ export function createContext(
     chatRetryRepo,
     permissionBroker,
     profileService,
+    avatarService: service.avatarService,
     scheduler,
     service,
     chatService,
@@ -511,7 +515,7 @@ export function createContext(
   };
 }
 
-export function closeContext(ctx: DaemonContext): void {
+export function closeContext(ctx: DaemonContext, preserveWorkerProcesses = false): void {
   try {
     ctx.perfCollector?.stop();
   } catch {
@@ -563,7 +567,7 @@ export function closeContext(ctx: DaemonContext): void {
     // ignore
   }
   try {
-    stopProcessGroups('SIGTERM');
+    if (!preserveWorkerProcesses) stopProcessGroups('SIGTERM');
   } catch {
     // ignore
   }
@@ -575,6 +579,8 @@ export function closeContext(ctx: DaemonContext): void {
   try {
     ctx.usageService?.stop();
     ctx.service?.stopWakeupTimer();
+    ctx.service?.stopCockpitAutoSyncTimer();
+    ctx.service?.stopClaudeAuthRecovery();
   } catch {
     // ignore
   }
@@ -613,6 +619,7 @@ export async function startDaemon(
 
   // Register profiles on startup
   ctx.profileService.registerAll();
+  ctx.service.cleanupAvatarCache();
   // Claude /usage opens the real Claude Code CLI; never do that from the test suite.
   if (!process.env.VITEST) {
     ctx.usageService.configureClaude({
@@ -622,6 +629,7 @@ export async function startDaemon(
   }
   ctx.usageService.start();
   ctx.service.startWakeupTimer();
+  ctx.service.startCockpitAutoSyncTimer();
 
   // Start scheduler
   ctx.scheduler.start();
@@ -646,6 +654,14 @@ export async function startDaemon(
   }
 
   // Start Fastify HTTP server with security and API endpoints
+  let controlledRestart = false;
+  ctx.service.setRestartHandler(() => {
+    controlledRestart = true;
+    setImmediate(() => {
+      getPlatform().restartService();
+      void shutdown();
+    });
+  });
   const fastify = await createServer(ctx.service, config, {
     openProjectSync: (sourceId) => ctx.intakeService.sync(sourceId),
     openProjectDailyReport: (sourceId, date) =>
@@ -669,6 +685,9 @@ export async function startDaemon(
         }
       }
       setImmediate(() => { void shutdown(); });
+    },
+    onRestart: () => {
+      ctx.service.triggerRestart();
     },
   });
 
@@ -712,7 +731,7 @@ export async function startDaemon(
     try {
       // Dừng nhận request trước, rồi mới đóng scheduler và DB
       await fastify.close();
-      closeContext(ctx);
+      closeContext(ctx, controlledRestart);
     } catch (err) {
       console.error('Error during shutdown:', err);
     } finally {
@@ -730,6 +749,10 @@ export async function startDaemon(
     try {
       parentIsServiceManager = /^(?:systemd|launchd)$/i.test(fs.readFileSync(`/proc/${process.ppid}/comm`, 'utf8').trim());
     } catch { /* platform does not expose the parent name */ }
+    // A termination that did not come through the explicit drain API is still
+    // a hub restart from the worker's point of view. Persist the outcome and
+    // explanation before the process group is torn down.
+    if (workersRunning) ctx.scheduler.shutdownForUser('hub_restart');
     if (workersRunning && !parentIsServiceManager) ctx.eventRepo.insert('daemon.stop_requested', undefined, { senderPid: process.ppid || null });
     void shutdown();
   };

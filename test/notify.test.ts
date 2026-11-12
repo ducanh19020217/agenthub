@@ -313,10 +313,10 @@ describe('NotificationService (Desktop Notifications)', () => {
   it('notifies when a profile authentication expires', () => {
     const notifier = new NotificationService({ eventBus, config, exec: fakeExec });
     notifier.start();
-    eventBus.emit('profile.auth_expired', undefined, { name: 'g3' });
+    eventBus.emit('profile.auth_expired', undefined, { name: 'g3', loginCommand: 'CLAUDE_CONFIG_DIR=/tmp/ncs claude /login' });
     expect(execCalls[0]).toEqual({
       file: 'notify-send',
-      args: ['-t', '10000', '-a', 'AgentHub', 'Hồ sơ g3 cần đăng nhập lại'],
+      args: ['-u', 'critical', '-t', '10000', '-a', 'AgentHub', 'Hồ sơ g3 cần đăng nhập lại. Chạy: CLAUDE_CONFIG_DIR=/tmp/ncs claude /login'],
     });
     notifier.stop();
   });
@@ -1262,6 +1262,37 @@ describe('NotificationService (Desktop Notifications)', () => {
     expect(execCalls).toHaveLength(4);
     restartedNotifier.stop();
 
+    notifier.stop();
+  });
+
+  it('notifies on task.pushed and task.push_failed', () => {
+    const notifier = new NotificationService({
+      eventBus,
+      config,
+      taskRepo,
+      profileRepo,
+      quotaMarkRepo,
+      projectRepo,
+      exec: fakeExec,
+    });
+    notifier.start();
+
+    eventBus.emit('task.pushed', 'proj/t-pushed', {
+      projectId: 'proj',
+      title: 'Task Pushed',
+      branch: 'main',
+    });
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.at(-1)).toContain('Đã đẩy lên git vào main');
+
+    eventBus.emit('task.push_failed', 'proj/t-failed', {
+      projectId: 'proj',
+      title: 'Task Push Failed',
+      error: 'rejected',
+    });
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[1].args.at(-1)).toContain('Đẩy git thất bại');
+    expect(execCalls[1].args.at(-1)).toContain('rejected');
     notifier.stop();
   });
 });

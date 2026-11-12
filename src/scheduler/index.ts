@@ -271,6 +271,7 @@ const ARBITER_ROUNDS = 2;
 const ARBITER_RETRY_MODEL = 'claude-opus-4-6-thinking';
 const REVIEWER_CRASH_BACKOFF_MS = 60_000;
 const REVIEWER_LOCK_BACKOFF_MS = 10_000;
+const DIRTY_WORKTREE_RECHECK_MS = 30 * 60 * 1000;
 
 export interface ReviewerRun {
   taskId: string;
@@ -4318,11 +4319,18 @@ export class Scheduler {
         if (fs.existsSync(task.worktreePath)) {
           let dirty = false;
           try {
-            dirty = execFileSync('git', ['-C', task.worktreePath, 'status', '--porcelain'], { encoding: 'utf8' }).trim().length > 0;
+            dirty = execFileSync('git', ['-C', task.worktreePath, 'status', '--porcelain'], {
+              encoding: 'utf8',
+              timeout: 30_000,
+              stdio: ['ignore', 'pipe', 'ignore'],
+            }).trim().length > 0;
           } catch {
             // A non-git directory is still eligible for a task-owned cleanup.
           }
           if (dirty) {
+            // `git status` runs synchronously on the scheduler tick (every 2s) and can take seconds on
+            // big repos. Without a back-off, a few dirty worktrees block the event loop and the API.
+            this.worktreeCleanupRetryAt.set(task.id, now + DIRTY_WORKTREE_RECHECK_MS);
             if (!this.dirtyWorktreeLogged.has(task.id)) {
               this.dirtyWorktreeLogged.add(task.id);
               console.warn(`[worktree] Keeping ${task.worktreePath}: uncommitted changes for task ${task.id}`);

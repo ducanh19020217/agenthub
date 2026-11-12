@@ -232,6 +232,30 @@ describe('Worktree Auto-Cleanup', () => {
     expect(ctx.taskRepo.get('proj/t-dirty')?.worktreePath).toBe(dirtyWorktree);
   });
 
+  it('backs off re-checking a dirty worktree instead of running git status every tick', () => {
+    const dirtyWorktree = path.join(tmpDir, 'worktrees', 'proj', 't-dirty-backoff');
+    execFileSync('git', ['-C', projectPath, 'worktree', 'add', dirtyWorktree, '-b', 'agenthub/t-dirty-backoff', 'main']);
+    fs.writeFileSync(path.join(dirtyWorktree, 'uncommitted.txt'), 'keep me');
+    ctx.taskRepo.insert({ id: 'proj/t-dirty-backoff', projectId: 'proj', slug: 't-dirty-backoff', title: 'Dirty', status: 'cancelled' });
+    ctx.taskRepo.update('proj/t-dirty-backoff', { worktreePath: dirtyWorktree });
+    const oldTime = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString().replace('T', ' ').replace('Z', '').slice(0, 19);
+    ctx.db.prepare("UPDATE tasks SET updatedAt = ? WHERE id = 'proj/t-dirty-backoff'").run(oldTime);
+
+    ctx.scheduler.tick();
+    expect(fs.existsSync(dirtyWorktree)).toBe(true);
+
+    // Now clean: the next tick must not re-check yet (backed off), so the worktree stays.
+    fs.rmSync(path.join(dirtyWorktree, 'uncommitted.txt'));
+    ctx.scheduler.tick();
+    expect(fs.existsSync(dirtyWorktree)).toBe(true);
+
+    // After the back-off window the clean worktree is pruned.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 31 * 60 * 1000);
+    ctx.scheduler.tick();
+    expect(fs.existsSync(dirtyWorktree)).toBe(false);
+    expect(ctx.taskRepo.get('proj/t-dirty-backoff')?.worktreePath).toBeNull();
+  });
+
   it('keeps the DB path and backs off when worktree removal fails', () => {
     const worktreePath = path.join(tmpDir, 'worktrees', 'proj', 't-failing-remove');
     execFileSync('git', ['-C', projectPath, 'worktree', 'add', worktreePath, '-b', 'agenthub/t-failing-remove', 'main']);

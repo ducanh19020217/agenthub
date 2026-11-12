@@ -137,9 +137,6 @@ export interface PublishTaskDeps {
     getByTask(taskId: string): Array<{ verdict: string; feedback?: string | null; actor?: string | null }>;
   };
   config?: AgentHubConfig;
-  notifyService?: {
-    notify(message: string, level?: string): void;
-  };
 }
 
 export type LocalBranchUpdateStatus = 'updated' | 'skipped_dirty';
@@ -230,12 +227,14 @@ export async function findMergeCommitForTask(
       }
     }
 
-    // Fallback: search merge commits by branch name or slug in commit message
+    // Fallback: search merge commits by exact branch name or slug in commit message
     for (const pattern of [taskBranch, task.slug]) {
       if (!pattern) continue;
       try {
+        const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = `(^|[ '"/])${escaped}([ '"]|$)`;
         const out = await runGit(
-          ['-C', repoPath, 'log', '--merges', '--first-parent', `--grep=${pattern}`, '--reverse', '--format=%H', searchRef],
+          ['-C', repoPath, 'log', '--merges', '--first-parent', '-E', `--grep=${regex}`, '--reverse', '--format=%H', searchRef],
           repoPath,
           env,
         );
@@ -1229,10 +1228,6 @@ export async function publishTask(
 
       // 6. Update local branch ref to match pushed commit safely
       const localUpdate = await updateLocalBranchSafely(repoPath, targetBranch, pushedCommit, env);
-      if (localUpdate === 'skipped_dirty') {
-        const dirtyWarningMsg = `Đã đẩy lên remote; nhánh local ${targetBranch} chưa cập nhật vì thư mục đang có thay đổi chưa commit`;
-        deps.notifyService?.notify(dirtyWarningMsg, 'warning');
-      }
 
       // 7. Push integration branch if enabled
       let pushedIntegrationBranch = false;

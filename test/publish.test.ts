@@ -1396,6 +1396,57 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(diffB.diff).not.toContain('content A');
     });
 
+    it('findMergeCommitForTask fallback --grep không khớp chuỗi con (t-foo không khớp t-foo-fix)', async () => {
+      const { findMergeCommitForTask } = await import('../src/publish.js');
+      const repoPath = path.join(tmpDir, 'local-repo-grep-boundary');
+      fs.mkdirSync(repoPath, { recursive: true });
+      execFileSync('git', ['init', '-b', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['config', 'user.name', 'Tester'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['config', 'user.email', 'tester@example.com'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'README.md'), '# Base\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'chore: initial'], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+
+      // First merge: t-foo-fix
+      execFileSync('git', ['checkout', '-b', 'agenthub/t-foo-fix'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'fix.txt'), 'fix\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: t-foo-fix'], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/t-foo-fix', '-m', "Merge branch 'agenthub/t-foo-fix' into agenthub/integration"], { cwd: repoPath, env: testEnv });
+      const mergeFixSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+      // Second merge: t-foo
+      execFileSync('git', ['checkout', '-b', 'agenthub/t-foo'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'foo.txt'), 'foo\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: t-foo'], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/t-foo', '-m', "Merge branch 'agenthub/t-foo' into agenthub/integration"], { cwd: repoPath, env: testEnv });
+      const mergeFooSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+      // Delete local branches so findMergeCommitForTask is forced to use commit message grep fallback
+      execFileSync('git', ['branch', '-D', 'agenthub/t-foo-fix'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['branch', '-D', 'agenthub/t-foo'], { cwd: repoPath, env: testEnv });
+
+      const taskFoo = {
+        id: 'proj/t-foo',
+        projectId: 'proj',
+        slug: 't-foo',
+        title: 'Task Foo',
+        branch: 'agenthub/t-foo',
+      } as unknown as import('../src/db/index.js').TaskRow;
+
+      const foundMerge = await findMergeCommitForTask(repoPath, taskFoo, ['agenthub/integration'], testEnv);
+      // Must find mergeFooSha, NOT the older mergeFixSha!
+      expect(foundMerge).toBe(mergeFooSha);
+      expect(foundMerge).not.toBe(mergeFixSha);
+    });
+
     it('verdict fail + findings rỗng -> không push, retryable, task không bị trả về', async () => {
       const remotePath = path.join(tmpDir, 'remote-fail-empty.git');
       initBareRemote(remotePath);

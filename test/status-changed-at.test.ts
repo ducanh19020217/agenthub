@@ -6,9 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   MIGRATIONS,
   openDatabase,
-  backfillTaskStatusChangedAt,
   TaskRepo,
-  EventRepo,
 } from '../src/db/index.js';
 
 const tempDirs: string[] = [];

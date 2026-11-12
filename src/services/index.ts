@@ -2450,6 +2450,9 @@ export class AppService {
           const saved = JSON.parse(note.content.slice('project_archive_status:'.length)) as { status?: string; waitReason?: string | null };
           if (saved.status) {
             this.taskRepo.update(note.taskId, { status: saved.status, waitReason: saved.waitReason as TaskRow['waitReason'] });
+            const resumePayload = { reason: 'project_restored', status: saved.status };
+            this.eventRepo?.insert(`task.${saved.status}`, note.taskId, resumePayload);
+            this.scheduler.getEventBus().emit(`task.${saved.status}`, note.taskId, resumePayload);
           }
         } catch {
           // Ignore malformed historical notes.
@@ -5067,6 +5070,9 @@ export class AppService {
     for (const task of tasks) {
       if (task.status === 'draft') {
         this.taskRepo.update(task.id, { status: 'cancelled', cancelReason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, cancelledBy: 'batch:discard' });
+        const cancelPayload = { reason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, by: 'batch:discard' };
+        this.eventRepo?.insert('task.cancelled', task.id, cancelPayload);
+        this.scheduler.getEventBus().emit('task.cancelled', task.id, cancelPayload);
       }
     }
     this.taskBatchRepo.updateStatus(id, 'discarded');

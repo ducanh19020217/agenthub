@@ -35,13 +35,21 @@ describe('Task statusChangedAt and backfill', () => {
       VALUES
         ('p/t1', 'p', 't1', 'Queued task', 'queued', '2026-10-15 08:00:00', '2026-10-15 08:05:00'),
         ('p/t2', 'p', 't2', 'Done task', 'done', '2026-10-15 08:00:00', '2026-10-15 08:30:00'),
-        ('p/t3', 'p', 't3', 'Missing event task', 'failed', '2026-10-15 08:00:00', '2026-10-15 09:00:00')
+        ('p/t3', 'p', 't3', 'Missing event task', 'failed', '2026-10-15 08:00:00', '2026-10-15 09:00:00'),
+        ('p/t4', 'p', 't4', 'Pushed task', 'pushed', '2026-10-15 08:00:00', '2026-10-15 08:40:00'),
+        ('p/t5', 'p', 't5', 'Review task', 'review', '2026-10-15 08:00:00', '2026-10-15 08:50:00'),
+        ('p/t6', 'p', 't6', 'Checking task', 'checking', '2026-10-15 08:00:00', '2026-10-15 08:55:00'),
+        ('p/t7', 'p', 't7', 'Waiting quota task', 'waiting_quota', '2026-10-15 08:00:00', '2026-10-15 08:58:00')
     `).run();
 
-    // Insert events for t1 and t2
+    // Insert events
     rawDb.prepare("INSERT INTO events (ts, type, taskId) VALUES ('2026-10-15 08:10:00', 'task.queued', 'p/t1')").run();
     rawDb.prepare("INSERT INTO events (ts, type, taskId) VALUES ('2026-10-15 08:05:00', 'task.queued', 'p/t2')").run();
     rawDb.prepare("INSERT INTO events (ts, type, taskId) VALUES ('2026-10-15 08:25:00', 'task.done', 'p/t2')").run();
+    rawDb.prepare("INSERT INTO events (ts, type, taskId) VALUES ('2026-10-15 08:35:00', 'task.pushed', 'p/t4')").run();
+    rawDb.prepare("INSERT INTO events (ts, type, taskId) VALUES ('2026-10-15 08:45:00', 'task.review_ready', 'p/t5')").run();
+    rawDb.prepare("INSERT INTO events (ts, type, taskId) VALUES ('2026-10-15 08:52:00', 'task.checking', 'p/t6')").run();
+    rawDb.prepare("INSERT INTO events (ts, type, taskId) VALUES ('2026-10-15 08:56:00', 'task.waiting_quota', 'p/t7')").run();
     rawDb.close();
 
     // Now open with openDatabase, which runs migration 75 and ensureStatusChangedAtBackfill
@@ -60,6 +68,22 @@ describe('Task statusChangedAt and backfill', () => {
     const t3 = taskRepo.get('p/t3')!;
     expect(t3.statusChangedAt).toBe(new Date(Date.parse('2026-10-15T09:00:00Z')).toISOString());
     expect(t3.statusChangedAtEstimated).toBe(1);
+
+    const t4 = taskRepo.get('p/t4')!;
+    expect(t4.statusChangedAt).toBe(new Date(Date.parse('2026-10-15T08:35:00Z')).toISOString());
+    expect(t4.statusChangedAtEstimated).toBe(0);
+
+    const t5 = taskRepo.get('p/t5')!;
+    expect(t5.statusChangedAt).toBe(new Date(Date.parse('2026-10-15T08:45:00Z')).toISOString());
+    expect(t5.statusChangedAtEstimated).toBe(0);
+
+    const t6 = taskRepo.get('p/t6')!;
+    expect(t6.statusChangedAt).toBe(new Date(Date.parse('2026-10-15T08:52:00Z')).toISOString());
+    expect(t6.statusChangedAtEstimated).toBe(0);
+
+    const t7 = taskRepo.get('p/t7')!;
+    expect(t7.statusChangedAt).toBe(new Date(Date.parse('2026-10-15T08:56:00Z')).toISOString());
+    expect(t7.statusChangedAtEstimated).toBe(0);
 
     db.close();
   });
@@ -167,18 +191,20 @@ describe('Task statusChangedAt and backfill', () => {
     expect(afterUpdate.statusChangedAtEstimated).toBe(1);
 
     // 3. updateStatus WITH a status change refreshes timestamp and resets estimated to 0
-    taskRepo.updateStatus('p/task-same', 'running');
+    const runningTime = '2026-11-12T01:00:00.000Z';
+    taskRepo.updateStatus('p/task-same', 'running', null, runningTime);
     const afterStatusChange = taskRepo.get('p/task-same')!;
     expect(afterStatusChange.status).toBe('running');
-    expect(afterStatusChange.statusChangedAt).not.toBe(originalTime);
+    expect(afterStatusChange.statusChangedAt).toBe(runningTime);
     expect(afterStatusChange.statusChangedAtEstimated).toBe(0);
 
-    // 4. update() WITH a status change refreshes timestamp and resets estimated to 0
-    const runningTime = afterStatusChange.statusChangedAt;
+    // 4. update() WITH a status change without explicit timestamp automatically sets now and resets estimated to 0
+    const beforeDone = Date.now();
     taskRepo.update('p/task-same', { status: 'done' });
     const afterUpdateChange = taskRepo.get('p/task-same')!;
     expect(afterUpdateChange.status).toBe('done');
     expect(afterUpdateChange.statusChangedAt).not.toBe(runningTime);
+    expect(Date.parse(afterUpdateChange.statusChangedAt)).toBeGreaterThanOrEqual(beforeDone - 1000);
     expect(afterUpdateChange.statusChangedAtEstimated).toBe(0);
 
     db.close();

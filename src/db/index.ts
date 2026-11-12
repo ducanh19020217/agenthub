@@ -1323,6 +1323,12 @@ export function backfillTaskStatusChangedAt(db: Database.Database): { updated: n
     ORDER BY rowid DESC LIMIT 1
   `);
 
+  const findReviewChangesRequestedStmt = db.prepare(`
+    SELECT createdAt FROM reviews
+    WHERE taskId = ? AND verdict = 'changes_requested'
+    ORDER BY id DESC LIMIT 1
+  `);
+
   const updateStmt = db.prepare(`
     UPDATE tasks
     SET statusChangedAt = ?, statusChangedAtEstimated = ?
@@ -1409,6 +1415,36 @@ export function backfillTaskStatusChangedAt(db: Database.Database): { updated: n
         }
         case 'draft': {
           ts = task.createdAt;
+          break;
+        }
+        case 'merged': {
+          const row = findEventStmt.get(task.id, 'task.merged') as { ts: string } | undefined;
+          if (row?.ts) {
+            ts = row.ts;
+          } else {
+            const doneRow = findDoneEventStmt.get(task.id) as { ts: string } | undefined;
+            if (doneRow?.ts) ts = doneRow.ts;
+          }
+          break;
+        }
+        case 'changes_requested': {
+          const row = findReviewChangesRequestedStmt.get(task.id) as { createdAt: string } | undefined;
+          if (row?.createdAt) {
+            ts = row.createdAt;
+          } else {
+            const eventRow = findEventStmt.get(task.id, 'review.completed') as { ts: string } | undefined;
+            if (eventRow?.ts) ts = eventRow.ts;
+          }
+          break;
+        }
+        case 'publishing': {
+          const row = findEventStmt.get(task.id, 'task.publishing') as { ts: string } | undefined;
+          if (row?.ts) ts = row.ts;
+          break;
+        }
+        case 'auditing': {
+          const row = findEventStmt.get(task.id, 'task.auditing') as { ts: string } | undefined;
+          if (row?.ts) ts = row.ts;
           break;
         }
       }

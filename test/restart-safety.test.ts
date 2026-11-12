@@ -491,6 +491,92 @@ describe('worker survival across daemon restart (handoff & adoption)', () => {
     exitSpy.mockRestore();
   });
 
+  it('SIGTERM with shutdown_requested marker is treated as user stop, killing worker processes', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+    process.env.FAKE_MODE = 'sleep-loop';
+    delete process.env.STOP_SLEEP;
+
+    taskRepo.insert({ id: 'p/tstopflag', projectId: 'p', slug: 'tstopflag', title: 'TStopFlag', status: 'queued', level: 'easy' });
+
+    const daemon = await startDaemon(config, new Map<string, Engine>([['agy', fakeEngine]]));
+    activeDaemons.push(daemon);
+    await vi.waitFor(() => {
+      expect(daemon.ctx.scheduler.getRunning().has('p/tstopflag')).toBe(true);
+    }, { timeout: 10_000 });
+
+    const rt = daemon.ctx.scheduler.getRunning().get('p/tstopflag')!;
+    const workerPid = rt.pid;
+    expect(workerPid).toBeGreaterThan(0);
+    expect(process.kill(workerPid, 0)).toBe(true);
+
+    // Place the shutdown marker file (as scripts/stop-prod.sh does)
+    fs.writeFileSync(path.join(config.hubHome, 'shutdown_requested'), '');
+
+    // Emit SIGTERM (simulating systemctl --user stop agenthub)
+    process.emit('SIGTERM');
+
+    await vi.waitFor(() => {
+      let alive = true;
+      try { process.kill(workerPid, 0); } catch { alive = false; }
+      expect(alive).toBe(false);
+    }, { timeout: 5000 });
+
+    const run = runRepo.getByTask('p/tstopflag')[0];
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toBe('user_stop');
+
+    activeDaemons = activeDaemons.filter((d) => d !== daemon);
+    exitSpy.mockRestore();
+  });
+
+  it('SIGTERM with stale shutdown_requested marker is treated as handoff (preserves worker)', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+    process.env.FAKE_MODE = 'sleep-loop';
+    delete process.env.STOP_SLEEP;
+
+    const flagPath = path.join(config.hubHome, 'shutdown_requested');
+    // Pre-create marker before daemon starts; startDaemon must clean it up
+    fs.writeFileSync(flagPath, 'stale-before-boot');
+
+    taskRepo.insert({ id: 'p/tstaleflag', projectId: 'p', slug: 'tstaleflag', title: 'TStaleFlag', status: 'queued', level: 'easy' });
+
+    const daemon = await startDaemon(config, new Map<string, Engine>([['agy', fakeEngine]]));
+    activeDaemons.push(daemon);
+
+    // Marker was cleared on daemon startup
+    expect(fs.existsSync(flagPath)).toBe(false);
+
+    await vi.waitFor(() => {
+      expect(daemon.ctx.scheduler.getRunning().has('p/tstaleflag')).toBe(true);
+    }, { timeout: 10_000 });
+
+    const rt = daemon.ctx.scheduler.getRunning().get('p/tstaleflag')!;
+    const workerPid = rt.pid;
+    expect(workerPid).toBeGreaterThan(0);
+    expect(process.kill(workerPid, 0)).toBe(true);
+
+    // Create a marker that has a stale mtime (>30s old)
+    fs.writeFileSync(flagPath, 'stale-marker');
+    const pastTimeSec = (Date.now() - 60_000) / 1000;
+    fs.utimesSync(flagPath, pastTimeSec, pastTimeSec);
+
+    // Emit SIGTERM (simulating systemctl --user restart agenthub or service restart)
+    process.emit('SIGTERM');
+
+    // Wait for shutdown to process: worker must REMAIN ALIVE (handoff, not user_stop)
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(process.kill(workerPid, 0)).toBe(true);
+
+    const run = runRepo.getByTask('p/tstaleflag')[0];
+    expect(run.handoff).toBe(1);
+    expect(run.outcome).toBeNull();
+
+    // Clean up worker process
+    try { process.kill(workerPid, 'SIGKILL'); } catch { /* ignore */ }
+    activeDaemons = activeDaemons.filter((d) => d !== daemon);
+    exitSpy.mockRestore();
+  });
+
   it('SIGTERM via real onTerm handler kills checking process group, new daemon only reruns check without rerunning worker', async () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
 

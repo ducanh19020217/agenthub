@@ -23,13 +23,69 @@ import {
 const execFileAsync = promisify(execFile);
 
 const activePublishProjects = new Set<string>();
+const publishLockReleaseListeners = new Map<string, Array<() => void>>();
 
 export function isProjectPublishing(projectId: string): boolean {
   return activePublishProjects.has(projectId);
 }
 
+export function onProjectPublishLockReleased(projectId: string, callback: () => void): () => void {
+  let list = publishLockReleaseListeners.get(projectId);
+  if (!list) {
+    list = [];
+    publishLockReleaseListeners.set(projectId, list);
+  }
+  list.push(callback);
+  return () => {
+    const arr = publishLockReleaseListeners.get(projectId);
+    if (arr) {
+      const idx = arr.indexOf(callback);
+      if (idx !== -1) arr.splice(idx, 1);
+    }
+  };
+}
+
+const lastProjectPublishError = new Map<string, string>();
+
 export function clearPublishLocks(): void {
   activePublishProjects.clear();
+  publishLockReleaseListeners.clear();
+  lastProjectPublishError.clear();
+}
+
+export function normalizePublishErrorKey(errorMsg: string): string {
+  return errorMsg
+    .replace(/[0-9a-f]{7,40}/gi, '<sha>')
+    .replace(/\b\d+\b/g, '<num>')
+    .replace(/\b[\w.-]+\/task-[\w.-]+\b/gi, '<task>')
+    .replace(/\btask-[\w.-]+\b/gi, '<task>')
+    .trim();
+}
+
+function emitPushFailed(
+  deps: PublishTaskDeps,
+  taskId: string,
+  projectId: string,
+  errorMsg: string,
+  remote?: string,
+  branch?: string,
+  isManual = false,
+) {
+  const normKey = normalizePublishErrorKey(errorMsg);
+  const lastError = lastProjectPublishError.get(projectId);
+  const isRepeat = lastError === normKey;
+  lastProjectPublishError.set(projectId, normKey);
+
+  const suppressNotification = !isManual && isRepeat;
+
+  deps.eventBus.emit('task.push_failed', taskId, {
+    taskId,
+    projectId,
+    error: errorMsg,
+    remote,
+    branch,
+    suppressNotification,
+  });
 }
 
 /**
@@ -44,6 +100,17 @@ export async function withProjectPublishLock<T>(projectId: string, fn: () => Pro
     return await fn();
   } finally {
     activePublishProjects.delete(projectId);
+    const listeners = publishLockReleaseListeners.get(projectId);
+    if (listeners && listeners.length > 0) {
+      publishLockReleaseListeners.delete(projectId);
+      for (const cb of listeners) {
+        try {
+          cb();
+        } catch (e) {
+          console.error(`[publish] Error in publish lock release listener for project ${projectId}:`, e);
+        }
+      }
+    }
   }
 }
 
@@ -134,12 +201,12 @@ export interface PublishTaskDeps {
   };
   reviewRepo?: {
     insert(review: Record<string, unknown>): void;
-    getByTask(taskId: string): Array<{ verdict: string; feedback?: string | null; actor?: string | null }>;
+    getByTask(taskId: string): Array<{ verdict: string; feedback?: string | null; actor?: string | null; createdAt?: string }>;
+  };
+  runRepo?: {
+    getByTask(taskId: string): Array<{ id: string; outcome?: string | null; startedAt?: string | null; endedAt?: string | null }>;
   };
   config?: AgentHubConfig;
-  notifyService?: {
-    notify(message: string, level?: string): void;
-  };
 }
 
 export type LocalBranchUpdateStatus = 'updated' | 'skipped_dirty';
@@ -230,12 +297,14 @@ export async function findMergeCommitForTask(
       }
     }
 
-    // Fallback: search merge commits by branch name or slug in commit message
+    // Fallback: search merge commits by exact branch name or slug in commit message
     for (const pattern of [taskBranch, task.slug]) {
       if (!pattern) continue;
       try {
+        const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = `(^|[ '"/])${escaped}([ '"]|$)`;
         const out = await runGit(
-          ['-C', repoPath, 'log', '--merges', '--first-parent', `--grep=${pattern}`, '--reverse', '--format=%H', searchRef],
+          ['-C', repoPath, 'log', '--merges', '--first-parent', '-E', `--grep=${regex}`, '--reverse', '--format=%H', searchRef],
           repoPath,
           env,
         );
@@ -356,6 +425,16 @@ export async function getTaskDiff(
   return { diff, changedFiles, commitSha, branchSha };
 }
 
+function parseTimestamp(raw: string | null | undefined): number {
+  if (!raw) return NaN;
+  const str = raw.trim();
+  if (!str) return NaN;
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(str)) {
+    return new Date(str.replace(' ', 'T') + 'Z').getTime();
+  }
+  return new Date(str).getTime();
+}
+
 /**
  * Identifies tasks merged into sourceBranch or targetBranch but not yet pushed to remote target branch.
  * Uses range remote/target..source to exclude tasks already present in remote/target.
@@ -369,7 +448,8 @@ async function findTasksToAudit(
   repoPath: string,
   env: NodeJS.ProcessEnv,
   deps: PublishTaskDeps,
-): Promise<TaskRow[]> {
+  sourceSha?: string | null,
+): Promise<{ tasksToAudit: TaskRow[]; baselineTasks: TaskRow[] }> {
   const mainTask = deps.taskRepo.get(taskId);
   const allTasks = deps.taskRepo.getByProject
     ? deps.taskRepo.getByProject(projectId)
@@ -383,19 +463,21 @@ async function findTasksToAudit(
   const hasTarget = await refExists(repoPath, targetRef, env);
 
   const doneTasks = allTasks.filter((t) => t.status === 'done');
-  const tasksToAudit: TaskRow[] = [];
+  const allCandidates: TaskRow[] = [];
+  const taskMergeCommitMap = new Map<string, string | null>();
 
   for (const t of doneTasks) {
     const tBranch = t.branch || `agenthub/${t.slug}`;
     const branchRef = `refs/heads/${tBranch}`;
     const branchExists = await refExists(repoPath, branchRef, env);
-    const mergeCommit = await findMergeCommitForTask(repoPath, t, [sourceBranch, targetBranch], env);
+    const mergeCommit = await findMergeCommitForTask(repoPath, t, [sourceSha || sourceBranch, targetBranch], env);
+    taskMergeCommitMap.set(t.id, mergeCommit);
 
     const taskRef = branchExists ? branchRef : mergeCommit;
 
     if (!taskRef) {
       if (t.id === taskId) {
-        tasksToAudit.push(t);
+        allCandidates.push(t);
       }
       continue;
     }
@@ -410,24 +492,103 @@ async function findTasksToAudit(
     }
 
     let mergedToPushTarget = false;
-    if (hasSource && (await isAncestor(repoPath, taskRef, sourceRef, env))) {
+    if (hasSource && (await isAncestor(repoPath, taskRef, sourceSha || sourceRef, env))) {
       mergedToPushTarget = true;
     } else if (hasTarget && (await isAncestor(repoPath, taskRef, targetRef, env))) {
       mergedToPushTarget = true;
-    } else if (branchExists && t.id === taskId) {
+    } else if (!hasSource && branchExists && t.id === taskId) {
       mergedToPushTarget = true;
     }
 
-    if (mergedToPushTarget || t.id === taskId) {
-      tasksToAudit.push(t);
+    if (mergedToPushTarget) {
+      allCandidates.push(t);
     }
   }
 
-  if (tasksToAudit.length === 0 && mainTask && (mainTask.status === 'done' || mainTask.status === 'pushed')) {
-    tasksToAudit.push(mainTask);
+  if (!allCandidates.some((t) => t.id === taskId) && mainTask && (mainTask.status === 'done' || mainTask.status === 'pushed')) {
+    if (!hasSource || !sourceSha) {
+      allCandidates.push(mainTask);
+    } else {
+      const taskBranch = mainTask.branch || `agenthub/${mainTask.slug}`;
+      const branchRef = `refs/heads/${taskBranch}`;
+      const branchExists = await refExists(repoPath, branchRef, env);
+      const mergeCommit = await findMergeCommitForTask(repoPath, mainTask, [sourceSha || sourceBranch, targetBranch], env);
+      const taskRef = branchExists ? branchRef : mergeCommit;
+      if (!taskRef) {
+        allCandidates.push(mainTask);
+      } else if (await isAncestor(repoPath, taskRef, sourceSha, env)) {
+        allCandidates.push(mainTask);
+      }
+    }
   }
 
-  return tasksToAudit;
+  const project = deps.projectRepo.get(projectId);
+  const settings = project ? projectSettings(project) : null;
+  const enabledAt = settings?.publish?.enabledAt || project?.createdAt;
+  const enabledTime = parseTimestamp(enabledAt);
+
+  // Separate baseline tasks merged before publish was enabled/migrated
+  if (!isNaN(enabledTime)) {
+    const tasksToAudit: TaskRow[] = [];
+    const baselineTasks: TaskRow[] = [];
+
+    for (const t of allCandidates) {
+      let mergeTime: number | null = null;
+      const mergeCommit = taskMergeCommitMap.get(t.id);
+      if (mergeCommit) {
+        try {
+          const commitDate = await runGit(['-C', repoPath, 'show', '-s', '--format=%cI', mergeCommit], repoPath, env);
+          const ts = parseTimestamp(commitDate);
+          if (!isNaN(ts)) mergeTime = ts;
+        } catch {
+          // ignore
+        }
+      }
+      if (mergeTime === null) {
+        const tBranch = t.branch || `agenthub/${t.slug}`;
+        const branchRef = `refs/heads/${tBranch}`;
+        if (await refExists(repoPath, branchRef, env)) {
+          try {
+            const commitDate = await runGit(['-C', repoPath, 'show', '-s', '--format=%cI', branchRef], repoPath, env);
+            const ts = parseTimestamp(commitDate);
+            if (!isNaN(ts)) mergeTime = ts;
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      if (mergeTime === null) {
+        const revs = deps.reviewRepo?.getByTask(t.id);
+        const approvedRev = revs?.find((r) => r.verdict === 'approved' && r.createdAt);
+        if (approvedRev?.createdAt) {
+          const ts = parseTimestamp(approvedRev.createdAt);
+          if (!isNaN(ts)) mergeTime = ts;
+        }
+      }
+
+      if (mergeTime === null && deps.runRepo) {
+        const runs = deps.runRepo.getByTask(t.id);
+        const doneRun = runs?.slice().reverse().find((r) => r.outcome === 'done' && (r.endedAt || r.startedAt));
+        if (doneRun) {
+          const ts = parseTimestamp(doneRun.endedAt || doneRun.startedAt);
+          if (!isNaN(ts)) mergeTime = ts;
+        }
+      }
+
+      // Root task being published must never be categorized as baseline (always audit the gated root task).
+      // Other tasks without a verifiable merge timestamp safely fall back to audit (fail-closed).
+      if (t.id !== taskId && mergeTime !== null && mergeTime < enabledTime) {
+        baselineTasks.push(t);
+      } else {
+        tasksToAudit.push(t);
+      }
+    }
+
+    return { tasksToAudit, baselineTasks };
+  }
+
+  return { tasksToAudit: allCandidates, baselineTasks: [] };
 }
 
 /**
@@ -722,6 +883,7 @@ export async function publishTask(
     }
 
     const currentSettings = projectSettings(currentProject);
+    const isManual = Boolean(options?.manual);
     const remote = currentSettings.publish?.remote || 'origin';
     const targetBranch = currentSettings.publish?.branch || currentProject.defaultBranch || 'main';
 
@@ -746,13 +908,7 @@ export async function publishTask(
       deps.taskRepo.update(taskId, {
         pushResult: JSON.stringify({ error: errorMsg, failedAt, retryable: true }),
       });
-      deps.eventBus.emit('task.push_failed', taskId, {
-        taskId,
-        projectId: currentProject.id,
-        error: errorMsg,
-        remote,
-        branch: targetBranch,
-      });
+      emitPushFailed(deps, taskId, currentProject.id, errorMsg, remote, targetBranch, isManual);
       return { ok: false, error: errorMsg, remote, branch: targetBranch };
     }
 
@@ -765,13 +921,7 @@ export async function publishTask(
       deps.taskRepo.update(taskId, {
         pushResult: JSON.stringify({ error: errorMsg, failedAt, retryable: true }),
       });
-      deps.eventBus.emit('task.push_failed', taskId, {
-        taskId,
-        projectId: currentProject.id,
-        error: errorMsg,
-        remote,
-        branch: targetBranch,
-      });
+      emitPushFailed(deps, taskId, currentProject.id, errorMsg, remote, targetBranch, isManual);
       return { ok: false, error: errorMsg, remote, branch: targetBranch, retryable: true };
     }
 
@@ -795,12 +945,50 @@ export async function publishTask(
       ? remoteRef
       : ((await refExists(repoPath, `refs/heads/${targetBranch}`, env)) ? `refs/heads/${targetBranch}` : targetBranch);
 
+    // Snapshot source branch SHA before computing tasksToAudit so concurrent merges are not included without audit
+    const sourceRef = `refs/heads/${sourceBranch}`;
+    let sourceSha: string | null = null;
+    if (await refExists(repoPath, sourceRef, env)) {
+      sourceSha = await runGit(['-C', repoPath, 'rev-parse', sourceRef], repoPath, env);
+    }
+
     // --- Pre-Publish Audit Gate ---
-    const isManual = Boolean(options?.manual);
     const isSkipAudit = isManual && Boolean(options?.skipAudit);
     const isAuditConfigEnabled = currentSettings.publish?.audit?.enabled !== false;
-    let tasksToAudit: TaskRow[] = [];
     const auditedResults = new Map<string, PrePublishAuditResult>();
+
+    // Candidate discovery runs in all publish modes to determine which tasks belong to the push snapshot
+    const candidates = await findTasksToAudit(
+      taskId,
+      currentProject.id,
+      sourceBranch,
+      targetBranch,
+      remote,
+      repoPath,
+      env,
+      deps,
+      sourceSha,
+    );
+    const tasksToAudit = candidates.tasksToAudit;
+    const baselineTasks = candidates.baselineTasks;
+
+    const rootInAudit = tasksToAudit.some((t) => t.id === taskId);
+    const rootInBaseline = baselineTasks.some((t) => t.id === taskId);
+    if (!rootInAudit && !rootInBaseline) {
+      const errorMsg = `Task ${taskId} is not included in the push commit or source snapshot (${sourceSha || sourceBranch})`;
+      const failedAt = new Date().toISOString();
+      deps.taskRepo.update(taskId, {
+        pushResult: JSON.stringify({ state: 'push_failed', error: errorMsg, failedAt, retryable: true }),
+      });
+      emitPushFailed(deps, taskId, currentProject.id, errorMsg, remote, targetBranch, isManual);
+      return {
+        ok: false,
+        error: errorMsg,
+        remote,
+        branch: targetBranch,
+        retryable: true,
+      };
+    }
 
     if (isSkipAudit) {
       deps.eventBus.emit('task.audit_skipped', taskId, {
@@ -809,17 +997,6 @@ export async function publishTask(
         manual: true,
       });
     } else if (isAuditConfigEnabled) {
-      tasksToAudit = await findTasksToAudit(
-        taskId,
-        currentProject.id,
-        sourceBranch,
-        targetBranch,
-        remote,
-        repoPath,
-        env,
-        deps,
-      );
-
       const maxTasks = currentSettings.publish?.audit?.maxTasks ?? 10;
       if (tasksToAudit.length > maxTasks) {
         const errorMsg = `Số lượng task cần audit (${tasksToAudit.length}) vượt quá giới hạn tối đa cho phép (${maxTasks}). Vui lòng kiểm tra hoặc điều chỉnh maxTasks.`;
@@ -835,13 +1012,7 @@ export async function publishTask(
             maxTasks,
           }),
         });
-        deps.eventBus.emit('task.push_failed', taskId, {
-          taskId,
-          projectId: currentProject.id,
-          error: errorMsg,
-          remote,
-          branch: targetBranch,
-        });
+        emitPushFailed(deps, taskId, currentProject.id, errorMsg, remote, targetBranch, isManual);
         return { ok: false, error: errorMsg, remote, branch: targetBranch, retryable: false };
       }
 
@@ -931,13 +1102,7 @@ export async function publishTask(
               }),
             });
           }
-          deps.eventBus.emit('task.push_failed', t.id, {
-            taskId: t.id,
-            projectId: currentProject.id,
-            error: errorMsg,
-            remote,
-            branch: targetBranch,
-          });
+          emitPushFailed(deps, t.id, currentProject.id, errorMsg, remote, targetBranch, isManual);
           return { ok: false, error: errorMsg, remote, branch: targetBranch, auditFailed: true, retryable: true };
         }
 
@@ -985,13 +1150,7 @@ export async function publishTask(
                 }),
               });
             }
-            deps.eventBus.emit('task.push_failed', t.id, {
-              taskId: t.id,
-              projectId: currentProject.id,
-              error: errorMsg,
-              remote,
-              branch: targetBranch,
-            });
+            emitPushFailed(deps, t.id, currentProject.id, errorMsg, remote, targetBranch, isManual);
             return {
               ok: false,
               error: errorMsg,
@@ -1192,7 +1351,8 @@ export async function publishTask(
       // 3. Merge source branch into target branch (if sourceBranch differs or has commits)
       const sourceExists = await refExists(repoPath, `refs/heads/${sourceBranch}`, env);
       if (sourceExists) {
-        const isAncestor = await execFileAsync('git', ['-C', worktreePath, 'merge-base', '--is-ancestor', sourceBranch, 'HEAD'], { env })
+        const commitToMerge = sourceSha || sourceBranch;
+        const isAncestor = await execFileAsync('git', ['-C', worktreePath, 'merge-base', '--is-ancestor', commitToMerge, 'HEAD'], { env })
           .then(() => true)
           .catch(() => false);
 
@@ -1200,7 +1360,7 @@ export async function publishTask(
           const identity = await gitIdentityArgs(worktreePath, env);
           const mergeMsg = `Merge branch '${sourceBranch}' into ${targetBranch}`;
           try {
-            await runGit(['-C', worktreePath, ...identity, 'merge', '--no-ff', sourceBranch, '-m', mergeMsg], worktreePath, env);
+            await runGit(['-C', worktreePath, ...identity, 'merge', '--no-ff', commitToMerge, '-m', mergeMsg], worktreePath, env);
           } catch (err) {
             try {
               await runGit(['-C', worktreePath, 'merge', '--abort'], worktreePath, env);
@@ -1229,18 +1389,15 @@ export async function publishTask(
 
       // 6. Update local branch ref to match pushed commit safely
       const localUpdate = await updateLocalBranchSafely(repoPath, targetBranch, pushedCommit, env);
-      if (localUpdate === 'skipped_dirty') {
-        const dirtyWarningMsg = `Đã đẩy lên remote; nhánh local ${targetBranch} chưa cập nhật vì thư mục đang có thay đổi chưa commit`;
-        deps.notifyService?.notify(dirtyWarningMsg, 'warning');
-      }
 
       // 7. Push integration branch if enabled
       let pushedIntegrationBranch = false;
       if (currentSettings.integration?.enabled && currentSettings.publish?.pushIntegrationBranch !== false) {
         const integrationBranch = currentSettings.integration.branch || 'agenthub/integration';
         if (await refExists(repoPath, `refs/heads/${integrationBranch}`, env)) {
+          const pushSource = (integrationBranch === sourceBranch && sourceSha) ? sourceSha : `refs/heads/${integrationBranch}`;
           await runGit(
-            ['-C', worktreePath, 'push', remote, `refs/heads/${integrationBranch}:refs/heads/${integrationBranch}`],
+            ['-C', worktreePath, 'push', remote, `${pushSource}:refs/heads/${integrationBranch}`],
             worktreePath,
             env,
           );
@@ -1263,7 +1420,7 @@ export async function publishTask(
           compareUrl,
           pushedIntegrationBranch,
           auditPassed: !isSkipAudit && isAuditConfigEnabled,
-          auditSkipped: isSkipAudit,
+          auditSkipped: isSkipAudit || !isAuditConfigEnabled,
           findings: p3Findings,
           summary: auditRes?.summary,
           localUpdate,
@@ -1288,28 +1445,43 @@ export async function publishTask(
         }
       }
 
-      // Ensure root taskId is updated even if not in tasksToAudit
+      // Update baseline tasks included in this pushed range (exempt from audit gate)
+      for (const t of baselineTasks) {
+        const tPushResultObj = {
+          state: 'pushed',
+          remote,
+          branch: targetBranch,
+          commit: pushedCommit,
+          compareUrl,
+          pushedIntegrationBranch,
+          auditPassed: false,
+          auditSkipped: true,
+          baseline: true,
+          localUpdate,
+        };
+
+        deps.taskRepo.update(t.id, {
+          status: 'pushed',
+          pushedAt,
+          pushResult: JSON.stringify(tPushResultObj),
+        });
+
+        if (t.id !== taskId) {
+          deps.eventBus.emit('task.pushed', t.id, {
+            taskId: t.id,
+            projectId: currentProject.id,
+            remote,
+            branch: targetBranch,
+            commit: pushedCommit,
+            compareUrl,
+            localUpdate,
+            baseline: true,
+          });
+        }
+      }
+
       const rootAuditRes = auditedResults.get(taskId);
       const rootP3Findings = rootAuditRes?.findings?.filter((f) => f.severity === 'P3') ?? [];
-      const pushResultObj: Record<string, unknown> = {
-        state: 'pushed',
-        remote,
-        branch: targetBranch,
-        commit: pushedCommit,
-        compareUrl,
-        pushedIntegrationBranch,
-        auditPassed: !isSkipAudit && isAuditConfigEnabled,
-        auditSkipped: isSkipAudit,
-        findings: rootP3Findings,
-        summary: rootAuditRes?.summary,
-        localUpdate,
-      };
-
-      deps.taskRepo.update(taskId, {
-        status: 'pushed',
-        pushedAt,
-        pushResult: JSON.stringify(pushResultObj),
-      });
 
       deps.eventBus.emit('task.pushed', taskId, {
         taskId,
@@ -1319,7 +1491,10 @@ export async function publishTask(
         commit: pushedCommit,
         compareUrl,
         localUpdate,
+        ...(rootInBaseline ? { baseline: true } : {}),
       });
+
+      lastProjectPublishError.delete(currentProject.id);
 
       return {
         ok: true,
@@ -1329,7 +1504,7 @@ export async function publishTask(
         compareUrl,
         pushedIntegrationBranch,
         auditPassed: !isSkipAudit && isAuditConfigEnabled,
-        auditSkipped: isSkipAudit,
+        auditSkipped: isSkipAudit || !isAuditConfigEnabled,
         findings: rootP3Findings,
         localUpdate,
       };
@@ -1339,13 +1514,7 @@ export async function publishTask(
       deps.taskRepo.update(taskId, {
         pushResult: JSON.stringify({ state: 'push_failed', error: errorMsg, failedAt, retryable: true }),
       });
-      deps.eventBus.emit('task.push_failed', taskId, {
-        taskId,
-        projectId: currentProject.id,
-        error: errorMsg,
-        remote,
-        branch: targetBranch,
-      });
+      emitPushFailed(deps, taskId, currentProject.id, errorMsg, remote, targetBranch, isManual);
       return {
         ok: false,
         error: errorMsg,

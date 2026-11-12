@@ -1140,18 +1140,64 @@ export class Scheduler {
       });
     }
 
-    // Tasks in review where the review chain is empty (direct auto-merge) re-emit review_ready on startup
+    // Recover review tasks interrupted by restart.
+    // Tasks waiting for manual approval (autoMerge off, or parked at manual gates)
+    // must NOT re-emit review_ready or gate notifications on restart.
     for (const task of this.taskRepo.getByStatus('review')) {
-      if (!this.projectRepo.get(task.projectId)) continue;
+      const project = this.projectRepo.get(task.projectId);
+      if (!project) continue;
       const chain = this.reviewChainForTask(task);
+      const stepIdx = task.reviewStep ?? 0;
+      const settings = projectSettings(project);
+      const autoMergeEnabled = Boolean(settings.review?.autoMerge || settings.integration?.autoMerge);
+      const taskEvents = this.eventRepo.getByTask(task.id);
+
+      const hasMergeOutcome = (): boolean => {
+        const lastOutcomeEvent = taskEvents.filter((e) =>
+          e.type === 'review.auto_merge_skipped' || e.type === 'merge.failed' || e.type === 'merge.conflict'
+        ).at(-1);
+        const lastReadyEvent = taskEvents.filter((e) => e.type === 'task.review_ready').at(-1);
+        return Boolean(lastOutcomeEvent && (!lastReadyEvent || lastOutcomeEvent.id > lastReadyEvent.id));
+      };
+
       if (chain.length === 0) {
-        const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
-        if (lastWorker?.outcome === 'done') {
+        this.reviewNotified.set(task.id, 'complete:0');
+        if (autoMergeEnabled && !hasMergeOutcome()) {
+          const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
+          if (lastWorker?.outcome === 'done') {
+            const checks = this.getCheckResults(task.id);
+            this.emitReviewReadyIfReview(task.id, {
+              reviewChainComplete: true,
+              checksPassed: checks.length > 0 ? checks.every((c) => c.ok) : true,
+            });
+          }
+        }
+      } else if (stepIdx >= chain.length) {
+        this.reviewNotified.set(task.id, `complete:${stepIdx}`);
+        if (autoMergeEnabled && !hasMergeOutcome()) {
           const checks = this.getCheckResults(task.id);
           this.emitReviewReadyIfReview(task.id, {
             reviewChainComplete: true,
             checksPassed: checks.length > 0 ? checks.every((c) => c.ok) : true,
           });
+        }
+      } else {
+        const step = chain[stepIdx];
+        if (step?.reviewer === 'claude') {
+          const alreadyNotifiedGate = taskEvents.some((e) => {
+            if (e.type !== 'review.gate_ready') return false;
+            try {
+              const p = e.payload ? JSON.parse(e.payload) as { reviewStep?: unknown } : {};
+              return p.reviewStep === stepIdx;
+            } catch {
+              return false;
+            }
+          });
+          if (alreadyNotifiedGate) {
+            this.reviewNotified.set(task.id, `gate:${stepIdx}`);
+          }
+        } else if (isAutomatedStep(step)) {
+          this.triggerTick();
         }
       }
     }
@@ -1175,6 +1221,8 @@ export class Scheduler {
         this.runRepo.finish(run.id, 'crashed', undefined, 'reviewer interrupted during restart');
         if (this.taskRepo.get(run.taskId)?.status === 'review') {
           this.eventBus.emit('review.failed', run.taskId, { actor: 'codex-reviewer', reason: 'restart_recovery', runId: run.id });
+          this.eventBus.emit('review.waiting', run.taskId, { actor: 'codex-reviewer', reason: 'restart_recovery' });
+          this.triggerTick();
         }
         continue;
       }
@@ -3435,9 +3483,10 @@ export class Scheduler {
     let finished = false;
     let hasError = false;
     let savedExitCode: number | null = null;
+    let savedSignal: NodeJS.Signals | string | null = null;
     let safetyTimer: NodeJS.Timeout | null = null;
 
-    const doFinish = (reason: 'exit' | 'error', code: number | null) => {
+    const doFinish = (reason: 'exit' | 'error', code: number | null, signal: string | null = null) => {
       if (finished) return;
       finished = true;
       if (safetyTimer) {
@@ -3445,12 +3494,12 @@ export class Scheduler {
         safetyTimer = null;
       }
       const run = this.reviewerRuns.get(task.id);
-      if (run?.exitTimeout) {
+      if (run && run.runId === runId && run.exitTimeout) {
         clearTimeout(run.exitTimeout);
         delete run.exitTimeout;
       }
       if (!this.stopped) {
-        this.finishReview(task.id, runId, profileName, reason, code);
+        this.finishReview(task.id, runId, profileName, reason, code, signal);
       }
     };
 
@@ -3458,26 +3507,28 @@ export class Scheduler {
       if (finished || this.stopped) return;
       hasError = true;
       if (!safetyTimer) {
-        safetyTimer = setTimeout(() => doFinish('error', null), 2000);
+        safetyTimer = setTimeout(() => doFinish('error', savedExitCode, savedSignal), 2000);
         const run = this.reviewerRuns.get(task.id);
-        if (run) run.exitTimeout = safetyTimer;
+        if (run && run.runId === runId) run.exitTimeout = safetyTimer;
       }
     });
 
-    child.once('exit', (code) => {
+    child.once('exit', (code, signal) => {
       if (finished || this.stopped) return;
       savedExitCode = code;
+      savedSignal = signal;
       if (!safetyTimer) {
-        safetyTimer = setTimeout(() => doFinish(hasError ? 'error' : 'exit', savedExitCode), 2000);
+        safetyTimer = setTimeout(() => doFinish(hasError ? 'error' : 'exit', savedExitCode, savedSignal), 2000);
         const run = this.reviewerRuns.get(task.id);
-        if (run) run.exitTimeout = safetyTimer;
+        if (run && run.runId === runId) run.exitTimeout = safetyTimer;
       }
     });
 
-    child.once('close', (code) => {
+    child.once('close', (code, signal) => {
       if (finished || this.stopped) return;
-      const finalCode = code ?? savedExitCode ?? 0;
-      doFinish(hasError ? 'error' : 'exit', finalCode);
+      const finalSignal = signal ?? savedSignal;
+      const finalCode = code ?? savedExitCode;
+      doFinish(hasError ? 'error' : 'exit', finalCode, finalSignal);
     });
   }
 
@@ -3502,7 +3553,7 @@ export class Scheduler {
     }
   }
 
-  private finishReview(taskId: string, runId: string, profileName: string, reason: 'exit' | 'timeout' | 'error', exitCode: number | null = 0): void {
+  private finishReview(taskId: string, runId: string, profileName: string, reason: 'exit' | 'timeout' | 'error', exitCode: number | null = 0, signal: string | null = null): void {
     if (this.stopped) return;
     const active = this.reviewerRuns.get(taskId);
     if (!active || active.runId !== runId) return;
@@ -3543,7 +3594,7 @@ export class Scheduler {
 
     const combinedLog = `${logOutput}\n${output}`;
     const isClaudeReviewer = active.actor === 'claude-reviewer' || active.engine.id === 'claude';
-    const isFailedRun = reason === 'timeout' || reason === 'error' || exitCode !== 0;
+    const isFailedRun = reason === 'timeout' || reason === 'error' || Boolean(signal) || exitCode === null || exitCode !== 0;
 
     if (isFailedRun) {
       // Only detect auth error from trusted error sources for Claude reviewer; never for Codex reviewer

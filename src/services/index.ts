@@ -79,7 +79,7 @@ import type { PageResult } from '../pagination.js';
 import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
 import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
-import { publishTask as executePublishTask, isProjectPublishing, type PublishResult } from '../publish.js';
+import { publishTask as executePublishTask, isProjectPublishing, onProjectPublishLockReleased, type PublishResult } from '../publish.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
@@ -1109,6 +1109,7 @@ export class AppService {
   private autoMergeCheckRetries = new Set<string>();
   private autoMergeCheckRetryPromises = new Map<string, Promise<boolean>>();
   private autoMergeSkipped = new Set<string>();
+  private pendingAutoPublishTasks = new Map<string, Set<string>>();
   public avatarService: AvatarService;
   constructor(
     public config: AgentHubConfig,
@@ -5408,9 +5409,7 @@ export class AppService {
       this.scheduler.getEventBus().emit('task.merged', taskId, mergeResult);
       const proj = this.projectRepo.get(task.projectId);
       if (proj && projectSettings(proj).publish?.enabled) {
-        void this.publishTask(taskId).catch((err) => {
-          console.error(`[publish] Auto-publish failed for task ${taskId}:`, err);
-        });
+        this.enqueueAutoPublish(task.projectId, taskId);
       }
     }
     return this.taskRepo.get(taskId)!;
@@ -5874,8 +5873,39 @@ export class AppService {
       });
     }
 
-    void this.publishTask(taskId, options).catch((err) => {
+    void this.publishTask(taskId, options).catch((err: unknown) => {
       console.error(`[publish] Background publish failed for task ${taskId}:`, err);
+      try {
+        const currentTask = this.taskRepo.get(taskId);
+        if (currentTask && currentTask.status !== 'pushed') {
+          let isAuditingState = false;
+          try {
+            const pr = currentTask.pushResult ? JSON.parse(currentTask.pushResult) : null;
+            isAuditingState = pr?.state === 'auditing' || pr?.state === 'pushing';
+          } catch {
+            isAuditingState = true;
+          }
+          if (isAuditingState) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            const failedAt = new Date().toISOString();
+            this.taskRepo.update(taskId, {
+              pushResult: JSON.stringify({
+                state: 'push_failed',
+                error: errorMsg,
+                failedAt,
+                retryable: true,
+              }),
+            });
+            this.scheduler.getEventBus().emit('task.push_failed', taskId, {
+              taskId,
+              projectId: project.id,
+              error: errorMsg,
+            });
+          }
+        }
+      } catch {
+        // Ignore DB errors if database was closed during shutdown / test teardown
+      }
     });
 
     return { started: true };
@@ -5894,10 +5924,75 @@ export class AppService {
         profileRepo: this.profileRepo,
         quotaService: this.scheduler.getQuotaService(),
         reviewRepo: this.reviewRepo,
+        runRepo: this.runRepo,
         config: this.config,
       },
       options,
     );
+  }
+
+  enqueueAutoPublish(projectId: string, taskId: string): void {
+    const run = async (tId: string) => {
+      try {
+        await this.publishTask(tId);
+        // Process any other queued tasks for this project that remain unpushed
+        const pending = this.pendingAutoPublishTasks.get(projectId);
+        if (pending && pending.size > 0) {
+          for (const remainingId of Array.from(pending)) {
+            const t = this.taskRepo.get(remainingId);
+            if (!t || t.status === 'pushed') {
+              pending.delete(remainingId);
+            }
+          }
+          if (pending.size > 0) {
+            const next = Array.from(pending).pop()!;
+            pending.delete(next);
+            this.enqueueAutoPublish(projectId, next);
+          }
+        }
+      } catch (err: unknown) {
+        if (err instanceof HttpError && err.statusCode === 409) {
+          let set = this.pendingAutoPublishTasks.get(projectId);
+          if (!set) {
+            set = new Set<string>();
+            this.pendingAutoPublishTasks.set(projectId, set);
+          }
+          set.add(tId);
+
+          const drain = () => {
+            const currentSet = this.pendingAutoPublishTasks.get(projectId);
+            if (!currentSet || currentSet.size === 0) return;
+            let nextId: string | null = null;
+            for (const id of Array.from(currentSet)) {
+              const t = this.taskRepo.get(id);
+              if (!t || t.status === 'pushed') {
+                currentSet.delete(id);
+              } else {
+                nextId = id;
+              }
+            }
+            if (nextId) {
+              currentSet.delete(nextId);
+              this.enqueueAutoPublish(projectId, nextId);
+            }
+          };
+
+          const unsubscribe = onProjectPublishLockReleased(projectId, () => {
+            drain();
+          });
+
+          // Check if lock was already released before listener was registered
+          if (!isProjectPublishing(projectId)) {
+            unsubscribe();
+            drain();
+          }
+          return;
+        }
+        console.error(`[publish] Auto-publish failed for task ${tId}:`, err);
+      }
+    };
+
+    void run(taskId);
   }
 
   getTaskLog(idParam: string, query?: { run?: string; tail?: string | number; scope?: string }): string {

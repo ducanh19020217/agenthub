@@ -4610,7 +4610,7 @@ export class TelegramBotService {
       }
 
       case 'task.push_failed': {
-        if (notify.failed === false) return;
+        if (notify.failed === false || p.suppressNotification) return;
         const errorMsg = typeof p.error === 'string' ? p.error : 'Lỗi không xác định';
         const title = this.resolveTaskTitle(taskId, p);
 

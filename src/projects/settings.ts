@@ -80,6 +80,7 @@ export const PublishAuditSettingsInputSchema = z.object({
 
 export const PublishSettingsSchema = z.object({
   enabled: z.boolean().default(true),
+  enabledAt: z.string().optional(),
   remote: z.string().trim().min(1).default('origin'),
   branch: z.string().trim().min(1, 'Tên nhánh không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
   pushIntegrationBranch: z.boolean().default(true),
@@ -89,6 +90,7 @@ export type PublishSettings = z.infer<typeof PublishSettingsSchema>;
 
 export const PublishSettingsInputSchema = z.object({
   enabled: z.boolean().optional(),
+  enabledAt: z.string().optional(),
   remote: z.string().trim().min(1).optional(),
   branch: z.string().trim().min(1, 'Tên nhánh không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
   pushIntegrationBranch: z.boolean().optional(),
@@ -307,14 +309,20 @@ export function mergeProjectSettings(current: ProjectSettings, input: ProjectSet
       ...(nextReviewFallback ? { fallback: nextReviewFallback } : {}),
     },
     ci: { ...current.ci, ...input.ci },
-    publish: {
-      ...(current.publish || DEFAULT_PROJECT_SETTINGS.publish),
-      ...input.publish,
-      audit: {
-        ...((current.publish || DEFAULT_PROJECT_SETTINGS.publish).audit || { enabled: true, maxFixRounds: 2 }),
-        ...input.publish?.audit,
-      },
-    },
+    publish: (() => {
+      const currentPublish = current.publish || DEFAULT_PROJECT_SETTINGS.publish;
+      const isEnabling = input.publish?.enabled === true && currentPublish.enabled !== true;
+      const enabledAt = input.publish?.enabledAt || (isEnabling ? new Date().toISOString() : currentPublish.enabledAt);
+      return {
+        ...currentPublish,
+        ...input.publish,
+        ...(enabledAt ? { enabledAt } : {}),
+        audit: {
+          ...(currentPublish.audit || { enabled: true, maxFixRounds: 2 }),
+          ...input.publish?.audit,
+        },
+      };
+    })(),
     references: input.references ?? current.references,
     reviewChecklist: input.reviewChecklist ?? current.reviewChecklist,
     notifications: { ...current.notifications, ...input.notifications },

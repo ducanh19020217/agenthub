@@ -2363,9 +2363,9 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                 <label className="flex items-center justify-between gap-3 text-xs">
                   <span className="font-semibold text-[var(--t-text)]">{t('projects.worktreeWarmPool')}</span>
                   <input
-                    type="number"
-                    min={0}
-                    step={1}
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
                     aria-label={t('projects.worktreeWarmPool')}
                     value={draftSettings.worktree.warmPool ?? 1}
                     onChange={(e) => setDraftSettings((prev) => ({

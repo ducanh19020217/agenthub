@@ -631,7 +631,7 @@ describe('Scheduler regression fixes', () => {
     expect(taskRepo.get('test-project/a')!.slot).toBe(1);
     expect(taskRepo.get('test-project/b')!.slot).toBe(2);
     scheduler.cancelTask('test-project/a');
-    scheduler.triggerTick();
+    await scheduler.triggerTick();
     expect(taskRepo.get('test-project/c')!.slot).toBe(1);
     expect(fs.readFileSync(path.join(taskRepo.get('test-project/b')!.worktreePath!, '.env'), 'utf8')).toContain('PORT=420');
     scheduler.cancelAll();
@@ -787,7 +787,7 @@ describe('Codex reviewer failover lifecycle', () => {
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
     new ReviewRepo(db).insert({ id: 'codex-ok', taskId: 'test-project/review', verdict: 'approved', feedback: 'ok', actor: 'codex-reviewer' });
     taskRepo.update('test-project/review', { reviewStep: 1 });
-    for (let tick = 0; tick < 10; tick++) scheduler.tick();
+    for (let tick = 0; tick < 10; tick++) await scheduler.tick();
     const ready = () => eventRepo.getRecent(50).filter((event) => event.type === 'task.review_ready' && event.taskId === 'test-project/review');
     expect(ready()).toHaveLength(1);
     // A new review round may announce again.
@@ -1466,12 +1466,14 @@ describe('Quota → profile marked → task runs on another profile', () => {
 
     // Emitting claude.quota_available while marks remain leaves task in waiting_quota after recheck
     scheduler.getEventBus().emit('claude.quota_available');
+    await scheduler.tick();
     task = taskRepo.get('test-project/chain-wait')!;
     expect(task.status).toBe('waiting_quota');
 
     // Clear quota mark and emit claude.quota_available -> task requeues
     quotaMarkRepo.clear('agy-p1', 'gemini');
     scheduler.getEventBus().emit('claude.quota_available');
+    await scheduler.tick();
     task = taskRepo.get('test-project/chain-wait')!;
     expect(['queued', 'running']).toContain(task.status);
     const availableEvents = eventRepo.getRecent(10).filter((e) => e.type === 'task.queued' && e.taskId === 'test-project/chain-wait');
@@ -2921,9 +2923,11 @@ describe('Env file generation', () => {
     expect(taskRepo.get('test-project/waiting-t1')?.status).toBe('waiting_quota');
 
     scheduler.getEventBus().emit('claude.quota_available');
+    await scheduler.tick();
     expect(taskRepo.get('test-project/waiting-t1')?.status).toBe('waiting_quota');
     quotaMarkRepo.clear('p1', 'gemini');
     scheduler.getEventBus().emit('claude.quota_available');
+    await scheduler.tick();
     // Task woke up and was immediately scheduled to run because p1 is available
     expect(['queued', 'running']).toContain(taskRepo.get('test-project/waiting-t1')?.status);
 

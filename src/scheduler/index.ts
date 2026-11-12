@@ -257,6 +257,7 @@ interface RunningTask {
 interface StartingTask {
   projectId: string;
   profileName: string;
+  slot?: number;
 }
 
 
@@ -1621,8 +1622,8 @@ export class Scheduler {
   /**
    * Force an immediate tick (for event-driven scheduling)
    */
-  triggerTick(): void {
-    void this.tick().catch(() => {});
+  triggerTick(): Promise<void> {
+    return this.tick().catch(() => {});
   }
 
   wakeWaitingQuotaTasks(reason = 'quota_unblocked'): void {
@@ -3589,7 +3590,12 @@ export class Scheduler {
     if (!worktreePath) {
       let slot: number;
       try {
-        slot = this.worktreeService.allocateSlot(task.projectId, this.taskRepo.getUsedSlots(task.projectId));
+        const startingSlots = Array.from(this.starting.values())
+          .filter((entry) => entry.projectId === task.projectId && entry.slot != null)
+          .map((entry) => entry.slot!);
+        slot = this.worktreeService.allocateSlot(task.projectId, [...this.taskRepo.getUsedSlots(task.projectId), ...startingSlots]);
+        const reservation = this.starting.get(task.id);
+        if (reservation) reservation.slot = slot;
       } catch (error) {
         // All slots are occupied; leave the task queued for a later tick.
         this.locks.release(profile.name, lockFile);
@@ -3717,7 +3723,12 @@ export class Scheduler {
 
     if (task.slot == null) {
       try {
-        const slot = this.worktreeService.allocateSlot(task.projectId, this.taskRepo.getUsedSlots(task.projectId));
+        const startingSlots = Array.from(this.starting.values())
+          .filter((entry) => entry.projectId === task.projectId && entry.slot != null)
+          .map((entry) => entry.slot!);
+        const slot = this.worktreeService.allocateSlot(task.projectId, [...this.taskRepo.getUsedSlots(task.projectId), ...startingSlots]);
+        const reservation = this.starting.get(task.id);
+        if (reservation) reservation.slot = slot;
         this.taskRepo.update(task.id, { slot });
       } catch {
         this.locks.release(profile.name, lockFile);

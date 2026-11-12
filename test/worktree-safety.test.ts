@@ -133,7 +133,7 @@ describe('worktree deletion safety (sự cố 16/10: hub xóa nhầm thư mục 
 
 describe('warm worktree pool', () => {
   it('refills detached worktrees and acquires a clean task branch', async () => {
-    const { project, worktreesDir, service } = setup();
+    const { project, worktreesDir } = setup();
     const events: Array<{ type: string; payload?: unknown }> = [];
     const configured = new WorktreeService({ worktreesDir, hubHome: path.dirname(worktreesDir), cacheDir: path.join(path.dirname(worktreesDir), 'cache'), cacheMaxEntries: 3, cacheMaxGB: 1 } as AgentHubConfig, {
       emit: (type, _taskId, payload) => { events.push({ type, payload }); return true; },

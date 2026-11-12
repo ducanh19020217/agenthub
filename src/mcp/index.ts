@@ -51,6 +51,23 @@ export function formatElapsed(ms: number): string {
   return `${hours}h${remMins}m`;
 }
 
+function parseDbTime(value: unknown): number | null {
+  if (typeof value !== 'string' || !value) return null;
+  // SQLite datetime('now') trả 'YYYY-MM-DD HH:MM:SS' (UTC, không có Z).
+  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? `${value.replace(' ', 'T')}Z` : value;
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+export function formatRunDuration(run: { durationMs?: number | null; startedAt?: string | null; endedAt?: string | null; outcome?: string | null }): string {
+  if (typeof run.durationMs === 'number') return formatElapsed(run.durationMs);
+  const start = parseDbTime(run.startedAt);
+  const end = parseDbTime(run.endedAt);
+  if (start !== null && end !== null) return formatElapsed(Math.max(0, end - start));
+  if (run.endedAt || run.outcome) return 'đã kết thúc';
+  return start !== null ? `đang chạy ${formatElapsed(Date.now() - start)}` : 'đang chạy';
+}
+
 export function formatUntil(epochSec: number): string {
   const d = new Date(epochSec * 1000);
   const hh = String(d.getHours()).padStart(2, '0');
@@ -1057,6 +1074,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             model: string;
             profileName: string;
             durationMs?: number | null;
+            startedAt?: string | null;
+            endedAt?: string | null;
           }>;
           commits: string[];
           doneReport?: string | null;
@@ -1079,7 +1098,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         const lines: string[] = [
           `Task: ${t.id} [${t.status}]`,
           `Tiêu đề: ${t.title}`,
-          `Level: ${t.level} | Lượt chạy: ${t.attempt}`,
+          `Level: ${t.level} | Lượt chạy: ${typeof t.runCount === 'number' ? t.runCount : runs.length}`,
           ...(typeof t.reviewRound === 'number' && typeof t.reviewMaxRounds === 'number' ? [`Vòng duyệt: ${t.reviewRound}/${t.reviewMaxRounds}`] : []),
           `Branch: ${t.branch || '(chưa tạo)'}`,
           `Worktree: ${t.worktreePath || '(chưa tạo)'}`,
@@ -1092,11 +1111,11 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         if (runs.length === 0) {
           lines.push('  (chưa có)');
         } else {
-          for (const r of runs) {
-            const dur = typeof r.durationMs === 'number' ? `${Math.round(r.durationMs / 1000)}s` : 'đang chạy';
+          runs.forEach((r, index) => {
+            const dur = formatRunDuration(r);
             const outcome = r.reason === 'stalled' ? 'kẹt (stalled)' : (r.outcome || 'running');
-            lines.push(`  - Run #${r.attempt || 1} [${outcome}]: model=${r.model} profile=${r.profileName} (${dur})`);
-          }
+            lines.push(`  - Run #${typeof r.attempt === 'number' ? r.attempt : index + 1} [${outcome}]: model=${r.model} profile=${r.profileName} (${dur})`);
+          });
         }
 
         lines.push('', `Danh sách commit (${commits.length}):`);

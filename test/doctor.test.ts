@@ -15,7 +15,7 @@ import {
   formatDoctorText,
   formatDoctorJson,
 } from '../src/doctor.js';
-import { cmdDoctor } from '../src/cli.js';
+import { cmdDoctor } from '../src/cli-main.js';
 import { loadConfig } from '../src/config.js';
 import { findAgyBin } from '../src/agy.js';
 

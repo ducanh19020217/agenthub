@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig, AgentHubConfig } from './config.js';
 import { agyInstallHint, applyIsolatedAgyEnv, findAgyBin } from './agy.js';
@@ -1607,7 +1605,8 @@ function getArg(args: string[], flag: string): string | undefined {
   return undefined;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+/** Điểm vào thật của CLI; `src/cli.ts` gọi hàm này cho mọi lệnh trừ `mcp`. */
+export function runCli(): void {
   main().catch((err) => {
     console.error(err);
     process.exit(1);

@@ -4,7 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { loadConfig } from '../src/config.js';
-import { cmdRollback, cmdSetup } from '../src/cli.js';
+import { cmdRollback, cmdSetup } from '../src/cli-main.js';
 import { makeTestTempDir } from './temp.js';
 import { prepareMacosNativeBinaries } from '../scripts/package-native.mjs';
 

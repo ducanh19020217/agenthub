@@ -395,7 +395,7 @@ describe('SavingsService and GET /api/savings integration', () => {
   });
 
   it('imports legacy codex logs and attaches tokens to matching task', async () => {
-    const { cmdSavings } = await import('../src/cli.js');
+    const { cmdSavings } = await import('../src/cli-main.js');
 
     // Seed task with slug t-legacy
     ctx.db.prepare(`INSERT INTO projects (id, name, path) VALUES ('proj-leg', 'Legacy Proj', '/tmp/leg')`).run();
@@ -513,7 +513,7 @@ describe('SavingsService and GET /api/savings integration', () => {
   });
 
   it('agenthub savings backfill-lines calculates lines for existing branches and skips deleted ones', async () => {
-    const { cmdSavings } = await import('../src/cli.js');
+    const { cmdSavings } = await import('../src/cli-main.js');
 
     const testRepoDir = path.join(tmpDir, 'test-backfill-repo');
     fs.mkdirSync(testRepoDir, { recursive: true });

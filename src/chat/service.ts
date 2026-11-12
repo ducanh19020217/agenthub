@@ -44,7 +44,7 @@ import { findClaudeBin,
   buildBrainPrompt,
   buildSetupPrompt,
 } from './claude.js';
-import { findProjectRoot } from '../cli.js';
+import { findProjectRoot } from '../cli-main.js';
 import { readCodexRateLimits } from '../quota/codex-usage.js';
 import { buildProjectKnowledgeContext } from '../projects/knowledge-context.js';
 import { projectSettings } from '../projects/settings.js';

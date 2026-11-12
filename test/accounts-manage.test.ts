@@ -9,7 +9,7 @@ import { createServer } from '../src/api/server.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { AgyEngine, CodexEngine, FakeEngine } from '../src/engines/index.js';
 import { parseCodexLoginStatus } from '../src/profiles/auth.js';
-import { cmdProfile } from '../src/cli.js';
+import { cmdProfile } from '../src/cli-main.js';
 import { isProfileLoggedIn } from '../src/profiles/index.js';
 
 describe('c-accounts-manage: Quản lý tài khoản', () => {

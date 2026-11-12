@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { AgentHubConfig } from './config.js';
-import { findProjectRoot } from './cli.js';
+import { findProjectRoot } from './cli-main.js';
 import { getPlatform } from './platform/index.js';
 import type { PlatformApi, ServiceInstallResult, ServiceUninstallResult } from './platform/types.js';
 

@@ -10,7 +10,7 @@ import { getOrCreateToken } from '../src/auth.js';
 import { FakeEngine } from '../src/engines/index.js';
 import { NotificationService } from '../src/notify.js';
 import { BulletinService, getChangedFilesForWorktree, parseDiffOutput, parsePorcelainOutput } from '../src/bulletin.js';
-import { cmdNote, cmdNotes } from '../src/cli.js';
+import { cmdNote, cmdNotes } from '../src/cli-main.js';
 
 describe('Context Bulletin & Overlap Coordination', () => {
   let tmpDir: string;

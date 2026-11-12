@@ -14,7 +14,7 @@ import {
   cmdStart,
   cmdStatus,
   cleanRemainingProcesses,
-} from '../src/cli.js';
+} from '../src/cli-main.js';
 import { loadConfig } from '../src/config.js';
 import { getOrCreateToken } from '../src/auth.js';
 
@@ -74,7 +74,7 @@ describe('AgentHub CLI and Installation', () => {
     expect(calledCmd).toBe(process.platform === 'darwin' ? 'open' : 'xdg-open');
     expect(calledArgs).toEqual([url]);
 
-    const cliSource = fs.readFileSync(path.resolve(findProjectRoot(), 'src', 'cli.ts'), 'utf-8');
+    const cliSource = fs.readFileSync(path.resolve(findProjectRoot(), 'src', 'cli-main.ts'), 'utf-8');
     expect(cliSource).not.toMatch(/exec\s*\(\s*`(?:xdg-open|open)/);
   });
 

@@ -324,17 +324,24 @@
   1. **Lưu mốc thời gian bật publish (`enabledAt`)**:
      - `projects.settings.publish.enabledAt` ghi nhận thời điểm tính năng publish được bật (hoặc thời điểm chạy migration `migration:publish_default_on_at`, fallback về `project.createdAt`).
      - Khi người dùng bật lại publish từ trạng thái tắt (`publish.enabled: false` sang `true`), `enabledAt` được cập nhật lại theo thời gian hiện tại (`new Date().toISOString()`).
+     - Đối với database đã chạy migration ở bản trước nhưng chưa có `enabledAt`, hệ thống dùng `project.createdAt` (hoặc mốc migration cũ nếu đã ghi) cho các project đã bật publish thay vì gán thời điểm deploy hiện tại, đảm bảo code merge sau khi bật publish không bị vô tình coi là baseline mà không qua audit gate.
+     - Project có `settings` NULL hoặc thiếu cấu hình `publish` trong database đã migrate được bổ sung cấu hình publish mặc định kèm `enabledAt` để backlog cũ được phân loại baseline, không bị kẹt `maxTasks`.
   2. **Phân tách task baseline và miễn trừ audit gate**:
-     - Trong `findTasksToAudit`: các task đã hoàn thành và được merge trước mốc `enabledAt` (dựa trên commit date của merge commit hoặc thời điểm tạo/cập nhật task) được phân loại là **task baseline**.
+     - Trong `findTasksToAudit`: các task đã hoàn thành và được merge trước mốc `enabledAt` được phân loại là **task baseline**.
+     - Mốc thời gian hoàn thành của task được xác định ưu tiên theo các mốc ổn định: (1) commit date của merge commit, (2) commit date của nhánh task trên git, (3) thời điểm approved review hoặc hoàn thành run, (4) `createdAt` của task. Không sử dụng `updatedAt` vì trường này biến động mỗi khi ghi trạng thái publish (`auditing`, `push_failed`).
      - Các task baseline được miễn trừ khỏi audit gate (`tasksToAudit` không chứa task baseline), do đó số lượng task baseline không tính vào ngưỡng `maxTasks`. Chỉ các task được merge sau `enabledAt` mới phải qua audit gate.
      - Khi git push thành công, cả `tasksToAudit` và `baselineTasks` đều được cập nhật trạng thái `status: 'pushed'`. Riêng task baseline được gắn thêm cờ `baseline: true, auditSkipped: true` trong `pushResult` và payload sự kiện `task.pushed`.
+     - Xử lý task gốc (root task): nếu task gốc không có branch hoặc merge commit, hệ thống đưa vào danh sách audit gốc để cập nhật trạng thái đẩy thành công. Nếu task gốc có nhánh nhưng chưa nằm trong `sourceSha` được snapshot, `publishTask` trả về lỗi rõ ràng (`push_failed`) thay vì trả về `ok: true` im lặng.
   3. **Chống spam thông báo lỗi publish lặp lại (`suppressNotification`)**:
      - Quản lý bộ nhớ đệm `lastProjectPublishError` theo `projectId`.
-     - Nếu một lần publish thất bại với thông điệp lỗi giống hệt lần thất bại liền kề trước đó của cùng project, sự kiện `task.push_failed` được phát kèm cờ `suppressNotification: true`.
+     - Khoá chống lặp được chuẩn hoá thông qua `normalizePublishErrorKey` (loại bỏ các số đếm biến động, commit SHA, task ID), đảm bảo các lỗi cùng bản chất (như backlog vượt quá `maxTasks` với số lượng task tăng dần sau mỗi lần merge) được nhận diện chính xác là lỗi lặp.
+     - Cờ `suppressNotification: true` chỉ áp dụng cho publish tự động (`!options?.manual`). Khi người dùng publish thủ công, thông báo luôn được gửi để phản hồi thao tác.
      - Các dịch vụ thông báo (`NotificationService` cho desktop và `TelegramBotService` cho Telegram) kiểm tra cờ này và bỏ qua việc gửi thông báo lặp lại, giữ cho luồng thông báo của người dùng không bị nhiễu.
      - Khi một lượt publish thành công, bản ghi lỗi của project được xoá để sẵn sàng ghi nhận nếu có lỗi mới phát sinh sau này.
   4. **Snapshot SHA nguồn trước audit và xếp hàng auto-publish khi gặp xung đột lock (P1)**:
      - Trước khi audit, SHA của `sourceBranch` được snapshot (`sourceSha`). Publish chỉ audit và merge/push đúng commit `sourceSha` đó, ngăn việc vô tình đẩy code của task merge muộn chưa được audit.
      - Khi auto-publish nhận 409 do publish khác đang chạy, task được xếp hàng chờ (`enqueueAutoPublish`) và tự động kích hoạt publish lại ngay khi lock được nhả (`onProjectPublishLockReleased`).
+     - Hàng đợi chờ 409 chỉ lưu trong bộ nhớ (in-memory); đây là thiết kế an toàn vì ngay cả khi khởi động lại, lần publish tiếp theo sẽ tự động gom và audit toàn bộ backlog chưa push trên nhánh tích hợp.
+     - Khi nhận 409, `enqueueAutoPublish` kiểm tra `isProjectPublishing` ngay sau khi đăng ký listener để kích hoạt xử lý ngay nếu lock đã được nhả trước thời điểm đăng ký callback.
   5. **Bảo toàn trạng thái cuối khi publish nền gặp lỗi (P3)**:
      - Bọc bắt lỗi trong `startPublishTask` để khi publish nền bị lỗi trước hoặc trong khi xử lý, trạng thái `auditing` luôn được chuyển về trạng thái cuối `push_failed` kèm sự kiện `task.push_failed`, không để lại trạng thái treo trong DB.

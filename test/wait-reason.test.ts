@@ -348,11 +348,11 @@ describe('Task waitReason (lý do chờ)', () => {
     ctx.service.updateDepartmentProfiles('chung', {
       profiles: [{ profileName: 'p1', share: null }],
     });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    const recovered = ctx.taskRepo.get('proj/t-no-dept');
-    expect(recovered?.status).toBe('running');
-    expect(recovered?.waitReason).toBeNull();
+    await vi.waitFor(() => {
+      const recovered = ctx.taskRepo.get('proj/t-no-dept');
+      expect(recovered?.status).toBe('running');
+      expect(recovered?.waitReason).toBeNull();
+    }, { timeout: 5000, interval: 20 });
   });
 
   it('distinguishes between quota exhaustion and no_matching_profile', async () => {
@@ -475,11 +475,11 @@ describe('Task waitReason (lý do chờ)', () => {
     // Move project to dept-active (simulating project moving department)
     (ctx.scheduler as unknown as { stopped: boolean }).stopped = false;
     ctx.service.updateProject('proj-moved', { departmentId: 'dept-active' });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    const runningTask = ctx.taskRepo.get('proj-moved/t-wait');
-    expect(runningTask?.status).toBe('running');
-    expect(runningTask?.waitReason).toBeNull();
+    await vi.waitFor(() => {
+      const runningTask = ctx.taskRepo.get('proj-moved/t-wait');
+      expect(runningTask?.status).toBe('running');
+      expect(runningTask?.waitReason).toBeNull();
+    }, { timeout: 5000, interval: 20 });
   });
 
   it('wakes waiting tasks when a department is created or deleted', async () => {

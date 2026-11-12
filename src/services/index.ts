@@ -1532,6 +1532,9 @@ export class AppService {
         cpu: r.cpu ?? 0,
         paused: Boolean(r.paused),
         pauseReason: r.pauseReason ?? null,
+        newCommitCount: r.lastCommitCount ?? null,
+        lastCommitAt: r.lastCommitAt != null ? new Date(r.lastCommitAt).toISOString() : null,
+        changedFileCount: r.changedFileCount ?? null,
       };
     });
 
@@ -3508,6 +3511,9 @@ export class AppService {
           pauseReason: run.pauseReason ?? null,
           rss: run.rss ?? 0,
           cpu: run.cpu ?? 0,
+          newCommitCount: run.lastCommitCount ?? null,
+          lastCommitAt: run.lastCommitAt != null ? new Date(run.lastCommitAt).toISOString() : null,
+          changedFileCount: run.changedFileCount ?? null,
         } : null,
       };
     }) as TaskRow[];
@@ -3676,6 +3682,9 @@ export class AppService {
         pauseReason: activeRun.pauseReason ?? null,
         rss: activeRun.rss ?? 0,
         cpu: activeRun.cpu ?? 0,
+        newCommitCount: activeRun.lastCommitCount ?? null,
+        lastCommitAt: activeRun.lastCommitAt != null ? new Date(activeRun.lastCommitAt).toISOString() : null,
+        changedFileCount: activeRun.changedFileCount ?? null,
       } : null,
       runs: runs.map(apiRun),
       reviews: reviewsWithModels.map(apiReview),

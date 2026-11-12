@@ -1211,18 +1211,27 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
     if (!hasMeta || !hasProjects) return { migrated, explicitlyDisabled };
 
     const metaRow = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_default_on'").get() as { value: string } | undefined;
-    if (metaRow && metaRow.value === '1') {
-      return { migrated, explicitlyDisabled };
+    const migrationAtRow = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_default_on_at'").get() as { value: string } | undefined;
+    let migrationAt = migrationAtRow?.value;
+    if (!migrationAt) {
+      migrationAt = new Date().toISOString();
+      if (!metaRow || metaRow.value !== '1') {
+        db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_default_on_at', ?)").run(migrationAt);
+      }
     }
 
-    const projects = db.prepare('SELECT id, defaultBranch, settings FROM projects').all() as Array<{
+    const projects = db.prepare('SELECT id, defaultBranch, settings, createdAt FROM projects').all() as Array<{
       id: string;
       defaultBranch: string;
       settings: string | null;
+      createdAt?: string;
     }>;
+
+    const updateStmt = db.prepare('UPDATE projects SET settings = ? WHERE id = ?');
 
     const defaultPublish = {
       enabled: true,
+      enabledAt: migrationAt,
       remote: 'origin',
       pushIntegrationBranch: true,
       audit: {
@@ -1231,7 +1240,53 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
       },
     };
 
-    const updateStmt = db.prepare('UPDATE projects SET settings = ? WHERE id = ?');
+    if (metaRow && metaRow.value === '1') {
+      for (const project of projects) {
+        const effectiveEnabledAt = migrationAtRow?.value || project.createdAt || migrationAt;
+
+        if (!project.settings) {
+          const newSettings = {
+            publish: {
+              ...defaultPublish,
+              enabledAt: effectiveEnabledAt,
+            },
+          };
+          updateStmt.run(JSON.stringify(newSettings), project.id);
+          migrated.push(project.id);
+          continue;
+        }
+
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(project.settings);
+          if (!parsed || typeof parsed !== 'object') {
+            parsed = {};
+          }
+        } catch {
+          parsed = {};
+        }
+
+        const publishVal = parsed.publish as Record<string, unknown> | undefined;
+        if (publishVal === undefined || publishVal === null) {
+          parsed.publish = {
+            ...defaultPublish,
+            enabledAt: effectiveEnabledAt,
+          };
+          updateStmt.run(JSON.stringify(parsed), project.id);
+          migrated.push(project.id);
+        } else if (publishVal.enabled === false) {
+          // Explicitly disabled, keep disabled
+          continue;
+        } else if (!publishVal.enabledAt) {
+          // Project already had publish enabled in the previous version (where enabledAt was not recorded).
+          // Use project.createdAt (or previously recorded migrationAt) to ensure recent tasks merged
+          // after publish was enabled are not silently converted to baseline without audit.
+          publishVal.enabledAt = effectiveEnabledAt;
+          updateStmt.run(JSON.stringify(parsed), project.id);
+        }
+      }
+      return { migrated, explicitlyDisabled };
+    }
 
     for (const project of projects) {
       if (!project.settings) {
@@ -1260,6 +1315,9 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
         migrated.push(project.id);
       } else if (publishVal.enabled === false) {
         explicitlyDisabled.push(project.id);
+      } else if (!publishVal.enabledAt) {
+        publishVal.enabledAt = migrationAt;
+        updateStmt.run(JSON.stringify(parsed), project.id);
       }
     }
 

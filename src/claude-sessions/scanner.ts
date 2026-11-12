@@ -83,7 +83,10 @@ export class ClaudeSessionScanner {
     // Only open transcripts of projects the hub manages (or hub chats). Other Claude Code projects on
     // this machine (e.g. company work) must not be read or recorded at all.
     const encodedRoots = this.allowedRoots().map(encodeProjectDir);
-    const dirAllowed = (name: string) => encodedRoots.some((root) => name === root || name.startsWith(`${root}-`));
+    const dirAllowed = (name: string) => {
+      if (name.includes('-.pool-') || name.endsWith('-.pool')) return false;
+      return encodedRoots.some((root) => name === root || name.startsWith(`${root}-`));
+    };
     const files = findTranscriptFiles(this.options.dir, this.options.maxAgeDays ?? 14, dirAllowed, (sessionId) => this.isHubChat(sessionId));
     for (const file of files) await this.scanFile(file, repo, tasks);
   }
@@ -308,7 +311,7 @@ export class ClaudeSessionScanner {
   private isAllowed(event: ClaudeTranscriptEvent, sessionId: string): boolean {
     if (this.isHubChat(sessionId)) return true;
     if (typeof event.cwd !== 'string' || event.cwd.length === 0) return false;
-    return this.allowedRoots().some((root) => isWithin(event.cwd!, root));
+    return !event.cwd!.split(path.sep).includes('.pool') && this.allowedRoots().some((root) => isWithin(event.cwd!, root));
   }
   private allowedRoots(): string[] {
     const projectRoots = (this.db.prepare('SELECT id, path, settings FROM projects').all() as Array<{ id: string; path: string; settings?: string | null }>)

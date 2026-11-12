@@ -803,6 +803,7 @@ export async function cmdClean(
             const projDir = path.join(config.worktreesDir, projId);
             if (fs.statSync(projDir).isDirectory()) {
               for (const slug of fs.readdirSync(projDir)) {
+                if (slug === '.pool') continue;
                 const wtDir = path.join(projDir, slug);
                 if (fs.existsSync(wtDir) && fs.statSync(wtDir).isDirectory()) {
                   worktreePaths.add(wtDir);
@@ -820,7 +821,7 @@ export async function cmdClean(
           try {
             if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) continue;
             for (const slug of fs.readdirSync(root)) {
-              if (slug === '.integration' || slug === '.logs') continue;
+              if (slug === '.integration' || slug === '.logs' || slug === '.pool') continue;
               const wtDir = path.join(root, slug);
               if (fs.existsSync(wtDir) && fs.statSync(wtDir).isDirectory()) worktreePaths.add(wtDir);
             }

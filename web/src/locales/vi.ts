@@ -1151,7 +1151,7 @@ export const vi = {
     tokenBudgetHint: 'Để trống để theo cấu hình toàn cục ({value}).',
     maxTurnsHint: 'Để trống để theo cấu hình toàn cục ({value}).',
     fullPermissionWarning: 'Cảnh báo: Toàn quyền cho phép Claude chạy mọi lệnh trên hệ thống mà không cần hỏi xác nhận. Dùng thận trọng!',
-    worktreeInstallDesc: 'Nên tắt khi dự án không có file package.json hoặc dependencies lớn, nhằm tăng tốc tạo worktree.',
+    worktreeInstallDesc: 'Nên tắt khi dự án không có file package.json hoặc dependencies lớn, nhằm tăng tốc tạo worktree.', worktreeWarmPool: 'Pool worktree sẵn', worktreeWarmPoolDesc: 'Giữ worktree detached sẵn dưới root project để giảm thời gian khởi động task. Đặt 0 để tắt.',
     gitHooksDesc: 'Nên bỏ qua khi git hooks (pre-commit/linter) chạy quá lâu hoặc phụ thuộc công cụ ngoài máy host.',
     integrationWorktreePath: 'Đường dẫn worktree',
     integrationCurrentBranchLabel: 'Nhánh hiện tại',

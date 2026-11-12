@@ -110,6 +110,8 @@ export const ProjectSettingsSchema = z.object({
     logsInRoot: z.boolean().optional(),
     /** auto: prepare node_modules when a lockfile exists; skip: never install; worker: worker installs dependencies. */
     install: z.enum(['auto', 'skip', 'worker']).default('auto'),
+    /** Number of detached task worktrees kept warm under the project worktree root. */
+    warmPool: z.number().int().min(0).default(1),
     /** run: git hooks (husky, commitlint…) run on worker commits; skip: workers commit with hooks disabled. */
     gitHooks: z.enum(['run', 'skip']).default('run'),
   }).default({}),

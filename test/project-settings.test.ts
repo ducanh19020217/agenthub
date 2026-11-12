@@ -30,7 +30,7 @@ describe('project settings parsing', () => {
         mergeMessageTemplate: "Merge branch '{branch}' into {target}",
       },
       brain: { engine: 'inherit', mode: 'inherit', permissions: 'inherit' },
-      worktree: { install: 'auto', gitHooks: 'run' },
+      worktree: { install: 'auto', warmPool: 1, gitHooks: 'run' },
       integration: { enabled: false, autoMerge: false },
       review: { autoMerge: false },
       ci: {},
@@ -48,7 +48,7 @@ describe('project settings parsing', () => {
     // An older JSON with only some sections still gets defaults for the rest.
     expect(parseProjectSettings(JSON.stringify({ worktree: { install: 'skip' } }))).toEqual({
       ...DEFAULT_PROJECT_SETTINGS,
-      worktree: { install: 'skip', gitHooks: 'run' },
+      worktree: { install: 'skip', warmPool: 1, gitHooks: 'run' },
     });
   });
 
@@ -207,11 +207,11 @@ describe('project settings through the service', () => {
       settings: typeof DEFAULT_PROJECT_SETTINGS;
     };
     expect(updated.settings.brain.mode).toBe('external');
-    expect(updated.settings.worktree).toEqual({ install: 'skip', gitHooks: 'skip' });
+    expect(updated.settings.worktree).toEqual({ install: 'skip', warmPool: 1, gitHooks: 'skip' });
 
     // Updating other fields leaves settings untouched.
     const renamed = ctx.service.updateProject('fe', { name: 'Frontend' }) as unknown as { settings: typeof DEFAULT_PROJECT_SETTINGS };
-    expect(renamed.settings.worktree).toEqual({ install: 'skip', gitHooks: 'skip' });
+    expect(renamed.settings.worktree).toEqual({ install: 'skip', warmPool: 1, gitHooks: 'skip' });
   });
 
   it('rejects invalid settings', () => {

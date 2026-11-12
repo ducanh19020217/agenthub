@@ -3,15 +3,34 @@ import fs from 'node:fs';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { AgentHubConfig } from '../config.js';
+import { ensureWorktreeNodeModules } from '../cache.js';
+import { projectSettings } from '../projects/settings.js';
 import { reap, reapSyncForWorktree } from '../reaper.js';
 import { isProjectWorktreeRootAccessible, projectWorktreeRoot, projectWorktreeRoots, resolveProjectFile } from '../projects/paths.js';
+import { lowPriority } from '../priority.js';
 
 const execFileAsync = promisify(execFile);
 const WORKTREE_GIT_TIMEOUT_MS = 10 * 60 * 1000;
 
+function execLowPriorityGit(args: string[], options: Parameters<typeof execFileAsync>[2] = {}): Promise<{ stdout: string; stderr: string }> {
+  const [executable, finalArgs] = lowPriority('git', args);
+  return execFileAsync(executable, finalArgs, options) as Promise<{ stdout: string; stderr: string }>;
+}
+
 export interface WorktreeInfo {
   worktreePath: string;
   slot: number;
+}
+
+export interface WorktreePoolOptions {
+  projectPath: string;
+  projectId: string;
+  projectSettings?: string | null;
+  slug: string;
+  branch: string;
+  baseRef: string;
+  taskId?: string;
+  diskAvailable?: () => boolean;
 }
 
 export interface WorktreeHookContext {
@@ -101,6 +120,7 @@ function shellWord(value: string): string {
 
 export const MAX_WORKTREE_SLOTS = 30;
 export class WorktreeService {
+  private poolRefills = new Map<string, Promise<void>>();
   constructor(
     private config: AgentHubConfig,
     private eventBus?: { emit: (type: string, taskId?: string, payload?: unknown) => boolean },
@@ -225,6 +245,120 @@ export class WorktreeService {
 
     await this.addToExcludeAsync(worktreePath);
     return worktreePath;
+  }
+
+  /** Move a prepared detached worktree into the task location and attach its branch. */
+  async acquireFromPool(opts: WorktreePoolOptions): Promise<string | null> {
+    const settings = projectSettings({ settings: opts.projectSettings });
+    if (settings.worktree.warmPool <= 0) {
+      this.eventBus?.emit('worktree.pool_miss', opts.taskId, { reason: 'disabled', projectId: opts.projectId });
+      return null;
+    }
+    const project = { id: opts.projectId, path: opts.projectPath, settings: opts.projectSettings };
+    const root = projectWorktreeRoot(project, this.config.hubHome, this.config.worktreesDir);
+    await this.poolRefills.get(root)?.catch(() => undefined);
+    const poolRoot = path.join(root, '.pool');
+    const target = path.join(root, opts.slug);
+    if (!fs.existsSync(poolRoot)) {
+      this.eventBus?.emit('worktree.pool_miss', opts.taskId, { reason: 'empty', projectId: opts.projectId });
+      return null;
+    }
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(poolRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory()); } catch {
+      entries = [];
+    }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))) {
+      const candidate = path.join(poolRoot, entry.name);
+      try {
+        await execFileAsync('git', ['-C', candidate, 'rev-parse', '--git-dir'], { timeout: 30_000 });
+        await execFileAsync('git', ['-C', opts.projectPath, 'worktree', 'move', candidate, target], { timeout: WORKTREE_GIT_TIMEOUT_MS });
+        await execFileAsync('git', ['-C', target, 'checkout', '-B', opts.branch, opts.baseRef], { timeout: WORKTREE_GIT_TIMEOUT_MS });
+        await this.addToExcludeAsync(target);
+        const status = await execFileAsync('git', ['-C', target, 'status', '--porcelain'], { encoding: 'utf8', timeout: 30_000 });
+        if (status.stdout.trim()) throw new Error('pooled worktree is dirty');
+        this.eventBus?.emit('worktree.pool_hit', opts.taskId, { projectId: opts.projectId, poolPath: candidate, worktreePath: target });
+        return target;
+      } catch (error) {
+        if (fs.existsSync(target)) {
+          await this.removeAsync(opts.projectPath, target, undefined, projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir)).catch(() => undefined);
+        }
+        if (fs.existsSync(candidate)) {
+          await this.removeAsync(opts.projectPath, candidate, undefined, projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir)).catch(() => undefined);
+        }
+        this.eventBus?.emit('worktree.pool_miss', opts.taskId, { projectId: opts.projectId, reason: String(error) });
+      }
+    }
+    return null;
+  }
+
+  /** Replenish detached worktrees in the background; calls for one project never overlap. */
+  refillPool(opts: Omit<WorktreePoolOptions, 'slug' | 'branch' | 'taskId'>): Promise<void> {
+    const project = { id: opts.projectId, path: opts.projectPath, settings: opts.projectSettings };
+    const root = projectWorktreeRoot(project, this.config.hubHome, this.config.worktreesDir);
+    const existing = this.poolRefills.get(root);
+    if (existing) return existing;
+    const promise = this.refillPoolInternal(opts).finally(() => {
+      if (this.poolRefills.get(root) === promise) this.poolRefills.delete(root);
+    });
+    this.poolRefills.set(root, promise);
+    return promise;
+  }
+
+  async removePoolAsync(project: { id: string; path: string; settings?: string | null }): Promise<void> {
+    const root = projectWorktreeRoot(project, this.config.hubHome, this.config.worktreesDir);
+    const poolRoot = path.join(root, '.pool');
+    if (!fs.existsSync(poolRoot)) return;
+    let entries: fs.Dirent[] = [];
+    try { entries = fs.readdirSync(poolRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory()); } catch { /* ignore */ }
+    for (const entry of entries) {
+      await this.removeAsync(project.path, path.join(poolRoot, entry.name), undefined, projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir));
+    }
+    try { await fs.promises.rm(poolRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+
+  private async refillPoolInternal(opts: Omit<WorktreePoolOptions, 'slug' | 'branch' | 'taskId'>): Promise<void> {
+    const settings = projectSettings({ settings: opts.projectSettings });
+    const project = { id: opts.projectId, path: opts.projectPath, settings: opts.projectSettings };
+    const root = projectWorktreeRoot(project, this.config.hubHome, this.config.worktreesDir);
+    const poolRoot = path.join(root, '.pool');
+    if (settings.worktree.warmPool <= 0) {
+      await this.removePoolAsync(project);
+      return;
+    }
+    if (opts.diskAvailable?.() === false) return;
+    fs.mkdirSync(poolRoot, { recursive: true });
+    const poolEntries = fs.readdirSync(poolRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    for (const extra of poolEntries.slice(settings.worktree.warmPool)) {
+      await this.removeAsync(opts.projectPath, path.join(poolRoot, extra.name), undefined, projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir));
+    }
+    for (let index = 1; index <= settings.worktree.warmPool && index <= MAX_WORKTREE_SLOTS; index++) {
+      if (opts.diskAvailable?.() === false) break;
+      const slot = path.join(poolRoot, String(index));
+      try {
+        if (fs.existsSync(slot)) {
+          const status = await execLowPriorityGit(['-C', slot, 'status', '--porcelain'], { encoding: 'utf8', timeout: 30_000 });
+          if (status.stdout.trim()) throw new Error('pooled worktree is dirty');
+          await execLowPriorityGit(['-C', slot, 'checkout', '--detach', opts.baseRef], { timeout: WORKTREE_GIT_TIMEOUT_MS });
+        } else {
+          await execLowPriorityGit(['-C', opts.projectPath, 'worktree', 'add', '--detach', slot, opts.baseRef], { timeout: WORKTREE_GIT_TIMEOUT_MS });
+        }
+        await this.addToExcludeAsync(slot);
+        if (settings.worktree.install === 'auto') {
+          const hasLock = (dir: string) => fs.existsSync(path.join(dir, 'package-lock.json')) || fs.existsSync(path.join(dir, 'pnpm-lock.yaml'));
+          if (hasLock(slot) || hasLock(path.join(slot, 'web'))) {
+            await ensureWorktreeNodeModules(slot, opts.projectPath, this.config.cacheDir, undefined, {
+              maxEntries: this.config.cacheMaxEntries,
+              maxBytes: this.config.cacheMaxGB * 1024 ** 3,
+            });
+          }
+        }
+      } catch (error) {
+        console.warn(`[worktree] Failed to replenish pool ${slot}: ${error instanceof Error ? error.message : String(error)}`);
+        if (fs.existsSync(slot)) await this.removeAsync(opts.projectPath, slot, undefined, projectWorktreeRoots(project, this.config.hubHome, this.config.worktreesDir)).catch(() => undefined);
+      }
+    }
   }
 
   /**

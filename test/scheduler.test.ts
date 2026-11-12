@@ -77,7 +77,7 @@ describe('Quota mark propagation to same-email profiles', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
 
-  it('marks quota for profiles with same email', () => {
+  it('marks quota for profiles with same email', async () => {
     // Create profiles with same email
     profileRepo.upsert({
       name: 'p1',
@@ -119,7 +119,7 @@ describe('Claude profiles are never worker scheduler profiles', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
 
-  it('does not select an engine=claude profile for the default worker chain', () => {
+  it('does not select an engine=claude profile for the default worker chain', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     profileRepo.upsert({ name: 'claude-may', engine: 'claude', kind: 'system', home: os.homedir(), email: null, enabled: 1 });
@@ -128,7 +128,7 @@ describe('Claude profiles are never worker scheduler profiles', () => {
     const fakeEngine = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
     const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['agy', fakeEngine]]));
-    scheduler.tick();
+    await scheduler.tick();
 
     expect(runRepo.getByTask('test-project/t1')).toHaveLength(0);
     expect(taskRepo.get('test-project/t1')?.status).toBe('waiting_quota');
@@ -140,7 +140,7 @@ describe('Task dependencies', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
 
-  it('task with dependency only runs when dependency is done', () => {
+  it('task with dependency only runs when dependency is done', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -176,7 +176,7 @@ describe('Task dependencies', () => {
     );
 
     // One tick
-    scheduler.tick();
+    await scheduler.tick();
 
     // t1 should be running, t2 should still be queued
     const t1 = taskRepo.get('test-project/t1')!;
@@ -230,7 +230,7 @@ describe('Task dependencies', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const t2 = taskRepo.get('test-project/t2')!;
     // t1 is done, so t2 should be running
@@ -244,7 +244,7 @@ describe('maxParallel limit', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
 
-  it('respects maxParallel=2 with 3 tasks', () => {
+  it('respects maxParallel=2 with 3 tasks', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -266,7 +266,7 @@ describe('maxParallel limit', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     // Count running tasks
     const tasks = taskRepo.getAll();
@@ -279,7 +279,7 @@ describe('maxParallel limit', () => {
     scheduler.stop();
   });
 
-  it('counts recovered live runs against the project limit', () => {
+  it('counts recovered live runs against the project limit', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: null, enabled: 1 });
@@ -303,7 +303,7 @@ describe('maxParallel limit', () => {
     );
     try {
       scheduler.start();
-      scheduler.tick();
+      await scheduler.tick();
       expect(scheduler.getRunning().size).toBe(3);
       expect(taskRepo.get('test-project/queued-1')?.status).toBe('queued');
       expect(taskRepo.get('test-project/queued-1')?.waitReason).toBe('parallel');
@@ -315,7 +315,7 @@ describe('maxParallel limit', () => {
     }
   });
 
-  it('enforces the department limit across projects', () => {
+  it('enforces the department limit across projects', async () => {
     const firstProjectPath = path.join(tmpDir, 'repo-first');
     createTestProject(firstProjectPath);
     const secondProjectPath = path.join(tmpDir, 'repo-second');
@@ -344,7 +344,7 @@ describe('maxParallel limit', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['agy', fakeEngine]]), undefined, undefined, undefined, undefined, undefined, undefined, departmentRepo,
     );
-    scheduler.tick();
+    await scheduler.tick();
 
     expect(taskRepo.get('test-project/low')?.status).toBe('running');
     expect(taskRepo.get('second-project/high')?.status).toBe('queued');
@@ -353,7 +353,7 @@ describe('maxParallel limit', () => {
     scheduler.stop();
   });
 
-  it('shares a busy machine between departments by weighted fair share', () => {
+  it('shares a busy machine between departments by weighted fair share', async () => {
     createTestProject(path.join(tmpDir, 'repo'));
     const secondProjectPath = path.join(tmpDir, 'repo-fair-second');
     fs.mkdirSync(secondProjectPath, { recursive: true });
@@ -383,7 +383,7 @@ describe('maxParallel limit', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['agy', fakeEngine]]), undefined, undefined, undefined, undefined, undefined, undefined, departmentRepo,
     );
-    scheduler.tick();
+    await scheduler.tick();
 
     const running = taskRepo.getAll().filter((task) => task.status === 'running');
     const priorityCount = running.filter((task) => task.projectId === 'test-project').length;
@@ -399,7 +399,7 @@ describe('Profile uses both agy slots', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
 
-  it('single profile runs 2 of 3 tasks at a time', () => {
+  it('single profile runs 2 of 3 tasks at a time', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -416,7 +416,7 @@ describe('Profile uses both agy slots', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const tasks = taskRepo.getAll();
     const runningCount = tasks.filter(t => t.status === 'running').length;
@@ -436,7 +436,7 @@ describe('Scheduler regression fixes', () => {
       new Map<string, Engine>([['agy', fakeEngine]]));
   }
 
-  it('does not repeat load.high while overloaded metrics stay flat', () => {
+  it('does not repeat load.high while overloaded metrics stay flat', async () => {
     config.load.enabled = true;
     const scheduler = makeScheduler();
     const loadEvents: unknown[] = [];
@@ -456,21 +456,21 @@ describe('Scheduler regression fixes', () => {
     loadGuard.isOverloaded = () => true;
     vi.spyOn(Date, 'now').mockReturnValue(0);
 
-    scheduler.tick();
+    await scheduler.tick();
     vi.mocked(Date.now).mockReturnValue(30 * 60 * 1000);
-    scheduler.tick();
+    await scheduler.tick();
     vi.mocked(Date.now).mockReturnValue(60 * 60 * 1000);
-    scheduler.tick();
+    await scheduler.tick();
     expect(loadEvents).toHaveLength(1);
 
     snapshot = { ...snapshot, load1: 13 };
-    scheduler.tick();
+    await scheduler.tick();
     expect(loadEvents).toHaveLength(2);
     scheduler.stop();
     vi.restoreAllMocks();
   });
 
-  it('does not treat a zero load baseline as worsening when it stays zero', () => {
+  it('does not treat a zero load baseline as worsening when it stays zero', async () => {
     config.load.enabled = true;
     const scheduler = makeScheduler();
     const loadEvents: unknown[] = [];
@@ -490,9 +490,9 @@ describe('Scheduler regression fixes', () => {
     loadGuard.isOverloaded = () => true;
     vi.spyOn(Date, 'now').mockReturnValue(0);
 
-    scheduler.tick();
+    await scheduler.tick();
     vi.mocked(Date.now).mockReturnValue(60 * 60 * 1000);
-    scheduler.tick();
+    await scheduler.tick();
 
     expect(loadEvents).toHaveLength(1);
     scheduler.stop();
@@ -507,7 +507,7 @@ describe('Scheduler regression fixes', () => {
     taskRepo.insert({ id: 'test-project/b', projectId: 'test-project', slug: 'b', title: 'B', status: 'queued' });
     process.env.FAKE_MODE = 'done';
     const scheduler = makeScheduler();
-    scheduler.tick();
+    await scheduler.tick();
     expect(taskRepo.get('test-project/b')!.status).toBe('running');
     scheduler.cancelAll();
     delete process.env.FAKE_MODE;
@@ -520,7 +520,7 @@ describe('Scheduler regression fixes', () => {
     taskRepo.insert({ id: 'test-project/a', projectId: 'test-project', slug: 'a', title: 'A', status: 'queued' });
     process.env.FAKE_MODE = 'slow';
     const scheduler = makeScheduler();
-    scheduler.tick();
+    await scheduler.tick();
     await vi.waitFor(() => expect(taskRepo.get('test-project/a')!.status).toBe('running'));
     scheduler.stop();
     expect(taskRepo.get('test-project/a')!.status).toBe('running');
@@ -542,7 +542,7 @@ describe('Scheduler regression fixes', () => {
     scheduler.stop();
   });
 
-  it('requeues a task left running without any run after a restart', () => {
+  it('requeues a task left running without any run after a restart', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     taskRepo.insert({ id: 'test-project/orphan', projectId: 'test-project', slug: 'orphan', title: 'Orphan', status: 'running' });
@@ -560,7 +560,7 @@ describe('Scheduler regression fixes', () => {
     process.env.FAKE_MODE = 'slow';
     config.defaultTimeout = 24 * 60 * 60;
     const first = makeScheduler();
-    first.tick();
+    await first.tick();
     await vi.waitFor(() => {
       expect(first.getRunning().has('test-project/a')).toBe(true);
     });
@@ -573,7 +573,7 @@ describe('Scheduler regression fixes', () => {
     delete process.env.FAKE_MODE;
   });
 
-  it('does not kill a recovered run immediately when its old timeout has elapsed', () => {
+  it('does not kill a recovered run immediately when its old timeout has elapsed', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: null, enabled: 1 });
@@ -602,7 +602,7 @@ describe('Scheduler regression fixes', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['agy', new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'))]]),
     );
-    scheduler.tick();
+    await scheduler.tick();
     await vi.waitFor(() => {
       const task = taskRepo.get('test-project/a')!;
       expect(task.status).toBe('queued');
@@ -614,7 +614,7 @@ describe('Scheduler regression fixes', () => {
     delete process.env.FAKE_MODE;
   });
 
-  it('keeps slots stable when an earlier task is cancelled', () => {
+  it('keeps slots stable when an earlier task is cancelled', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     db.prepare('UPDATE projects SET maxParallel = 2, envTemplate = ? WHERE id = ?').run(
@@ -627,7 +627,7 @@ describe('Scheduler regression fixes', () => {
     }
     process.env.FAKE_MODE = 'slow';
     const scheduler = makeScheduler();
-    scheduler.tick();
+    await scheduler.tick();
     expect(taskRepo.get('test-project/a')!.slot).toBe(1);
     expect(taskRepo.get('test-project/b')!.slot).toBe(2);
     scheduler.cancelTask('test-project/a');
@@ -638,7 +638,7 @@ describe('Scheduler regression fixes', () => {
     delete process.env.FAKE_MODE;
   });
 
-  it('rejects an empty review feedback', () => {
+  it('rejects an empty review feedback', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     taskRepo.insert({ id: 'test-project/a', projectId: 'test-project', slug: 'a', title: 'A', status: 'review' });
@@ -689,7 +689,7 @@ describe('Codex reviewer failover lifecycle', () => {
 
   it('selects a review task once and accepts chatter around output-last-message JSON', async () => {
     const { scheduler, reviewRepo } = makeReviewer('reviewer-chatter');
-    scheduler.tick();
+    await scheduler.tick();
     expect(scheduler.getReviewerStatus().running).toEqual(['test-project/review']);
     await vi.waitFor(() => {
       expect(taskRepo.get('test-project/review')?.status).toBe('done');
@@ -701,7 +701,7 @@ describe('Codex reviewer failover lifecycle', () => {
 
   it('routes changes_requested back to queued with feedback', async () => {
     const { scheduler, reviewRepo } = makeReviewer('reviewer-changes');
-    scheduler.tick();
+    await scheduler.tick();
     await vi.waitFor(() => {
       expect(reviewRepo.getByTask('test-project/review')[0]?.verdict).toBe('changes_requested');
     });
@@ -713,7 +713,7 @@ describe('Codex reviewer failover lifecycle', () => {
 
   it('does not approve quota or malformed reviewer output', async () => {
     const { scheduler } = makeReviewer('reviewer-malformed');
-    scheduler.tick();
+    await scheduler.tick();
     await vi.waitFor(() => {
       expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).toBe('crashed');
     });
@@ -723,7 +723,7 @@ describe('Codex reviewer failover lifecycle', () => {
 
   it('does not parse reviewer verdict from log when output file is missing', async () => {
     const { scheduler } = makeReviewer('reviewer-missing-output');
-    scheduler.tick();
+    await scheduler.tick();
     await vi.waitFor(() => {
       expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).toBe('crashed');
     });
@@ -733,7 +733,7 @@ describe('Codex reviewer failover lifecycle', () => {
 
   it('cleans up a reviewer when the child emits an asynchronous spawn error', async () => {
     const { scheduler } = makeReviewer('reviewer-error');
-    scheduler.tick();
+    await scheduler.tick();
     await vi.waitFor(() => {
       expect(scheduler.getReviewerStatus().running).toEqual([]);
       expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).toBe('crashed');
@@ -744,7 +744,7 @@ describe('Codex reviewer failover lifecycle', () => {
 
   it('marks Codex quota and leaves the task in review', async () => {
     const { scheduler } = makeReviewer('reviewer-quota');
-    scheduler.tick();
+    await scheduler.tick();
     await vi.waitFor(() => {
       expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).toBe('quota');
     });
@@ -755,12 +755,12 @@ describe('Codex reviewer failover lifecycle', () => {
 
   it('escalates read-only reviewer feedback once without requeueing', async () => {
     const { scheduler } = makeReviewer('reviewer-erofs');
-    scheduler.tick();
+    await scheduler.tick();
     await vi.waitFor(() => {
       expect(taskRepo.get('test-project/review')?.reviewerEscalated).toBe(1);
     });
-    scheduler.tick();
-    scheduler.tick();
+    await scheduler.tick();
+    await scheduler.tick();
     const task = taskRepo.get('test-project/review')!;
     expect(task.status).toBe('review');
     expect(task.reviewerEscalated).toBe(1);
@@ -772,7 +772,7 @@ describe('Codex reviewer failover lifecycle', () => {
 
   it('ignores environment wording in the reviewer log and processes the final quality verdict', async () => {
     const { scheduler } = makeReviewer('reviewer-erofs-log');
-    scheduler.tick();
+    await scheduler.tick();
     await vi.waitFor(() => {
       expect(taskRepo.get('test-project/review')?.body).toContain('race condition');
     });
@@ -782,7 +782,7 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
-  it('announces a finished review chain once instead of on every tick', () => {
+  it('announces a finished review chain once instead of on every tick', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
     new ReviewRepo(db).insert({ id: 'codex-ok', taskId: 'test-project/review', verdict: 'approved', feedback: 'ok', actor: 'codex-reviewer' });
@@ -793,7 +793,7 @@ describe('Codex reviewer failover lifecycle', () => {
     // A new review round may announce again.
     scheduler.reviewTask('test-project/review', 'changes_requested', 'fix it', 'brain');
     taskRepo.update('test-project/review', { status: 'review', reviewStep: 1 });
-    scheduler.tick();
+    await scheduler.tick();
     expect(ready()).toHaveLength(2);
     scheduler.stop();
   });
@@ -801,7 +801,7 @@ describe('Codex reviewer failover lifecycle', () => {
   it('runs a Codex final step itself and completes the chain when it approves', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }]) });
-    scheduler.tick();
+    await scheduler.tick();
     expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(1);
     await vi.waitFor(() => {
       expect(taskRepo.get('test-project/review')?.reviewStep).toBe(1);
@@ -813,59 +813,59 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
-  it('leaves a Claude final step to the brain or a person', () => {
+  it('leaves a Claude final step to the brain or a person', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'claude', mode: 'final' }]) });
-    scheduler.tick();
+    await scheduler.tick();
     expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(0);
     scheduler.stop();
   });
 
-  it('reviews a Codex-built task from another Codex account instead of skipping the gate', () => {
+  it('reviews a Codex-built task from another Codex account instead of skipping the gate', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
     db.prepare("INSERT INTO runs (id, taskId, engine, model, profileName, kind) VALUES ('w1', 'test-project/review', 'codex', 'codex:gpt-5.6-luna', 'codex-1', 'worker')").run();
 
     profileRepo.upsert({ name: 'codex-2', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
-    scheduler.tick();
+    await scheduler.tick();
     const reviewer = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
     expect(reviewer?.profileName).toBe('codex-2');
     scheduler.stop();
   });
 
-  it('uses Claude for a chain gate when the worker is the only Codex profile', () => {
+  it('uses Claude for a chain gate when the worker is the only Codex profile', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
     db.prepare("INSERT INTO runs (id, taskId, engine, model, profileName, kind) VALUES ('chain-worker', 'test-project/review', 'codex', 'codex:gpt-5.6-luna', 'codex-1', 'worker')").run();
     withClaudeReviewer(scheduler);
 
-    scheduler.tick();
+    await scheduler.tick();
 
     expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.engine).toBe('claude');
     expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.profileName).toBe('claude-1');
     scheduler.stop();
   });
 
-  it('reuses the worker Codex profile when chain Claude fallback is disabled', () => {
+  it('reuses the worker Codex profile when chain Claude fallback is disabled', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     config.reviewer.fallback.onUnavailable = false;
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
     db.prepare("INSERT INTO runs (id, taskId, engine, model, profileName, kind) VALUES ('chain-worker', 'test-project/review', 'codex', 'codex:gpt-5.6-luna', 'codex-1', 'worker')").run();
 
-    scheduler.tick();
+    await scheduler.tick();
 
     expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.profileName).toBe('codex-1');
     scheduler.stop();
   });
 
-  it('reports a chain gate with no reviewer once per 30-minute window', () => {
+  it('reports a chain gate with no reviewer once per 30-minute window', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
     profileRepo.update('codex-1', { authState: 'not_logged_in' });
 
-    scheduler.tick();
-    scheduler.tick();
-    scheduler.tick();
+    await scheduler.tick();
+    await scheduler.tick();
+    await scheduler.tick();
 
     const waiting = eventRepo.getRecent(30).filter((event) => event.type === 'review.waiting' && event.taskId === 'test-project/review');
     expect(waiting).toHaveLength(1);
@@ -873,22 +873,22 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
-  it('sends a task past a Codex gate without a Codex review back to the gate', () => {
+  it('sends a task past a Codex gate without a Codex review back to the gate', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
     taskRepo.update('test-project/review', { reviewStep: 1 });
-    scheduler.tick();
+    await scheduler.tick();
     expect(taskRepo.get('test-project/review')?.reviewStep).toBe(0);
     expect(eventRepo.getRecent(50).filter((event) => event.type === 'task.review_ready')).toHaveLength(0);
     scheduler.stop();
   });
 
-  it('does not start a reviewer with a logged-out Codex profile', () => {
+  it('does not start a reviewer with a logged-out Codex profile', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     profileRepo.update('codex-1', { authState: 'not_logged_in' });
     profileRepo.upsert({ name: 'codex-2', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1, authState: 'ok' });
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const reviewer = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
     expect(reviewer?.profileName).toBe('codex-2');
@@ -914,7 +914,7 @@ describe('Codex reviewer failover lifecycle', () => {
     const { scheduler, reviewRepo } = makeReviewer('reviewer-chatter');
     withClaudeReviewer(scheduler);
     new QuotaService(quotaMarkRepo, profileRepo).mark('codex-1', 'codex', 3600, 'test');
-    scheduler.tick();
+    await scheduler.tick();
     const reviewer = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
     expect(reviewer?.profileName).toBe('claude-1');
     expect(reviewer?.engine).toBe('claude');
@@ -931,7 +931,7 @@ describe('Codex reviewer failover lifecycle', () => {
       db.prepare("INSERT INTO events (type, taskId, payload) VALUES ('review.escalated', 'test-project/review', ?)").run(JSON.stringify({ reason: 'reviewer_changes_limit' }));
     }
     taskRepo.update('test-project/review', { reviewerEscalated: 1, reviewerEscalationReason: 'reviewer_changes_limit' });
-    scheduler.tick();
+    await scheduler.tick();
     const reviewer = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
     expect(reviewer?.profileName).toBe('claude-1');
     await vi.waitFor(() => expect(reviewRepo.getByTask('test-project/review').at(-1)?.actor).toBe('claude-reviewer'));
@@ -952,7 +952,7 @@ describe('Codex reviewer failover lifecycle', () => {
     taskRepo.update('test-project/review', { reviewerEscalated: 1, reviewerEscalationReason: 'reviewer_changes_limit' });
     (scheduler as unknown as { reviewerBackoffUntil: Map<string, number> }).reviewerBackoffUntil.set('claude-1', Date.now() + 60_000);
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const reviewer = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
     expect(reviewer?.profileName).toBe('codex-2');
@@ -961,7 +961,7 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
-  it('waits when a Claude arbiter exceeds the department budget', () => {
+  it('waits when a Claude arbiter exceeds the department budget', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     withClaudeReviewer(scheduler);
     exhaustDepartmentClaudeBudget(scheduler);
@@ -970,14 +970,14 @@ describe('Codex reviewer failover lifecycle', () => {
     }
     taskRepo.update('test-project/review', { reviewerEscalated: 1, reviewerEscalationReason: 'reviewer_changes_limit' });
 
-    scheduler.tick();
+    await scheduler.tick();
 
     expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(0);
     expect(eventRepo.getRecent(30).some((event) => event.type === 'review.waiting' && event.payload?.includes('department_claude_budget'))).toBe(true);
     scheduler.stop();
   });
 
-  it('still runs a Codex arbiter when the department Claude budget is exhausted', () => {
+  it('still runs a Codex arbiter when the department Claude budget is exhausted', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     exhaustDepartmentClaudeBudget(scheduler);
     config.reviewer.arbiter = { engine: 'codex', model: 'gpt-5.6-luna' };
@@ -986,24 +986,24 @@ describe('Codex reviewer failover lifecycle', () => {
     }
     taskRepo.update('test-project/review', { reviewerEscalated: 1, reviewerEscalationReason: 'reviewer_changes_limit' });
 
-    scheduler.tick();
+    await scheduler.tick();
 
     expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.engine).toBe('codex');
     scheduler.stop();
   });
 
-  it('clears an escalation once an automated reviewer approved, so the finished chain can merge', () => {
+  it('clears an escalation once an automated reviewer approved, so the finished chain can merge', async () => {
     const { scheduler, reviewRepo } = makeReviewer('reviewer-approved');
     projectRepo.update('test-project', { reviewChain: JSON.stringify([{ reviewer: 'codex:gpt-5.6-luna', mode: 'gate' }]) });
     taskRepo.update('test-project/review', { reviewerEscalated: 1, reviewerEscalationReason: 'reviewer_changes_limit', reviewStep: 1 });
     reviewRepo.insert({ id: 'arb-ok', taskId: 'test-project/review', verdict: 'approved', feedback: 'ok', actor: 'claude-reviewer' });
-    scheduler.tick();
+    await scheduler.tick();
     expect(taskRepo.get('test-project/review')?.reviewerEscalated).toBe(0);
     expect(eventRepo.getRecent(30).filter((event) => event.type === 'task.review_ready' && event.taskId === 'test-project/review')).toHaveLength(1);
     scheduler.stop();
   });
 
-  it('sends an arbiter rejection back to the worker, then blocks after the allowed rounds', () => {
+  it('sends an arbiter rejection back to the worker, then blocks after the allowed rounds', async () => {
     const { scheduler, reviewRepo } = makeReviewer('reviewer-approved');
     const escalate = () => {
       db.prepare("INSERT INTO events (type, taskId, payload) VALUES ('review.escalated', 'test-project/review', ?)").run(JSON.stringify({ reason: 'reviewer_changes_limit' }));
@@ -1014,7 +1014,7 @@ describe('Codex reviewer failover lifecycle', () => {
       if (round > 1) escalate();
       reviewRepo.insert({ id: `arb-no-${round}`, taskId: 'test-project/review', verdict: 'changes_requested', feedback: `thiếu test ${round}`, actor: 'claude-reviewer' });
       db.prepare("INSERT INTO events (type, taskId, payload) VALUES ('review.completed', 'test-project/review', ?)").run(JSON.stringify({ actor: 'claude-reviewer', verdict: 'changes_requested' }));
-      scheduler.tick();
+      await scheduler.tick();
       const task = taskRepo.get('test-project/review')!;
       if (round <= 2) {
         // Back in the queue; the same tick may already mark it waiting for a free account.
@@ -1027,38 +1027,38 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
-  it('leaves a first escalation for the retry path, not the arbiter', () => {
+  it('leaves a first escalation for the retry path, not the arbiter', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     withClaudeReviewer(scheduler);
     db.prepare("INSERT INTO events (type, taskId, payload) VALUES ('review.escalated', 'test-project/review', ?)").run(JSON.stringify({ reason: 'reviewer_changes_limit' }));
     taskRepo.update('test-project/review', { reviewerEscalated: 1, reviewerEscalationReason: 'reviewer_changes_limit' });
-    scheduler.tick();
+    await scheduler.tick();
     expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(0);
     scheduler.stop();
   });
 
-  it('lets Claude review once a busy Codex has kept the task waiting too long', () => {
+  it('lets Claude review once a busy Codex has kept the task waiting too long', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     withClaudeReviewer(scheduler);
     (scheduler as unknown as { reviewerRunsForProfile: (name: string) => boolean }).reviewerRunsForProfile = (name) => name === 'codex-1';
     db.prepare("UPDATE tasks SET updatedAt = datetime('now', '-30 minutes') WHERE id = 'test-project/review'").run();
-    scheduler.tick();
+    await scheduler.tick();
     expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.profileName).toBe('claude-1');
     scheduler.stop();
   });
 
-  it('keeps waiting for Codex when its accounts are only busy', () => {
+  it('keeps waiting for Codex when its accounts are only busy', async () => {
     const { scheduler } = makeReviewer('reviewer-approved');
     withClaudeReviewer(scheduler);
     (scheduler as unknown as { reviewerRunsForProfile: (name: string) => boolean }).reviewerRunsForProfile = (name) => name === 'codex-1';
-    scheduler.tick();
+    await scheduler.tick();
     expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(0);
     scheduler.stop();
   });
 
-  it('escalates before spawning when autocheck results are missing', () => {
+  it('escalates before spawning when autocheck results are missing', async () => {
     const { scheduler } = makeReviewer('reviewer-approved', false);
-    scheduler.tick();
+    await scheduler.tick();
     const task = taskRepo.get('test-project/review')!;
     expect(task.status).toBe('review');
     expect(task.reviewerEscalated).toBe(1);
@@ -1067,7 +1067,7 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
-  it('allows two reviewer changes requests, then escalates and survives restart ticks', () => {
+  it('allows two reviewer changes requests, then escalates and survives restart ticks', async () => {
     const { scheduler, failover, reviewRepo } = makeReviewer('reviewer-changes');
     for (let count = 0; count < 3; count++) {
       scheduler.reviewTask('test-project/review', 'changes_requested', `feedback ${count + 1}`, 'codex-reviewer');
@@ -1084,12 +1084,12 @@ describe('Codex reviewer failover lifecycle', () => {
       new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
     recovery.configureReviewer(reviewRepo, failover);
     // Reuse persisted task state and prove a new scheduler does not start it.
-    recovery.tick();
+    await recovery.tick();
     expect(runRepo.getByTask(task.id).filter((run) => run.kind === 'reviewer')).toHaveLength(0);
     recovery.stop();
   });
 
-  it('counts content feedback across reviewers and steps, but not operational returns', () => {
+  it('counts content feedback across reviewers and steps, but not operational returns', async () => {
     const { scheduler } = makeReviewer('reviewer-changes');
     projectRepo.update('test-project', {
       review: JSON.stringify({ maxRounds: 2, chain: [
@@ -1109,7 +1109,7 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
-  it('escalation includes all open findings and the reviewer actor', () => {
+  it('escalation includes all open findings and the reviewer actor', async () => {
     const { scheduler } = makeReviewer('reviewer-changes');
     scheduler.reviewTask('test-project/review', 'changes_requested', 'first missing case', 'codex-reviewer');
     taskRepo.update('test-project/review', { status: 'review' });
@@ -1128,7 +1128,7 @@ describe('Codex reviewer failover lifecycle', () => {
   it('retains reviewerChangesRequested counter without reset or increase on reviewer crash', async () => {
     const errorSetup = makeReviewer('reviewer-error');
     taskRepo.update('test-project/review', { reviewerChangesRequested: 1 });
-    errorSetup.scheduler.tick();
+    await errorSetup.scheduler.tick();
     await vi.waitFor(() => {
       expect(errorSetup.scheduler.getReviewerStatus().running).toEqual([]);
       expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).toBe('crashed');
@@ -1140,7 +1140,7 @@ describe('Codex reviewer failover lifecycle', () => {
   it('retains reviewerChangesRequested counter without reset or increase on reviewer quota', async () => {
     const quotaSetup = makeReviewer('reviewer-quota');
     taskRepo.update('test-project/review', { reviewerChangesRequested: 1 });
-    quotaSetup.scheduler.tick();
+    await quotaSetup.scheduler.tick();
     await vi.waitFor(() => {
       expect(runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer')?.outcome).toBe('quota');
     });
@@ -1148,7 +1148,7 @@ describe('Codex reviewer failover lifecycle', () => {
     quotaSetup.scheduler.stop();
   });
 
-  it('accumulates reviewerChangesRequested across advanceReviewStep chain steps', () => {
+  it('accumulates reviewerChangesRequested across advanceReviewStep chain steps', async () => {
     const { scheduler } = makeReviewer('reviewer-changes');
     projectRepo.update('test-project', {
       review: JSON.stringify({
@@ -1188,7 +1188,7 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
-  it('emits review.escalated only once when exceeding maxRounds and ignores subsequent calls', () => {
+  it('emits review.escalated only once when exceeding maxRounds and ignores subsequent calls', async () => {
     const { scheduler } = makeReviewer('reviewer-changes');
     projectRepo.update('test-project', {
       review: JSON.stringify({ maxRounds: 1 }),
@@ -1211,7 +1211,7 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
-  it('highlights missed-earlier findings distinctly in review.escalated open feedback', () => {
+  it('highlights missed-earlier findings distinctly in review.escalated open feedback', async () => {
     const { scheduler } = makeReviewer('reviewer-changes');
     projectRepo.update('test-project', {
       review: JSON.stringify({ maxRounds: 1 }),
@@ -1226,7 +1226,7 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
-  it('recovers a durable reviewer run without putting it in the worker map', () => {
+  it('recovers a durable reviewer run without putting it in the worker map', async () => {
     const { scheduler, failover } = makeReviewer('reviewer-approved');
     runRepo.insert({ id: 'old-review', taskId: 'test-project/review', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-1', kind: 'reviewer' });
     failover.clear();
@@ -1256,7 +1256,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
 
-  it('switches profile when quota is exhausted', () => {
+  it('switches profile when quota is exhausted', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -1275,7 +1275,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     // The task should be running on p2 (p1 is quota-exhausted for gemini, easy model chain starts with gemini)
     const runs = runRepo.getByTask('test-project/t1');
@@ -1334,7 +1334,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
     scheduler.stop();
   });
 
-  it('fails over to another profile with the exact same model when profile A exhausts quota for model M', () => {
+  it('fails over to another profile with the exact same model when profile A exhausts quota for model M', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -1357,7 +1357,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
     const engines = new Map<string, Engine>([['agy', fakeEngine]]);
     const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines);
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const runs = runRepo.getByTask('test-project/same-model-failover');
     expect(runs).toHaveLength(1);
@@ -1415,7 +1415,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
     scheduler.stop();
   });
 
-  it('dispatches queued task to waiting_quota when all models in chain are exhausted, and requeues on quota reset and claude.quota_available', () => {
+  it('dispatches queued task to waiting_quota when all models in chain are exhausted, and requeues on quota reset and claude.quota_available', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     profileRepo.upsert({ name: 'agy-p1', engine: 'agy', kind: 'isolated', home: '/tmp/agy-p1', email: null, enabled: 1 });
@@ -1442,7 +1442,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
     );
 
     // 1. When findModelProfilePair returns null, dispatch puts task into waiting_quota
-    scheduler.tick();
+    await scheduler.tick();
     let task = taskRepo.get('test-project/chain-wait')!;
     expect(task.status).toBe('waiting_quota');
     expect(task.waitReason).toBe('quota');
@@ -1453,7 +1453,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
     // Simulate quota expiry by marking in the past
     quotaMarkRepo.mark('agy-p1', 'gemini', now - 10, 'expired');
     quotaMarkRepo.mark('codex-p1', 'codex', now - 10, 'expired');
-    scheduler.tick();
+    await scheduler.tick();
     task = taskRepo.get('test-project/chain-wait')!;
     expect(['queued', 'running']).toContain(task.status);
     const allRecent = eventRepo.getRecent(50);
@@ -1480,7 +1480,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
     scheduler.stop();
   });
 
-  it('moves to waiting_quota when all profiles exhausted', () => {
+  it('moves to waiting_quota when all profiles exhausted', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -1500,7 +1500,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const t = taskRepo.get('test-project/t1')!;
     expect(t.status).toBe('waiting_quota');
@@ -1508,7 +1508,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
     scheduler.stop();
   });
 
-  it('falls through the task model chain when the first model family is exhausted', () => {
+  it('falls through the task model chain when the first model family is exhausted', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     profileRepo.upsert({ name: 'agy-1', engine: 'agy', kind: 'isolated', home: '/tmp/agy-1', email: null, enabled: 1 });
@@ -1524,7 +1524,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['agy', new FakeEngine(fakeAgent)], ['codex', new FakeEngine(fakeAgent)]]),
     );
-    scheduler.tick();
+    await scheduler.tick();
 
     expect(runRepo.getByTask('test-project/fallback')[0]).toMatchObject({ model: 'codex:gpt-5.6-luna', profileName: 'codeX1' });
     expect(taskRepo.get('test-project/fallback')?.status).toBe('running');
@@ -1543,7 +1543,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['agy', new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'))]]),
     );
-    scheduler.tick();
+    await scheduler.tick();
     await vi.waitFor(() => expect(profileRepo.get('p1')?.authState).toBe('not_logged_in'), { timeout: 5000 });
     expect(profileRepo.get('p3')?.authState).toBe('not_logged_in');
     expect(profileRepo.get('p1')?.authMessage).toBe('Phiên đăng nhập hết hạn (401) – cần đăng nhập lại');
@@ -1554,7 +1554,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
     delete process.env.FAKE_MODE;
   });
 
-  it('fails clearly when every matching profile needs login again', () => {
+  it('fails clearly when every matching profile needs login again', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     for (const name of ['p1', 'p2']) {
@@ -1565,7 +1565,7 @@ describe('Quota → profile marked → task runs on another profile', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['agy', new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'))]]),
     );
-    scheduler.tick();
+    await scheduler.tick();
     expect(taskRepo.get('test-project/t1')).toMatchObject({ status: 'failed' });
     scheduler.stop();
   });
@@ -1575,7 +1575,7 @@ describe('Review: DONE → review, changes_requested → re-queue', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
 
-  it('review changes_requested → feedback written, marker deleted, task re-queued with resume', () => {
+  it('review changes_requested → feedback written, marker deleted, task re-queued with resume', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -1675,7 +1675,7 @@ describe('Cancel task → process group killed', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     // Task should be running
     let t = taskRepo.get('test-project/t1')!;
@@ -1772,7 +1772,7 @@ describe('Watchdog', () => {
     const fakeEngine = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
     const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['agy', fakeEngine]]));
-    scheduler.tick();
+    await scheduler.tick();
     projectRepo.update('test-project', { maxParallel: 0 });
     await vi.waitFor(() => {
       (scheduler as unknown as { checkRunningTasks: () => void }).checkRunningTasks();
@@ -1786,7 +1786,7 @@ describe('Watchdog', () => {
     delete process.env.FAKE_MODE;
   });
 
-  it('does not stall when the agy conversation changes while its log is silent', () => {
+  it('does not stall when the agy conversation changes while its log is silent', async () => {
     const fixture = makeActivityFixture({ startTime: Date.now() - 120_000 });
     fs.writeFileSync(path.join(fixture.conversationDir, 'run.db'), 'conversation activity');
     fs.utimesSync(fixture.logPath, new Date(fixture.startTime - 60_000), new Date(fixture.startTime - 60_000));
@@ -1797,7 +1797,7 @@ describe('Watchdog', () => {
     expect(fixture.running.activitySource).toBe('conversation');
   });
 
-  it('stalls when every activity source is silent', () => {
+  it('stalls when every activity source is silent', async () => {
     const fixture = makeActivityFixture({ startTime: Date.now() - 120_000 });
     const old = new Date(fixture.startTime - 60_000);
     fs.utimesSync(fixture.logPath, old, old);
@@ -1811,7 +1811,7 @@ describe('Watchdog', () => {
     expect(stalled).toBe(true);
   });
 
-  it('uses the real HOME for a keyring profile', () => {
+  it('uses the real HOME for a keyring profile', async () => {
     const realHome = process.env.HOME;
     const fixture = makeActivityFixture({ profileKind: 'keyring', startTime: Date.now() - 120_000 });
     const conversationPath = path.join(fixture.home, '.gemini', 'antigravity-cli', 'conversations', 'keyring.db');
@@ -1826,7 +1826,7 @@ describe('Watchdog', () => {
     }
   });
 
-  it('keeps a worker alive when a worktree file changes', () => {
+  it('keeps a worker alive when a worktree file changes', async () => {
     const fixture = makeActivityFixture({ startTime: Date.now() - 120_000 });
     const changed = path.join(fixture.worktreePath, 'changed.txt');
     fs.writeFileSync(changed, 'new work');
@@ -1836,7 +1836,7 @@ describe('Watchdog', () => {
     expect(stalled).toBe(false);
   });
 
-  it('ignores conversation files changed before the run started', () => {
+  it('ignores conversation files changed before the run started', async () => {
     const fixture = makeActivityFixture({ startTime: Date.now() });
     const oldConversation = path.join(fixture.conversationDir, 'before.db');
     fs.writeFileSync(oldConversation, 'old conversation');
@@ -1852,7 +1852,7 @@ describe('Codex slots', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
 
-  it('runs two hard tasks concurrently on one Codex profile', () => {
+  it('runs two hard tasks concurrently on one Codex profile', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     profileRepo.upsert({ name: 'codex', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
@@ -1864,7 +1864,7 @@ describe('Codex slots', () => {
     (fakeEngine as unknown as { id: 'codex' }).id = 'codex';
     const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['codex', fakeEngine]]));
-    scheduler.tick();
+    await scheduler.tick();
 
     expect(scheduler.getRunning().size).toBe(2);
     expect(runRepo.getByTask('test-project/hard-a')[0].model).toBe('codex:gpt-5.6-luna');
@@ -1874,7 +1874,7 @@ describe('Codex slots', () => {
     delete process.env.FAKE_MODE;
   });
 
-  it('dispatches two codex tasks in a single tick with two different lockFiles', () => {
+  it('dispatches two codex tasks in a single tick with two different lockFiles', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     profileRepo.upsert({ name: 'codex', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
@@ -1893,7 +1893,7 @@ describe('Codex slots', () => {
 
     const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['codex', fakeEngine]]));
-    scheduler.tick();
+    await scheduler.tick();
 
     expect(spawnedOpts).toHaveLength(2);
     expect(spawnedOpts[0].lockFile).toBeTruthy();
@@ -1930,7 +1930,7 @@ describe('Codex slots', () => {
     const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['codex', fakeEngine]]));
 
-    scheduler.tick();
+    await scheduler.tick();
 
     await vi.waitFor(() => {
       const task = taskRepo.get('test-project/flock-busy-task');
@@ -1951,7 +1951,7 @@ describe('Codex slots', () => {
     scheduler.stop();
   });
 
-  it('keeps third task queued when all profile slots are occupied', () => {
+  it('keeps third task queued when all profile slots are occupied', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     profileRepo.upsert({ name: 'codex', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
@@ -1964,7 +1964,7 @@ describe('Codex slots', () => {
     const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['codex', fakeEngine]]));
 
-    scheduler.tick();
+    await scheduler.tick();
 
     expect(scheduler.getRunning().size).toBe(2);
     expect(taskRepo.get('test-project/t1')?.status).toBe('running');
@@ -2660,7 +2660,7 @@ describe('Crash recovery on startup', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
 
-  it('marks running runs as crashed and re-queues tasks on startup', () => {
+  it('marks running runs as crashed and re-queues tasks on startup', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: null, enabled: 1 });
@@ -2702,7 +2702,7 @@ describe('Crash recovery on startup', () => {
     scheduler.stop();
   });
 
-  it('keeps a done task terminal when daemon recovery finds an old worker row', () => {
+  it('keeps a done task terminal when daemon recovery finds an old worker row', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     fs.mkdirSync(path.join(projectPath, '.agenthub'), { recursive: true });
@@ -2718,7 +2718,7 @@ describe('Crash recovery on startup', () => {
     scheduler.stop();
   });
 
-  it('does not treat a stale marker on a queued task as a new completion', () => {
+  it('does not treat a stale marker on a queued task as a new completion', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     fs.mkdirSync(path.join(projectPath, '.agenthub'), { recursive: true });
@@ -2734,7 +2734,7 @@ describe('Crash recovery on startup', () => {
     scheduler.stop();
   });
 
-  it('does not let an older worker run claim a marker when a newer run is active', () => {
+  it('does not let an older worker run claim a marker when a newer run is active', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     fs.mkdirSync(path.join(projectPath, '.agenthub'), { recursive: true });
@@ -2769,7 +2769,7 @@ describe('Crash recovery on startup', () => {
     scheduler.stop();
   });
 
-  it('recovers a newer BLOCKED marker without marking the run crashed', () => {
+  it('recovers a newer BLOCKED marker without marking the run crashed', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     fs.mkdirSync(path.join(projectPath, '.agenthub'), { recursive: true });
@@ -2785,7 +2785,7 @@ describe('Crash recovery on startup', () => {
     scheduler.stop();
   });
 
-  it('re-queues progress after a dead worker without increasing attempt', () => {
+  it('re-queues progress after a dead worker without increasing attempt', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     execFileSync('git', ['checkout', '-b', 'agenthub/progress'], { cwd: projectPath });
@@ -2808,7 +2808,7 @@ describe('Worktree creation', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
 
-  it('creates worktree with correct branch and base', () => {
+  it('creates worktree with correct branch and base', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -2829,7 +2829,7 @@ describe('Worktree creation', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const task = taskRepo.get('test-project/t1')!;
     expect(task.worktreePath).toBeTruthy();
@@ -2847,7 +2847,7 @@ describe('Env file generation', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
 
-  it('generates env file with correct slot substitution', () => {
+  it('generates env file with correct slot substitution', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -2881,7 +2881,7 @@ describe('Env file generation', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const task = taskRepo.get('test-project/my-task')!;
     expect(task.worktreePath).toBeTruthy();
@@ -2897,7 +2897,7 @@ describe('Env file generation', () => {
     scheduler.stop();
   });
 
-  it('wakes waiting_quota tasks on eventBus quota.cleared or profile.updated', () => {
+  it('wakes waiting_quota tasks on eventBus quota.cleared or profile.updated', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -2930,7 +2930,7 @@ describe('Env file generation', () => {
     scheduler.stop();
   });
 
-  it('re-queues tasks left in waiting_quota by a previous daemon once disk is ok (restart loses in-memory disk waiters)', () => {
+  it('re-queues tasks left in waiting_quota by a previous daemon once disk is ok (restart loses in-memory disk waiters)', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -2950,13 +2950,13 @@ describe('Env file generation', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
     expect(['queued', 'running']).toContain(taskRepo.get('test-project/disk-waiter')?.status);
 
     scheduler.stop();
   });
 
-  it('uses gemini-3.8-flash-high for hard level by default and opus only when specified in modelChain', () => {
+  it('uses gemini-3.8-flash-high for hard level by default and opus only when specified in modelChain', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -2977,7 +2977,7 @@ describe('Env file generation', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const runs = runRepo.getByTask('test-project/hard-t1');
     expect(runs.length).toBe(1);
@@ -2986,7 +2986,7 @@ describe('Env file generation', () => {
     scheduler.stop();
   });
 
-  it('skips unknown models, emits task.model_skipped, and fails when none are usable', () => {
+  it('skips unknown models, emits task.model_skipped, and fails when none are usable', async () => {
     const projectPath = path.join(tmpDir, 'repo-model-skip');
     createTestProject(projectPath);
     profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: null, enabled: 1 });
@@ -3005,7 +3005,7 @@ describe('Env file generation', () => {
       new Map<string, Engine>([['agy', fakeEngine]]));
 
     scheduler.getEventBus().on('task.model_skipped', (_taskId, payload) => skipped.push(payload));
-    scheduler.tick();
+    await scheduler.tick();
 
     expect(runRepo.getByTask('test-project/skip-known')[0]?.model).toBe('gemini-3.8-flash-medium');
     expect(taskRepo.get('test-project/skip-all')?.status).toBe('failed');
@@ -3014,7 +3014,7 @@ describe('Env file generation', () => {
     scheduler.stop();
   });
 
-  it('fails clearly when all profiles have a non-ok authState', () => {
+  it('fails clearly when all profiles have a non-ok authState', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -3043,7 +3043,7 @@ describe('Env file generation', () => {
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     // Since the only enabled profile has a non-ok authState, task cannot run.
     expect(taskRepo.get('test-project/verify-t1')?.status).toBe('failed');
@@ -3057,7 +3057,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
 
-  it('selects g2 instead of g1 when chinh and g1 share the same email and chinh has 1 active run', () => {
+  it('selects g2 instead of g1 when chinh and g1 share the same email and chinh has 1 active run', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -3100,7 +3100,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
         usageBefore: null,
       });
 
-      scheduler.tick();
+      await scheduler.tick();
 
       const runs = runRepo.getByTask('test-project/t-new');
       expect(runs.length).toBe(1);
@@ -3112,7 +3112,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
     }
   });
 
-  it('selects profile with higher remaining quota when two profiles with different emails are both idle', () => {
+  it('selects profile with higher remaining quota when two profiles with different emails are both idle', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -3134,7 +3134,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
       undefined, undefined, db,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const runs = runRepo.getByTask('test-project/t1');
     expect(runs.length).toBe(1);
@@ -3143,7 +3143,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
     scheduler.stop();
   });
 
-  it('does not select a profile with active quota mark even if it is idle', () => {
+  it('does not select a profile with active quota mark even if it is idle', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -3168,7 +3168,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
       undefined, undefined, db,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const runs = runRepo.getByTask('test-project/t1');
     expect(runs.length).toBe(1);
@@ -3177,7 +3177,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
     scheduler.stop();
   });
 
-  it('defaults to 50 when quota usage is missing and prefers profile with higher quota', () => {
+  it('defaults to 50 when quota usage is missing and prefers profile with higher quota', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -3196,7 +3196,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
       new Map<string, Engine>([['agy', fakeEngine]]), undefined, undefined, db,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const runs = runRepo.getByTask('test-project/t1');
     expect(runs[0].profileName).toBe('p-high');
@@ -3204,7 +3204,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
     scheduler.stop();
   });
 
-  it('defaults to 50 when quota usage is missing and prefers it over lower quota profile', () => {
+  it('defaults to 50 when quota usage is missing and prefers it over lower quota profile', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -3223,7 +3223,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
       new Map<string, Engine>([['agy', fakeEngine]]), undefined, undefined, db,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const runs = runRepo.getByTask('test-project/t1');
     expect(runs[0].profileName).toBe('p-no-data');
@@ -3231,7 +3231,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
     scheduler.stop();
   });
 
-  it('treats profile name as email when email is null', () => {
+  it('treats profile name as email when email is null', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -3273,7 +3273,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
         usageBefore: null,
       });
 
-      scheduler.tick();
+      await scheduler.tick();
 
       const runs = runRepo.getByTask('test-project/t-new');
       expect(runs[0].profileName).toBe('p2');
@@ -3284,7 +3284,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
     }
   });
 
-  it('preserves existing order when both email runs and remaining quota tie', () => {
+  it('preserves existing order when both email runs and remaining quota tie', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
 
@@ -3299,7 +3299,7 @@ describe('Profile selection: email load spreading and remaining quota priority',
       new Map<string, Engine>([['agy', fakeEngine]]), undefined, undefined, db,
     );
 
-    scheduler.tick();
+    await scheduler.tick();
 
     const runs = runRepo.getByTask('test-project/t1');
     expect(runs[0].profileName).toBe('alpha');
@@ -3328,7 +3328,7 @@ describe('Run metrics after a normal worker exit', () => {
     const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['codex', fake as unknown as Engine]]), undefined, undefined, undefined, metrics);
     try {
-      scheduler.tick();
+      await scheduler.tick();
       await vi.waitFor(() => {
         const run = runRepo.getByTask('test-project/tok')[0];
         expect(run).toBeDefined();

@@ -770,16 +770,18 @@ export class Scheduler {
     // Recover crashed runs on startup
     this.recoverOnStartup();
     this.applyFocus();
-    this.skipSchedulingOnce = true;
+    this.skipSchedulingOnce = false;
 
     // Start the scheduler loop (every 2 seconds)
-    this.timer = setInterval(() => this.tick(), 2000);
+    this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 2000);
     // Measure task resources every 15s
     this.measureAllRunningTaskResources();
     this.resourceTimer = setInterval(() => this.measureAllRunningTaskResources(), 15000);
     this.resourceTimer.unref();
     // Also run immediately
-    this.tick();
+    queueMicrotask(() => {
+      if (!this.stopped) void this.tick().catch(() => {});
+    });
   }
 
   stop(): void {
@@ -1574,7 +1576,7 @@ export class Scheduler {
     }
 
     // 3c. Start new tasks if possible
-    this.scheduleNewTasks();
+    await this.scheduleNewTasks();
 
     // 4. Scan worktrees and reap orphaned worker processes periodically.
     if (Date.now() - this.lastOrphanScan >= 6 * 60 * 60 * 1000) {
@@ -1620,7 +1622,7 @@ export class Scheduler {
    * Force an immediate tick (for event-driven scheduling)
    */
   triggerTick(): void {
-    this.tick();
+    void this.tick().catch(() => {});
   }
 
   wakeWaitingQuotaTasks(reason = 'quota_unblocked'): void {
@@ -2388,7 +2390,7 @@ export class Scheduler {
     });
   }
 
-  private scheduleNewTasks(): void {
+  private async scheduleNewTasks(): Promise<void> {
     if (this.paused) {
       return;
     }
@@ -2418,6 +2420,7 @@ export class Scheduler {
       fairUsage.set(departmentId, (fairUsage.get(departmentId) || 0) + 1);
     }
     const blockedDisksInTick = new Map<string, MonitoredDisk>();
+    const starts: Promise<void>[] = [];
     const remainingTasks = [...schedulableTasks];
     while (remainingTasks.length > 0) {
       remainingTasks.sort((a, b) => {
@@ -2480,7 +2483,7 @@ export class Scheduler {
         }
         const departmentId = this.departmentIdForTask(task);
         fairUsage.set(departmentId, (fairUsage.get(departmentId) || 0) + 1);
-        void this.startTask(task, pair.model, pair.profileName)
+        starts.push(this.startTask(task, pair.model, pair.profileName)
           .catch((error) => {
             console.error(`[scheduler] failed to start task ${task.id}:`, error);
           })
@@ -2488,7 +2491,7 @@ export class Scheduler {
             // A failed start can happen before the run is inserted or after an
             // unexpected exception. Never leave a stale capacity reservation.
             if (!this.running.has(task.id)) this.starting.delete(task.id);
-          });
+          }));
       } else if (this.hasBusyMatchingProfile(task)) {
         this.markQueuedWaiting(task, 'profile_busy');
         continue;
@@ -2524,6 +2527,7 @@ export class Scheduler {
         this.markDiskLow(lowDisk);
       }
     }
+    await Promise.all(starts);
   }
 
   private scheduleReviews(): void {
@@ -3625,6 +3629,11 @@ export class Scheduler {
           branch,
           baseRef,
         });
+        if (this.stopGeneration !== stopGeneration) {
+          this.starting.delete(task.id);
+          this.locks.release(profile.name, lockFile);
+          return;
+        }
       } catch (e) {
         this.locks.release(profile.name, lockFile);
         if (!isProjectAccessible(project.path) || !isProjectWorktreeRootAccessible({ id: project.id, path: project.path, settings: project.settings })) {

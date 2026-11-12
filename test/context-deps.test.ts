@@ -304,7 +304,7 @@ describe('dependency context in worker files', () => {
       );
       scheduler.configureReviewer(reviewRepo, new ClaudeFailoverState());
 
-      scheduler.tick();
+      await scheduler.tick();
 
       await vi.waitFor(() => expect(taskRepo.get('p1/consumer')?.status).toBe('running'));
       const consumer = taskRepo.get('p1/consumer')!;

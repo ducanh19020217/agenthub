@@ -316,8 +316,8 @@ describe('Worktree Auto-Cleanup', () => {
     ctx.db.prepare("UPDATE tasks SET updatedAt = ? WHERE id = 'proj/outside'").run(oldTime);
 
     ctx.scheduler.start();
+    await ctx.scheduler.tick();
     ctx.scheduler.stop();
-    await new Promise((resolve) => setTimeout(resolve, 50));
 
     expect(fs.existsSync(orphanWorktree)).toBe(false);
     expect(execFileSync('git', ['-C', projectPath, 'branch', '--list', 'agenthub/orphan'], { encoding: 'utf8' })).toContain('agenthub/orphan');

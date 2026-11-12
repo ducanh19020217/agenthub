@@ -290,7 +290,7 @@ describe('Brain Codex Engine Integration and Failover', () => {
         level: 'easy',
         start: true,
       });
-      ctx.scheduler.tick();
+      await ctx.scheduler.tick();
       const task = ctx.taskRepo.get('rev-proj/feat-codex')!;
       ctx.taskRepo.update(task.id, { status: 'review' });
 

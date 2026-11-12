@@ -34,7 +34,7 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
     ctx.db.prepare("INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'test', 0, 1, 1, 'failed')").run(taskId, runId);
   }
 
-  function prepareRetryTask(slug: string) {
+  async function prepareRetryTask(slug: string) {
     const projectId = `retry-${slug}`;
     const repo = path.join(tmpDir, `${slug}-repo`);
     initGitRepo(repo, 'main');
@@ -48,7 +48,7 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
       merge: { enabled: true, worktrees: {}, checks: ['node -e "process.exit(0)"'], timeoutSec: 30 },
     });
     ctx.service.createTask({ project: projectId, slug, title: 'Retry checks', body: 'Do it', level: 'easy', start: true });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const task = ctx.taskRepo.get(`${projectId}/${slug}`)!;
     fs.writeFileSync(path.join(task.worktreePath!, 'retry.txt'), 'retry\n');
     execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
@@ -112,7 +112,7 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
     });
     const intPath = path.join(tmpDir, 'integration', 'sub-proj');
     ctx.service.createTask({ project: 'sub-proj', slug: 'feat-claude', title: 'Feature Claude', body: 'Do it', level: 'easy', start: true });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const task = ctx.taskRepo.get('sub-proj/feat-claude')!;
     fs.writeFileSync(path.join(task.worktreePath!, 'claude.txt'), 'claude approved\n');
     execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
@@ -155,7 +155,7 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
     });
     const intPath = path.join(tmpDir, 'integration', 'codex-proj');
     ctx.service.createTask({ project: 'codex-proj', slug: 'feat-codex', title: 'Feature Codex', body: 'Do it', level: 'easy', start: true });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const task = ctx.taskRepo.get('codex-proj/feat-codex')!;
     fs.writeFileSync(path.join(task.worktreePath!, 'codex.txt'), 'codex approved\n');
     execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
@@ -197,7 +197,7 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
     });
     const intPath = path.join(tmpDir, 'integration', 'codex-final');
     ctx.service.createTask({ project: 'codex-final', slug: 'feat-final', title: 'Feature final', body: 'Do it', level: 'easy', start: true });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const task = ctx.taskRepo.get('codex-final/feat-final')!;
     fs.writeFileSync(path.join(task.worktreePath!, 'final.txt'), 'codex final approved\n');
     execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
@@ -247,7 +247,7 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
 
     // Run multiple scheduler ticks
     for (let i = 0; i < 5; i++) {
-      ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     }
 
     // autoMergeReviewedTask is called (daemon would call this on task.review_ready)
@@ -277,7 +277,7 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
       merge: { enabled: true, worktrees: {}, checks: [], timeoutSec: 30 },
     });
     ctx.service.createTask({ project: 'fail-chk-proj', slug: 'feat-fail-chk', title: 'Feature Fail', body: 'Do it', level: 'easy', start: true });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const task = ctx.taskRepo.get('fail-chk-proj/feat-fail-chk')!;
     fs.writeFileSync(path.join(task.worktreePath!, 'fail.txt'), 'fail\n');
     execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
@@ -304,7 +304,7 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
   });
 
   it('reruns only failed checks once and merges when the rerun passes', async () => {
-    const task = prepareRetryTask('green');
+    const task = await prepareRetryTask('green');
     let calls = 0;
     ctx.scheduler.rerunFailedChecksForTask = async (taskId, runId) => {
       calls += 1;
@@ -317,7 +317,7 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
   });
 
   it('shares an in-flight retry between repeated review_ready calls', async () => {
-    const task = prepareRetryTask('concurrent');
+    const task = await prepareRetryTask('concurrent');
     let calls = 0;
     let release!: () => void;
     const waiting = new Promise<void>((resolve) => { release = resolve; });
@@ -353,7 +353,7 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
       merge: { enabled: true, worktrees: {}, checks: [], timeoutSec: 30 },
     });
     ctx.service.createTask({ project: 'guard-proj', slug: 'feat-guard', title: 'Feature Guard', body: 'Do it', level: 'easy', start: true });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const task = ctx.taskRepo.get('guard-proj/feat-guard')!;
     fs.writeFileSync(path.join(task.worktreePath!, 'guard.txt'), 'guard\n');
     execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
@@ -395,7 +395,7 @@ describe('Auto-merge with Claude substitute and review_ready flow', () => {
       merge: { enabled: true, worktrees: {}, checks: [], timeoutSec: 30 },
     });
     ctx.service.createTask({ project: 'human-proj', slug: 'feat-human', title: 'Feature Human', body: 'Do it', level: 'easy', start: true });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const task = ctx.taskRepo.get('human-proj/feat-human')!;
     fs.writeFileSync(path.join(task.worktreePath!, 'human.txt'), 'human\n');
     execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);

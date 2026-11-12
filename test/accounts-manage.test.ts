@@ -173,7 +173,7 @@ describe('c-accounts-manage: Quản lý tài khoản', () => {
         status: 'queued',
       });
 
-      ctx.scheduler.tick();
+      await ctx.scheduler.tick();
 
       await vi.waitFor(() => expect(ctx.runRepo.getByTask('p-sched/t1')).toHaveLength(1));
       const runs = ctx.runRepo.getByTask('p-sched/t1');

@@ -107,7 +107,7 @@ describe('Project Focus Mode (agenthub/p-project-priority)', () => {
       title: 'Task Y1',
       status: 'queued',
     });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const rtY1 = ctx.scheduler.getRunning().get('proj-y/t1');
     expect(rtY1).toBeDefined();
@@ -152,7 +152,7 @@ describe('Project Focus Mode (agenthub/p-project-priority)', () => {
     expect(ctx.taskRepo.get('proj-y/t3')?.waitReason).toBe('focus');
 
     // Dispatch: task của X được chạy, task của Y tiếp tục chờ
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rtX1 = ctx.scheduler.getRunning().get('proj-x/t1');
     expect(rtX1).toBeDefined();
     expect(rtX1!.paused).toBe(false);
@@ -169,7 +169,7 @@ describe('Project Focus Mode (agenthub/p-project-priority)', () => {
       title: 'Task Y1',
       status: 'queued',
     });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rtY1 = ctx.scheduler.getRunning().get('proj-y/t1')!;
 
     ctx.taskRepo.insert({
@@ -199,7 +199,7 @@ describe('Project Focus Mode (agenthub/p-project-priority)', () => {
     expect(ctx.taskRepo.get('proj-y/t2')?.waitReason).toBeNull();
 
     // Scheduler dispatch tiếp
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rtY2 = ctx.scheduler.getRunning().get('proj-y/t2');
     expect(rtY2).toBeDefined();
     expect(rtY2!.paused).toBe(false);
@@ -213,7 +213,7 @@ describe('Project Focus Mode (agenthub/p-project-priority)', () => {
       title: 'Manual Paused Task',
       status: 'queued',
     });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rt = ctx.scheduler.getRunning().get('proj-y/t-manual')!;
 
     // Người dùng tự pause
@@ -254,7 +254,7 @@ describe('Project Focus Mode (agenthub/p-project-priority)', () => {
       title: 'Task Z1',
       status: 'queued',
     });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const rtY = ctx.scheduler.getRunning().get('proj-y/t1')!;
     const rtZ = ctx.scheduler.getRunning().get('proj-z/t1')!;
@@ -276,7 +276,7 @@ describe('Project Focus Mode (agenthub/p-project-priority)', () => {
       title: 'Task X1',
       status: 'queued',
     });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rtX = ctx.scheduler.getRunning().get('proj-x/t1')!;
     expect(rtX.paused).toBe(false);
 
@@ -309,7 +309,7 @@ describe('Project Focus Mode (agenthub/p-project-priority)', () => {
       title: 'Task Y1',
       status: 'queued',
     });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rtY = ctx.scheduler.getRunning().get('proj-y/t1')!;
 
     // Bật focus cho X
@@ -325,7 +325,7 @@ describe('Project Focus Mode (agenthub/p-project-priority)', () => {
       title: 'Task X1',
       status: 'queued',
     });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rtX = ctx.scheduler.getRunning().get('proj-x/t1')!;
     expect(rtX.paused).toBe(false);
 
@@ -388,7 +388,7 @@ describe('Project Focus Mode (agenthub/p-project-priority)', () => {
     ctx.service.setFocus({ projectId: 'proj-x' });
 
     // Kích hoạt tick scheduler
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     // Reviewer runs chỉ chứa task của proj-x, không có proj-y
     const reviewerRuns = (ctx.scheduler as unknown as { reviewerRuns: Map<string, unknown> }).reviewerRuns;

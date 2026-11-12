@@ -116,7 +116,7 @@ describe('Integration branch and cross-project dependencies', () => {
     });
 
     // 1st tick: BE task should start, FE task must wait
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const beTask = ctx.taskRepo.get('be/api-v1')!;
     const feTask = ctx.taskRepo.get('fe/ui-v1')!;
@@ -139,7 +139,7 @@ describe('Integration branch and cross-project dependencies', () => {
     expect(ctx.taskRepo.get('be/api-v1')!.status).toBe('done');
 
     // 2nd tick: FE task should now start
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const runningFeTask = ctx.taskRepo.get('fe/ui-v1')!;
     expect(runningFeTask.status).toBe('running');
@@ -163,7 +163,7 @@ describe('Integration branch and cross-project dependencies', () => {
     expect(depsMdContent).toContain('approved — BE looks good');
   });
 
-  it('same-project dependency: inherits branch from nearest same-project dependency, ignoring cross-project dependencies', () => {
+  it('same-project dependency: inherits branch from nearest same-project dependency, ignoring cross-project dependencies', async () => {
     const beRepo = path.join(tmpDir, 'be-repo-2');
     const feRepo = path.join(tmpDir, 'fe-repo-2');
     initGitRepo(beRepo, 'main');
@@ -208,7 +208,7 @@ describe('Integration branch and cross-project dependencies', () => {
       start: true,
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const feTask2 = ctx.taskRepo.get('fe2/task-2')!;
     expect(feTask2.status).toBe('running');
@@ -265,7 +265,7 @@ describe('Integration branch and cross-project dependencies', () => {
       start: true,
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const t1 = ctx.taskRepo.get('int-proj/feat-1')!;
     expect(t1.status).toBe('running');
@@ -306,7 +306,7 @@ describe('Integration branch and cross-project dependencies', () => {
       start: true,
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const t2 = ctx.taskRepo.get('int-proj/feat-2')!;
     expect(t2.status).toBe('running');
@@ -330,7 +330,7 @@ describe('Integration branch and cross-project dependencies', () => {
     });
     const intPath = path.join(tmpDir, 'integration', 'auto-proj');
     ctx.service.createTask({ project: 'auto-proj', slug: 'feat', title: 'Feature', body: 'Do it', level: 'easy', start: true });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const task = ctx.taskRepo.get('auto-proj/feat')!;
     fs.writeFileSync(path.join(task.worktreePath!, 'auto.txt'), 'auto\n');
     execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
@@ -361,7 +361,7 @@ describe('Integration branch and cross-project dependencies', () => {
       merge: { enabled: true, worktrees: {}, checks: [], timeoutSec: 30 },
     });
     ctx.service.createTask({ project: 'rev-proj', slug: 'feat1', title: 'Feature 1', body: 'Do it', level: 'easy', start: true });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const task1 = ctx.taskRepo.get('rev-proj/feat1')!;
     fs.writeFileSync(path.join(task1.worktreePath!, 'file1.txt'), 'content 1\n');
     execFileSync('git', ['-C', task1.worktreePath!, 'add', '.']);
@@ -381,7 +381,7 @@ describe('Integration branch and cross-project dependencies', () => {
 
     // 3. Conflict scenario: create task2 with conflicting changes
     ctx.service.createTask({ project: 'rev-proj', slug: 'feat2', title: 'Feature 2', body: 'Conflict', level: 'easy', start: true });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const task2 = ctx.taskRepo.get('rev-proj/feat2')!;
     // In integration branch, modify file1.txt differently
     const intPath = path.join(tmpDir, 'integration', 'rev-proj');
@@ -411,7 +411,7 @@ describe('Integration branch and cross-project dependencies', () => {
 
     // 4. Failed checks scenario: if checks failed, do not merge
     ctx.service.createTask({ project: 'rev-proj', slug: 'feat3', title: 'Feature 3', body: 'Failing check', level: 'easy', start: true });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const task3 = ctx.taskRepo.get('rev-proj/feat3')!;
     fs.writeFileSync(path.join(task3.worktreePath!, 'file3.txt'), 'content 3\n');
     execFileSync('git', ['-C', task3.worktreePath!, 'add', '.']);
@@ -437,7 +437,7 @@ describe('Integration branch and cross-project dependencies', () => {
       merge: { enabled: true, worktrees: {}, checks: [], timeoutSec: 30 },
     });
     ctx.service.createTask({ project: 'conflict-lim-proj', slug: 'feat', title: 'Feature', body: 'Do it', level: 'easy', start: true });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const task = ctx.taskRepo.get('conflict-lim-proj/feat')!;
     const intPath = path.join(tmpDir, 'integration', 'conflict-lim-proj');
     fs.writeFileSync(path.join(intPath, 'conflict.txt'), 'base content\n');
@@ -481,7 +481,7 @@ describe('Integration branch and cross-project dependencies', () => {
       merge: { enabled: true, worktrees: { main: repo }, checks: [], timeoutSec: 30 },
     });
     ctx.service.createTask({ project: 'no-chain-proj', slug: 'feat', title: 'Feature', body: 'Do it', level: 'easy', start: true });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const task = ctx.taskRepo.get('no-chain-proj/feat')!;
     fs.writeFileSync(path.join(task.worktreePath!, 'feature.txt'), 'feature\n');
     execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
@@ -512,7 +512,7 @@ describe('Integration branch and cross-project dependencies', () => {
         merge: { enabled: true, worktrees: { main: repo }, checks: [], timeoutSec: 30 },
       });
       ctx.service.createTask({ project: slug, slug: 'feat', title: 'Feature', body: 'Do it', level: 'easy', start: true });
-      ctx.scheduler.tick();
+    await ctx.scheduler.tick();
       const task = ctx.taskRepo.get(`${slug}/feat`)!;
       fs.writeFileSync(path.join(task.worktreePath!, 'feature.txt'), 'feature\n');
       execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
@@ -599,7 +599,7 @@ describe('Integration branch and cross-project dependencies', () => {
       start: true,
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const t = ctx.taskRepo.get('checks-proj/failing-check-task')!;
     fs.writeFileSync(path.join(t.worktreePath!, 'code.txt'), 'bad code\n');
@@ -667,7 +667,7 @@ describe('Integration branch and cross-project dependencies', () => {
       start: true,
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const t = ctx.taskRepo.get('env-proj/env-check-task')!;
     fs.writeFileSync(path.join(t.worktreePath!, 'code.txt'), 'some code\n');
@@ -950,7 +950,7 @@ exec /usr/bin/git "$@"
         start: true,
       });
 
-      ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
       const task = ctx.taskRepo.get('no-push-proj/np-task')!;
       fs.writeFileSync(path.join(task.worktreePath!, 'work.txt'), 'done\n');

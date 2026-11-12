@@ -75,7 +75,7 @@ describe('Task waitReason (lý do chờ)', () => {
     delete process.env.AGENTHUB_AGY_HOMES;
   });
 
-  it('sets waitReason to disk when disk space is below minFreeGB and clears when disk recovers', () => {
+  it('sets waitReason to disk when disk space is below minFreeGB and clears when disk recovers', async () => {
     ctx.profileRepo.upsert({
       name: 'p1',
       engine: 'agy',
@@ -98,7 +98,7 @@ describe('Task waitReason (lý do chờ)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const task = ctx.taskRepo.get('proj/t-disk');
     expect(task?.status).toBe('waiting_quota');
@@ -115,14 +115,14 @@ describe('Task waitReason (lý do chờ)', () => {
 
     // Disk space recovers (10GB >= 5GB)
     mockFreeGB = 10;
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const recovered = ctx.taskRepo.get('proj/t-disk');
     expect(['queued', 'running']).toContain(recovered?.status);
     expect(recovered?.waitReason).toBeNull();
   });
 
-  it('sets waitReason to quota when all matching profiles are quota-exhausted and clears when quota expires', () => {
+  it('sets waitReason to quota when all matching profiles are quota-exhausted and clears when quota expires', async () => {
     ctx.profileRepo.upsert({
       name: 'p1',
       engine: 'agy',
@@ -145,7 +145,7 @@ describe('Task waitReason (lý do chờ)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const task = ctx.taskRepo.get('proj/t-quota');
     expect(task?.status).toBe('waiting_quota');
@@ -160,7 +160,7 @@ describe('Task waitReason (lý do chờ)', () => {
     expect(recovered?.waitReason).toBeNull();
   });
 
-  it('sets waitReason to parallel when project maxParallel is reached and clears when a slot opens', () => {
+  it('sets waitReason to parallel when project maxParallel is reached and clears when a slot opens', async () => {
     // Project maxParallel is 1
     ctx.profileRepo.upsert({
       name: 'p1',
@@ -196,7 +196,7 @@ describe('Task waitReason (lý do chờ)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     // First task starts running, second task waits for parallel slot
     const t1 = ctx.taskRepo.get('proj/t-parallel-1');
@@ -210,14 +210,14 @@ describe('Task waitReason (lý do chờ)', () => {
 
     // Increase maxParallel to 2
     ctx.projectRepo.update('proj', { maxParallel: 2 });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const t2After = ctx.taskRepo.get('proj/t-parallel-2');
     expect(['queued', 'running']).toContain(t2After?.status);
     expect(t2After?.waitReason).toBeNull();
   });
 
-  it('sets waitReason to profile_busy when profile is occupied and clears when profile is freed', () => {
+  it('sets waitReason to profile_busy when profile is occupied and clears when profile is freed', async () => {
     // 2 projects each maxParallel 3, but only 1 profile p1 (which has 2 slots)
     ctx.projectRepo.insert({
       id: 'proj2',
@@ -262,7 +262,7 @@ describe('Task waitReason (lý do chờ)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const t1a = ctx.taskRepo.get('proj/t-p1-a');
     const t1b = ctx.taskRepo.get('proj/t-p1-b');
@@ -283,7 +283,7 @@ describe('Task waitReason (lý do chờ)', () => {
       email: 'p2@example.com',
       enabled: 1,
     });
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const t2After = ctx.taskRepo.get('proj2/t-p2');
     expect(['queued', 'running']).toContain(t2After?.status);
@@ -325,7 +325,7 @@ describe('Task waitReason (lý do chờ)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const task = ctx.taskRepo.get('proj/t-no-dept');
     expect(task?.status).toBe('waiting_quota');
@@ -355,7 +355,7 @@ describe('Task waitReason (lý do chờ)', () => {
     expect(recovered?.waitReason).toBeNull();
   });
 
-  it('distinguishes between quota exhaustion and no_matching_profile', () => {
+  it('distinguishes between quota exhaustion and no_matching_profile', async () => {
     ctx.profileRepo.upsert({
       name: 'p-agy',
       engine: 'agy',
@@ -378,7 +378,7 @@ describe('Task waitReason (lý do chờ)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const quotaTask = ctx.taskRepo.get('proj/t-quota-exhausted');
     expect(quotaTask?.status).toBe('waiting_quota');
@@ -395,7 +395,7 @@ describe('Task waitReason (lý do chờ)', () => {
       modelChain: JSON.stringify(['codex:gpt-5.6-luna']),
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const noMatchingTask = ctx.taskRepo.get('proj/t-codex-engine');
     expect(noMatchingTask?.status).toBe('waiting_quota');
@@ -466,7 +466,7 @@ describe('Task waitReason (lý do chờ)', () => {
       level: 'easy',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const waitingTask = ctx.taskRepo.get('proj-moved/t-wait');
     expect(waitingTask?.status).toBe('waiting_quota');
@@ -482,7 +482,7 @@ describe('Task waitReason (lý do chờ)', () => {
     expect(runningTask?.waitReason).toBeNull();
   });
 
-  it('wakes waiting tasks when a department is created or deleted', () => {
+  it('wakes waiting tasks when a department is created or deleted', async () => {
     ctx.taskRepo.insert({
       id: 'proj/t-dept-create-wake',
       projectId: 'proj',

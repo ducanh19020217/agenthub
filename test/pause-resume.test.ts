@@ -181,7 +181,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
       status: 'queued',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     const rt = ctx.scheduler.getRunning().get('p-test/t1');
     expect(rt).toBeDefined();
@@ -245,7 +245,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
       status: 'queued',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rt = ctx.scheduler.getRunning().get('p-test/t-timeout')!;
     expect(rt).toBeDefined();
 
@@ -284,7 +284,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
       });
     }
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     await vi.waitFor(() => {
       expect(ctx.scheduler.getRunning().size).toBe(3);
     }, { timeout: 5000 });
@@ -327,7 +327,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
     vi.spyOn(loadGuard, 'isAutoPauseTriggered').mockReturnValue(true);
     vi.spyOn(loadGuard, 'isOverloaded').mockReturnValue(true);
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
 
     expect(t3.paused).toBe(true);
     expect(t3.pauseReason).toBe('load');
@@ -335,12 +335,12 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
     expect(t2.paused).toBe(false);
 
     // 4.2 maxAutoPaused = 1 ngăn không pause thêm task thứ 2
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(running.filter((t) => t.paused).length).toBe(1);
 
     // 4.3 Tăng maxAutoPaused = 2 -> task recent tiếp theo (t2) bị pause
     ctx.config.load.maxAutoPaused = 2;
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(t2.paused).toBe(true);
     expect(t2.pauseReason).toBe('load');
     expect(t1.paused).toBe(false);
@@ -350,11 +350,11 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
     vi.spyOn(loadGuard, 'isOverloaded').mockReturnValue(false);
 
     // Tick 1: resume 1 task
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(running.filter((t) => t.paused).length).toBe(1);
 
     // Tick 2: resume task còn lại
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(running.filter((t) => t.paused).length).toBe(0);
 
     // 4.5 Chính sách 'rss': task có RSS cao nhất (t2: 500MB) bị pause trước
@@ -363,7 +363,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
     vi.spyOn(loadGuard, 'isAutoPauseTriggered').mockReturnValue(true);
     vi.spyOn(loadGuard, 'isOverloaded').mockReturnValue(true);
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(t2.paused).toBe(true);
     expect(t2.pauseReason).toBe('load');
     expect(t1.paused).toBe(false);
@@ -379,7 +379,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
       status: 'queued',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rt = ctx.scheduler.getRunning().get('p-test/t-stop')!;
     expect(rt).toBeDefined();
 
@@ -427,7 +427,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
       status: 'queued',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rt = ctx.scheduler.getRunning().get('p-test/t-api')!;
     expect(rt).toBeDefined();
     rt.rss = 157286400; // 150 MB
@@ -504,7 +504,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
       status: 'queued',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rt = ctx.scheduler.getRunning().get('p-test/t-brain-load')!;
     expect(rt).toBeDefined();
 
@@ -530,7 +530,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
       status: 'queued',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rt = ctx.scheduler.getRunning().get('p-test/t-manual-remind')!;
     expect(rt).toBeDefined();
 
@@ -550,7 +550,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
     });
 
     // Tick bình thường (thời gian pause chưa đủ 30 phút)
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(rt.paused).toBe(true);
     expect(reminders.length).toBe(0);
 
@@ -558,7 +558,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
     rt.pausedAt = Date.now() - 31 * 60 * 1000;
 
     // Tick lần 1 -> phát thông báo nhắc nhở 1 lần
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(rt.paused).toBe(true); // Vẫn pause, không tự resume
     expect(reminders.length).toBe(1);
     expect(reminders[0].taskId).toBe('p-test/t-manual-remind');
@@ -568,7 +568,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
     });
 
     // Tick lần 2 -> không gửi lại (chỉ nhắc 1 lần)
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(reminders.length).toBe(1);
   });
 
@@ -581,7 +581,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
       status: 'queued',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rt = ctx.scheduler.getRunning().get('p-test/t-load-safety')!;
     expect(rt).toBeDefined();
 
@@ -589,7 +589,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
     expect(rt.paused).toBe(true);
 
     // Máy không quá tải, gọi tick -> tự động resume
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     expect(rt.paused).toBe(false);
     expect(rt.pauseReason).toBeNull();
   });
@@ -603,7 +603,7 @@ describe('Task Pause and Resume (c-pause-resume)', () => {
       status: 'queued',
     });
 
-    ctx.scheduler.tick();
+    await ctx.scheduler.tick();
     const rt = ctx.scheduler.getRunning().get('p-test/t-stall-paused')!;
     expect(rt).toBeDefined();
 

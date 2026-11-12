@@ -315,6 +315,7 @@ export class Scheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
   private inTick = false;
+  private tickPromise: Promise<void> | null = null;
   private skipSchedulingOnce = false;
   private diskLow = false;
   private lastDiskLowEmit = 0;
@@ -1275,9 +1276,20 @@ export class Scheduler {
   /**
    * Main scheduler tick
    */
-  async tick(): Promise<void> {
+  tick(): Promise<void> {
+    if (this.tickPromise) return this.tickPromise;
+    const promise = this.runTick();
+    const tracked = promise.finally(() => {
+      if (this.tickPromise === tracked) this.tickPromise = null;
+    });
+    this.tickPromise = tracked;
+    return tracked;
+  }
+
+  private async runTick(): Promise<void> {
     if (this.inTick) return;
     this.inTick = true;
+    const tickGeneration = this.stopGeneration;
     try {
       this.loadGuard.setConfig(this.config.load);
       const load = this.loadGuard.update();
@@ -1568,6 +1580,7 @@ export class Scheduler {
     // 3b. Prune expired worktrees before dispatching tasks. When disk is low,
     // this gives cleanup a chance to free space before queued work is parked.
     await this.cleanExpiredWorktrees();
+    if (this.stopGeneration !== tickGeneration) return;
 
     // Auto-close tasks that have already been merged elsewhere (e.g. into integration or default branch)
     const nowMergedCheck = Date.now();
@@ -1578,11 +1591,13 @@ export class Scheduler {
 
     // 3c. Start new tasks if possible
     await this.scheduleNewTasks();
+    if (this.stopGeneration !== tickGeneration) return;
 
     // 4. Scan worktrees and reap orphaned worker processes periodically.
     if (Date.now() - this.lastOrphanScan >= 6 * 60 * 60 * 1000) {
       this.lastOrphanScan = Date.now();
       await this.scanOrphanWorktrees();
+      if (this.stopGeneration !== tickGeneration) return;
       this.reapOrphans();
     }
     } finally {
@@ -3642,6 +3657,10 @@ export class Scheduler {
         }
       } catch (e) {
         this.locks.release(profile.name, lockFile);
+        if (this.stopped || this.stopGeneration !== stopGeneration) {
+          this.starting.delete(task.id);
+          return;
+        }
         if (!isProjectAccessible(project.path) || !isProjectWorktreeRootAccessible({ id: project.id, path: project.path, settings: project.settings })) {
           this.markTaskWaitingForProject(task, project);
           return;
@@ -3671,6 +3690,11 @@ export class Scheduler {
               maxEntries: this.config.cacheMaxEntries,
               maxBytes: this.config.cacheMaxGB * 1024 ** 3,
             });
+            if (this.stopped || this.stopGeneration !== stopGeneration) {
+              this.starting.delete(task.id);
+              this.locks.release(profile.name, lockFile);
+              return;
+            }
             installResult = 'prepared';
           } catch (error) {
             installResult = 'failed';

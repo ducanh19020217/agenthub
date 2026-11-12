@@ -1002,6 +1002,8 @@ export function openDatabase(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  db.pragma('synchronous = NORMAL');
+  db.pragma('busy_timeout = 5000');
   db.function('agenthub_normalize', normalizeSearchText);
 
   // Run migrations
@@ -1827,6 +1829,23 @@ export class TaskRepo {
       .all(status) as TaskRow[];
   }
 
+  getCompletedWithWorktrees(): Array<Pick<TaskRow, 'id' | 'projectId' | 'slug' | 'status' | 'updatedAt' | 'worktreePath' | 'slot'>> {
+    return this.db.prepare(`
+      SELECT id, projectId, slug, status, updatedAt, worktreePath, slot
+      FROM tasks
+      WHERE status IN ('done', 'cancelled') AND worktreePath IS NOT NULL
+      ORDER BY updatedAt
+    `).all() as Array<Pick<TaskRow, 'id' | 'projectId' | 'slug' | 'status' | 'updatedAt' | 'worktreePath' | 'slot'>>;
+  }
+
+  getWorktreeReferences(): Array<Pick<TaskRow, 'id' | 'projectId' | 'slug' | 'status' | 'worktreePath'>> {
+    return this.db.prepare(`
+      SELECT id, projectId, slug, status, worktreePath
+      FROM tasks
+      WHERE worktreePath IS NOT NULL
+    `).all() as Array<Pick<TaskRow, 'id' | 'projectId' | 'slug' | 'status' | 'worktreePath'>>;
+  }
+
   getByBatch(batchId: string): TaskRow[] {
     return this.db.prepare('SELECT * FROM tasks WHERE batchId = ? ORDER BY createdAt').all(batchId) as TaskRow[];
   }
@@ -2195,6 +2214,37 @@ export class EventRepo {
     return this.db
       .prepare('SELECT * FROM events WHERE taskId = ? ORDER BY id')
       .all(taskId) as EventRow[];
+  }
+
+  getByTasksAndTypes(taskIds: string[], types: string[]): EventRow[] {
+    if (taskIds.length === 0 || types.length === 0) return [];
+    // Keep task batches below SQLite's default 999-variable limit.
+    if (taskIds.length + types.length > 999) throw new Error('getByTasksAndTypes batch exceeds SQLite parameter limit');
+    const taskPlaceholders = taskIds.map(() => '?').join(', ');
+    const typePlaceholders = types.map(() => '?').join(', ');
+    return this.db.prepare(`
+      SELECT taskId, type, payload, id, ts
+      FROM events
+      WHERE taskId IN (${taskPlaceholders}) AND type IN (${typePlaceholders})
+      ORDER BY id
+    `).all(...taskIds, ...types) as EventRow[];
+  }
+
+  deleteExpired(noisyTypes: string[], protectedTypes: string[], noisyBefore: string, eventBefore: string, limit = 1000): number {
+    if (noisyTypes.length === 0) return 0;
+    const noisy = noisyTypes.map(() => '?').join(', ');
+    const protectedList = protectedTypes.length > 0 ? protectedTypes.map(() => '?').join(', ') : "''";
+    const result = this.db.prepare(`
+      DELETE FROM events
+      WHERE id IN (
+        SELECT id FROM events
+        WHERE (type IN (${noisy}) AND ts < ?)
+           OR (type NOT IN (${noisy}) AND type NOT IN (${protectedList}) AND ts < ?)
+        ORDER BY id
+        LIMIT ?
+      )
+    `).run(...noisyTypes, noisyBefore, ...noisyTypes, ...protectedTypes, eventBefore, limit);
+    return result.changes;
   }
 
   hasTimesheetPosted(sourceId: string, date: string): boolean {
@@ -3154,6 +3204,23 @@ export class TaskNoteRepo {
          ORDER BY id DESC LIMIT 50`,
       )
       .all(...runningTaskIds) as TaskNoteRow[];
+  }
+
+  deleteOldCompletedOverlaps(before: string, limit = 1000): number {
+    const result = this.db.prepare(`
+      DELETE FROM task_notes
+      WHERE id IN (
+        SELECT notes.id
+        FROM task_notes notes
+        JOIN tasks ON tasks.id = notes.taskId
+        WHERE notes.kind = 'overlap'
+          AND tasks.status IN ('done', 'cancelled')
+          AND tasks.updatedAt < ?
+        ORDER BY notes.id
+        LIMIT ?
+      )
+    `).run(before, limit);
+    return result.changes;
   }
 }
 

@@ -20,6 +20,7 @@ import {
   RunRepo,
   ReviewRepo,
   EventRepo,
+  EventRow,
   TaskNoteRepo,
   TaskNoteRow,
   ProjectRow,
@@ -518,6 +519,11 @@ export const UpdateConfigSchema = z.object({
   watchdog: z.object({
     stallMinutes: z.number().positive().optional(),
     waitingMinutes: z.number().positive().optional(),
+  }).optional(),
+  retention: z.object({
+    noisyEventDays: z.number().positive().optional(),
+    eventDays: z.number().positive().optional(),
+    taskNoteDays: z.number().positive().optional(),
   }).optional(),
   autoFixOnFail: z.boolean().optional(),
   defaultProjectPreset: z.enum(['safe', 'balanced', 'auto']).optional(),
@@ -3445,32 +3451,49 @@ export class AppService {
 
   private decorateTasks(tasks: TaskRow[]): TaskRow[] {
     const projects = new Map(this.projectRepo.getAll().map((project) => [project.id, project]));
+    const projectReview = new Map<string, { chain: ReturnType<typeof parseReviewChain>; order?: ReturnType<typeof reviewerSettingsFromLegacy>['order']; maxRounds: number }>();
+    for (const [projectId, project] of projects) {
+      let chain = parseReviewChain(project.reviewChain);
+      if (project.review) {
+        try { chain = parseReviewChain(JSON.stringify((JSON.parse(project.review) as { chain?: unknown }).chain || [])); } catch { /* invalid settings are ignored */ }
+      }
+      const settings = projectSettings(project);
+      projectReview.set(projectId, { chain, order: settings.review?.order ?? undefined, maxRounds: reviewMaxRoundsFor(project, this.config) });
+    }
+    const configuredOrder = reviewerSettingsFromLegacy(this.config.reviewer as unknown as Record<string, unknown>).order;
+    const reviewEvents = new Map<string, { fallback?: EventRow; skipped?: EventRow }>();
+    for (let offset = 0; offset < tasks.length; offset += 900) {
+      const rows = this.eventRepo?.getByTasksAndTypes(tasks.slice(offset, offset + 900).map((task) => task.id), ['review.fallback', 'review.auto_merge_skipped']) || [];
+      for (const event of rows) {
+        const current = reviewEvents.get(event.taskId!) || {};
+        if (event.type === 'review.fallback') current.fallback = event;
+        if (event.type === 'review.auto_merge_skipped') current.skipped = event;
+        reviewEvents.set(event.taskId!, current);
+      }
+    }
     const running = this.scheduler.getRunning();
     return tasks.map((task) => {
       const run = running.get(task.id);
       const project = projects.get(task.projectId);
+      const review = projectReview.get(task.projectId);
       const blockingDisk = this.getBlockingDiskForTask(task);
-      let reviewChain = parseReviewChain(project?.reviewChain);
-      if (project?.review) {
-        try { reviewChain = parseReviewChain(JSON.stringify((JSON.parse(project.review) as { chain?: unknown }).chain || [])); } catch { /* invalid settings are ignored */ }
-      }
       // Keep this lookup scoped to the task. A global recent-event window can
       // forget an older fallback after unrelated events push it out of that window.
-      const isFallback = this.eventRepo?.getByTask(task.id).some((event) => event.type === 'review.fallback') ?? false;
-      const fallbackEvent = this.eventRepo?.getByTask(task.id).filter((event) => event.type === 'review.fallback').at(-1);
+      const fallbackEvent = reviewEvents.get(task.id)?.fallback;
+      const isFallback = Boolean(fallbackEvent);
       let fallbackReviewer: 'codex' | 'claude' = 'claude';
       if (fallbackEvent?.payload) {
         try { fallbackReviewer = JSON.parse(fallbackEvent.payload).to === 'codex' ? 'codex' : 'claude'; } catch { /* legacy payload */ }
       }
-      const configuredOrder = reviewerSettingsFromLegacy(this.config.reviewer as unknown as Record<string, unknown>).order;
-      const projectOrder = project ? projectSettings(project).review?.order : undefined;
+      const projectOrder = review?.order;
       const reviewerRun = this.scheduler?.getReviewerRun?.(task.id);
+      const reviewChain = review?.chain ?? parseReviewChain(project?.reviewChain);
       const reviewer = reviewerRun
         ? (reviewerRun.engine.id === 'claude' ? 'claude' : 'codex')
         : (isFallback ? fallbackReviewer : (reviewChain[task.reviewStep ?? 0]?.reviewer?.startsWith('claude') ? 'claude' : (projectOrder || configuredOrder)[task.reviewStep ?? 0]?.engine || 'codex'));
-      const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
+      const reviewMaxRounds = review?.maxRounds ?? reviewMaxRoundsFor(project, this.config);
       const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
-      const skippedEvent = this.eventRepo?.getByTask(task.id).filter((event) => event.type === 'review.auto_merge_skipped').at(-1);
+      const skippedEvent = reviewEvents.get(task.id)?.skipped;
       let autoMergeSkippedReason: string | null = null;
       let autoMergeSkippedChecks: unknown[] | undefined;
       let autoMergeSkippedRetried = false;
@@ -5390,6 +5413,7 @@ export class AppService {
       stall: this.config.stall,
       disk: this.config.disk,
       cleanup: this.config.cleanup,
+      retention: this.config.retention,
       cacheDir: this.config.cacheDir,
       cacheMaxEntries: this.config.cacheMaxEntries,
       cacheMaxGB: this.config.cacheMaxGB,

@@ -359,6 +359,9 @@ export class Scheduler {
   private lastLoadHighEventSnapshot: LoadSnapshot | null = null;
   private notifiedSkippedModels = new Set<string>();
   private resourceTimer: ReturnType<typeof setInterval> | null = null;
+  private retentionTimer: ReturnType<typeof setInterval> | null = null;
+  private retentionStartupTimer: ReturnType<typeof setTimeout> | null = null;
+  private retentionRunning = false;
   private diskReader: (p: string) => DiskSpace = getDiskSpaceSync;
   private usageService?: QuotaUsageService;
   private checkingQueue: QueuedCheck[] = [];
@@ -776,6 +779,13 @@ export class Scheduler {
     this.measureAllRunningTaskResources();
     this.resourceTimer = setInterval(() => this.measureAllRunningTaskResources(), 15000);
     this.resourceTimer.unref();
+    this.retentionStartupTimer = setTimeout(() => {
+      this.retentionStartupTimer = null;
+      void this.runRetentionBatch();
+    }, 1000);
+    this.retentionStartupTimer.unref();
+    this.retentionTimer = setInterval(() => { void this.runRetentionBatch(); }, 6 * 60 * 60 * 1000);
+    this.retentionTimer.unref();
     // Also run immediately
     this.tick();
   }
@@ -788,6 +798,14 @@ export class Scheduler {
     if (this.resourceTimer) {
       clearInterval(this.resourceTimer);
       this.resourceTimer = null;
+    }
+    if (this.retentionTimer) {
+      clearInterval(this.retentionTimer);
+      this.retentionTimer = null;
+    }
+    if (this.retentionStartupTimer) {
+      clearTimeout(this.retentionStartupTimer);
+      this.retentionStartupTimer = null;
     }
 
     // Requirement 4: Khi daemon tắt/khởi động lại: mọi task đang paused phải được SIGCONT trước (không để tiến trình đứng mãi).
@@ -4297,7 +4315,7 @@ export class Scheduler {
     const thresholdMs = effectiveAfterHours * 60 * 60 * 1000;
     const now = Date.now();
 
-    const completedTasks = this.taskRepo.getAll().filter((task) => task.status === 'done' || task.status === 'cancelled');
+    const completedTasks = this.taskRepo.getCompletedWithWorktrees();
     for (const task of completedTasks) {
       if (!task.worktreePath) continue;
 
@@ -4383,7 +4401,7 @@ export class Scheduler {
     } catch {
       return;
     }
-    const tasks = this.taskRepo.getAll();
+    const tasks = this.taskRepo.getWorktreeReferences();
     const referenced = new Set(tasks.filter((task) => task.worktreePath).map((task) => path.resolve(task.worktreePath!)));
     for (const projectDir of projects) {
       if (!projectDir.isDirectory()) continue;
@@ -4416,6 +4434,37 @@ export class Scheduler {
           console.warn(`[worktree] Failed to remove orphan ${candidate}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
+    }
+  }
+
+  private async runRetentionBatch(): Promise<void> {
+    if (!this.db || this.retentionRunning) return;
+    this.retentionRunning = true;
+    const now = Date.now();
+    const sqliteTime = (days: number): string => new Date(now - days * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19);
+    const noisyTypes = [
+      'brain.updated', 'brain.status', 'deploy.restart_waiting', 'claude.quota_available',
+      'claude.fallback_changed', 'load.high', 'load.ok', 'task.overlap', 'review.waiting',
+    ];
+    const retainedTypes = [
+      'review.fallback', 'review.auto_merge_skipped', 'review.completed', 'review.escalated',
+      'merge.conflict', 'task.merged', 'tracker.timesheet.posted',
+    ];
+    const noisyBefore = sqliteTime(this.config.retention.noisyEventDays);
+    const eventBefore = sqliteTime(this.config.retention.eventDays);
+    const notesBefore = sqliteTime(this.config.retention.taskNoteDays);
+    let optimized = false;
+    try {
+      while (true) {
+        const deletedEvents = this.eventRepo.deleteExpired(noisyTypes, retainedTypes, noisyBefore, eventBefore, 1000);
+        const deletedNotes = this.taskNoteRepo?.deleteOldCompletedOverlaps(notesBefore, 1000) || 0;
+        if (deletedEvents > 0 || deletedNotes > 0) optimized = true;
+        if (deletedEvents < 1000 && deletedNotes < 1000) break;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      if (optimized) this.db.pragma('optimize');
+    } finally {
+      this.retentionRunning = false;
     }
   }
 

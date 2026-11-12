@@ -468,6 +468,11 @@ export interface AgentHubConfig {
     nodeModulesOnDone: boolean;
     worktreeOnDoneAfterHours: number;
   };
+  retention: {
+    noisyEventDays: number;
+    eventDays: number;
+    taskNoteDays: number;
+  };
   cacheDir: string;
   cacheMaxEntries: number;
   cacheMaxGB: number;
@@ -530,6 +535,7 @@ export function saveConfig(
     wakeup?: Partial<WakeupConfig>;
     disk?: { minFreeGB?: number; hubHomeMinFreeGB?: number; extraPaths?: ExtraDiskPath[] };
     cleanup?: { nodeModulesOnDone?: boolean; worktreeOnDoneAfterHours?: number };
+    retention?: { noisyEventDays?: number; eventDays?: number; taskNoteDays?: number };
     cacheDir?: string;
     cacheMaxEntries?: number;
     cacheMaxGB?: number;
@@ -733,6 +739,7 @@ export function updateConfigInMemory(
     wakeup?: Partial<WakeupConfig>;
     disk?: { minFreeGB?: number; hubHomeMinFreeGB?: number; extraPaths?: ExtraDiskPath[] };
     cleanup?: { nodeModulesOnDone?: boolean; worktreeOnDoneAfterHours?: number };
+    retention?: { noisyEventDays?: number; eventDays?: number; taskNoteDays?: number };
     cacheDir?: string;
     cacheMaxEntries?: number;
     cacheMaxGB?: number;
@@ -901,6 +908,11 @@ export function updateConfigInMemory(
   }
   if (patch.cleanup?.worktreeOnDoneAfterHours !== undefined) {
     config.cleanup.worktreeOnDoneAfterHours = patch.cleanup.worktreeOnDoneAfterHours;
+  }
+  if (patch.retention) {
+    if (patch.retention.noisyEventDays !== undefined) config.retention.noisyEventDays = patch.retention.noisyEventDays;
+    if (patch.retention.eventDays !== undefined) config.retention.eventDays = patch.retention.eventDays;
+    if (patch.retention.taskNoteDays !== undefined) config.retention.taskNoteDays = patch.retention.taskNoteDays;
   }
   if (patch.cacheDir !== undefined) {
     config.cacheDir = patch.cacheDir;
@@ -1116,6 +1128,13 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
   const cleanup = {
     nodeModulesOnDone: typeof userCleanup?.nodeModulesOnDone === 'boolean' ? userCleanup.nodeModulesOnDone : true,
     worktreeOnDoneAfterHours: typeof userCleanup?.worktreeOnDoneAfterHours === 'number' ? userCleanup.worktreeOnDoneAfterHours : 24,
+  };
+
+  const rawRetention = (userConfig.retention as { noisyEventDays?: number; eventDays?: number; taskNoteDays?: number } | undefined);
+  const retention = {
+    noisyEventDays: typeof rawRetention?.noisyEventDays === 'number' && rawRetention.noisyEventDays > 0 ? rawRetention.noisyEventDays : 14,
+    eventDays: typeof rawRetention?.eventDays === 'number' && rawRetention.eventDays > 0 ? rawRetention.eventDays : 90,
+    taskNoteDays: typeof rawRetention?.taskNoteDays === 'number' && rawRetention.taskNoteDays > 0 ? rawRetention.taskNoteDays : 90,
   };
 
   const cacheDir =
@@ -1465,6 +1484,7 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
     },
     disk,
     cleanup,
+    retention,
     cacheDir,
     cacheMaxEntries,
     cacheMaxGB,

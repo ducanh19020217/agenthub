@@ -363,6 +363,7 @@ export class Scheduler {
   private lastLoadHighEventSnapshot: LoadSnapshot | null = null;
   private notifiedSkippedModels = new Set<string>();
   private resourceTimer: ReturnType<typeof setInterval> | null = null;
+  private poolTimer: ReturnType<typeof setInterval> | null = null;
   private diskReader: (p: string) => DiskSpace = getDiskSpaceSync;
   private usageService?: QuotaUsageService;
   private checkingQueue: QueuedCheck[] = [];
@@ -780,6 +781,8 @@ export class Scheduler {
     this.measureAllRunningTaskResources();
     this.resourceTimer = setInterval(() => this.measureAllRunningTaskResources(), 15000);
     this.resourceTimer.unref();
+    this.poolTimer = setInterval(() => { void this.refillWorktreePools(); }, 10 * 60 * 1000);
+    this.poolTimer.unref();
     // Also run immediately
     queueMicrotask(() => {
       if (!this.stopped) void this.tick().catch(() => {});
@@ -794,6 +797,10 @@ export class Scheduler {
     if (this.resourceTimer) {
       clearInterval(this.resourceTimer);
       this.resourceTimer = null;
+    }
+    if (this.poolTimer) {
+      clearInterval(this.poolTimer);
+      this.poolTimer = null;
     }
 
     // Requirement 4: Khi daemon tắt/khởi động lại: mọi task đang paused phải được SIGCONT trước (không để tiến trình đứng mãi).
@@ -830,6 +837,20 @@ export class Scheduler {
     this.locks.clearReservations();
     for (const entry of this.checkingQueue.splice(0)) entry.resolve();
     this.checkingPromises.clear();
+  }
+
+  private async refillWorktreePools(): Promise<void> {
+    if (this.stopped) return;
+    for (const project of this.projectRepo.getAll()) {
+      if (this.getBlockingDiskForTask({ projectId: project.id } as TaskRow)) continue;
+      await this.worktreeService.refillPool({
+        projectPath: project.path,
+        projectId: project.id,
+        projectSettings: project.settings,
+        baseRef: project.defaultBranch || 'main',
+        diskAvailable: () => !this.stopped && !this.getBlockingDiskForTask({ projectId: project.id } as TaskRow),
+      }).catch((error) => console.warn(`[scheduler] Failed to refresh worktree pool: ${String(error)}`));
+    }
   }
 
   cancelAll(): void {
@@ -3642,14 +3663,32 @@ export class Scheduler {
       }
       const baseRef = this.resolveBaseRef(task, project);
       try {
-        worktreePath = await this.worktreeService.createAsync({
+        worktreePath = await this.worktreeService.acquireFromPool({
           projectPath: project.path,
           projectId: project.id,
           projectSettings: project.settings,
           slug: task.slug,
           branch,
           baseRef,
+          taskId: task.id,
         });
+        if (!worktreePath) {
+          worktreePath = await this.worktreeService.createAsync({
+            projectPath: project.path,
+            projectId: project.id,
+            projectSettings: project.settings,
+            slug: task.slug,
+            branch,
+            baseRef,
+          });
+        }
+        void this.worktreeService.refillPool({
+          projectPath: project.path,
+          projectId: project.id,
+          projectSettings: project.settings,
+          baseRef: project.defaultBranch || baseRef,
+          diskAvailable: () => !this.stopped && !this.getBlockingDiskForTask(task),
+        }).catch((error) => console.warn(`[scheduler] Failed to replenish worktree pool: ${String(error)}`));
         if (this.stopGeneration !== stopGeneration) {
           this.starting.delete(task.id);
           this.locks.release(profile.name, lockFile);
@@ -4449,6 +4488,7 @@ export class Scheduler {
       try { entries = fs.readdirSync(path.join(root, projectDir.name), { withFileTypes: true }); } catch { continue; }
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
+        if (entry.name === '.pool') continue;
         const candidate = path.join(root, projectDir.name, entry.name);
         if (referenced.has(path.resolve(candidate)) || !isDeletableWorktreePath(this.config.worktreesDir, candidate, [this.config.hubHome, project.path])) continue;
         const task = tasks.find((row) => row.projectId === project.id && row.slug === entry.name);

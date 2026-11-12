@@ -161,7 +161,9 @@ export function listAllWorktreeProcesses(options: ReaperOptions = {}): ProcessIn
   const result: ProcessInfo[] = [];
   for (const info of getPlatform().process.listProcesses()) {
     if (excluded.has(info.pid)) continue;
-    if (info && roots.some((root) => isInside(info.cwd, root)) && isDeletableWorktreePath(roots, cleanCwd(info.cwd), options.protectedPaths || [])) {
+    const cwd = cleanCwd(info.cwd);
+    if (cwd.split(path.sep).includes('.pool')) continue;
+    if (info && roots.some((root) => isInside(info.cwd, root)) && isDeletableWorktreePath(roots, cwd, options.protectedPaths || [])) {
       result.push(info);
     }
   }

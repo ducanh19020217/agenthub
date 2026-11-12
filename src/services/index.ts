@@ -2237,6 +2237,15 @@ export class AppService {
       validateIntegrationBranch(mergedSettings.integration.branch || 'agenthub/integration', effectiveDefaultBranch);
     }
 
+    const oldRoot = projectWorktreeRoot(current, this.config.hubHome, this.config.worktreesDir);
+    const nextProject = { ...current, settings: JSON.stringify(mergedSettings) };
+    const nextRoot = projectWorktreeRoot(nextProject, this.config.hubHome, this.config.worktreesDir);
+    if (oldRoot !== nextRoot || mergedSettings.worktree.warmPool === 0) {
+      void new WorktreeService(this.config, this.scheduler.getEventBus()).removePoolAsync(current).catch((error) => {
+        console.warn(`[projects] Failed to remove old worktree pool: ${String(error)}`);
+      });
+    }
+
     let mergeUpdate = parsed.merge === undefined ? undefined : parsed.merge ? JSON.stringify(parsed.merge) : null;
     if (parsed.defaultBranch !== undefined && !mergedSettings.integration.enabled && parsed.merge === undefined) {
       const currentMerge = parseProjectMerge(current.merge);
@@ -2350,6 +2359,7 @@ export class AppService {
       }
       this.projectRepo.archive(id);
       this.brainRunner?.stopProject(id);
+      await new WorktreeService(this.config, this.scheduler.getEventBus()).removePoolAsync(proj);
       const warning = await removeIntegrationWorktreeAsync(proj, this.config.hubHome);
       this.invalidateOutOfScopeClaudeScanStates();
       const hasData = Object.values(deleteData.counts).some((count) => count > 0);
@@ -2363,6 +2373,7 @@ export class AppService {
     }
 
     const warnings: string[] = [];
+    try { await new WorktreeService(this.config, this.scheduler.getEventBus()).removePoolAsync(proj); } catch (error) { warnings.push(`Không thể gỡ worktree pool: ${String(error)}`); }
     const integrationWarning = await removeIntegrationWorktreeAsync(proj, this.config.hubHome);
     if (integrationWarning) warnings.push(integrationWarning);
     for (const task of deleteData.tasks) {

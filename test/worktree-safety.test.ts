@@ -130,3 +130,47 @@ describe('worktree deletion safety (sự cố 16/10: hub xóa nhầm thư mục 
     expect(isDeletableWorktreePath(symlinkDir, path.join(realDir, 'project', 'uncreated-task'), [project])).toBe(true);
   });
 });
+
+describe('warm worktree pool', () => {
+  it('refills detached worktrees and acquires a clean task branch', async () => {
+    const { project, worktreesDir, service } = setup();
+    const events: Array<{ type: string; payload?: unknown }> = [];
+    const configured = new WorktreeService({ worktreesDir, hubHome: path.dirname(worktreesDir), cacheDir: path.join(path.dirname(worktreesDir), 'cache'), cacheMaxEntries: 3, cacheMaxGB: 1 } as AgentHubConfig, {
+      emit: (type, _taskId, payload) => { events.push({ type, payload }); return true; },
+    });
+    const settings = JSON.stringify({ worktree: { warmPool: 1, install: 'skip' } });
+    await configured.refillPool({ projectPath: project, projectId: 'xfarm', projectSettings: settings, baseRef: 'HEAD' });
+    const poolPath = path.join(worktreesDir, 'xfarm', '.pool', '1');
+    expect(fs.existsSync(poolPath)).toBe(true);
+    expect(execFileSync('git', ['-C', poolPath, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' })).toBe('HEAD\n');
+    const exclude = execFileSync('git', ['-C', poolPath, 'rev-parse', '--git-path', 'info/exclude'], { encoding: 'utf8' }).trim();
+    expect(fs.readFileSync(path.isAbsolute(exclude) ? exclude : path.join(poolPath, exclude), 'utf8')).toContain('.agenthub/');
+
+    const taskPath = await configured.acquireFromPool({ projectPath: project, projectId: 'xfarm', projectSettings: settings, slug: 'task-a', branch: 'agenthub/task-a', baseRef: 'HEAD', taskId: 'xfarm/task-a' });
+    expect(taskPath).toBe(path.join(worktreesDir, 'xfarm', 'task-a'));
+    expect(execFileSync('git', ['-C', taskPath!, 'symbolic-ref', '--short', 'HEAD'], { encoding: 'utf8' })).toBe('agenthub/task-a\n');
+    expect(execFileSync('git', ['-C', taskPath!, 'status', '--porcelain'], { encoding: 'utf8' })).toBe('');
+    expect(events.map((event) => event.type)).toContain('worktree.pool_hit');
+  });
+
+  it('removes a broken pool entry and falls back to normal creation', async () => {
+    const { project, worktreesDir, service } = setup();
+    const settings = JSON.stringify({ worktree: { warmPool: 1 } });
+    const broken = path.join(worktreesDir, 'xfarm', '.pool', '1');
+    fs.mkdirSync(broken, { recursive: true });
+    const result = await service.acquireFromPool({ projectPath: project, projectId: 'xfarm', projectSettings: settings, slug: 'fallback', branch: 'fallback', baseRef: 'HEAD' });
+    expect(result).toBeNull();
+    expect(fs.existsSync(broken)).toBe(false);
+    const created = await service.createAsync({ projectPath: project, projectId: 'xfarm', projectSettings: settings, slug: 'fallback', branch: 'fallback', baseRef: 'HEAD' });
+    expect(fs.existsSync(created)).toBe(true);
+  });
+
+  it('does not create a pool when disabled or disk is low', async () => {
+    const first = setup();
+    await first.service.refillPool({ projectPath: first.project, projectId: 'xfarm', projectSettings: JSON.stringify({ worktree: { warmPool: 0 } }), baseRef: 'HEAD' });
+    expect(fs.existsSync(path.join(first.worktreesDir, 'xfarm', '.pool'))).toBe(false);
+    const second = setup();
+    await second.service.refillPool({ projectPath: second.project, projectId: 'xfarm', projectSettings: JSON.stringify({ worktree: { warmPool: 1 } }), baseRef: 'HEAD', diskAvailable: () => false });
+    expect(fs.existsSync(path.join(second.worktreesDir, 'xfarm', '.pool'))).toBe(false);
+  });
+});

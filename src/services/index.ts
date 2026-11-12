@@ -3509,7 +3509,7 @@ export class AppService {
         ...apiTask(task, blockingDisk),
         externalUrl: this.openProjectTicketUrl(task),
         blockingDisk,
-        reviewChain: review?.chain ?? parseReviewChain(project?.reviewChain),
+        reviewChain,
         reviewRound,
         reviewMaxRounds,
         reviewer,

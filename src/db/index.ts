@@ -2218,6 +2218,8 @@ export class EventRepo {
 
   getByTasksAndTypes(taskIds: string[], types: string[]): EventRow[] {
     if (taskIds.length === 0 || types.length === 0) return [];
+    // Keep task batches below SQLite's default 999-variable limit.
+    if (taskIds.length + types.length > 999) throw new Error('getByTasksAndTypes batch exceeds SQLite parameter limit');
     const taskPlaceholders = taskIds.map(() => '?').join(', ');
     const typePlaceholders = types.map(() => '?').join(', ');
     return this.db.prepare(`

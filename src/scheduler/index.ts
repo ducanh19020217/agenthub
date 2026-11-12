@@ -360,6 +360,8 @@ export class Scheduler {
   private notifiedSkippedModels = new Set<string>();
   private resourceTimer: ReturnType<typeof setInterval> | null = null;
   private retentionTimer: ReturnType<typeof setInterval> | null = null;
+  private retentionStartupTimer: ReturnType<typeof setTimeout> | null = null;
+  private retentionRunning = false;
   private diskReader: (p: string) => DiskSpace = getDiskSpaceSync;
   private usageService?: QuotaUsageService;
   private checkingQueue: QueuedCheck[] = [];
@@ -777,7 +779,12 @@ export class Scheduler {
     this.measureAllRunningTaskResources();
     this.resourceTimer = setInterval(() => this.measureAllRunningTaskResources(), 15000);
     this.resourceTimer.unref();
-    this.retentionTimer = setInterval(() => this.runRetentionBatch(), 6 * 60 * 60 * 1000);
+    this.retentionStartupTimer = setTimeout(() => {
+      this.retentionStartupTimer = null;
+      void this.runRetentionBatch();
+    }, 1000);
+    this.retentionStartupTimer.unref();
+    this.retentionTimer = setInterval(() => { void this.runRetentionBatch(); }, 6 * 60 * 60 * 1000);
     this.retentionTimer.unref();
     // Also run immediately
     this.tick();
@@ -795,6 +802,10 @@ export class Scheduler {
     if (this.retentionTimer) {
       clearInterval(this.retentionTimer);
       this.retentionTimer = null;
+    }
+    if (this.retentionStartupTimer) {
+      clearTimeout(this.retentionStartupTimer);
+      this.retentionStartupTimer = null;
     }
 
     // Requirement 4: Khi daemon tắt/khởi động lại: mọi task đang paused phải được SIGCONT trước (không để tiến trình đứng mãi).
@@ -4426,8 +4437,9 @@ export class Scheduler {
     }
   }
 
-  private runRetentionBatch(): void {
-    if (!this.db) return;
+  private async runRetentionBatch(): Promise<void> {
+    if (!this.db || this.retentionRunning) return;
+    this.retentionRunning = true;
     const now = Date.now();
     const sqliteTime = (days: number): string => new Date(now - days * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19);
     const noisyTypes = [
@@ -4436,17 +4448,24 @@ export class Scheduler {
     ];
     const retainedTypes = [
       'review.fallback', 'review.auto_merge_skipped', 'review.completed', 'review.escalated',
-      'merge.conflict', 'task.merged',
+      'merge.conflict', 'task.merged', 'tracker.timesheet.posted',
     ];
-    const deletedEvents = this.eventRepo.deleteExpired(
-      noisyTypes,
-      retainedTypes,
-      sqliteTime(this.config.retention.noisyEventDays),
-      sqliteTime(this.config.retention.eventDays),
-      1000,
-    );
-    const deletedNotes = this.taskNoteRepo?.deleteOldCompletedOverlaps(sqliteTime(this.config.retention.taskNoteDays), 1000) || 0;
-    if (deletedEvents > 0 || deletedNotes > 0) this.db.pragma('optimize');
+    const noisyBefore = sqliteTime(this.config.retention.noisyEventDays);
+    const eventBefore = sqliteTime(this.config.retention.eventDays);
+    const notesBefore = sqliteTime(this.config.retention.taskNoteDays);
+    let optimized = false;
+    try {
+      while (true) {
+        const deletedEvents = this.eventRepo.deleteExpired(noisyTypes, retainedTypes, noisyBefore, eventBefore, 1000);
+        const deletedNotes = this.taskNoteRepo?.deleteOldCompletedOverlaps(notesBefore, 1000) || 0;
+        if (deletedEvents > 0 || deletedNotes > 0) optimized = true;
+        if (deletedEvents < 1000 && deletedNotes < 1000) break;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      if (optimized) this.db.pragma('optimize');
+    } finally {
+      this.retentionRunning = false;
+    }
   }
 
   setTaskMerging(taskId: string, merging: boolean): void {

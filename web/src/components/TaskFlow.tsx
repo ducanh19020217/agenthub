@@ -548,10 +548,10 @@ export const FlowTaskList: React.FC<{ status: TaskStatus; project?: string; sear
                   {task.statusChangedAt && (
                     <span
                       className="truncate text-[11px] text-[var(--t-text-3)]"
-                      title={formatDateTime(task.statusChangedAt, locale)}
+                      title={`${formatDateTime(task.statusChangedAt, locale)}${task.statusChangedAtEstimated ? ` (${t('taskDetail.stepEstimated')})` : ''}`}
                       data-testid="task-status-time"
                     >
-                      {formatStatusTimeLabel(task.status, task.statusChangedAt, locale, undefined, t)}
+                      {formatStatusTimeLabel(task.status, task.statusChangedAt, locale, undefined, t, task.statusChangedAtEstimated)}
                     </span>
                   )}
                 </div>

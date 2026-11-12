@@ -3,11 +3,12 @@ import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TaskDetailPage } from '../pages/TaskDetailPage';
+import { FlowTaskList } from '../components/TaskFlow';
 import { LocaleProvider } from '../context/LocaleContext';
 import type { Locale } from '../locales';
 import * as client from '../api/client';
 import * as sse from '../api/sse';
-import type { TaskDetail, TaskTimelineItem } from '../types/api';
+import type { TaskDetail, TaskTimelineItem, Task } from '../types/api';
 
 describe('Workflow Timeline UI & Status Timestamps', () => {
   let queryClient: QueryClient;
@@ -115,12 +116,13 @@ describe('Workflow Timeline UI & Status Timestamps', () => {
       status: 'done',
       timeline: multiRoundTimeline,
     });
-    vi.spyOn(client, 'getTaskTimeline').mockResolvedValue(multiRoundTimeline);
+    const timelineSpy = vi.spyOn(client, 'getTaskTimeline');
 
     renderDetailPage();
 
     const workflowSection = await screen.findByTestId('workflow-timeline');
     expect(workflowSection).toBeInTheDocument();
+    expect(timelineSpy).not.toHaveBeenCalled();
 
     // Verify all 7 steps rendered distinctly
     const steps = within(workflowSection).getAllByRole('listitem');
@@ -168,7 +170,6 @@ describe('Workflow Timeline UI & Status Timestamps', () => {
       status: 'running',
       timeline: timelineEn,
     });
-    vi.spyOn(client, 'getTaskTimeline').mockResolvedValue(timelineEn);
 
     renderDetailPage('proj-1~t1', 'en');
 
@@ -199,11 +200,70 @@ describe('Workflow Timeline UI & Status Timestamps', () => {
       statusChangedAtEstimated: true,
       timeline: estimatedTimeline,
     });
-    vi.spyOn(client, 'getTaskTimeline').mockResolvedValue(estimatedTimeline);
 
     renderDetailPage();
 
     const workflowSection = await screen.findByTestId('workflow-timeline');
     expect(workflowSection.textContent).toContain('ước lượng');
+  });
+
+  it('displays estimated indicator on FlowTaskList cards in vi and en', async () => {
+    const estimatedCardTask: Task = {
+      id: 'proj-1/t-legacy',
+      projectId: 'proj-1',
+      slug: 't-legacy',
+      title: 'Legacy Task Card',
+      level: 'easy',
+      status: 'done',
+      dependsOn: [],
+      attempt: 1,
+      resume: 0,
+      createdAt: '2026-10-15T00:00:00.000Z',
+      updatedAt: '2026-10-15T08:30:00.000Z',
+      statusChangedAt: '2026-10-15T08:30:00.000Z',
+      statusChangedAtEstimated: true,
+    };
+
+    vi.spyOn(client, 'getProjects').mockResolvedValue([{ id: 'proj-1', name: 'Project 1', path: '/tmp', defaultBranch: 'main', maxParallel: 2 }]);
+    vi.spyOn(client, 'getTasksPage').mockResolvedValue({
+      items: [estimatedCardTask],
+      total: 1,
+      nextCursor: null,
+    });
+
+    // 1. Vietnamese render
+    const { unmount } = render(
+      <QueryClientProvider client={queryClient}>
+        <LocaleProvider initialLocale="vi">
+          <MemoryRouter>
+            <FlowTaskList status="done" />
+          </MemoryRouter>
+        </LocaleProvider>
+      </QueryClientProvider>,
+    );
+
+    const timeBadgeVi = await screen.findByTestId('task-status-time');
+    expect(timeBadgeVi).toBeInTheDocument();
+    expect(timeBadgeVi.textContent).toContain('ước lượng');
+    expect(timeBadgeVi.getAttribute('title')).toContain('ước lượng');
+
+    unmount();
+
+    // 2. English render
+    const queryClientEn = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClientEn}>
+        <LocaleProvider initialLocale="en">
+          <MemoryRouter>
+            <FlowTaskList status="done" />
+          </MemoryRouter>
+        </LocaleProvider>
+      </QueryClientProvider>,
+    );
+
+    const timeBadgeEn = await screen.findByTestId('task-status-time');
+    expect(timeBadgeEn).toBeInTheDocument();
+    expect(timeBadgeEn.textContent).toContain('estimated');
+    expect(timeBadgeEn.getAttribute('title')).toContain('estimated');
   });
 });

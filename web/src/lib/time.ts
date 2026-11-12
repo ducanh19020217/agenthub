@@ -434,6 +434,7 @@ export function formatStatusTimeLabel(
   locale: TimeLocale = 'vi',
   now: number | Date = Date.now(),
   t?: (key: string, params?: Record<string, string | number>) => string,
+  estimated?: boolean,
 ): string {
   const isEn = String(locale).startsWith('en');
   const parsed = parseApiTime(value);
@@ -446,54 +447,66 @@ export function formatStatusTimeLabel(
     ? formatTimeAgo(parsed, nowMs(now), locale)
     : formatShortContextualTime(parsed, locale, now);
 
+  const getEstimatedSuffix = () => {
+    if (!estimated) return '';
+    if (t) {
+      const trans = t('statusTime.estimatedSuffix');
+      if (trans && trans !== 'statusTime.estimatedSuffix') return trans;
+    }
+    return isEn ? ' (estimated)' : ' (ước lượng)';
+  };
+
   if (t) {
     const key = `statusTime.${status}`;
     const formatted = t(key, { time: timeStr });
     if (formatted && formatted !== key) {
-      return formatted;
+      return `${formatted}${getEstimatedSuffix()}`;
     }
   }
 
+  let label: string;
   if (isEn) {
     switch (status) {
-      case 'running': return `Running since ${timeStr}`;
-      case 'checking': return `Checking since ${timeStr}`;
-      case 'queued': return `Queued since ${timeStr}`;
-      case 'waiting_quota': return `Waiting for quota since ${timeStr}`;
-      case 'review': return `In review since ${timeStr}`;
-      case 'paused': return `Paused since ${timeStr}`;
-      case 'draft': return `Draft since ${timeStr}`;
-      case 'done': return `Completed ${timeStr}`;
-      case 'pushed': return `Pushed to git ${timeStr}`;
-      case 'failed': return `Failed ${timeStr}`;
-      case 'blocked': return `Blocked ${timeStr}`;
-      case 'cancelled': return `Cancelled ${timeStr}`;
-      case 'merged': return `Merged ${timeStr}`;
-      case 'changes_requested': return `Changes requested ${timeStr}`;
-      case 'auditing': return `Auditing since ${timeStr}`;
-      case 'publishing': return `Publishing since ${timeStr}`;
-      default: return `${status} ${timeStr}`;
+      case 'running': label = `Running since ${timeStr}`; break;
+      case 'checking': label = `Checking since ${timeStr}`; break;
+      case 'queued': label = `Queued since ${timeStr}`; break;
+      case 'waiting_quota': label = `Waiting for quota since ${timeStr}`; break;
+      case 'review': label = `In review since ${timeStr}`; break;
+      case 'paused': label = `Paused since ${timeStr}`; break;
+      case 'draft': label = `Draft since ${timeStr}`; break;
+      case 'done': label = `Completed ${timeStr}`; break;
+      case 'pushed': label = `Pushed to git ${timeStr}`; break;
+      case 'failed': label = `Failed ${timeStr}`; break;
+      case 'blocked': label = `Blocked ${timeStr}`; break;
+      case 'cancelled': label = `Cancelled ${timeStr}`; break;
+      case 'merged': label = `Merged ${timeStr}`; break;
+      case 'changes_requested': label = `Changes requested ${timeStr}`; break;
+      case 'auditing': label = `Auditing since ${timeStr}`; break;
+      case 'publishing': label = `Publishing since ${timeStr}`; break;
+      default: label = `${status} ${timeStr}`; break;
+    }
+  } else {
+    switch (status) {
+      case 'running': label = `Đang chạy từ ${timeStr}`; break;
+      case 'checking': label = `Đang kiểm tra từ ${timeStr}`; break;
+      case 'queued': label = `Chờ chạy từ ${timeStr}`; break;
+      case 'waiting_quota': label = `Chờ quota từ ${timeStr}`; break;
+      case 'review': label = `Chờ duyệt từ ${timeStr}`; break;
+      case 'paused': label = `Tạm dừng từ ${timeStr}`; break;
+      case 'draft': label = `Nháp từ ${timeStr}`; break;
+      case 'done': label = `Hoàn thành ${timeStr}`; break;
+      case 'pushed': label = `Đã đẩy git ${timeStr}`; break;
+      case 'failed': label = `Lỗi ${timeStr}`; break;
+      case 'blocked': label = `Bị chặn ${timeStr}`; break;
+      case 'cancelled': label = `Đã hủy ${timeStr}`; break;
+      case 'merged': label = `Đã gộp ${timeStr}`; break;
+      case 'changes_requested': label = `Yêu cầu sửa ${timeStr}`; break;
+      case 'auditing': label = `Đang audit từ ${timeStr}`; break;
+      case 'publishing': label = `Đang đẩy git từ ${timeStr}`; break;
+      default: label = `${status} ${timeStr}`; break;
     }
   }
 
-  switch (status) {
-    case 'running': return `Đang chạy từ ${timeStr}`;
-    case 'checking': return `Đang kiểm tra từ ${timeStr}`;
-    case 'queued': return `Chờ chạy từ ${timeStr}`;
-    case 'waiting_quota': return `Chờ quota từ ${timeStr}`;
-    case 'review': return `Chờ duyệt từ ${timeStr}`;
-    case 'paused': return `Tạm dừng từ ${timeStr}`;
-    case 'draft': return `Nháp từ ${timeStr}`;
-    case 'done': return `Hoàn thành ${timeStr}`;
-    case 'pushed': return `Đã đẩy git ${timeStr}`;
-    case 'failed': return `Lỗi ${timeStr}`;
-    case 'blocked': return `Bị chặn ${timeStr}`;
-    case 'cancelled': return `Đã hủy ${timeStr}`;
-    case 'merged': return `Đã gộp ${timeStr}`;
-    case 'changes_requested': return `Yêu cầu sửa ${timeStr}`;
-    case 'auditing': return `Đang audit từ ${timeStr}`;
-    case 'publishing': return `Đang đẩy git từ ${timeStr}`;
-    default: return `${status} ${timeStr}`;
-  }
+  return `${label}${getEstimatedSuffix()}`;
 }
 

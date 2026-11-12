@@ -89,6 +89,8 @@ export const vi = {
     changes_requested: 'Yêu cầu sửa {time}',
     auditing: 'Đang audit từ {time}',
     publishing: 'Đang đẩy git từ {time}',
+    estimated: 'ước lượng',
+    estimatedSuffix: ' (ước lượng)',
   },
   waitReason: {
     focus: 'Chờ vì đang tập trung cho project khác',

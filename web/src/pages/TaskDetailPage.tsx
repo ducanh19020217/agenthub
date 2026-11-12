@@ -7,7 +7,6 @@ import {
   createTaskFromError,
   deleteWorktree,
   getTask,
-  getTaskTimeline,
   getTaskRunsPage,
   getTasks,
   getTaskLog,
@@ -128,15 +127,7 @@ export const TaskDetailPage: React.FC = () => {
     refetchInterval: 4000,
   });
 
-  const { data: timelineData } = useQuery({
-    queryKey: ['task-timeline', id],
-    queryFn: () => getTaskTimeline(id),
-    enabled: !!id,
-    refetchInterval: 4000,
-  });
-
   const workflowTimelineItems: TaskTimelineItem[] = useMemo(() => {
-    if (timelineData && timelineData.length > 0) return timelineData;
     if (task?.timeline && task.timeline.length > 0) return task.timeline;
     if (task) {
       return [
@@ -148,7 +139,7 @@ export const TaskDetailPage: React.FC = () => {
       ];
     }
     return [];
-  }, [timelineData, task]);
+  }, [task]);
 
   const emptyLogMessage = React.useMemo(() => {
     if (task?.status === 'review') {

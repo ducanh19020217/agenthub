@@ -322,5 +322,14 @@ describe('API time helpers', () => {
     it('falls back when value is null or invalid', () => {
       expect(formatStatusTimeLabel('running', null, 'vi')).toBe('running');
     });
+
+    it('appends localized estimated suffix when estimated is true', () => {
+      const tenAm = Date.parse('2026-11-12T03:05:00Z');
+      expect(formatStatusTimeLabel('done', tenAm, 'vi', now, undefined, true)).toBe('Hoàn thành 10:05 (ước lượng)');
+      expect(formatStatusTimeLabel('done', tenAm, 'en', now, undefined, true)).toBe('Completed 10:05 (estimated)');
+
+      expect(formatStatusTimeLabel('running', tenAm, 'vi', now, undefined, true)).toBe('Đang chạy từ 10:05 (ước lượng)');
+      expect(formatStatusTimeLabel('running', tenAm, 'en', now, undefined, true)).toBe('Running since 10:05 (estimated)');
+    });
   });
 });

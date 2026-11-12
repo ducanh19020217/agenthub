@@ -243,10 +243,10 @@ const KanbanColumnComponent: React.FC<KanbanColumnProps> = ({ statusKey, project
                   {task.statusChangedAt && (
                     <span
                       className="truncate text-[var(--t-text-3)]"
-                      title={formatDateTime(task.statusChangedAt, locale)}
+                      title={`${formatDateTime(task.statusChangedAt, locale)}${task.statusChangedAtEstimated ? ` (${t('taskDetail.stepEstimated')})` : ''}`}
                       data-testid="task-status-time"
                     >
-                      {formatStatusTimeLabel(task.status, task.statusChangedAt, locale, undefined, t)}
+                      {formatStatusTimeLabel(task.status, task.statusChangedAt, locale, undefined, t, task.statusChangedAtEstimated)}
                     </span>
                   )}
                 </div>
@@ -322,10 +322,10 @@ const ProjectTaskGroup: React.FC<{ project: { id: string; name: string }; tasks:
               {task.statusChangedAt && (
                 <span
                   className="truncate text-[11px] text-[var(--t-text-3)]"
-                  title={formatDateTime(task.statusChangedAt, locale)}
+                  title={`${formatDateTime(task.statusChangedAt, locale)}${task.statusChangedAtEstimated ? ` (${t('taskDetail.stepEstimated')})` : ''}`}
                   data-testid="task-status-time"
                 >
-                  {formatStatusTimeLabel(task.status, task.statusChangedAt, locale, undefined, t)}
+                  {formatStatusTimeLabel(task.status, task.statusChangedAt, locale, undefined, t, task.statusChangedAtEstimated)}
                 </span>
               )}
             </div>
@@ -666,10 +666,10 @@ export const TasksPage: React.FC = () => {
                   {task.statusChangedAt && (
                     <span
                       className="text-[11px] text-[var(--t-text-3)]"
-                      title={formatDateTime(task.statusChangedAt, locale)}
+                      title={`${formatDateTime(task.statusChangedAt, locale)}${task.statusChangedAtEstimated ? ` (${t('taskDetail.stepEstimated')})` : ''}`}
                       data-testid="task-status-time"
                     >
-                      {formatStatusTimeLabel(task.status, task.statusChangedAt, locale, undefined, t)}
+                      {formatStatusTimeLabel(task.status, task.statusChangedAt, locale, undefined, t, task.statusChangedAtEstimated)}
                     </span>
                   )}
                 </div>

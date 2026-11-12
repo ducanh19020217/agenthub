@@ -91,6 +91,8 @@ export const en: typeof vi = {
     changes_requested: 'Changes requested {time}',
     auditing: 'Auditing since {time}',
     publishing: 'Publishing since {time}',
+    estimated: 'estimated',
+    estimatedSuffix: ' (estimated)',
   },
   waitReason: {
     focus: 'Waiting because another project is focused',

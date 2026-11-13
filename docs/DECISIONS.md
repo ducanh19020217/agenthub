@@ -436,7 +436,7 @@
   1. **Cơ chế timeout resume dựa trên tiến độ và số lần timeout liên tiếp**:
      - Khi worker run bị timeout, scheduler kiểm tra tiến độ bằng hàm `hasCommitAfter(task, startedAtMs)` sẵn có (xem worktree HEAD có commit mới sau mốc bắt đầu của run hay không). Mốc `startedAtMs` sử dụng trực tiếp giá trị hợp lệ từ `run.startedAt` trong DB (fallback về `rt.startTime` nếu không hợp lệ), không dùng `Math.min` để tránh lùi mốc thời gian và nhận diện nhầm commit trước run là tiến độ.
      - Đếm số lần timeout liên tiếp dựa trên số run worker có outcome `timeout` liên tiếp ở cuối danh sách runs của task (`getConsecutiveTimeoutCount`), không cần thêm cột DB mới.
-     - Cấu hình `scheduler.maxTimeoutResumes` (mặc định 2, đặt 0 để tắt) giới hạn số lần resume liên tiếp do timeout.
+     - Cấu hình `scheduler.maxTimeoutResumes` (mặc định 2, đặt 0 để tắt) giới hạn số lần resume liên tiếp do timeout; hỗ trợ cấu hình qua file `config.json`, schema `UpdateConfigSchema` (`PUT /api/config`), và công cụ `SetupTools.configSet` (`POST /api/setup/config-set`).
      - Phát sự kiện `task.timeout` cho mọi outcome timeout (kể cả khi requeue lẫn khi fail) để Telegram và các thành phần hiện tại tiếp tục hoạt động không đổi.
      - Nếu có tiến độ và số lần timeout liên tiếp chưa vượt `maxTimeoutResumes`:
        - Task được chuyển về `queued` với cờ `resume: 1`.

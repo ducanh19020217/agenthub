@@ -860,6 +860,13 @@ export interface SystemConfig {
   defaultTimeout: number;
   multiplePerProvider?: boolean;
   planning?: { requireApproval?: boolean; approvalMinTasks?: number };
+  scheduler?: {
+    maxRunsPerTask?: number;
+    maxConsecutiveCrashesPerTask?: number;
+    maxPausedMin?: number;
+    maxCheckingMin?: number;
+    maxTimeoutResumes?: number;
+  };
   slotsPerAgyProfile?: number;
   slotsPerCodexProfile?: number;
   watchdog?: { stallMinutes: number; waitingMinutes: number };

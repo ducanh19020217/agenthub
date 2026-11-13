@@ -1,0 +1,80 @@
+# Hoàn thành task: t-account-model-discovery – Khám phá danh sách model theo từng tài khoản bật thực tế
+
+## 1. Tóm tắt việc đã làm
+
+1. **Khám phá model theo từng profile (Backend Discovery)**:
+   - Tạo `ProfileModelRepo` và migration 72 (`profile_models`) lưu trữ danh sách model được khám phá theo từng profile: `profileName`, `engine`, `modelId`, `displayName`, `verified`, `fetchedAt`.
+   - Cập nhật migration hash vào `test/fixtures/migrations.lock` theo quy tắc append-only.
+   - Triển khai bộ phân tích và hàm khám phá độc lập cho từng engine (`src/models/discovery.ts`):
+     - **Antigravity (agy)**: Thực thi binary CLI trong môi trường sandbox cô lập qua thư mục tạm, bóc tách danh sách model từ output (loại bỏ spinner ANSI, ký tự thừa).
+     - **Codex**: Đọc metadata/cache `models_cache.json` từ `CODEX_HOME` của profile; khi cache không có hoặc khi refresh cưỡng chế (`force=true`), gọi endpoint API `backend-api/models` của Codex qua đường kết nối an toàn đã có sẵn, không đọc hay in lộ token.
+     - **Claude**: Đọc danh sách model catalog từ `.claude.json` / cache profile và hợp nhất với các alias tiêu chuẩn (`sonnet`, `opus`, `haiku`).
+   - Tuyệt đối không giải mã hay in lộ token/auth/keyring; test backend hoàn toàn dùng fixture và thư mục tạm cô lập, không chạy agy/codex thật.
+
+2. **Dịch vụ Cache, Làm mới và Fallback (`src/models/index.ts`)**:
+   - `ModelDiscoveryService`: Cung cấp hàm `discoverAll()`, `discoverForProfile()`, `refresh()`.
+   - Cơ chế fallback 2 lớp: khi lệnh khám phá lỗi, fallback về bản ghi cache gần nhất trong DB; nếu DB chưa từng có cache, fallback về danh sách mặc định nhưng đánh dấu `verified: false`.
+   - Xử lý trạng thái tài khoản: Nếu profile đã đăng xuất (`isProfileLoggedIn(profile) === false`), toàn bộ cache được đánh dấu `verified: false` và profile đó không được coi là đang cung cấp model.
+   - Tích hợp chu kỳ làm mới định kỳ trong daemon và endpoint `POST /api/models/refresh` (hỗ trợ cờ `force: true` bỏ qua file cache tĩnh).
+
+3. **API `/api/models` (`src/services/index.ts`)**:
+   - Trả về danh sách model hợp nhất theo cặp khóa duy nhất `(engine, modelId)`, ngăn ngừa xung đột gán profile chéo giữa các engine có chung model ID.
+   - Mỗi model trả về gồm: `id`, `engine`, `name`, `profiles` (danh sách tên profile đang bật và đăng nhập thực sự có model), `available` (chỉ `true` khi có ít nhất một profile đăng nhập cung cấp), và `verified`.
+   - Tự động thu thập toàn bộ các model đang cấu hình trên hệ thống (chuỗi HARD/EASY, reviewer chain, project reviewer fallback, brain model, brain fallback models, chat model); nếu model đang cấu hình mà không có tài khoản nào cung cấp, model đó được đưa vào danh sách kèm nhãn cảnh báo `available: false` và `configured: true`.
+   - Chuẩn hóa tiền tố `codex:` cho brain model để đồng bộ namespace và loại bỏ cảnh báo giả / trùng lặp.
+   - Tích hợp `ProfileModelRepo` vào `ChatService.validateSessionOptions()` cho phép chấp nhận các model Claude mới khám phá từ profile đang hoạt động.
+
+4. **Scheduler Integration (`src/scheduler/index.ts`)**:
+   - `isKnownModel` ưu tiên kiểm tra danh sách model đã khám phá từ DB cache, hợp nhất an toàn với fallback hardcode đối với các profile chưa có bản ghi discovery cache.
+   - Khi chọn profile thực thi task, chỉ xét các profile thực sự cung cấp model và đang đăng nhập (`profileHasModel`), tránh phân bổ task vào profile không hỗ trợ.
+
+5. **Giao diện Web (`web/src/...`)**:
+   - Mọi ô chọn model (Cài đặt chuỗi HARD/EASY, Reviewer chain, Brain model trong ProjectSettingsDrawer và DepartmentsPage, NewSessionModal, ChatPage, CreateTaskPage) sử dụng dữ liệu từ `/api/models`.
+   - Đề xuất model nhóm trực quan theo engine, hiển thị số lượng tài khoản khả dụng; loại bỏ triệt để việc chèn model fallback hardcode khi profile chưa xác minh.
+   - Hiển thị badge / cảnh báo đỏ nổi bật ngay trong danh sách chuỗi nếu model đang cấu hình không còn tài khoản nào cung cấp.
+   - Cho phép nhập model tùy chỉnh với cảnh báo hợp lệ thời gian thực.
+   - Nút "Làm mới danh sách model" gọi `POST /api/models/refresh` và cập nhật tức thì dữ liệu qua React Query.
+
+6. **Ổn định hóa bài kiểm tra (`test/publish.test.ts`)**:
+   - Thiết lập `enabledAt` cố định cho project trong bài test `huỷ bỏ publish khi số lượng task cần audit vượt quá maxTasks`, tránh race condition giữa timestamp commit git và thời điểm tạo project qua ranh giới giây dưới tải CPU cao.
+
+## 2. Kết quả kiểm tra & nghiệm thu
+
+- `npm run lint`: Đạt (0 errors, 130 baseline warnings).
+- `npx tsc --noEmit -p .`: Đạt (0 errors).
+- `npx tsc --noEmit -p web`: Đạt (0 errors).
+- `npm run test -- --run`: Đạt 140/140 test files, 1,776/1,776 tests passed.
+  - Bao gồm `test/model-discovery.test.ts`: 20/20 tests passed.
+  - Bao gồm `test/publish.test.ts`: 34/34 tests passed.
+  - Bao gồm `test/migrations-append-only.test.ts`: 1/1 tests passed.
+- `npm run test:web -- --run`: Đạt 74/74 test files, 682/682 tests passed.
+  - Bao gồm `web/src/test/settingsSelectInputs.test.tsx`: 40/40 tests passed.
+  - Bao gồm `web/src/test/departmentsPage.test.tsx`: 10/10 tests passed.
+  - Bao gồm `web/src/test/chat.test.tsx`: 7/7 tests passed.
+- `npm run build:web`: Đạt (Vite production build thành công trong 30.84s).
+
+**Tổng số test:** 2,458 tests passed (1,776 backend + 682 frontend).
+
+## 3. Việc chưa làm được / Ghi chú thiết kế
+
+- Không có việc tồn đọng.
+- Tất cả các yêu cầu từ đề bài ban đầu và các điểm phản hồi review (P1, P2) qua 3 lượt review và tự sửa đều đã được giải quyết trọn vẹn và kiểm tra nghiêm ngặt.
+
+## 4. Danh sách commits trên nhánh
+
+- `5bb48b6d`: `fix(test): stabilize publish audit maxTasks test against timestamp race`
+- `0341fe7d`: `fix(web): use discovered models in chat selectors and remove unverified defaults from brain selectors`
+- `ded920ec`: `feat(models): merge models by engine and ID and validate chat models from discovery`
+- `4b12f032`: `fix(web): prevent inserting fallback models as new suggestions when all models are unavailable`
+- `ed49190f`: `fix(models): treat logged-out profiles as unavailable in discovery cache, API, and scheduler`
+- `31af4101`: `fix(scheduler): fallback to engine syntax in isKnownModel for unrepresented engines`
+- `4736d49a`: `fix(models): resolve lint and typecheck issues in services and components`
+- `ce2cc60b`: `fix(web): exclude unavailable models from suggestions and use discovered models across all selectors`
+- `9a66609c`: `feat(scheduler): merge discovered models with fallback for profiles lacking discovery cache`
+- `7b643aee`: `fix(models): bypass codex cache on refresh, guard fallback availability, and track brain fallback models`
+- `a11490ca`: `feat(web): display discovered models grouped by engine with account counts and warnings`
+- `7e2a8365`: `fix(models): avoid executing real agy or codex binaries during tests`
+- `01f47eca`: `feat(scheduler): filter model chains and profile selection using discovered models`
+- `6e4c2772`: `feat(api): update /api/models and add POST /api/models/refresh with DB caching`
+- `53f72044`: `feat(models): implement model discovery per profile for agy, codex, and claude`
+- `111a3abd`: `feat(db): add profile_models migration and ProfileModelRepo`

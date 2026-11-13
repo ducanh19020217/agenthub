@@ -1148,6 +1148,7 @@ export const SettingsPage: React.FC = () => {
                           options={engineModelOptions}
                           validate={(val) => validateReviewerModelSyntax(val, item.engine, t, knownDiscovered)}
                           placeholder={item.engine === 'codex' ? 'codex:model' : 'sonnet'}
+                          showCustomWarning={true}
                         />
                         {unavailableModels.has(item.model) && (
                           <div
@@ -1241,6 +1242,7 @@ export const SettingsPage: React.FC = () => {
                     options={arbiter.engine === 'codex' ? availableCodexReviewerModels : availableClaudeReviewerModels}
                     validate={(val) => validateReviewerModelSyntax(val, arbiter.engine, t, knownDiscovered)}
                     placeholder={arbiter.engine === 'codex' ? 'codex:model' : 'sonnet'}
+                    showCustomWarning={true}
                   />
                 </div>
               </div>
@@ -1256,6 +1258,7 @@ export const SettingsPage: React.FC = () => {
                 options={availableCodexReviewerModels}
                 validate={(val) => validateReviewerModelSyntax(val, val.startsWith('claude') ? 'claude' : 'codex', t, knownDiscovered)}
                 placeholder="codex:model"
+                showCustomWarning={true}
                 className="w-full"
               />
             </div>

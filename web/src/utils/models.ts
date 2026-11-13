@@ -128,7 +128,10 @@ export function validateModelSyntax(
   const isAgy = VALID_AGY_MODELS.includes(trimmed);
   const isCodex =
     trimmed.startsWith('codex:') &&
-    validateReviewerModelSyntax(trimmed, 'codex') === null;
+    (() => {
+      const raw = trimmed.slice('codex:'.length);
+      return DEFAULT_CODEX_MODELS.includes(raw) || (raw.startsWith('gpt-') && raw.length > 4);
+    })();
 
   if (!isAgy && !isCodex) {
     return t
@@ -186,8 +189,11 @@ export function validateReviewChainReviewerSyntax(
         ? t('settings.invalidReviewChainReviewer')
       : 'Reviewer must be claude or have the codex: prefix';
     }
-    const modelError = validateReviewerModelSyntax(codexModel, 'codex', t, knownModels);
-    if (modelError) {
+    const isKnown =
+      (knownModels && (new Set(knownModels).has(trimmed) || new Set(knownModels).has(codexModel))) ||
+      DEFAULT_CODEX_MODELS.includes(codexModel) ||
+      (codexModel.startsWith('gpt-') && codexModel.length > 4);
+    if (!isKnown) {
       return t
         ? t('settings.invalidReviewChainReviewer')
       : 'Reviewer must be claude or have the codex: prefix';
@@ -225,9 +231,9 @@ export function validateBranchSyntax(
 
 export function validateReviewerModelSyntax(
   model: string,
-  engine?: 'codex' | 'claude' | string,
+  _engine?: 'codex' | 'claude' | string,
   t?: (key: string) => string,
-  knownModels?: Iterable<string>,
+  _knownModels?: Iterable<string>,
 ): string | null {
   const trimmed = model.trim();
   if (!trimmed) {
@@ -236,41 +242,8 @@ export function validateReviewerModelSyntax(
   if (/\s/.test(trimmed)) {
     return t ? t('settings.invalidModelSyntax') : 'Model cannot contain whitespace';
   }
-  if (knownModels) {
-    const knownSet = new Set(knownModels);
-    const unprefix = trimmed.replace(/^(codex:|claude:)/, '');
-    if (
-      knownSet.has(trimmed) ||
-      knownSet.has(`codex:${trimmed}`) ||
-      knownSet.has(`claude:${trimmed}`) ||
-      knownSet.has(unprefix) ||
-      knownSet.has(`codex:${unprefix}`) ||
-      knownSet.has(`claude:${unprefix}`)
-    ) {
-      return null;
-    }
-  }
-  if (engine === 'claude') {
-    const raw = trimmed.startsWith('claude:') ? trimmed.slice('claude:'.length) : trimmed;
-    const isValidClaude =
-      DEFAULT_CLAUDE_MODELS.includes(raw) ||
-      raw.startsWith('claude-');
-    if (!isValidClaude) {
-      return t
-        ? t('settings.invalidChatModelSyntax')
-      : 'Claude model must be sonnet, opus, or haiku';
-    }
-  }
-  if (engine === 'codex') {
-    const raw = trimmed.startsWith('codex:') ? trimmed.slice('codex:'.length) : trimmed;
-    const isValidCodex =
-      DEFAULT_CODEX_MODELS.includes(raw) ||
-      (raw.startsWith('gpt-') && raw.length > 4);
-    if (!isValidCodex) {
-      return t
-        ? t('settings.invalidModelSyntax')
-      : 'Codex model must have the codex: or gpt- prefix';
-    }
+  if (trimmed === 'codex:' || trimmed === 'claude:') {
+    return t ? t('settings.invalidModelSyntax') : 'Model cannot be empty';
   }
   return null;
 }

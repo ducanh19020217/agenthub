@@ -231,11 +231,12 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(validateReviewerModelSyntax('claude:sonnet', 'claude', (k) => k)).toBeNull();
       expect(validateReviewerModelSyntax('gpt-5.6-luna', 'codex', (k) => k)).toBeNull();
       expect(validateReviewerModelSyntax('codex:gpt-5.6-luna', 'codex', (k) => k)).toBeNull();
+      expect(validateReviewerModelSyntax('my-model', 'codex', (k) => k)).toBeNull();
+      expect(validateReviewerModelSyntax('my-model', 'claude', (k) => k)).toBeNull();
       expect(validateReviewerModelSyntax('invalid model with space', 'codex', (k) => k)).toBe('settings.invalidModelSyntax');
       expect(validateReviewerModelSyntax('codex:', 'codex', (k) => k)).toBe('settings.invalidModelSyntax');
-      expect(validateReviewerModelSyntax('codex:x', 'codex', (k) => k)).toBe('settings.invalidModelSyntax');
-      expect(validateReviewerModelSyntax('gpt-5.6-luna', 'claude', (k) => k)).toBe('settings.invalidChatModelSyntax');
-      expect(validateReviewerModelSyntax('sonnet', 'codex', (k) => k)).toBe('settings.invalidModelSyntax');
+      expect(validateReviewerModelSyntax('claude:', 'claude', (k) => k)).toBe('settings.invalidModelSyntax');
+      expect(validateReviewerModelSyntax('', 'codex', (k) => k)).toBe('settings.emptyChainWarning');
 
       // Accepts newly discovered Codex models when knownModels is passed
       expect(validateReviewerModelSyntax('o3-mini', 'codex', (k) => k, ['codex:o3-mini'])).toBeNull();
@@ -702,6 +703,28 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       await waitFor(() => expect(updateSpy).toHaveBeenCalled());
       const payload = updateSpy.mock.calls[0][0];
       expect(payload.chat?.model).toBe('custom-claude-model');
+    });
+
+    it('allows saving a custom reviewer model my-model with custom warning', async () => {
+      const updateSpy = vi.spyOn(client, 'updateConfig').mockResolvedValue({} as any);
+      renderSettings();
+
+      const reviewerSelect = await screen.findByLabelText('Model reviewer 1');
+      expect(reviewerSelect).toBeInTheDocument();
+      fireEvent.change(reviewerSelect, { target: { value: '__custom__' } });
+
+      const customInput = within(reviewerSelect.closest('div')!).getByPlaceholderText('codex:model');
+      expect(customInput).toBeInTheDocument();
+      fireEvent.change(customInput, { target: { value: 'my-model' } });
+
+      await waitFor(() => {
+        expect(within(reviewerSelect.closest('div')!).getByTestId('custom-warning')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /Lưu cấu hình/i }));
+      await waitFor(() => expect(updateSpy).toHaveBeenCalled());
+      const payload = updateSpy.mock.calls[0][0];
+      expect(payload.reviewer?.order?.[0]?.model).toBe('my-model');
     });
 
     it('shows a success toast after saving the config', async () => {

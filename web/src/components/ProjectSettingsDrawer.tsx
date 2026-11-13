@@ -3781,6 +3781,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                                 options={engineModelOptions}
                                 validate={(val) => validateReviewerModelSyntax(val, item.engine, t, knownReviewerValidatorModels)}
                                 placeholder={item.engine === 'codex' ? 'codex:model' : 'sonnet'}
+                                showCustomWarning={true}
                               />
                               {isReviewerModelUnavailable(item.model, item.engine) && (
                                 <div
@@ -4074,6 +4075,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                             validate={(val) => validateReviewChainReviewerSyntax(val, t, knownReviewerValidatorModels)}
                             ariaLabel={`${t('settings.reviewStep')} ${index + 1}`}
                             placeholder={t('settings.reviewerPlaceholder')}
+                            showCustomWarning={true}
                           />
                           {isReviewChainStepUnavailable(step.reviewer) && (
                             <div

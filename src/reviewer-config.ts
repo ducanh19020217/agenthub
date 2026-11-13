@@ -36,22 +36,12 @@ export const ReviewerOrderItemSchema = z
       });
       return;
     }
-    if (item.engine === 'claude') {
-      if (!isValidReviewerModel('claude', item.model)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['model'],
-          message: 'Model Claude phải là sonnet, opus hoặc haiku',
-        });
-      }
-    } else if (item.engine === 'codex') {
-      if (!isValidReviewerModel('codex', item.model)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['model'],
-          message: 'Model Codex phải có tiền tố codex: hoặc gpt-',
-        });
-      }
+    if (trimmed === 'codex:' || trimmed === 'claude:') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['model'],
+        message: 'Model của reviewer không hợp lệ',
+      });
     }
   });
 
@@ -78,22 +68,12 @@ export const ReviewerArbiterSchema = z
       });
       return;
     }
-    if (item.engine === 'claude') {
-      if (!isValidReviewerModel('claude', item.model)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['model'],
-          message: 'Model Claude phải là sonnet, opus hoặc haiku',
-        });
-      }
-    } else if (item.engine === 'codex') {
-      if (!isValidReviewerModel('codex', item.model)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['model'],
-          message: 'Model Codex phải có tiền tố codex: hoặc gpt-',
-        });
-      }
+    if (trimmed === 'codex:' || trimmed === 'claude:') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['model'],
+        message: 'Model của arbiter không hợp lệ',
+      });
     }
   });
 

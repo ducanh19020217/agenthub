@@ -38,7 +38,6 @@ import { Link } from 'react-router-dom';
 import {
   DEFAULT_COMMON_BRANCHES,
   DEFAULT_CLAUDE_MODELS,
-  DEFAULT_CODEX_MODELS,
   getModelsForProvider,
   validateBranchSyntax,
   validateReviewerModelSyntax,

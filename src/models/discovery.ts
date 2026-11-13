@@ -170,7 +170,9 @@ export async function discoverCodexModels(
         const content = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
         const parsed = parseCodexModelsData(content);
         if (parsed.length > 0) return parsed;
-      } catch {}
+      } catch {
+        // ignore fallback errors
+      }
     }
     throw new Error(`Codex credentials unavailable: ${tokenRes.skip}`);
   }
@@ -203,7 +205,9 @@ export async function discoverCodexModels(
         const content = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
         const parsed = parseCodexModelsData(content);
         if (parsed.length > 0) return parsed;
-      } catch {}
+      } catch {
+        // ignore fallback errors
+      }
     }
     throw err;
   }

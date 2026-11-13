@@ -658,11 +658,6 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
       accountType: 'personal',
     });
 
-    const fakeScheduler: any = {
-      profileRepo,
-      profileModelRepo,
-    };
-
     // Call getKnownDiscoveredModels method from Scheduler
     const known = Scheduler.prototype.getKnownDiscoveredModels.call({
       profileRepo,

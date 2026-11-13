@@ -6541,9 +6541,6 @@ export class AppService {
     const brainFallbackModels = (this.config.brain?.fallback || [])
       .filter((step): step is { type: 'model'; model: string } => step.type === 'model' && Boolean(step.model))
       .map((step) => step.model);
-    const chatFallbackModels = (this.config.chat?.fallback || [])
-      .filter((step): step is { type: 'model'; model: string } => step.type === 'model' && Boolean(step.model))
-      .map((step) => step.model);
 
     const configuredRaw = [
       ...this.config.defaultModelChains.hard,
@@ -6556,7 +6553,6 @@ export class AppService {
       ...brainFallbackModels,
       ...(this.config.chat?.model ? [this.config.chat.model] : []),
       ...(this.config.chat?.models || []),
-      ...chatFallbackModels,
     ].filter(Boolean);
     const configuredModels = [...new Set(configuredRaw)];
 

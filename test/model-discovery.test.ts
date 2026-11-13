@@ -865,6 +865,57 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(bareLuna).toBeUndefined();
   });
 
+  it('AppService.getModelOptions scans projectRepo and returns models configured only in a project with available:false, configured:true', () => {
+    const fakeProjectRepo = {
+      getAll: () => [
+        {
+          id: 'proj-1',
+          name: 'Project 1',
+          reviewChain: JSON.stringify([{ reviewer: 'codex:project-only-reviewer', mode: 'gate' }]),
+          settings: JSON.stringify({
+            review: {
+              order: [{ engine: 'claude', model: 'project-only-claude-reviewer' }],
+            },
+            brain: {
+              model: 'project-only-brain-model',
+            },
+          }),
+        },
+      ],
+    };
+
+    const service = {
+      profileRepo,
+      profileModelRepo,
+      projectRepo: fakeProjectRepo,
+      config: {
+        defaultModelChains: { hard: [], easy: [] },
+        reviewer: { order: [] },
+      },
+    };
+
+    const result = AppService.prototype.getModelOptions.call(service as any);
+    expect(result.configured).toContain('codex:project-only-reviewer');
+    expect(result.configured).toContain('project-only-claude-reviewer');
+    expect(result.configured).toContain('project-only-brain-model');
+
+    const projCodexReviewer = result.models.find((m) => m.id === 'codex:project-only-reviewer');
+    expect(projCodexReviewer).toBeDefined();
+    expect(projCodexReviewer?.available).toBe(false);
+    expect(projCodexReviewer?.configured).toBe(true);
+    expect(projCodexReviewer?.warning).toBeTruthy();
+
+    const projClaudeReviewer = result.models.find((m) => m.id === 'project-only-claude-reviewer');
+    expect(projClaudeReviewer).toBeDefined();
+    expect(projClaudeReviewer?.available).toBe(false);
+    expect(projClaudeReviewer?.configured).toBe(true);
+
+    const projBrain = result.models.find((m) => m.id === 'project-only-brain-model');
+    expect(projBrain).toBeDefined();
+    expect(projBrain?.available).toBe(false);
+    expect(projBrain?.configured).toBe(true);
+  });
+
   it('ChatService.validateSessionOptions accepts models discovered in profileModelRepo for active profiles', () => {
     const claudeHome = path.join(tmpDir, 'claude-chat-home');
     fs.mkdirSync(claudeHome, { recursive: true });

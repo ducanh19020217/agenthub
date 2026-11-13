@@ -1004,6 +1004,7 @@ export interface DiscoveredModel {
   profiles: string[];
   verified: boolean;
   available: boolean;
+  configured?: boolean;
   warning?: string | null;
 }
 

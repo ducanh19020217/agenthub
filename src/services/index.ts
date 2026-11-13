@@ -1111,6 +1111,7 @@ export interface DiscoveredModelApiItem {
   profiles: string[];
   verified: boolean;
   available: boolean;
+  configured?: boolean;
   warning?: string | null;
 }
 
@@ -6674,6 +6675,7 @@ export class AppService {
             profiles: [profile.name],
             verified: true,
             available: true,
+            configured: false,
             warning: null,
           });
         }
@@ -6698,6 +6700,7 @@ export class AppService {
               profiles: [],
               verified: false,
               available: false,
+              configured: false,
               warning: 'Chưa xác minh qua tài khoản',
             });
           }
@@ -6738,6 +6741,98 @@ export class AppService {
       ...(this.config.chat?.models || []).map((m) => ({ model: m, engine: 'claude' as const })),
     ].filter((item) => Boolean(item.model));
 
+    if (this.projectRepo?.getAll) {
+      for (const project of this.projectRepo.getAll()) {
+        const settings = projectSettings(project);
+        // 1. review chain
+        const chainRaw: Array<{ reviewer?: string }> = [];
+        if (project.reviewChain) {
+          try {
+            const parsed = JSON.parse(project.reviewChain);
+            if (Array.isArray(parsed)) chainRaw.push(...parsed);
+          } catch { /* ignore */ }
+        }
+        if (project.review) {
+          try {
+            const parsedReview = JSON.parse(project.review);
+            if (Array.isArray(parsedReview.chain)) {
+              chainRaw.push(...parsedReview.chain);
+            }
+          } catch { /* ignore */ }
+        }
+        for (const step of chainRaw) {
+          if (!step || typeof step !== 'object') continue;
+          const reviewer = typeof step.reviewer === 'string' ? step.reviewer.trim() : '';
+          if (!reviewer || reviewer === 'claude') continue;
+          if (reviewer.startsWith('codex:')) {
+            configuredItems.push({ model: reviewer, engine: 'codex' });
+          } else if (reviewer.startsWith('claude:')) {
+            configuredItems.push({ model: reviewer, engine: 'claude' });
+          } else {
+            configuredItems.push({ model: reviewer });
+          }
+        }
+
+        // 2. reviewer order
+        if (Array.isArray(settings.review?.order)) {
+          for (const item of settings.review.order) {
+            if (item && item.model) {
+              const model = item.engine === 'codex'
+                ? (item.model.startsWith('codex:') ? item.model : `codex:${item.model}`)
+                : item.model;
+              configuredItems.push({ model, engine: item.engine as 'agy' | 'codex' | 'claude' });
+            }
+          }
+        }
+
+        // 3. arbiter
+        const projArbiter = (settings.review as any)?.arbiter || (settings as any).arbiter;
+        if (projArbiter && projArbiter.model) {
+          const model = projArbiter.engine === 'codex'
+            ? (projArbiter.model.startsWith('codex:') ? projArbiter.model : `codex:${projArbiter.model}`)
+            : projArbiter.model;
+          configuredItems.push({ model, engine: projArbiter.engine as 'agy' | 'codex' | 'claude' });
+        }
+
+        // 4. brain model & fallback
+        if (settings.brain?.model && settings.brain.model !== 'inherit') {
+          const engine = settings.brain.engine === 'codex'
+            ? 'codex'
+            : (settings.brain.engine === 'claude' ? 'claude' : undefined);
+          configuredItems.push({ model: settings.brain.model, engine });
+        }
+        const projBrainCodex = (settings.brain as any)?.codexModel;
+        if (projBrainCodex) {
+          const model = projBrainCodex.startsWith('codex:') ? projBrainCodex : `codex:${projBrainCodex}`;
+          configuredItems.push({ model, engine: 'codex' });
+        }
+        if ((settings.brain as any)?.director?.model) {
+          configuredItems.push({ model: (settings.brain as any).director.model });
+        }
+        if (Array.isArray((settings.brain as any)?.fallback)) {
+          for (const step of (settings.brain as any).fallback) {
+            if (step && step.type === 'model' && step.model) {
+              configuredItems.push({ model: step.model });
+            }
+          }
+        }
+
+        // 5. model chain HARD/EASY if any
+        const projHard = (settings as any).modelChainHard || (settings as any).modelChains?.hard || (project as any).modelChainHard;
+        if (Array.isArray(projHard)) {
+          for (const m of projHard) {
+            if (typeof m === 'string' && m.trim()) configuredItems.push({ model: m.trim() });
+          }
+        }
+        const projEasy = (settings as any).modelChainEasy || (settings as any).modelChains?.easy || (project as any).modelChainEasy;
+        if (Array.isArray(projEasy)) {
+          for (const m of projEasy) {
+            if (typeof m === 'string' && m.trim()) configuredItems.push({ model: m.trim() });
+          }
+        }
+      }
+    }
+
     const configuredModels = [...new Set(configuredItems.map((item) => item.model))];
 
     for (const item of configuredItems) {
@@ -6768,11 +6863,15 @@ export class AppService {
           profiles: [],
           verified: false,
           available: false,
+          configured: true,
           warning: 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp',
         });
-      } else if (existing.profiles.length === 0) {
-        existing.available = false;
-        existing.warning = 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp';
+      } else {
+        existing.configured = true;
+        if (existing.profiles.length === 0) {
+          existing.available = false;
+          existing.warning = 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp';
+        }
       }
     }
 

@@ -195,6 +195,17 @@ export function isKnownModel(model: string, discoveredModels?: Iterable<string>)
     for (const m of discoveredModels) {
       if (m === model) return true;
     }
+    const engine = getModelEngine(model);
+    let hasEngineModels = false;
+    for (const m of discoveredModels) {
+      if (getModelEngine(m) === engine) {
+        hasEngineModels = true;
+        break;
+      }
+    }
+    if (!hasEngineModels) {
+      return model.startsWith('codex:') ? model.length > 6 : KNOWN_AGY_MODELS.has(model);
+    }
     return false;
   }
   return model.startsWith('codex:') ? model.length > 6 : KNOWN_AGY_MODELS.has(model);

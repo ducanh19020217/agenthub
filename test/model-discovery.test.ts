@@ -630,6 +630,9 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(isKnownModel('my-custom-model', custom)).toBe(true);
     expect(isKnownModel('gemini-3.8-flash-high', custom)).toBe(true);
     expect(isKnownModel('claude-opus-4-6-thinking', custom)).toBe(false);
+    // When discovered models only contain agy models, codex engine models fall back to engine syntax
+    expect(isKnownModel('codex:gpt-5.6-luna', custom)).toBe(true);
+    expect(isKnownModel('codex:', custom)).toBe(false);
   });
 
   it('Scheduler.getKnownDiscoveredModels merges discovered models with fallback models for undiscovered profiles', () => {

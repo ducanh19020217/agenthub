@@ -30,8 +30,10 @@
    - Khi chọn profile thực thi task, chỉ xét các profile thực sự cung cấp model và đang đăng nhập (`profileHasModel`), tránh phân bổ task vào profile không hỗ trợ.
 
 5. **Giao diện Web (`web/src/...`)**:
-   - Mọi ô chọn model (Cài đặt chuỗi HARD/EASY, Reviewer chain, Brain model trong ProjectSettingsDrawer và DepartmentsPage, NewSessionModal, ChatPage, CreateTaskPage, TaskDetailPage) sử dụng dữ liệu từ `/api/models`.
+   - Mọi ô chọn model (Cài đặt chuỗi HARD/EASY, Reviewer chain, Brain model trong ProjectSettingsDrawer và DepartmentsPage, NewSessionModal, ChatPage, CreateTaskPage, TaskDetailPage, SettingsPage chat model) sử dụng dữ liệu từ `/api/models`.
    - Thay thế `<select>` chỉ chứa discovery tĩnh tại `NewSessionModal` và header của `ChatPage` bằng `SelectOrCustomInput`: hỗ trợ chế độ nhập tay (custom) hiển thị cảnh báo `data-testid="custom-warning"` cho model tùy chỉnh chưa xác minh, và cảnh báo đỏ `data-testid="model-unavailable-warning"` khi model được chọn hoặc đang cấu hình không còn khả dụng trên tài khoản nào.
+   - Cập nhật `validateChatModelSyntax(model, t, knownModels?)` trong `web/src/utils/models.ts`: cho qua (null) nếu rỗng, nằm trong `knownModels` (model Claude discovery) hoặc `DEFAULT_CLAUDE_MODELS`; với chuỗi custom chỉ báo lỗi khi chứa khoảng trắng — khớp đúng quy tắc backend `ChatService.validateSessionOptions`.
+   - Truyền danh sách `availableChatModels` vào `validateChatModelSyntax` trong `SettingsPage` (kiểm tra khi lưu, ô chọn chat model, ô thêm chat model, kiểm tra nút disabled, và bước fallback model). Bật `showCustomWarning` hiển thị cảnh báo model tùy chỉnh chưa xác minh mà không chặn lưu cấu hình.
    - Loại bỏ toàn bộ fallback chèn model hardcode vào danh sách gợi ý dropdown / datalist (`CreateTaskPage`, `ProjectSettingsDrawer`, `SettingsPage`, `DepartmentsPage`) khi danh sách model discovery trống hoặc model chưa xác minh.
    - Đề xuất model nhóm trực quan theo engine, hiển thị số lượng tài khoản khả dụng; hiển thị cảnh báo đỏ nổi bật (`data-testid="model-unavailable-warning"`) cho các model đã cấu hình nhưng không khả dụng trong `CreateTaskPage`, `ProjectSettingsDrawer` (reviewer order và review chain), `SettingsPage` (reviewer order và model chains), `TaskDetailPage`.
    - Project reviewer-chain validator (`validateReviewerModelSyntax` và `validateReviewChainReviewerSyntax`) nhận danh sách model discovery khả dụng/đã cấu hình để không từ chối các model Codex mới hợp lệ.
@@ -41,23 +43,23 @@
 ## 2. Kết quả kiểm tra & nghiệm thu
 
 - `npm run lint`: Đạt (0 errors, 135 baseline warnings).
-- `npx tsc --noEmit -p .`: Đạt (0 errors).
-- `npx tsc --noEmit -p web`: Đạt (0 errors).
+- `npm run typecheck` (`tsc --noEmit`): Đạt (0 errors).
+- `npm --prefix web run typecheck` (`tsc --noEmit`): Đạt (0 errors).
 - `npm run build`: Đạt (tsc và copy protocol.md thành công).
-- `npm run build:web`: Đạt (Vite production build thành công trong 5.87s).
-- `npm run test:web -- --run`: Đạt 74/74 test files, 687/687 tests passed (100%).
-  - Bao gồm `web/src/test/settingsSelectInputs.test.tsx`: 43/43 tests passed.
+- `npm run build:web`: Đạt (Vite production build thành công trong 5.24s).
+- `npm run test:web`: Đạt 74/74 test files, 688/688 tests passed (100%).
+  - Bao gồm `web/src/test/settingsSelectInputs.test.tsx`: 44/44 tests passed (thêm kiểm thử cho phép custom chat model không khoảng trắng và lưu thành công từ SettingsPage).
   - Bao gồm `web/src/test/createTaskPage.test.tsx`: 11/11 tests passed.
   - Bao gồm `web/src/test/taskDetailPage.test.tsx`: 34/34 tests passed.
   - Bao gồm `web/src/test/departmentsPage.test.tsx`: 10/10 tests passed.
   - Bao gồm `web/src/test/chat.test.tsx`: 7/7 tests passed.
-- Backend test (`npm run test -- --run`): Đạt 140/140 test files, 1,779/1,779 tests passed (100%).
+- Backend test (`npm test`): Đạt 140/140 test files, 1,779/1,779 tests passed (100%).
   - `test/migrations-append-only.test.ts`: 1/1 passed.
   - `test/model-discovery.test.ts`: 23/23 tests passed.
   - `test/publish.test.ts`: 34/34 tests passed.
   - `test/scheduler.test.ts`: 131/131 tests passed.
   - `test/chat.test.ts`: 46/46 tests passed.
-- Tổng cộng tests: 2,466/2,466 tests passed (0 failed).
+- Tổng cộng tests: 2,467/2,467 tests passed (0 failed).
 
 ## 3. Việc chưa làm được / Ghi chú thiết kế
 
@@ -66,6 +68,8 @@
 
 ## 4. Danh sách commits trên nhánh
 
+- `4a078d1c`: `feat(web): support custom chat models and pass discovered claude models to syntax validator in settings`
+- `0c8cd23a`: `docs(tasks): update completion report for round 6 review fixes`
 - `7a329ed8`: `feat(chat): support custom model input with warnings in chat selectors and accept valid syntax in backend`
 - `524dc427`: `fix(scheduler): restrict codex model fallback to defined models in isKnownModel and profile selection`
 - `cafbb90e`: `fix(db): add migration 77 to expand profile_models primary key to engine and modelId`

@@ -199,6 +199,7 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
       ctx.taskRepo.update('p1/t-review-orphan', {
         status: 'review',
         statusChangedAt: past35m,
+        worktreePath: projectPath,
       });
 
       // Mock scheduler that auto review is enabled and eligible (not waiting for manual gate or quota)
@@ -221,6 +222,7 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
       ctx.taskRepo.update('p1/t-review-manual', {
         status: 'review',
         statusChangedAt: past35m,
+        worktreePath: projectPath,
       });
 
       // Eligible is false because it is waiting for manual approval
@@ -228,6 +230,83 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
 
       const result = await sweepService.runSweep(now);
       expect(result.issues.some((i) => i.rule === 'review_orphan')).toBe(false);
+    });
+
+    it('không báo nhầm khi task review thiếu worktreePath', async () => {
+      const now = Date.now();
+      const past35m = new Date(now - 35 * 60 * 1000).toISOString();
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-review-noworktree',
+        projectId: 'p1',
+        title: 'Task review no worktree',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-review-noworktree', {
+        status: 'review',
+        statusChangedAt: past35m,
+        worktreePath: null,
+      });
+
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'review_orphan' && i.taskId === 'p1/t-review-noworktree')).toBe(false);
+    });
+
+    it('không báo nhầm khi task review thiếu kết quả autocheck', async () => {
+      const now = Date.now();
+      const past35m = new Date(now - 35 * 60 * 1000).toISOString();
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-review-nochecks',
+        projectId: 'p1',
+        title: 'Task review no checks',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-review-nochecks', {
+        status: 'review',
+        statusChangedAt: past35m,
+        worktreePath: projectPath,
+      });
+
+      const isEligible = ctx.scheduler.isReviewOrphanEligible(ctx.taskRepo.get('p1/t-review-nochecks')!);
+      expect(isEligible).toBe(false);
+
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'review_orphan' && i.taskId === 'p1/t-review-nochecks')).toBe(false);
+    });
+
+    it('isReviewOrphanEligible trả về false khi thiếu worktreePath hoặc autocheck results', () => {
+      ctx.taskRepo.insert({
+        id: 'p1/t-elig-test',
+        projectId: 'p1',
+        title: 'Eligibility test',
+        level: 'easy',
+      });
+
+      // 1. Missing worktreePath
+      ctx.taskRepo.update('p1/t-elig-test', {
+        status: 'review',
+        worktreePath: null,
+      });
+      expect(ctx.scheduler.isReviewOrphanEligible(ctx.taskRepo.get('p1/t-elig-test')!)).toBe(false);
+
+      // 2. Has worktreePath, but no check_results
+      ctx.taskRepo.update('p1/t-elig-test', {
+        worktreePath: projectPath,
+      });
+      expect(ctx.scheduler.isReviewOrphanEligible(ctx.taskRepo.get('p1/t-elig-test')!)).toBe(false);
+
+      // 3. With check_results inserted into DB
+      ctx.runRepo.insert({
+        id: 'run-test',
+        taskId: 'p1/t-elig-test',
+        engine: 'agy',
+        model: 'model',
+        profileName: 'prof1',
+      });
+      ctx.db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('p1/t-elig-test', 'run-test', 'test', 1, 0, 100, 'pass');
+      expect(ctx.scheduler.getCheckResults('p1/t-elig-test').length).toBe(1);
     });
   });
 
@@ -313,11 +392,31 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
       ctx.taskRepo.update('p1/t-queued-notbefore', {
         status: 'queued',
         statusChangedAt: past65m,
-        notBefore: now + 30 * 60 * 1000,
+        notBefore: Math.floor(now / 1000) + 30 * 60,
       });
 
       const result = await sweepService.runSweep(now);
       expect(result.issues.some((i) => i.rule === 'queued_starved' && i.taskId === 'p1/t-queued-notbefore')).toBe(false);
+    });
+
+    it('phát hiện đúng khi task queued có notBefore trong quá khứ', async () => {
+      const now = Date.now();
+      const past65m = new Date(now - 65 * 60 * 1000).toISOString();
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-queued-past-notbefore',
+        projectId: 'p1',
+        title: 'Task queued past notBefore',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-queued-past-notbefore', {
+        status: 'queued',
+        statusChangedAt: past65m,
+        notBefore: Math.floor(now / 1000) - 60,
+      });
+
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'queued_starved' && i.taskId === 'p1/t-queued-past-notbefore')).toBe(true);
     });
 
     it('không báo nhầm khi project đã hết slot chạy song song', async () => {

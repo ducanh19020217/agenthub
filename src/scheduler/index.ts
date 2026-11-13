@@ -29,6 +29,7 @@ import { isProjectWorktreeRootAccessible, projectWorktreeRoot, projectWorktreeRo
 import { Engine, AgyEngine, CodexEngine } from '../engines/index.js';
 import { findAgyBin } from '../agy.js';
 import { getModelFamily, getModelEngine, isKnownModel, QuotaService, KNOWN_AGY_MODELS } from '../quota/index.js';
+import { DEFAULT_CODEX_DISCOVERED_MODELS, DEFAULT_CLAUDE_DISCOVERED_MODELS } from '../models/index.js';
 import { DependencyContext, isDeletableWorktreePath, WorktreeService } from '../worktrees/index.js';
 import { ensureWorktreeNodeModules, nodeModulesCacheSummary, pruneNodeModulesCache } from '../cache.js';
 import { AgentHubConfig, DEFAULT_SCHEDULER_LIMITS } from '../config.js';
@@ -492,12 +493,29 @@ export class Scheduler {
 
   getKnownDiscoveredModels(): Set<string> {
     const known = new Set<string>();
-    if (this.profileModelRepo) {
-      const enabledProfiles = this.profileRepo.getEnabled();
-      for (const p of enabledProfiles) {
+    const enabledProfiles = this.profileRepo.getEnabled();
+    for (const p of enabledProfiles) {
+      if (this.profileModelRepo) {
         const rows = this.profileModelRepo.getForProfile(p.name);
-        for (const r of rows) {
-          known.add(r.modelId);
+        if (rows.length > 0) {
+          for (const r of rows) {
+            known.add(r.modelId);
+          }
+          continue;
+        }
+      }
+      // If this profile has no discovery recorded yet, merge its engine hardcoded fallback models
+      if (p.engine === 'agy') {
+        for (const m of KNOWN_AGY_MODELS) {
+          known.add(m);
+        }
+      } else if (p.engine === 'codex') {
+        for (const m of DEFAULT_CODEX_DISCOVERED_MODELS) {
+          known.add(m.id);
+        }
+      } else if (p.engine === 'claude') {
+        for (const m of DEFAULT_CLAUDE_DISCOVERED_MODELS) {
+          known.add(m.id);
         }
       }
     }
@@ -4038,8 +4056,12 @@ export class Scheduler {
       ? this.config.defaultModelChains.hard
       : this.config.defaultModelChains.easy;
     const knownDiscovered = this.getKnownDiscoveredModels();
+    const hasUndiscoveredCodex = this.profileRepo.getEnabled().some(
+      (p) => p.engine === 'codex' && (!this.profileModelRepo || this.profileModelRepo.getForProfile(p.name).length === 0),
+    );
     return chain.filter((model) => {
       if (isKnownModel(model, knownDiscovered.size > 0 ? knownDiscovered : undefined)) return true;
+      if (hasUndiscoveredCodex && model.startsWith('codex:') && model.length > 6) return true;
       const key = `${task.id}:${model}`;
       if (!this.notifiedSkippedModels.has(key)) {
         this.notifiedSkippedModels.add(key);

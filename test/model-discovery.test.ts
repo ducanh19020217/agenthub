@@ -15,6 +15,7 @@ import {
 import { openDatabase, ProfileModelRepo, ProfileRepo, ProfileRow } from '../src/db/index.js';
 import { isKnownModel } from '../src/quota/index.js';
 import { AppService } from '../src/services/index.js';
+import { Scheduler } from '../src/scheduler/index.js';
 
 describe('Model Discovery Parsers', () => {
   it('parseAgyModelsOutput handles spinner output, tabs and spaces correctly', () => {
@@ -629,5 +630,47 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(isKnownModel('my-custom-model', custom)).toBe(true);
     expect(isKnownModel('gemini-3.8-flash-high', custom)).toBe(true);
     expect(isKnownModel('claude-opus-4-6-thinking', custom)).toBe(false);
+  });
+
+  it('Scheduler.getKnownDiscoveredModels merges discovered models with fallback models for undiscovered profiles', () => {
+    // agy-1 has discovered models in DB
+    profileRepo.upsert({
+      name: 'agy-with-disc',
+      engine: 'agy',
+      kind: 'isolated',
+      home: '/home/agy-with-disc',
+      email: 'disc@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('agy-with-disc', [
+      { modelId: 'gemini-custom-model', modelName: 'Gemini Custom', engine: 'agy', verified: true },
+    ]);
+
+    // agy-2 has NO discovery recorded yet
+    profileRepo.upsert({
+      name: 'agy-no-disc',
+      engine: 'agy',
+      kind: 'isolated',
+      home: '/home/agy-no-disc',
+      email: 'nodisc@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+
+    const fakeScheduler: any = {
+      profileRepo,
+      profileModelRepo,
+    };
+
+    // Call getKnownDiscoveredModels method from Scheduler
+    const known = Scheduler.prototype.getKnownDiscoveredModels.call({
+      profileRepo,
+      profileModelRepo,
+    } as any);
+
+    expect(known.has('gemini-custom-model')).toBe(true);
+    expect(known.has('gemini-3.8-flash-high')).toBe(true);
+    expect(known.has('claude-opus-4-6-thinking')).toBe(true);
   });
 });

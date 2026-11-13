@@ -392,3 +392,41 @@
      - Định nghĩa tập trạng thái kết thúc (`TERMINAL_STATUSES: ['done', 'merged', 'pushed', 'cancelled', 'failed']`).
      - Với bước cuối của các task thuộc tập trạng thái này: chỉ hiển thị mốc thời gian (`at`), không tính toán hoặc hiển thị thời lượng đang chạy (`currentDurationMs`) và ẩn nhãn "đang ở bước này từ...".
      - Các task đang chạy hoặc chờ tiếp tục hiển thị thời lượng thực tế và nhãn ngữ cảnh theo đúng thiết kế.
+
+## DEC-029: Lượt quét sức khoẻ định kỳ (Health Sweep) và đánh thức Brain
+
+- **Bối cảnh**:
+  - Brain trước đây chỉ thức dậy theo sự kiện đột xuất từ daemon.
+  - Watchdog chỉ bắt worker im lặng log, còn `task.no_commit`/`task.looping` chỉ gửi thông báo Telegram mà không đánh thức Brain.
+  - Các sự cố task kẹt mồ côi (như `checking` mồ côi không có process chạy, `review` mồ côi khi auto-review bật nhưng không có reviewer, `queued_starved` có slot nhưng không chạy, `running_no_progress`, worker loop/churn nhiều lượt, quota failover dồn dập, `stale_run` DB chưa kết thúc nhưng tiến trình đã chết) không có cơ chế phát hiện tự động để kích hoạt Brain can thiệp.
+- **Quyết định thiết kế**:
+  1. **Dịch vụ Health Sweep định kỳ (`src/health/sweep.ts`)**:
+     - Chạy định kỳ `healthSweep.intervalMinutes` (mặc định 10 phút) dưới dạng deterministic code (không gọi LLM tốn token/quota).
+     - Không chạy khi daemon đang drain restart hoặc scheduler đã dừng (`isDraining()` hoặc `isStopped()`).
+     - Triển khai 7 luật phát hiện với ngưỡng cấu hình linh hoạt trong `config.healthSweep.rules`:
+       - `checking_orphan`: checking > 20 phút không có check active/queued và không có run đang chạy.
+       - `review_orphan`: review > 30 phút, đủ điều kiện auto-review nhưng không có reviewer chạy và không bị chặn bởi quota hay backoff.
+       - `queued_starved`: queued > 60 phút, không chờ quota, không có dependency chưa xong, không có notBefore tương lai, project còn slot song song.
+       - `running_no_progress`: worker chạy > 90 phút không có commit mới và không đổi file trong worktree.
+       - `churn`: worker runs >= 8 hoặc review.escalated >= 2 lần.
+       - `failover_churn`: failover / quota_retry >= 4 lần trong 2 giờ.
+       - `stale_run`: run DB có `outcome IS NULL` nhưng PID không còn sống và không có trong memory.
+  2. **Tự sửa an toàn (Self-repair) cho lỗi trạng thái nội bộ**:
+     - `checking_orphan`: Tự động gọi lại `scheduler.runChecksForTask(...)` để chạy lại kiểm tra.
+     - `stale_run`: Đánh dấu run là `crashed`, tự động đưa task trở lại `queued` với `resume = 1`.
+     - Vẫn phát event `task.health_issue` kèm chi tiết tự sửa để Brain và người dùng nắm thông tin.
+     - Các luật khác chỉ phát cảnh báo để Brain quyết định, không tự ý can thiệp sai luồng.
+  3. **Chống spam cảnh báo bằng Cooldown bảng SQLite (Migration 76)**:
+     - Tạo bảng `health_issue_cooldowns (taskId, rule, lastEmittedAt, taskStatus)`.
+     - Cooldown mặc định 120 phút. Nếu trạng thái task thay đổi rồi lại vi phạm, cooldown được bỏ qua để kịp thời báo cáo tình trạng mới.
+     - Cooldown được lưu bền vững qua các lần khởi động lại daemon.
+  4. **Đánh thức Brain theo lô (Single Turn Batching) và hướng dẫn hành động**:
+     - Đưa `task.health_issue` vào `DEFAULT_BRAIN_WAKEUP_EVENTS`.
+     - Phân loại `churn`, `queued_starved`, `review_orphan` vào nhóm sự kiện ưu tiên (`isPriorityEvent`).
+     - Gom toàn bộ issue trong cùng một lượt sweep thành 1 lượt chạy duy nhất của Brain (`debounceMs`), tránh spam N lượt Brain.
+     - Cung cấp prompt hướng dẫn cụ thể các thao tác Brain được phép làm bằng công cụ sẵn có: retry, cancel, ghi chú/chỉ dẫn cho task, đổi chuỗi model, tách task, hoặc thông báo qua `brain.notify`.
+  5. **Quan sát và tích hợp**:
+     - Telegram: Thông báo gọn gàng gộp trong một tin nhắn mỗi lượt sweep, tôn trọng cài đặt thông báo (`telegram.notify.healthIssue`).
+     - HTTP API: `GET /api/health/sweep` xem kết quả quét gần nhất, `POST /api/health/sweep` kích hoạt quét tức thì.
+     - CLI & MCP: `agenthub health [--run]` và MCP tool `hub_health_sweep`.
+     - Logic an toàn cho `checking` mồ côi được tích hợp hoàn toàn trong sweep, không chạy song song trùng lặp.

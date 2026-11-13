@@ -3715,6 +3715,10 @@ export class TaskNoteRepo {
       )
       .all(...runningTaskIds) as TaskNoteRow[];
   }
+
+  delete(id: number): void {
+    this.db.prepare('DELETE FROM task_notes WHERE id = ?').run(id);
+  }
 }
 
 export interface CiRunRow {

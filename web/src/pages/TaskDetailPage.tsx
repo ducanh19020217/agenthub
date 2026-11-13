@@ -77,6 +77,8 @@ const VALID_MODELS = [
   'gpt-oss-120b-medium',
 ];
 
+const TERMINAL_STATUSES = new Set<string>(['done', 'merged', 'pushed', 'cancelled', 'failed']);
+
 export const TaskDetailPage: React.FC = () => {
   const { t, locale } = useLocale();
   const { id = '' } = useParams<{ id: string }>();
@@ -1192,10 +1194,13 @@ export const TaskDetailPage: React.FC = () => {
           {workflowTimelineItems.map((item, idx) => {
             const isCurrent = idx === workflowTimelineItems.length - 1;
             const statusKey = item.status as TaskStatus;
+            const isTerminal = isCurrent && (TERMINAL_STATUSES.has(task.status) || TERMINAL_STATUSES.has(item.status));
             const parsedAt = parseApiTime(item.at);
-            const currentDurationMs = isCurrent && Number.isFinite(parsedAt)
-              ? Math.max(0, Date.now() - parsedAt)
-              : item.durationMs;
+            const currentDurationMs = isTerminal
+              ? undefined
+              : isCurrent && Number.isFinite(parsedAt)
+                ? Math.max(0, Date.now() - parsedAt)
+                : item.durationMs;
 
             return (
               <li
@@ -1252,7 +1257,7 @@ export const TaskDetailPage: React.FC = () => {
                   )}
                 </div>
 
-                {isCurrent && (
+                {isCurrent && !isTerminal && (
                   <p
                     data-testid="workflow-current-step"
                     className="text-xs font-medium text-[var(--t-accent)]"

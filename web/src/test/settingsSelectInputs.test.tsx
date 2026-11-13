@@ -1408,5 +1408,55 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       const addModelSelect = within(hardChain).getByRole('combobox', { name: /Thêm model vào chuỗi/i }) as HTMLSelectElement;
       expect(within(addModelSelect).queryByRole('option', { name: /unavailable-configured-model/i })).not.toBeInTheDocument();
     });
+
+    it('does not insert hardcoded default models as new options when /api/models returns all models as unavailable', async () => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: [],
+        configured: ['sonnet'],
+        models: [
+          { id: 'sonnet', engine: 'claude', profiles: [], verified: false, available: false, warning: 'Chưa xác minh' },
+          { id: 'opus', engine: 'claude', profiles: [], verified: false, available: false, warning: 'Chưa xác minh' },
+          { id: 'gpt-5.6-luna', engine: 'codex', profiles: [], verified: false, available: false, warning: 'Chưa xác minh' },
+        ],
+      });
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        modelChainHard: [],
+        modelChainEasy: [],
+        defaultTimeout: 10800,
+        chat: { claudeBin: 'claude', allowFullMode: false, maxConcurrent: 2, model: 'sonnet', models: ['sonnet'] },
+        reviewer: {
+          model: 'sonnet',
+          order: [],
+          fallback: { onUnavailable: true, onError: true, onBusyAfterMin: 10 },
+          arbiter: { engine: 'claude', model: 'sonnet' },
+        },
+      } as any);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('hard-chain-list')).toBeInTheDocument();
+      });
+
+      // In chat settings, "Thêm model" dropdown should NOT offer opus or haiku from DEFAULT_CLAUDE_MODELS
+      const addChatModelSelect = screen.queryByRole('combobox', { name: /Thêm model Claude/i }) as HTMLSelectElement | null;
+      if (addChatModelSelect) {
+        expect(within(addChatModelSelect).queryByRole('option', { name: 'opus' })).not.toBeInTheDocument();
+        expect(within(addChatModelSelect).queryByRole('option', { name: 'haiku' })).not.toBeInTheDocument();
+      }
+    });
   });
 });

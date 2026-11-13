@@ -48,7 +48,7 @@ export const CreateTaskPage: React.FC = () => {
   const openProject = selectedProject?.settings?.openproject;
   const openProjectSource = openProject?.sourceId ? openProjectSources.find((source) => source.id === openProject.sourceId) : undefined;
   const modelSuggestions = React.useMemo(() => {
-    if (modelOptions?.models && modelOptions.models.length > 0) {
+    if (modelOptions?.models) {
       return modelOptions.models.filter((m) => m.available).map((m) => m.id);
     }
     return modelOptions?.suggestions?.length

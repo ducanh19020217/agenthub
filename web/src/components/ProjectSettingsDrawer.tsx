@@ -515,14 +515,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       .filter((r) => r.engine === 'claude')
       .map((r) => r.model);
 
-    const hasAnyClaude =
-      fromDiscovered.length > 0 ||
-      fromApi.length > 0 ||
-      fromChat.length > 0 ||
-      fromChatModel.length > 0 ||
-      fromClaudeModel.length > 0 ||
-      fromConfigOrder.length > 0;
-    const fallbackDefaults = hasAnyClaude ? [] : DEFAULT_CLAUDE_MODELS;
+    const fallbackDefaults = modelOptions ? [] : DEFAULT_CLAUDE_MODELS;
 
     return getModelsForProvider([
       ...fallbackDefaults,

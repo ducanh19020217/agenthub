@@ -13,9 +13,6 @@ import { SetupChatButton } from '../components/SetupChatButton';
 import { ToastViewport, useToasts } from '../components/ui/Toast';
 import { DataTable, SelectOrCustomInput, SortableModelList } from '../components/ui';
 import {
-  DEFAULT_CLAUDE_MODELS,
-  DEFAULT_CODEX_MODELS,
-  DEFAULT_VALID_MODELS,
   formatDiscoveredModelOptions,
   getModelsForProvider,
   validateModelSyntax,
@@ -182,10 +179,10 @@ export const SettingsPage: React.FC = () => {
   }, [modelOptions]);
 
   const availableWorkerModels = useMemo(() => {
-    if (modelOptions?.models && modelOptions.models.length > 0) {
+    if (modelOptions?.models) {
       return formatDiscoveredModelOptions(modelOptions.models, t, undefined, true);
     }
-    const fromApi = modelOptions?.suggestions || DEFAULT_VALID_MODELS;
+    const fromApi = modelOptions?.suggestions || [];
     const set = new Set([...fromApi]);
     return Array.from(set).filter(Boolean);
   }, [modelOptions, t]);
@@ -227,52 +224,56 @@ export const SettingsPage: React.FC = () => {
   };
 
   const availableCodexReviewerModels = useMemo(() => {
-    if (modelOptions?.models && modelOptions.models.length > 0) {
+    if (modelOptions?.models) {
       const codexDiscovered = formatDiscoveredModelOptions(modelOptions.models, t, 'codex', true);
-      if (codexDiscovered.length > 0) return codexDiscovered;
+      const reviewerModels = reviewOrder.filter((r) => r.engine === 'codex').map((r) => r.model);
+      const arbiterModel = arbiter.engine === 'codex' && arbiter.model ? [arbiter.model] : [];
+      const chainCodex = [...hardChainModels, ...easyChainModels];
+      const configured = getModelsForProvider([...reviewerModels, ...arbiterModel, ...chainCodex], 'codex');
+      const discoveredValues = new Set(codexDiscovered.map((opt) => opt.value));
+      const extraConfigured = configured
+        .filter((m) => !discoveredValues.has(m))
+        .map((m) => ({
+          value: m,
+          label: `${m} (${t('settings.inactiveOrOld')})`,
+        }));
+      return [...codexDiscovered, ...extraConfigured];
     }
-    const sourceModels = modelOptions
-      ? [...modelOptions.suggestions, ...modelOptions.configured]
-      : DEFAULT_CODEX_MODELS.map((model) => `codex:${model}`);
     const reviewerModels = reviewOrder.filter((r) => r.engine === 'codex').map((r) => r.model);
     const arbiterModel = arbiter.engine === 'codex' && arbiter.model ? [arbiter.model] : [];
     const chainCodex = [...hardChainModels, ...easyChainModels];
-    return getModelsForProvider([
-      ...getModelsForProvider(sourceModels, 'codex'),
-      ...reviewerModels,
-      ...arbiterModel,
-      ...chainCodex,
-    ], 'codex');
+    return getModelsForProvider([...reviewerModels, ...arbiterModel, ...chainCodex], 'codex');
   }, [modelOptions, reviewOrder, arbiter, hardChainModels, easyChainModels, t]);
 
   const availableClaudeReviewerModels = useMemo(() => {
-    if (modelOptions?.models && modelOptions.models.length > 0) {
+    if (modelOptions?.models) {
       const claudeDiscovered = formatDiscoveredModelOptions(modelOptions.models, t, 'claude', true);
-      if (claudeDiscovered.length > 0) return claudeDiscovered;
+      const fromChat = getModelsForProvider(chatModels, 'claude');
+      const reviewerModels = reviewOrder.filter((r) => r.engine === 'claude').map((r) => r.model);
+      const arbiterModel = arbiter.engine === 'claude' && arbiter.model ? [arbiter.model] : [];
+      const configured = getModelsForProvider([...reviewerModels, ...arbiterModel, ...fromChat], 'claude');
+      const discoveredValues = new Set(claudeDiscovered.map((opt) => opt.value));
+      const extraConfigured = configured
+        .filter((m) => !discoveredValues.has(m))
+        .map((m) => ({
+          value: m,
+          label: `${m} (${t('settings.inactiveOrOld')})`,
+        }));
+      return [...claudeDiscovered, ...extraConfigured];
     }
     const fromChat = getModelsForProvider(chatModels, 'claude');
-    const sourceModels = modelOptions
-      ? [...modelOptions.suggestions, ...modelOptions.configured]
-      : DEFAULT_CLAUDE_MODELS;
     const reviewerModels = reviewOrder.filter((r) => r.engine === 'claude').map((r) => r.model);
     const arbiterModel = arbiter.engine === 'claude' && arbiter.model ? [arbiter.model] : [];
-    return getModelsForProvider([
-      ...DEFAULT_CLAUDE_MODELS,
-      ...fromChat,
-      ...getModelsForProvider(sourceModels, 'claude'),
-      ...reviewerModels,
-      ...arbiterModel,
-    ], 'claude');
+    return getModelsForProvider([...reviewerModels, ...arbiterModel, ...fromChat], 'claude');
   }, [modelOptions, reviewOrder, arbiter, chatModels, t]);
 
   const availableChatModels = useMemo(() => {
-    if (modelOptions?.models && modelOptions.models.length > 0) {
-      const claudeDiscovered = modelOptions.models
+    if (modelOptions?.models) {
+      return modelOptions.models
         .filter((m) => m.engine === 'claude' && m.available)
         .map((m) => m.id);
-      if (claudeDiscovered.length > 0) return claudeDiscovered;
     }
-    return DEFAULT_CLAUDE_MODELS;
+    return [];
   }, [modelOptions]);
 
   useEffect(() => {

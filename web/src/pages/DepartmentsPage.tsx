@@ -68,7 +68,7 @@ export const DepartmentsPage: React.FC = () => {
     });
   };
   const modelOptionsByEngine = useMemo(() => {
-    if (modelOptions?.models && modelOptions.models.length > 0) {
+    if (modelOptions?.models) {
       const claude = modelOptions.models
         .filter((m) => m.engine === 'claude' && m.available)
         .map((m) => m.id);
@@ -76,8 +76,8 @@ export const DepartmentsPage: React.FC = () => {
         .filter((m) => m.engine === 'codex' && m.available)
         .map((m) => (m.id.startsWith('codex:') ? m.id.slice('codex:'.length) : m.id));
       return {
-        claude: claude.length > 0 ? Array.from(new Set(claude)) : DEFAULT_CLAUDE_MODELS,
-        codex: codex.length > 0 ? Array.from(new Set(codex)) : DEFAULT_CODEX_MODELS,
+        claude: Array.from(new Set(claude)),
+        codex: Array.from(new Set(codex)),
       };
     }
     const suggestions = modelOptions?.suggestions || [];

@@ -492,7 +492,7 @@ export const TaskDetailPage: React.FC = () => {
   });
   const { data: modelOptions } = useQuery({ queryKey: ['model-options'], queryFn: getModelOptions });
   const modelSuggestions = React.useMemo(() => {
-    if (modelOptions?.models && modelOptions.models.length > 0) {
+    if (modelOptions?.models) {
       return modelOptions.models.filter((m) => m.available).map((m) => m.id);
     }
     return modelOptions?.suggestions?.length ? modelOptions.suggestions : VALID_MODELS;

@@ -16,7 +16,9 @@
      - `running_no_progress`: worker chạy quá 90 phút mà không có commit hoặc đổi file trong worktree. Bỏ qua các runtime đang pause (`rt.paused`), và tính thời gian tiến độ từ thời điểm resume (`rt.resumedAt`). Đánh giá trong cửa sổ tiến độ `now - runningNoProgressMin * 60_000`, đối chiếu `cachedWorktreeMtime`, mtime `.git/index` (hỗ trợ git worktree pointer file), `lastCommitAt`, và dữ liệu `noCommitMinutes`. Không dùng `lastCommitCheckAt` làm bằng chứng tiến độ; fallback lấy thời điểm commit thực tế từ git log worktree hoặc `effectiveStartTime`.
      - `churn`: worker runs >= 8 hoặc `review.escalated` >= 2.
      - `failover_churn`: task bị `task.failover`/`quota_retry` >= 4 lần trong 2 giờ. Bọc try/catch khi parse payload JSON của `task.queued`, bỏ qua payload hỏng mà không gây sập vòng quét.
-     - `stale_run`: run DB có `outcome IS NULL`. Bỏ qua các run mới tạo chưa có PID trong khoảng ân hạn 10 phút để scheduler kịp spawn và cập nhật PID. Chỉ coi là mồ côi khi run thiếu PID quá 10 phút và task không còn running trong scheduler. Với run có PID, dùng lại `scheduler.isProcessAlive(run.pid, run.pidStart)` để kiểm tra process identity và nhận diện đúng các trường hợp PID bị tái sử dụng. Tự sửa an toàn phân định theo `run.kind`: với worker run (task đang `running`), đánh dấu run crashed và requeue với `resume = 1`; với reviewer/arbiter run (kind khác worker) và task đang ở `review`, chỉ đánh dấu run crashed, giữ nguyên trạng thái `review` (không đổi status, không requeue worker), và gọi `scheduler.triggerTick()` để scheduler tự dispatch lại reviewer theo luồng hiện có.
+     - `stale_run`: run DB có `outcome IS NULL`. Bỏ qua các run mới tạo chưa có PID trong khoảng ân hạn 10 phút để scheduler kịp spawn và cập nhật PID. Chỉ coi là mồ côi khi run thiếu PID quá 10 phút và task không còn running trong scheduler. Với run có PID, dùng lại `scheduler.isProcessAlive(run.pid, run.pidStart)` để kiểm tra process identity và nhận diện đúng các trường hợp PID bị tái sử dụng.
+       - Tự sửa an toàn phân định theo `run.kind`: với worker run (task đang `running`), đánh dấu run crashed và requeue với `resume = 1`; với reviewer/arbiter run (kind khác worker) và task đang ở `review`, chỉ đánh dấu run crashed, giữ nguyên trạng thái `review` (không đổi status, không requeue worker), và gọi `scheduler.triggerTick()` để scheduler tự dispatch lại reviewer theo luồng hiện có.
+       - Tách việc tự sửa an toàn ra khỏi `shouldEmitWithCooldown`: với MỌI run mồ côi (kể cả khi một task có nhiều run cùng lúc hoặc đang trong cooldown), luôn gọi `runRepo.finish` và xử lý requeue/tick tương ứng. Cooldown chỉ dùng để quyết định có phát event `task.health_issue` và đưa issue vào kết quả sweep hay không. Tránh phát duplicate issue cho cùng một task trong một lượt quét và lưu cooldown theo trạng thái sau self-repair.
    - An toàn khi thực thi:
      - Lời gọi `runSweep()` định kỳ từ timer `setInterval` được bọc `.catch()` để log lỗi an toàn, tránh unhandled promise rejection.
    - Chống spam: cooldown theo cặp (taskId, rule) lưu trong DB. Bỏ qua quét khi scheduler đang drain restart hoặc đã stop.
@@ -38,15 +40,16 @@
 - `npm run lint`: 0 lỗi (`eslint src/ test/` thành công, 115 warnings có sẵn từ baseline).
 - `npm run build`: 0 lỗi (`tsc && cp src/protocol.md dist/protocol.md` thành công).
 - Test suites:
-  - `test/health-sweep.test.ts`: 48/48 tests passed (bao gồm ca kiểm thử reviewer run mồ côi giữ task ở `review` và ca worker run mồ côi requeue `queued`).
+  - `test/health-sweep.test.ts`: 49/49 tests passed (bao gồm ca kiểm thử 2 run stale cùng lúc trên 1 task: cả 2 run đều được finish trong 1 lần quét, và lần quét tiếp theo trong cooldown không phát event trùng).
   - `test/cli.test.ts`: 22/22 tests passed (bao gồm 6 tests cho `cmdHealthSweep`).
   - `test/mcp.test.ts`: 30/30 tests passed (bao gồm 5 tests cho `hub_health_sweep`).
-  - Tổng các test trực tiếp liên quan đến health sweep/CLI/MCP: 100/100 tests passed.
+  - Toàn bộ test suite dự án: 145/145 test files passed, 1874/1874 tests passed.
 
 ## Việc còn thiếu
-- Không có. Toàn bộ yêu cầu và các phản hồi review từ các vòng trước và vòng hiện tại (stale_run unassigned PID grace period, xác thực PID reuse bằng scheduler.isProcessAlive với pidStart, bảo vệ timer runSweep và try/catch parse JSON trong failover_churn, scheduler/task pause handling, self-repair rejection safety, notBefore epoch seconds, autochecks/worktreePath cho review_orphan, escalation arbiter eligibility, CLI/MCP test coverage, running_no_progress time-window, và fallback commit thực tế) đã được hoàn thiện và xác minh đầy đủ.
+- Không có. Toàn bộ yêu cầu và phản hồi review (tách self-repair khỏi cooldown trong `stale_run`, reviewer stale run self-repair, unassigned PID grace period, xác thực PID reuse bằng scheduler.isProcessAlive với pidStart, bảo vệ timer runSweep và try/catch parse JSON trong failover_churn, scheduler/task pause handling, self-repair rejection safety, notBefore epoch seconds, autochecks/worktreePath cho review_orphan, escalation arbiter eligibility, CLI/MCP test coverage, running_no_progress time-window, và fallback commit thực tế) đã được hoàn thiện và xác minh đầy đủ.
 
 ## Danh sách commit
+- `498786f8 fix(health): decouple stale run self-repair from cooldown check`
 - `c045b2f3 fix(health): differentiate reviewer and worker stale runs in self-repair`
 - `dc953138 fix(health): handle pidless runs, verify pidStart on stale_run, and safeguard timer and json parsing`
 - `3a161130 docs(tasks): update completion report with pause handling and rejection safety details`

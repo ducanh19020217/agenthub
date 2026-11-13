@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getRestartState, requestRestart, cancelRestart, getProfiles, getModelOptions, getPresets, applyPreset, getCurrentPreset } from '../api/client';
+import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getRestartState, requestRestart, cancelRestart, getProfiles, getModelOptions, refreshModels, getPresets, applyPreset, getCurrentPreset } from '../api/client';
 import type { ReviewerFallback, ReviewerOrderItem, PresetLevel, ApplyPresetResult, GlobalPresetField } from '../types/api';
-import { Save, CheckCircle2, AlertCircle, Info, MessageSquare, Bell, ArrowUp, ArrowDown, Plus, Trash2 } from 'lucide-react';
+import { Save, CheckCircle2, AlertCircle, Info, MessageSquare, Bell, ArrowUp, ArrowDown, Plus, Trash2, RefreshCw } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
 import { TelegramCard } from '../components/TelegramCard';
 import { OpenProjectSettings } from '../components/OpenProjectSettings';
@@ -16,6 +16,7 @@ import {
   DEFAULT_CLAUDE_MODELS,
   DEFAULT_CODEX_MODELS,
   DEFAULT_VALID_MODELS,
+  formatDiscoveredModelOptions,
   getModelsForProvider,
   validateModelSyntax,
   validateChatModelSyntax,
@@ -153,12 +154,42 @@ export const SettingsPage: React.FC = () => {
     queryFn: getModelOptions,
   });
 
+  const refreshModelsMutation = useMutation({
+    mutationFn: refreshModels,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['model-options'] });
+      pushToast({ kind: 'success', title: t('models.refreshed') });
+    },
+    onError: (err: any) => {
+      pushToast({ kind: 'error', title: t('common.error'), message: err.message });
+    },
+  });
+
+  const unavailableModels = useMemo(() => {
+    const set = new Set<string>();
+    if (modelOptions?.models) {
+      for (const m of modelOptions.models) {
+        if (!m.available) {
+          set.add(m.id);
+        }
+      }
+    }
+    return set;
+  }, [modelOptions]);
+
+  const knownDiscovered = useMemo(() => {
+    return modelOptions?.models ? modelOptions.models.map((m) => m.id) : undefined;
+  }, [modelOptions]);
+
   const availableWorkerModels = useMemo(() => {
+    if (modelOptions?.models && modelOptions.models.length > 0) {
+      return formatDiscoveredModelOptions(modelOptions.models, t);
+    }
     const fromApi = modelOptions?.suggestions || DEFAULT_VALID_MODELS;
     const fromConfig = modelOptions?.configured || [];
     const set = new Set([...fromApi, ...fromConfig, ...hardChainModels, ...easyChainModels]);
     return Array.from(set).filter(Boolean);
-  }, [modelOptions, hardChainModels, easyChainModels]);
+  }, [modelOptions, hardChainModels, easyChainModels, t]);
 
   const availableClaudeProfiles = useMemo(
     () => allProfiles.filter((p) => p.engine === 'claude'),
@@ -192,7 +223,15 @@ export const SettingsPage: React.FC = () => {
     });
   }, [availableClaudeProfiles, claudeProfiles, fallback, t]);
 
+  const getModelOptionValue = (opt: string | { value: string } | undefined): string => {
+    return typeof opt === 'string' ? opt : opt?.value || '';
+  };
+
   const availableCodexReviewerModels = useMemo(() => {
+    if (modelOptions?.models && modelOptions.models.length > 0) {
+      const codexDiscovered = formatDiscoveredModelOptions(modelOptions.models, t, 'codex');
+      if (codexDiscovered.length > 0) return codexDiscovered;
+    }
     const sourceModels = modelOptions
       ? [...modelOptions.suggestions, ...modelOptions.configured]
       : DEFAULT_CODEX_MODELS.map((model) => `codex:${model}`);
@@ -205,9 +244,13 @@ export const SettingsPage: React.FC = () => {
       ...arbiterModel,
       ...chainCodex,
     ], 'codex');
-  }, [modelOptions, reviewOrder, arbiter, hardChainModels, easyChainModels]);
+  }, [modelOptions, reviewOrder, arbiter, hardChainModels, easyChainModels, t]);
 
   const availableClaudeReviewerModels = useMemo(() => {
+    if (modelOptions?.models && modelOptions.models.length > 0) {
+      const claudeDiscovered = formatDiscoveredModelOptions(modelOptions.models, t, 'claude');
+      if (claudeDiscovered.length > 0) return claudeDiscovered;
+    }
     const fromChat = getModelsForProvider(chatModels, 'claude');
     const sourceModels = modelOptions
       ? [...modelOptions.suggestions, ...modelOptions.configured]
@@ -221,7 +264,7 @@ export const SettingsPage: React.FC = () => {
       ...reviewerModels,
       ...arbiterModel,
     ], 'claude');
-  }, [modelOptions, reviewOrder, arbiter, chatModels]);
+  }, [modelOptions, reviewOrder, arbiter, chatModels, t]);
 
   useEffect(() => {
     if (config) {
@@ -362,14 +405,14 @@ export const SettingsPage: React.FC = () => {
       return;
     }
 
-    const invalidHard = hardModels.find((m) => validateModelSyntax(m, t));
+    const invalidHard = hardModels.find((m) => validateModelSyntax(m, t, knownDiscovered));
     if (invalidHard) {
-      failValidation(`${t('settings.hardChainLabel')}: ${validateModelSyntax(invalidHard, t)} ("${invalidHard}")`);
+      failValidation(`${t('settings.hardChainLabel')}: ${validateModelSyntax(invalidHard, t, knownDiscovered)} ("${invalidHard}")`);
       return;
     }
-    const invalidEasy = easyModels.find((m) => validateModelSyntax(m, t));
+    const invalidEasy = easyModels.find((m) => validateModelSyntax(m, t, knownDiscovered));
     if (invalidEasy) {
-      failValidation(`${t('settings.easyChainLabel')}: ${validateModelSyntax(invalidEasy, t)} ("${invalidEasy}")`);
+      failValidation(`${t('settings.easyChainLabel')}: ${validateModelSyntax(invalidEasy, t, knownDiscovered)} ("${invalidEasy}")`);
       return;
     }
 
@@ -380,7 +423,7 @@ export const SettingsPage: React.FC = () => {
     }
 
     const invalidReviewer = reviewerModel.trim()
-      ? validateReviewerModelSyntax(reviewerModel, reviewerModel.startsWith('claude') ? 'claude' : 'codex', t)
+      ? validateReviewerModelSyntax(reviewerModel, reviewerModel.startsWith('claude') ? 'claude' : 'codex', t, knownDiscovered)
       : null;
     if (invalidReviewer) {
       failValidation(`${t('extra.reviewerModel')}: ${invalidReviewer} ("${reviewerModel}")`);
@@ -388,14 +431,14 @@ export const SettingsPage: React.FC = () => {
     }
 
     for (let i = 0; i < reviewOrder.length; i++) {
-      const err = validateReviewerModelSyntax(reviewOrder[i].model, reviewOrder[i].engine, t);
+      const err = validateReviewerModelSyntax(reviewOrder[i].model, reviewOrder[i].engine, t, knownDiscovered);
       if (err) {
         failValidation(`${t('settings.reviewerOrder')} ${i + 1}: ${err} ("${reviewOrder[i].model}")`);
         return;
       }
     }
 
-    const invalidArbiter = validateReviewerModelSyntax(arbiter.model, arbiter.engine, t);
+    const invalidArbiter = validateReviewerModelSyntax(arbiter.model, arbiter.engine, t, knownDiscovered);
     if (invalidArbiter) {
       failValidation(`${t('settings.arbiter')}: ${invalidArbiter} ("${arbiter.model}")`);
       return;
@@ -749,11 +792,24 @@ export const SettingsPage: React.FC = () => {
               {brainPermissions === 'full' && <p className="text-xs text-[var(--t-crit)]">{t('extra.fullModeWarning')}</p>}
             </div>
             {/* Info notice */}
-            <div className="p-4 rounded-lg bg-[var(--t-accent-bg)] border border-[var(--t-accent)] text-[var(--t-accent)] text-xs flex items-start gap-2.5">
-              <Info className="w-4 h-4 shrink-0 mt-0.5" />
-              <div>
-                {t('settings.infoChain')}
+            <div className="p-4 rounded-lg bg-[var(--t-accent-bg)] border border-[var(--t-accent)] text-[var(--t-accent)] text-xs flex items-start justify-between gap-4">
+              <div className="flex items-start gap-2.5">
+                <Info className="w-4 h-4 shrink-0 mt-0.5" />
+                <div>
+                  {t('settings.infoChain')}
+                </div>
               </div>
+              <button
+                type="button"
+                onClick={() => refreshModelsMutation.mutate()}
+                disabled={refreshModelsMutation.isPending}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] hover:bg-[var(--t-hover)] text-[var(--t-text)] transition-colors cursor-pointer shrink-0 disabled:opacity-50"
+                data-testid="refresh-models-btn"
+                title={t('models.refresh')}
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${refreshModelsMutation.isPending ? 'animate-spin' : ''}`} />
+                <span>{refreshModelsMutation.isPending ? t('models.refreshing') : t('models.refresh')}</span>
+              </button>
             </div>
 
             {/* Hard chain */}
@@ -766,6 +822,8 @@ export const SettingsPage: React.FC = () => {
               models={hardChainModels}
               onChange={setHardChainModels}
               availableOptions={availableWorkerModels}
+              unavailableModels={unavailableModels}
+              validate={(val) => validateModelSyntax(val, t, knownDiscovered)}
               ariaLabel={t('settings.hardChainLabel')}
             />
 
@@ -777,6 +835,8 @@ export const SettingsPage: React.FC = () => {
               models={easyChainModels}
               onChange={setEasyChainModels}
               availableOptions={availableWorkerModels}
+              unavailableModels={unavailableModels}
+              validate={(val) => validateModelSyntax(val, t, knownDiscovered)}
               ariaLabel={t('settings.easyChainLabel')}
             />
 
@@ -985,7 +1045,7 @@ export const SettingsPage: React.FC = () => {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setReviewOrder((current) => [...current, { engine: 'codex', model: availableCodexReviewerModels[0] || '', profiles: [] }])}
+                  onClick={() => setReviewOrder((current) => [...current, { engine: 'codex', model: getModelOptionValue(availableCodexReviewerModels[0]), profiles: [] }])}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] text-[var(--t-text)] hover:bg-[var(--t-surface)] cursor-pointer"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -1029,8 +1089,8 @@ export const SettingsPage: React.FC = () => {
                                     ...row,
                                     engine: newEngine,
                                     model: newEngine === 'codex'
-                                      ? (availableCodexReviewerModels[0] || '')
-                                      : (availableClaudeReviewerModels[0] || ''),
+                                      ? getModelOptionValue(availableCodexReviewerModels[0])
+                                      : getModelOptionValue(availableClaudeReviewerModels[0]),
                                     profiles: [],
                                   }
                                 : row,

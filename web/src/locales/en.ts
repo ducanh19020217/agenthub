@@ -1935,4 +1935,15 @@ export const en: typeof vi = {
     rolePrimary: 'New tickets create tasks in this project',
     roleSecondary: 'Only receive linked tasks when ticket modifies this repo',
   },
+  models: {
+    refresh: 'Refresh model list',
+    refreshing: 'Refreshing…',
+    refreshed: 'Model list refreshed',
+    accountCount: '{count} account(s)',
+    unavailableWarning: 'Configured model is no longer available on any active account',
+    customWarning: 'Custom model is not verified by any active account',
+    engineAgy: 'Antigravity (agy)',
+    engineCodex: 'Codex',
+    engineClaude: 'Claude',
+  },
 };

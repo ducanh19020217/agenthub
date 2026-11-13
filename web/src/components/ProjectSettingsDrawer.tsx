@@ -460,6 +460,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const [hasReviewChainOverride, setHasReviewChainOverride] = useState<boolean>(false);
 
   const availableCodexReviewerModels = useMemo(() => {
+    const fromDiscovered = modelOptions?.models ? modelOptions.models.map((m) => m.id) : [];
     const fromApi = modelOptions?.suggestions || [];
     const fromConfigured = modelOptions?.configured || [];
     const fromConfigOrder = (config?.reviewer?.order || [])
@@ -481,6 +482,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       .map((r) => r.model);
 
     return getModelsForProvider([
+        ...fromDiscovered,
         ...fromApi,
         ...fromConfigured,
         ...fromConfigOrder,
@@ -493,6 +495,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   }, [modelOptions, config, reviewerOrder, project]);
 
   const availableClaudeReviewerModels = useMemo(() => {
+    const fromDiscovered = modelOptions?.models ? modelOptions.models.map((m) => m.id) : [];
     const fromChat = config?.chat?.models || [];
     const fromChatModel = config?.chat?.model ? [config.chat.model] : [];
     const fromClaudeModel = config?.reviewer?.claudeModel ? [config.reviewer.claudeModel] : [];
@@ -513,6 +516,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
 
     return getModelsForProvider([
         ...DEFAULT_CLAUDE_MODELS,
+        ...fromDiscovered,
         ...fromChat,
         ...fromChatModel,
         ...fromClaudeModel,

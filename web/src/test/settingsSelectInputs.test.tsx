@@ -16,6 +16,7 @@ import {
   validateBranchSyntax,
   getModelProvider,
   getModelsForProvider,
+  formatDiscoveredModelOptions,
 } from '../utils/models';
 import * as client from '../api/client';
 import * as sse from '../api/sse';
@@ -1212,6 +1213,136 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       const step1Select = within(chainBlock).getByRole('combobox', { name: /^Bước review 1$/i }) as HTMLSelectElement;
       expect(step1Select.value).toBe('');
       expect(within(step1Select).queryByText(/gpt-5.6-luna/i)).not.toBeInTheDocument();
+    });
+  });
+
+  describe('5. Discovered Models Integration & Warnings (f-account-model-discovery)', () => {
+    it('formatDiscoveredModelOptions groups models by engine and formats labels with account count', () => {
+      const mockModels = [
+        { id: 'gemini-3.8-flash-high', name: 'Gemini 3.8 Flash (High)', engine: 'agy' as const, profiles: ['huynq766', 'work'], verified: true, available: true },
+        { id: 'codex:gpt-5.6-luna', name: 'GPT-5.6 Luna', engine: 'codex' as const, profiles: ['openai-1'], verified: true, available: true },
+        { id: 'sonnet', name: 'Claude Sonnet', engine: 'claude' as const, profiles: [], verified: false, available: false, warning: 'No active profile' },
+      ];
+
+      const viOptions = formatDiscoveredModelOptions(mockModels, (k, params) => {
+        if (k === 'models.engineAgy') return 'Antigravity (agy)';
+        if (k === 'models.engineCodex') return 'Codex';
+        if (k === 'models.engineClaude') return 'Claude';
+        if (k === 'models.accountCount') return `${params?.count} tài khoản`;
+        if (k === 'models.unavailableWarning') return 'Không khả dụng';
+        return k;
+      });
+
+      expect(viOptions).toHaveLength(3);
+      expect(viOptions[0].group).toBe('Antigravity (agy)');
+      expect(viOptions[0].label).toContain('Gemini 3.8 Flash (High) (gemini-3.8-flash-high) (2 tài khoản)');
+      expect(viOptions[1].group).toBe('Codex');
+      expect(viOptions[1].label).toContain('(1 tài khoản)');
+      expect(viOptions[2].group).toBe('Claude');
+      expect(viOptions[2].label).toContain('⚠️ Không khả dụng');
+
+      // Filter by engine
+      const codexOnly = formatDiscoveredModelOptions(mockModels, undefined, 'codex');
+      expect(codexOnly).toHaveLength(1);
+      expect(codexOnly[0].value).toBe('codex:gpt-5.6-luna');
+    });
+
+    it('SelectOrCustomInput renders grouped options inside optgroups', () => {
+      const groupedOpts = [
+        { value: 'gemini-3.8-flash-high', label: 'Gemini Flash (2 tài khoản)', group: 'Antigravity' },
+        { value: 'codex:gpt-5.6-luna', label: 'GPT Luna (1 tài khoản)', group: 'Codex' },
+      ];
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <SelectOrCustomInput
+            testId="grouped-select"
+            value="gemini-3.8-flash-high"
+            onChange={() => {}}
+            options={groupedOpts}
+            ariaLabel="Grouped Select"
+          />
+        </LocaleProvider>,
+      );
+
+      const select = screen.getByTestId('grouped-select') as HTMLSelectElement;
+      const optgroups = select.querySelectorAll('optgroup');
+      expect(optgroups.length).toBe(2);
+      expect(optgroups[0].label).toBe('Antigravity');
+      expect(optgroups[1].label).toBe('Codex');
+    });
+
+    it('SelectOrCustomInput displays custom warning when showCustomWarning is enabled and custom value entered', () => {
+      render(
+        <LocaleProvider initialLocale="vi">
+          <SelectOrCustomInput
+            testId="custom-warning-select"
+            value="my-custom-model"
+            onChange={() => {}}
+            options={['preset-model-1']}
+            showCustomWarning={true}
+            ariaLabel="Custom Warning Select"
+          />
+        </LocaleProvider>,
+      );
+
+      // In custom mode with an unverified model
+      expect(screen.getByTestId('custom-warning')).toBeInTheDocument();
+      expect(screen.getByTestId('custom-warning').textContent).toContain('chưa được xác minh');
+    });
+
+    it('SortableModelList marks unavailable models with warning badge', () => {
+      render(
+        <LocaleProvider initialLocale="vi">
+          <SortableModelList
+            title="Model Chain"
+            models={['gemini-3.8-flash-high', 'deprecated-model']}
+            onChange={() => {}}
+            availableOptions={['gemini-3.8-flash-high']}
+            unavailableModels={new Set(['deprecated-model'])}
+          />
+        </LocaleProvider>,
+      );
+
+      const warnings = screen.getAllByTestId('model-unavailable-warning');
+      expect(warnings.length).toBe(1);
+      expect(warnings[0].textContent).toContain('không còn khả dụng');
+    });
+
+    it('SettingsPage displays refresh button and handles clicking refresh', async () => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      const refreshSpy = vi.spyOn(client, 'refreshModels').mockResolvedValue({
+        suggestions: ['gemini-3.8-flash-high'],
+        configured: ['gemini-3.8-flash-high'],
+        models: [
+          { id: 'gemini-3.8-flash-high', engine: 'agy', profiles: ['huynq766'], verified: true, available: true },
+        ],
+      });
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('refresh-models-btn')).toBeInTheDocument();
+      });
+
+      const refreshBtn = screen.getByTestId('refresh-models-btn');
+      fireEvent.click(refreshBtn);
+
+      await waitFor(() => {
+        expect(refreshSpy).toHaveBeenCalled();
+      });
     });
   });
 });

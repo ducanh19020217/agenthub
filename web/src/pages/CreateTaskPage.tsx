@@ -47,9 +47,14 @@ export const CreateTaskPage: React.FC = () => {
   const selectedProject = projects.find((project) => project.id === projectId);
   const openProject = selectedProject?.settings?.openproject;
   const openProjectSource = openProject?.sourceId ? openProjectSources.find((source) => source.id === openProject.sourceId) : undefined;
-  const modelSuggestions = modelOptions?.suggestions?.length
-    ? modelOptions.suggestions
-    : [...new Set([...(config?.modelChainHard || []), ...(config?.modelChainEasy || [])])];
+  const modelSuggestions = React.useMemo(() => {
+    if (modelOptions?.models && modelOptions.models.length > 0) {
+      return modelOptions.models.filter((m) => m.available).map((m) => m.id);
+    }
+    return modelOptions?.suggestions?.length
+      ? modelOptions.suggestions
+      : [...new Set([...(config?.modelChainHard || []), ...(config?.modelChainEasy || [])])];
+  }, [modelOptions, config]);
 
   // Set default project when loaded
   React.useEffect(() => {

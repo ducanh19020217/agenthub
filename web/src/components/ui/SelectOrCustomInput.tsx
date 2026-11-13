@@ -1,10 +1,13 @@
-import React, { useState, useEffect, useId } from 'react';
+import React, { useState, useEffect, useId, useMemo } from 'react';
 import { AlertCircle, RotateCcw } from 'lucide-react';
 import { useLocale } from '../../context/LocaleContext';
 
 export interface SelectOrCustomOption {
   value: string;
   label?: string;
+  group?: string;
+  available?: boolean;
+  warning?: string | null;
 }
 
 export interface SelectOrCustomInputProps {
@@ -26,6 +29,8 @@ export interface SelectOrCustomInputProps {
   inputTestId?: string;
   allowEmpty?: boolean;
   emptyLabel?: string;
+  customWarning?: string | null;
+  showCustomWarning?: boolean;
 }
 
 export const SelectOrCustomInput: React.FC<SelectOrCustomInputProps> = ({
@@ -46,15 +51,35 @@ export const SelectOrCustomInput: React.FC<SelectOrCustomInputProps> = ({
   inputTestId,
   allowEmpty = false,
   emptyLabel = '—',
+  customWarning,
+  showCustomWarning,
 }) => {
   const { t } = useLocale();
   const generatedId = useId();
   const inputId = id || generatedId;
   const errorId = `${inputId}-error`;
 
-  const normalizedOptions: SelectOrCustomOption[] = options.map((opt) =>
-    typeof opt === 'string' ? { value: opt, label: opt } : opt,
-  );
+  const normalizedOptions: SelectOrCustomOption[] = useMemo(() => {
+    return options.map((opt) =>
+      typeof opt === 'string' ? { value: opt, label: opt } : opt,
+    );
+  }, [options]);
+
+  const groupedOptions = useMemo(() => {
+    const groups: { [group: string]: SelectOrCustomOption[] } = {};
+    const ungrouped: SelectOrCustomOption[] = [];
+    let hasGroups = false;
+    for (const opt of normalizedOptions) {
+      if (opt.group) {
+        hasGroups = true;
+        if (!groups[opt.group]) groups[opt.group] = [];
+        groups[opt.group].push(opt);
+      } else {
+        ungrouped.push(opt);
+      }
+    }
+    return { groups, ungrouped, hasGroups };
+  }, [normalizedOptions]);
 
   const isKnownOption =
     normalizedOptions.some((opt) => opt.value === value) || (allowEmpty && value === '');
@@ -119,11 +144,30 @@ export const SelectOrCustomInput: React.FC<SelectOrCustomInputProps> = ({
             {placeholder || '—'}
           </option>
         )}
-        {normalizedOptions.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label || opt.value}
-          </option>
-        ))}
+        {groupedOptions.hasGroups ? (
+          <>
+            {groupedOptions.ungrouped.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label || opt.value}
+              </option>
+            ))}
+            {Object.entries(groupedOptions.groups).map(([groupName, groupOpts]) => (
+              <optgroup key={groupName} label={groupName}>
+                {groupOpts.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label || opt.value}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </>
+        ) : (
+          normalizedOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label || opt.value}
+            </option>
+          ))
+        )}
         {!isKnownOption && Boolean(value) && !isCustomMode && (
           <option value={value}>{value} ({customText})</option>
         )}
@@ -161,12 +205,17 @@ export const SelectOrCustomInput: React.FC<SelectOrCustomInputProps> = ({
               </button>
             )}
           </div>
-          {error && (
+          {error ? (
             <p id={errorId} role="alert" className="text-xs text-[var(--t-crit)] flex items-center gap-1">
               <AlertCircle className="w-3.5 h-3.5 shrink-0" />
               <span>{error}</span>
             </p>
-          )}
+          ) : (customWarning || (showCustomWarning && t('models.customWarning'))) && Boolean(value) ? (
+            <p className="text-xs text-[var(--t-warn)] flex items-center gap-1" data-testid="custom-warning">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+              <span>{customWarning || t('models.customWarning')}</span>
+            </p>
+          ) : null}
         </div>
       )}
     </div>

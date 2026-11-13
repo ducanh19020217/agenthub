@@ -1964,4 +1964,15 @@ export const vi = {
     rolePrimary: 'Ticket mới tạo task ở dự án này',
     roleSecondary: 'Chỉ nhận task liên kết khi ticket cần sửa repo này',
   },
+  models: {
+    refresh: 'Làm mới danh sách model',
+    refreshing: 'Đang làm mới…',
+    refreshed: 'Đã làm mới danh sách model',
+    accountCount: '{count} tài khoản',
+    unavailableWarning: 'Model đang cấu hình không còn khả dụng trên tài khoản nào',
+    customWarning: 'Model tùy chỉnh chưa được xác minh bởi tài khoản nào',
+    engineAgy: 'Antigravity (agy)',
+    engineCodex: 'Codex',
+    engineClaude: 'Claude',
+  },
 };

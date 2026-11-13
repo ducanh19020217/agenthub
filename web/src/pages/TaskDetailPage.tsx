@@ -491,7 +491,12 @@ export const TaskDetailPage: React.FC = () => {
     enabled: showEditModal && !!task?.projectId,
   });
   const { data: modelOptions } = useQuery({ queryKey: ['model-options'], queryFn: getModelOptions });
-  const modelSuggestions = modelOptions?.suggestions?.length ? modelOptions.suggestions : VALID_MODELS;
+  const modelSuggestions = React.useMemo(() => {
+    if (modelOptions?.models && modelOptions.models.length > 0) {
+      return modelOptions.models.filter((m) => m.available).map((m) => m.id);
+    }
+    return modelOptions?.suggestions?.length ? modelOptions.suggestions : VALID_MODELS;
+  }, [modelOptions]);
 
   const editMutation = useMutation({
     mutationFn: (data: { modelChain: string[]; dependsOn: string[]; level: TaskLevel }) => updateTask(id, data),

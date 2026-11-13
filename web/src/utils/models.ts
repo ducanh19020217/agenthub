@@ -1,3 +1,5 @@
+import type { DiscoveredModel } from '../types/api';
+
 export const VALID_AGY_MODELS = [
   'gemini-3.8-flash-high',
   'gemini-3.8-flash-medium',
@@ -46,13 +48,77 @@ export function getModelsForProvider(models: string[], provider: ModelProvider):
 
 export const DEFAULT_COMMON_BRANCHES = ['integration', 'main', 'master', 'develop', 'staging'];
 
+export interface GroupedModelOption {
+  value: string;
+  label: string;
+  group?: string;
+  engine?: 'agy' | 'codex' | 'claude';
+  profiles?: string[];
+  verified?: boolean;
+  available?: boolean;
+  warning?: string | null;
+}
+
+export function formatDiscoveredModelOptions(
+  models?: DiscoveredModel[],
+  t?: (key: string, params?: Record<string, any>) => string,
+  filterEngine?: 'agy' | 'codex' | 'claude' | ('agy' | 'codex' | 'claude')[],
+): GroupedModelOption[] {
+  if (!models || models.length === 0) return [];
+
+  const allowedEngines = filterEngine
+    ? Array.isArray(filterEngine)
+      ? filterEngine
+      : [filterEngine]
+    : null;
+
+  const filtered = allowedEngines
+    ? models.filter((m) => allowedEngines.includes(m.engine))
+    : models;
+
+  const engineLabels: Record<string, string> = {
+    agy: t ? t('models.engineAgy') : 'Antigravity (agy)',
+    codex: t ? t('models.engineCodex') : 'Codex',
+    claude: t ? t('models.engineClaude') : 'Claude',
+  };
+
+  return filtered.map((m) => {
+    const group = engineLabels[m.engine] || m.engine;
+    const baseName = m.name && m.name !== m.id ? `${m.name} (${m.id})` : m.id;
+    let label = baseName;
+    if (m.profiles && m.profiles.length > 0) {
+      const countStr = t
+        ? t('models.accountCount', { count: m.profiles.length })
+        : `${m.profiles.length} account(s)`;
+      label = `${baseName} (${countStr})`;
+    } else if (!m.available) {
+      label = `${baseName} (⚠️ ${t ? t('models.unavailableWarning') : 'Unavailable'})`;
+    }
+
+    return {
+      value: m.id,
+      label,
+      group,
+      engine: m.engine,
+      profiles: m.profiles,
+      verified: m.verified,
+      available: m.available,
+      warning: m.warning,
+    };
+  });
+}
+
 export function validateModelSyntax(
   model: string,
   t?: (key: string) => string,
+  knownModels?: Iterable<string>,
 ): string | null {
   const trimmed = model.trim();
   if (!trimmed) {
     return t ? t('settings.emptyChainWarning') : 'Model cannot be empty';
+  }
+  if (knownModels && new Set(knownModels).has(trimmed)) {
+    return null;
   }
   const isAgy = VALID_AGY_MODELS.includes(trimmed);
   const isCodex =
@@ -86,6 +152,7 @@ export function validateChatModelSyntax(
 export function validateReviewChainReviewerSyntax(
   reviewer: string,
   t?: (key: string) => string,
+  knownModels?: Iterable<string>,
 ): string | null {
   const trimmed = reviewer.trim();
   if (!trimmed) {
@@ -97,6 +164,9 @@ export function validateReviewChainReviewerSyntax(
   if (trimmed === 'claude') {
     return null;
   }
+  if (knownModels && new Set(knownModels).has(trimmed)) {
+    return null;
+  }
   if (trimmed.startsWith('codex:')) {
     const codexModel = trimmed.slice('codex:'.length);
     if (!codexModel) {
@@ -104,7 +174,7 @@ export function validateReviewChainReviewerSyntax(
         ? t('settings.invalidReviewChainReviewer')
       : 'Reviewer must be claude or have the codex: prefix';
     }
-    const modelError = validateReviewerModelSyntax(codexModel, 'codex', t);
+    const modelError = validateReviewerModelSyntax(codexModel, 'codex', t, knownModels);
     if (modelError) {
       return t
         ? t('settings.invalidReviewChainReviewer')
@@ -145,6 +215,7 @@ export function validateReviewerModelSyntax(
   model: string,
   engine?: 'codex' | 'claude' | string,
   t?: (key: string) => string,
+  knownModels?: Iterable<string>,
 ): string | null {
   const trimmed = model.trim();
   if (!trimmed) {
@@ -152,6 +223,12 @@ export function validateReviewerModelSyntax(
   }
   if (/\s/.test(trimmed)) {
     return t ? t('settings.invalidModelSyntax') : 'Model cannot contain whitespace';
+  }
+  if (knownModels) {
+    const knownSet = new Set(knownModels);
+    if (knownSet.has(trimmed) || knownSet.has(`codex:${trimmed}`) || knownSet.has(`claude:${trimmed}`)) {
+      return null;
+    }
   }
   if (engine === 'claude') {
     const raw = trimmed.startsWith('claude:') ? trimmed.slice('claude:'.length) : trimmed;

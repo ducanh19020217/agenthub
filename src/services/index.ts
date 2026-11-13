@@ -561,6 +561,13 @@ export const UpdateConfigSchema = z.object({
     requireApproval: z.boolean().optional(),
     approvalMinTasks: z.number().int().min(0).max(100).optional(),
   }).optional(),
+  scheduler: z.object({
+    maxRunsPerTask: z.number().int().positive().optional(),
+    maxConsecutiveCrashesPerTask: z.number().int().positive().optional(),
+    maxPausedMin: z.number().int().positive().optional(),
+    maxCheckingMin: z.number().int().positive().optional(),
+    maxTimeoutResumes: z.number().int().min(0).optional(),
+  }).optional(),
   watchdog: z.object({
     stallMinutes: z.number().positive().optional(),
     waitingMinutes: z.number().positive().optional(),
@@ -876,6 +883,10 @@ export function formatEventSummary(
       if (reason === 'retry') {
         return `${taskLabel} được đưa vào hàng đợi để thử lại`;
       }
+      if (reason === 'timeout_resume') {
+        const attempt = typeof p.attempt === 'number' ? ` (lần ${p.attempt})` : '';
+        return `${taskLabel} được đưa vào hàng đợi để làm tiếp sau khi quá thời gian${attempt}`;
+      }
       return `${taskLabel} được đưa vào hàng đợi`;
     }
 
@@ -897,8 +908,12 @@ export function formatEventSummary(
     case 'task.blocked':
       return `${taskLabel} bị chặn`;
 
-    case 'task.failed':
+    case 'task.failed': {
+      if (p.reason === 'timeout') {
+        return `${taskLabel} thất bại do quá thời gian`;
+      }
       return `${taskLabel} thất bại`;
+    }
 
     case 'task.done':
       return p.reason === 'merged_elsewhere'
@@ -6515,6 +6530,7 @@ export class AppService {
       slotsPerAgyProfile: this.config.slotsPerAgyProfile,
       multiplePerProvider: this.config.multiplePerProvider,
       planning: this.config.planning,
+      scheduler: this.config.scheduler,
       slotsPerCodexProfile: this.config.slotsPerCodexProfile,
       watchdog: this.config.watchdog,
       autoFixOnFail: this.config.autoFixOnFail,

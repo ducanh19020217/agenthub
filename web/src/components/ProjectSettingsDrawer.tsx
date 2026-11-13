@@ -38,6 +38,7 @@ import { Link } from 'react-router-dom';
 import {
   DEFAULT_COMMON_BRANCHES,
   DEFAULT_CLAUDE_MODELS,
+  DEFAULT_CODEX_MODELS,
   getModelsForProvider,
   validateBranchSyntax,
   validateReviewerModelSyntax,
@@ -460,9 +461,10 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const [hasReviewChainOverride, setHasReviewChainOverride] = useState<boolean>(false);
 
   const availableCodexReviewerModels = useMemo(() => {
-    const fromDiscovered = modelOptions?.models ? modelOptions.models.map((m) => m.id) : [];
-    const fromApi = modelOptions?.suggestions || [];
-    const fromConfigured = modelOptions?.configured || [];
+    const fromDiscovered = modelOptions?.models
+      ? modelOptions.models.filter((m) => m.engine === 'codex' && m.available).map((m) => m.id)
+      : [];
+    const fromApi = (modelOptions?.suggestions || []).filter((m) => m.startsWith('codex:') || m.startsWith('gpt-'));
     const fromConfigOrder = (config?.reviewer?.order || [])
       .filter((r) => r.engine === 'codex')
       .map((r) => r.model);
@@ -482,20 +484,21 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       .map((r) => r.model);
 
     return getModelsForProvider([
-        ...fromDiscovered,
-        ...fromApi,
-        ...fromConfigured,
-        ...fromConfigOrder,
-        ...fromConfigReviewer,
-        ...fromConfigArbiter,
-        ...fromChains,
-        ...fromCurrentOrder,
-        ...fromProjectOrder,
-      ], 'codex');
+      ...fromDiscovered,
+      ...fromApi,
+      ...fromConfigOrder,
+      ...fromConfigReviewer,
+      ...fromConfigArbiter,
+      ...fromChains,
+      ...fromCurrentOrder,
+      ...fromProjectOrder,
+    ], 'codex');
   }, [modelOptions, config, reviewerOrder, project]);
 
   const availableClaudeReviewerModels = useMemo(() => {
-    const fromDiscovered = modelOptions?.models ? modelOptions.models.map((m) => m.id) : [];
+    const fromDiscovered = modelOptions?.models
+      ? modelOptions.models.filter((m) => m.engine === 'claude' && m.available).map((m) => m.id)
+      : [];
     const fromChat = config?.chat?.models || [];
     const fromChatModel = config?.chat?.model ? [config.chat.model] : [];
     const fromClaudeModel = config?.reviewer?.claudeModel ? [config.reviewer.claudeModel] : [];
@@ -505,8 +508,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     const fromConfigArbiter = config?.reviewer?.arbiter?.engine === 'claude' && config.reviewer.arbiter.model
       ? [config.reviewer.arbiter.model]
       : [];
-    const fromApi = modelOptions?.suggestions || [];
-    const fromConfigured = modelOptions?.configured || [];
+    const fromApi = (modelOptions?.suggestions || []).filter((m) => m.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(m));
     const fromCurrentOrder = reviewerOrder
       .filter((r) => r.engine === 'claude')
       .map((r) => r.model);
@@ -514,19 +516,27 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       .filter((r) => r.engine === 'claude')
       .map((r) => r.model);
 
+    const hasAnyClaude =
+      fromDiscovered.length > 0 ||
+      fromApi.length > 0 ||
+      fromChat.length > 0 ||
+      fromChatModel.length > 0 ||
+      fromClaudeModel.length > 0 ||
+      fromConfigOrder.length > 0;
+    const fallbackDefaults = hasAnyClaude ? [] : DEFAULT_CLAUDE_MODELS;
+
     return getModelsForProvider([
-        ...DEFAULT_CLAUDE_MODELS,
-        ...fromDiscovered,
-        ...fromChat,
-        ...fromChatModel,
-        ...fromClaudeModel,
-        ...fromConfigOrder,
-        ...fromConfigArbiter,
-        ...fromApi,
-        ...fromConfigured,
-        ...fromCurrentOrder,
-        ...fromProjectOrder,
-      ], 'claude');
+      ...fallbackDefaults,
+      ...fromDiscovered,
+      ...fromChat,
+      ...fromChatModel,
+      ...fromClaudeModel,
+      ...fromConfigOrder,
+      ...fromConfigArbiter,
+      ...fromApi,
+      ...fromCurrentOrder,
+      ...fromProjectOrder,
+    ], 'claude');
   }, [modelOptions, config, reviewerOrder, project]);
 
   const availableReviewChainReviewers = useMemo(() => {

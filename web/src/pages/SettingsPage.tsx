@@ -183,13 +183,12 @@ export const SettingsPage: React.FC = () => {
 
   const availableWorkerModels = useMemo(() => {
     if (modelOptions?.models && modelOptions.models.length > 0) {
-      return formatDiscoveredModelOptions(modelOptions.models, t);
+      return formatDiscoveredModelOptions(modelOptions.models, t, undefined, true);
     }
     const fromApi = modelOptions?.suggestions || DEFAULT_VALID_MODELS;
-    const fromConfig = modelOptions?.configured || [];
-    const set = new Set([...fromApi, ...fromConfig, ...hardChainModels, ...easyChainModels]);
+    const set = new Set([...fromApi]);
     return Array.from(set).filter(Boolean);
-  }, [modelOptions, hardChainModels, easyChainModels, t]);
+  }, [modelOptions, t]);
 
   const availableClaudeProfiles = useMemo(
     () => allProfiles.filter((p) => p.engine === 'claude'),
@@ -229,7 +228,7 @@ export const SettingsPage: React.FC = () => {
 
   const availableCodexReviewerModels = useMemo(() => {
     if (modelOptions?.models && modelOptions.models.length > 0) {
-      const codexDiscovered = formatDiscoveredModelOptions(modelOptions.models, t, 'codex');
+      const codexDiscovered = formatDiscoveredModelOptions(modelOptions.models, t, 'codex', true);
       if (codexDiscovered.length > 0) return codexDiscovered;
     }
     const sourceModels = modelOptions
@@ -248,7 +247,7 @@ export const SettingsPage: React.FC = () => {
 
   const availableClaudeReviewerModels = useMemo(() => {
     if (modelOptions?.models && modelOptions.models.length > 0) {
-      const claudeDiscovered = formatDiscoveredModelOptions(modelOptions.models, t, 'claude');
+      const claudeDiscovered = formatDiscoveredModelOptions(modelOptions.models, t, 'claude', true);
       if (claudeDiscovered.length > 0) return claudeDiscovered;
     }
     const fromChat = getModelsForProvider(chatModels, 'claude');
@@ -265,6 +264,16 @@ export const SettingsPage: React.FC = () => {
       ...arbiterModel,
     ], 'claude');
   }, [modelOptions, reviewOrder, arbiter, chatModels, t]);
+
+  const availableChatModels = useMemo(() => {
+    if (modelOptions?.models && modelOptions.models.length > 0) {
+      const claudeDiscovered = modelOptions.models
+        .filter((m) => m.engine === 'claude' && m.available)
+        .map((m) => m.id);
+      if (claudeDiscovered.length > 0) return claudeDiscovered;
+    }
+    return DEFAULT_CLAUDE_MODELS;
+  }, [modelOptions]);
 
   useEffect(() => {
     if (config) {
@@ -947,7 +956,7 @@ export const SettingsPage: React.FC = () => {
                     ariaLabel={t('extra.chatModel')}
                     value={chatModel}
                     onChange={setChatModel}
-                    options={Array.from(new Set([...chatModels, ...DEFAULT_CLAUDE_MODELS]))}
+                    options={Array.from(new Set([...chatModels, ...availableChatModels]))}
                     validate={(m) => validateChatModelSyntax(m, t)}
                     placeholder="sonnet"
                     className="w-full max-w-sm"
@@ -983,7 +992,7 @@ export const SettingsPage: React.FC = () => {
                     <SelectOrCustomInput
                       value={newChatModel}
                       onChange={setNewChatModel}
-                      options={DEFAULT_CLAUDE_MODELS.filter((m) => !chatModels.includes(m))}
+                      options={availableChatModels.filter((m) => !chatModels.includes(m))}
                       validate={(m) => validateChatModelSyntax(m, t)}
                       placeholder="opus"
                       ariaLabel={t('extra.chatModelsLabel')}
@@ -1365,7 +1374,7 @@ export const SettingsPage: React.FC = () => {
                     <SelectOrCustomInput
                       value={step.model}
                       onChange={(val) => { const next = [...fallback]; next[index] = { ...step, model: val }; setFallback(next); }}
-                      options={Array.from(new Set([...DEFAULT_CLAUDE_MODELS, ...chatModels, step.model].filter(Boolean)))}
+                      options={Array.from(new Set([...availableChatModels, ...chatModels, step.model].filter(Boolean)))}
                       validate={(m) => validateChatModelSyntax(m, t)}
                       placeholder="sonnet"
                       ariaLabel={`Fallback model ${index + 1}`}

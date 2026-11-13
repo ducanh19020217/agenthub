@@ -70,24 +70,24 @@ export const DepartmentsPage: React.FC = () => {
   const modelOptionsByEngine = useMemo(() => {
     if (modelOptions?.models && modelOptions.models.length > 0) {
       const claude = modelOptions.models
-        .filter((m) => m.engine === 'claude')
+        .filter((m) => m.engine === 'claude' && m.available)
         .map((m) => m.id);
       const codex = modelOptions.models
-        .filter((m) => m.engine === 'codex')
+        .filter((m) => m.engine === 'codex' && m.available)
         .map((m) => (m.id.startsWith('codex:') ? m.id.slice('codex:'.length) : m.id));
       return {
-        claude: Array.from(new Set([...DEFAULT_CLAUDE_MODELS, ...claude])),
-        codex: Array.from(new Set([...DEFAULT_CODEX_MODELS, ...codex])),
+        claude: claude.length > 0 ? Array.from(new Set(claude)) : DEFAULT_CLAUDE_MODELS,
+        codex: codex.length > 0 ? Array.from(new Set(codex)) : DEFAULT_CODEX_MODELS,
       };
     }
-    const configured = [...(modelOptions?.suggestions || []), ...(modelOptions?.configured || [])];
-    const claude = configured.filter((model) => DEFAULT_CLAUDE_MODELS.includes(model) || model.startsWith('claude-'));
-    const codex = configured
-      .map((model) => model.startsWith('codex:') ? model.slice('codex:'.length) : model)
+    const suggestions = modelOptions?.suggestions || [];
+    const claude = suggestions.filter((model) => DEFAULT_CLAUDE_MODELS.includes(model) || model.startsWith('claude-'));
+    const codex = suggestions
+      .map((model) => (model.startsWith('codex:') ? model.slice('codex:'.length) : model))
       .filter((model) => DEFAULT_CODEX_MODELS.includes(model) || model.startsWith('gpt-'));
     return {
-      claude: Array.from(new Set([...DEFAULT_CLAUDE_MODELS, ...claude])),
-      codex: Array.from(new Set([...DEFAULT_CODEX_MODELS, ...codex])),
+      claude: claude.length > 0 ? Array.from(new Set(claude)) : DEFAULT_CLAUDE_MODELS,
+      codex: codex.length > 0 ? Array.from(new Set(codex)) : DEFAULT_CODEX_MODELS,
     };
   }, [modelOptions]);
 

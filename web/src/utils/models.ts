@@ -63,6 +63,7 @@ export function formatDiscoveredModelOptions(
   models?: DiscoveredModel[],
   t?: (key: string, params?: Record<string, any>) => string,
   filterEngine?: 'agy' | 'codex' | 'claude' | ('agy' | 'codex' | 'claude')[],
+  onlyAvailable = false,
 ): GroupedModelOption[] {
   if (!models || models.length === 0) return [];
 
@@ -72,9 +73,13 @@ export function formatDiscoveredModelOptions(
       : [filterEngine]
     : null;
 
-  const filtered = allowedEngines
+  let filtered = allowedEngines
     ? models.filter((m) => allowedEngines.includes(m.engine))
     : models;
+
+  if (onlyAvailable) {
+    filtered = filtered.filter((m) => m.available);
+  }
 
   const engineLabels: Record<string, string> = {
     agy: t ? t('models.engineAgy') : 'Antigravity (agy)',

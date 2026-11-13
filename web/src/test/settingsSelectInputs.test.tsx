@@ -1344,5 +1344,69 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
         expect(refreshSpy).toHaveBeenCalled();
       });
     });
+
+    it('formatDiscoveredModelOptions with onlyAvailable=true filters out unavailable models', () => {
+      const mockModels = [
+        { id: 'gemini-3.8-flash-high', name: 'Gemini Flash', engine: 'agy' as const, profiles: ['p1'], verified: true, available: true },
+        { id: 'gemini-old', name: 'Gemini Old', engine: 'agy' as const, profiles: [], verified: false, available: false },
+      ];
+
+      const all = formatDiscoveredModelOptions(mockModels);
+      expect(all).toHaveLength(2);
+
+      const availableOnly = formatDiscoveredModelOptions(mockModels, undefined, undefined, true);
+      expect(availableOnly).toHaveLength(1);
+      expect(availableOnly[0].value).toBe('gemini-3.8-flash-high');
+    });
+
+    it('SettingsPage does not propose unavailable configured models in Add Model dropdown', async () => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['gemini-3.8-flash-high'],
+        configured: ['gemini-3.8-flash-high', 'unavailable-configured-model'],
+        models: [
+          { id: 'gemini-3.8-flash-high', engine: 'agy', profiles: ['huynq766'], verified: true, available: true },
+          { id: 'unavailable-configured-model', engine: 'agy', profiles: [], verified: false, available: false, warning: 'Không có tài khoản nào' },
+        ],
+      });
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        modelChainHard: ['gemini-3.8-flash-high', 'unavailable-configured-model'],
+        modelChainEasy: ['gemini-3.8-flash-high'],
+        defaultTimeout: 10800,
+        chat: { claudeBin: 'claude', allowFullMode: false, maxConcurrent: 2, model: 'sonnet', models: ['sonnet'] },
+        reviewer: {
+          model: 'sonnet',
+          order: [],
+          fallback: { onUnavailable: true, onError: true, onBusyAfterMin: 10 },
+          arbiter: { engine: 'claude', model: 'sonnet' },
+        },
+      } as any);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('hard-chain-list')).toBeInTheDocument();
+      });
+
+      // Existing chain item shows warning for unavailable-configured-model
+      const hardChain = screen.getByTestId('hard-chain-list');
+      expect(within(hardChain).getByTestId('model-unavailable-warning')).toBeInTheDocument();
+
+      // But "Add model to chain" select should NOT include unavailable-configured-model as an option
+      const addModelSelect = within(hardChain).getByRole('combobox', { name: /Thêm model vào chuỗi/i }) as HTMLSelectElement;
+      expect(within(addModelSelect).queryByRole('option', { name: /unavailable-configured-model/i })).not.toBeInTheDocument();
+    });
   });
 });

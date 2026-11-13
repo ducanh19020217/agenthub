@@ -370,6 +370,29 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(saved[0].verified).toBe(1);
   });
 
+  it('profileModelRepo supports same modelId across different engines for the same profile', () => {
+    profileRepo.upsert({
+      name: 'multi-engine-prof',
+      engine: 'agy',
+      kind: 'isolated',
+      home: '/tmp/dummy',
+      email: 'multi@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+
+    expect(() => {
+      profileModelRepo.setForProfile('multi-engine-prof', [
+        { modelId: 'claude-3-5-sonnet', modelName: 'Sonnet via agy', engine: 'agy', verified: true },
+        { modelId: 'claude-3-5-sonnet', modelName: 'Sonnet via claude', engine: 'claude', verified: true },
+      ]);
+    }).not.toThrow();
+
+    const saved = profileModelRepo.getForProfile('multi-engine-prof');
+    expect(saved).toHaveLength(2);
+    expect(saved.map((m) => m.engine).sort()).toEqual(['agy', 'claude']);
+  });
+
   it('falls back to DB cache if discovery command fails', async () => {
     const agyHome = path.join(tmpDir, 'agy-h2');
     fs.mkdirSync(path.join(agyHome, '.gemini', 'antigravity-cli'), { recursive: true });

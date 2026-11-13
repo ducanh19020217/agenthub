@@ -1101,7 +1101,7 @@ export const MIGRATIONS: string[] = [
     engine TEXT NOT NULL,
     verified INTEGER NOT NULL DEFAULT 1,
     fetchedAt INTEGER NOT NULL,
-    PRIMARY KEY (profileName, modelId),
+    PRIMARY KEY (profileName, engine, modelId),
     FOREIGN KEY (profileName) REFERENCES profiles(name) ON DELETE CASCADE
   );
   CREATE INDEX IF NOT EXISTS idx_profile_models_engine ON profile_models(engine);
@@ -2305,7 +2305,7 @@ export class ProfileModelRepo {
     const transaction = this.db.transaction(() => {
       this.db.prepare('DELETE FROM profile_models WHERE profileName = ?').run(profileName);
       const insert = this.db.prepare(
-        'INSERT INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT OR REPLACE INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt) VALUES (?, ?, ?, ?, ?, ?)',
       );
       for (const m of models) {
         insert.run(profileName, m.modelId, m.modelName || null, m.engine, m.verified === false ? 0 : 1, fetchedAt);

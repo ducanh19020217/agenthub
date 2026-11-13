@@ -225,47 +225,29 @@ export const SettingsPage: React.FC = () => {
 
   const availableCodexReviewerModels = useMemo(() => {
     if (modelOptions?.models) {
-      const codexDiscovered = formatDiscoveredModelOptions(modelOptions.models, t, 'codex', true);
-      const reviewerModels = reviewOrder.filter((r) => r.engine === 'codex').map((r) => r.model);
-      const arbiterModel = arbiter.engine === 'codex' && arbiter.model ? [arbiter.model] : [];
-      const chainCodex = [...hardChainModels, ...easyChainModels];
-      const configured = getModelsForProvider([...reviewerModels, ...arbiterModel, ...chainCodex], 'codex');
-      const discoveredValues = new Set(codexDiscovered.map((opt) => opt.value));
-      const extraConfigured = configured
-        .filter((m) => !discoveredValues.has(m))
-        .map((m) => ({
-          value: m,
-          label: `${m} (${t('settings.inactiveOrOld')})`,
-        }));
-      return [...codexDiscovered, ...extraConfigured];
+      return formatDiscoveredModelOptions(modelOptions.models, t, 'codex', true);
     }
-    const reviewerModels = reviewOrder.filter((r) => r.engine === 'codex').map((r) => r.model);
-    const arbiterModel = arbiter.engine === 'codex' && arbiter.model ? [arbiter.model] : [];
-    const chainCodex = [...hardChainModels, ...easyChainModels];
-    return getModelsForProvider([...reviewerModels, ...arbiterModel, ...chainCodex], 'codex');
-  }, [modelOptions, reviewOrder, arbiter, hardChainModels, easyChainModels, t]);
+    if (modelOptions?.suggestions) {
+      const fromApi = modelOptions.suggestions.filter(
+        (m) => m.startsWith('codex:') || (m.startsWith('gpt-') && !m.startsWith('gpt-oss-')),
+      );
+      return getModelsForProvider(fromApi, 'codex');
+    }
+    return [];
+  }, [modelOptions, t]);
 
   const availableClaudeReviewerModels = useMemo(() => {
     if (modelOptions?.models) {
-      const claudeDiscovered = formatDiscoveredModelOptions(modelOptions.models, t, 'claude', true);
-      const fromChat = getModelsForProvider(chatModels, 'claude');
-      const reviewerModels = reviewOrder.filter((r) => r.engine === 'claude').map((r) => r.model);
-      const arbiterModel = arbiter.engine === 'claude' && arbiter.model ? [arbiter.model] : [];
-      const configured = getModelsForProvider([...reviewerModels, ...arbiterModel, ...fromChat], 'claude');
-      const discoveredValues = new Set(claudeDiscovered.map((opt) => opt.value));
-      const extraConfigured = configured
-        .filter((m) => !discoveredValues.has(m))
-        .map((m) => ({
-          value: m,
-          label: `${m} (${t('settings.inactiveOrOld')})`,
-        }));
-      return [...claudeDiscovered, ...extraConfigured];
+      return formatDiscoveredModelOptions(modelOptions.models, t, 'claude', true);
     }
-    const fromChat = getModelsForProvider(chatModels, 'claude');
-    const reviewerModels = reviewOrder.filter((r) => r.engine === 'claude').map((r) => r.model);
-    const arbiterModel = arbiter.engine === 'claude' && arbiter.model ? [arbiter.model] : [];
-    return getModelsForProvider([...reviewerModels, ...arbiterModel, ...fromChat], 'claude');
-  }, [modelOptions, reviewOrder, arbiter, chatModels, t]);
+    if (modelOptions?.suggestions) {
+      const fromApi = modelOptions.suggestions.filter(
+        (m) => m.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(m),
+      );
+      return getModelsForProvider(fromApi, 'claude');
+    }
+    return [];
+  }, [modelOptions, t]);
 
   const availableChatModels = useMemo(() => {
     if (modelOptions?.models) {
@@ -1244,6 +1226,16 @@ export const SettingsPage: React.FC = () => {
                     placeholder={arbiter.engine === 'codex' ? 'codex:model' : 'sonnet'}
                     showCustomWarning={true}
                   />
+                  {arbiter.model && unavailableModels.has(arbiter.model) && (
+                    <div
+                      className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                      data-testid="model-unavailable-warning"
+                      title={t('models.unavailableWarning')}
+                    >
+                      <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                      <span>{t('models.unavailableWarning')}</span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -1261,6 +1253,16 @@ export const SettingsPage: React.FC = () => {
                 showCustomWarning={true}
                 className="w-full"
               />
+              {reviewerModel && unavailableModels.has(reviewerModel) && (
+                <div
+                  className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                  data-testid="model-unavailable-warning"
+                  title={t('models.unavailableWarning')}
+                >
+                  <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                  <span>{t('models.unavailableWarning')}</span>
+                </div>
+              )}
             </div>
 
             <div className="pt-2 border-t border-[var(--t-border)] space-y-4">

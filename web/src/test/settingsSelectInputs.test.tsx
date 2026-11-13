@@ -1947,5 +1947,62 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       const warning = await screen.findByTestId('model-unavailable-warning');
       expect(warning).toBeInTheDocument();
     });
+
+    it('SettingsPage excludes unavailable models from reviewer options and shows model-unavailable-warning for arbiter and reviewerModel', async () => {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['sonnet', 'codex:gpt-5.6-luna'],
+        configured: ['unavailable-codex-model', 'unavailable-arbiter-model'],
+        models: [
+          { id: 'sonnet', engine: 'claude', profiles: ['p1'], verified: true, available: true },
+          { id: 'codex:gpt-5.6-luna', engine: 'codex', profiles: ['p2'], verified: true, available: true },
+          { id: 'unavailable-codex-model', engine: 'codex', profiles: [], verified: false, available: false },
+          { id: 'unavailable-arbiter-model', engine: 'claude', profiles: [], verified: false, available: false },
+        ],
+      });
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        modelChainHard: ['gemini-3.8-flash-high'],
+        modelChainEasy: ['gemini-3.8-flash-medium'],
+        defaultTimeout: 10800,
+        chat: { claudeBin: 'claude', allowFullMode: false, maxConcurrent: 2, model: 'sonnet', models: ['sonnet'] },
+        reviewer: {
+          model: 'unavailable-codex-model',
+          order: [{ engine: 'codex', model: 'codex:gpt-5.6-luna', profiles: [] }],
+          fallback: { onUnavailable: true, onError: true, onBusyAfterMin: 10 },
+          arbiter: { engine: 'claude', model: 'unavailable-arbiter-model' },
+        },
+        brain: { mode: 'off', fallback: [] },
+      } as any);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('hard-chain-list')).toBeInTheDocument();
+      });
+
+      // Arbiter options should not propose unavailable models with inactiveOrOld label
+      const arbiterInput = screen.getByLabelText('Trọng tài Model reviewer');
+      expect(arbiterInput).toBeInTheDocument();
+      expect(within(arbiterInput).queryByText(/ngừng hoạt động hoặc cũ/i)).not.toBeInTheDocument();
+
+      // Legacy reviewer model options should not propose unavailable models with inactiveOrOld label
+      const reviewerModelInput = screen.getByTestId('reviewer-model-input');
+      expect(reviewerModelInput).toBeInTheDocument();
+      expect(within(reviewerModelInput).queryByText(/ngừng hoạt động hoặc cũ/i)).not.toBeInTheDocument();
+
+      const warnings = await screen.findAllByTestId('model-unavailable-warning');
+      expect(warnings.length).toBeGreaterThanOrEqual(2);
+    });
   });
 });

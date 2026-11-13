@@ -3604,6 +3604,41 @@ describe('Scheduler limits configuration', () => {
       fs.rmSync(testDir, { recursive: true, force: true });
     }
   });
+
+  it('validates maxTimeoutResumes with default 2 and allows 0 to disable', () => {
+    expect(DEFAULT_SCHEDULER_LIMITS.maxTimeoutResumes).toBe(2);
+
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-cfg-timeout-'));
+    try {
+      const cfg = loadConfig(testDir);
+      expect(cfg.scheduler.maxTimeoutResumes).toBe(2);
+      expect(cfg.schedulerLimits.maxTimeoutResumes).toBe(2);
+
+      // Invalid (negative) falls back to default 2
+      fs.writeFileSync(path.join(testDir, 'config.json'), JSON.stringify({
+        scheduler: { maxTimeoutResumes: -1 },
+      }));
+      const invalidCfg = loadConfig(testDir);
+      expect(invalidCfg.scheduler.maxTimeoutResumes).toBe(2);
+      expect(invalidCfg.schedulerLimits.maxTimeoutResumes).toBe(2);
+
+      // 0 is valid and disables timeout resumes
+      fs.writeFileSync(path.join(testDir, 'config.json'), JSON.stringify({
+        scheduler: { maxTimeoutResumes: 0 },
+      }));
+      const zeroCfg = loadConfig(testDir);
+      expect(zeroCfg.scheduler.maxTimeoutResumes).toBe(0);
+      expect(zeroCfg.schedulerLimits.maxTimeoutResumes).toBe(0);
+
+      // Custom positive value and persistence
+      saveConfig(testDir, { scheduler: { maxTimeoutResumes: 5 } });
+      const reloaded = loadConfig(testDir);
+      expect(reloaded.scheduler.maxTimeoutResumes).toBe(5);
+      expect(reloaded.schedulerLimits.maxTimeoutResumes).toBe(5);
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('Crash recovery on startup', () => {

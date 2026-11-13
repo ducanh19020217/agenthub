@@ -14,8 +14,8 @@
 
 3. **P2c: Task đã kết thúc không còn hiển thị như đang chạy**
    - Trong `web/src/pages/TaskDetailPage.tsx`, định nghĩa tập trạng thái kết thúc `TERMINAL_STATUSES` (`done`, `merged`, `pushed`, `cancelled`, `failed`).
-   - Với các task ở trạng thái kết thúc, bước cuối trên dòng thời gian chỉ hiển thị mốc thời gian tĩnh (`at`), không tính thời lượng đang chạy (`currentDurationMs = undefined`) và ẩn dòng "đang ở bước này từ...".
-   - Cập nhật và bổ sung test kiểm thử trong `web/src/test/taskTimelineUi.test.tsx`.
+   - Với các task ở trạng thái kết thúc, bước cuối trên dòng thời gian chỉ hiển thị mốc thời gian tĩnh (`at`), ẩn hoàn toàn thời lượng (`currentDurationMs = undefined` khi `isTerminal`, ngăn fallback sang `item.durationMs`) và ẩn dòng "đang ở bước này từ...".
+   - Cập nhật và bổ sung test kiểm thử trong `web/src/test/taskTimelineUi.test.tsx` khẳng định bước cuối không hiển thị duration dù backend/timeline có `durationMs` hoặc trạng thái bước cuối không khớp trạng thái task.
 
 4. **P3d: Sửa `restoreProject` phát lại event cũ**
    - Bổ sung phương thức `TaskNoteRepo.delete(id: number)` trong `src/db/index.ts`.

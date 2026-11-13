@@ -1196,9 +1196,11 @@ export const TaskDetailPage: React.FC = () => {
             const statusKey = item.status as TaskStatus;
             const isTerminal = isCurrent && (TERMINAL_STATUSES.has(task.status) || TERMINAL_STATUSES.has(item.status));
             const parsedAt = parseApiTime(item.at);
-            const currentDurationMs = isCurrent && !isTerminal && Number.isFinite(parsedAt)
-              ? Math.max(0, Date.now() - parsedAt)
-              : item.durationMs;
+            const currentDurationMs = isTerminal
+              ? undefined
+              : isCurrent && Number.isFinite(parsedAt)
+                ? Math.max(0, Date.now() - parsedAt)
+                : item.durationMs;
 
             return (
               <li

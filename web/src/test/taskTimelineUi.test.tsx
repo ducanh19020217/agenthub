@@ -208,13 +208,13 @@ describe('Workflow Timeline UI & Status Timestamps', () => {
     expect(workflowSection.textContent).toContain('ước lượng');
   });
 
-  it('suppresses running duration and currentStepSince on terminal statuses (cancelled, failed, merged, pushed)', async () => {
-    const terminalStatuses = ['cancelled', 'failed', 'merged', 'pushed'] as const;
+  it('suppresses running duration and currentStepSince on terminal statuses (done, cancelled, failed, merged, pushed) even if step has durationMs', async () => {
+    const terminalStatuses = ['done', 'cancelled', 'failed', 'merged', 'pushed'] as const;
 
     for (const status of terminalStatuses) {
       const terminalTimeline: TaskTimelineItem[] = [
         { status: 'running', at: '2026-11-12T02:00:00.000Z', durationMs: 10 * 60 * 1000 },
-        { status, at: '2026-11-12T02:10:00.000Z' },
+        { status, at: '2026-11-12T02:10:00.000Z', durationMs: 5 * 60 * 1000 },
       ];
 
       vi.spyOn(client, 'getTask').mockResolvedValue({
@@ -226,7 +226,7 @@ describe('Workflow Timeline UI & Status Timestamps', () => {
       const { unmount } = renderDetailPage();
       await screen.findByTestId('workflow-timeline');
 
-      // Step 1 (terminal) must not display running duration or current step indicator
+      // Step 1 (terminal) must not display running duration or current step indicator even if durationMs is provided
       expect(screen.queryByTestId('workflow-current-step')).toBeNull();
       expect(screen.queryByTestId('workflow-duration-1')).toBeNull();
       // But step 0 (running) should have duration
@@ -234,6 +234,23 @@ describe('Workflow Timeline UI & Status Timestamps', () => {
 
       unmount();
     }
+
+    // Also verify when task.status is terminal but last step status is non-terminal, duration is suppressed on the last step
+    const mismatchedTimeline: TaskTimelineItem[] = [
+      { status: 'running', at: '2026-11-12T02:00:00.000Z', durationMs: 10 * 60 * 1000 },
+      { status: 'review', at: '2026-11-12T02:10:00.000Z', durationMs: 2 * 60 * 1000 },
+    ];
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      timeline: mismatchedTimeline,
+    });
+    const { unmount: unmountMismatch } = renderDetailPage();
+    await screen.findByTestId('workflow-timeline');
+    expect(screen.queryByTestId('workflow-current-step')).toBeNull();
+    expect(screen.queryByTestId('workflow-duration-1')).toBeNull();
+    expect(screen.getByTestId('workflow-duration-0')).toHaveTextContent('10 phút');
+    unmountMismatch();
   });
 
   it('displays estimated indicator on FlowTaskList cards in vi and en', async () => {

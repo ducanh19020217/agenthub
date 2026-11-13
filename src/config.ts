@@ -68,6 +68,7 @@ export const DEFAULT_BRAIN_WAKEUP_EVENTS: string[] = [
   'brain.notify',
   'brain.directive_added',
   'ci.failed',
+  'task.health_issue',
 ];
 
 export interface BrainConfig {
@@ -183,6 +184,8 @@ export interface TelegramNotifyConfig {
   projectIdle?: boolean;
   /** Báo khi task bị ngắt: hủy, quá thời gian, lặp lệnh, không commit, chuyển tài khoản, tự đóng. */
   interrupted?: boolean;
+  /** Báo khi phát hiện bất thường qua lượt quét sức khoẻ định kỳ. */
+  healthIssue?: boolean;
 }
 
 export interface TelegramChat {
@@ -243,6 +246,41 @@ export const DEFAULT_TELEGRAM_NOTIFY: TelegramNotifyConfig = {
   taskDone: true,
   projectIdle: true,
   interrupted: true,
+  healthIssue: true,
+};
+
+export interface HealthSweepRulesConfig {
+  checkingOrphanMin: number;
+  reviewOrphanMin: number;
+  queuedStarvedMin: number;
+  runningNoProgressMin: number;
+  churnWorkerRuns: number;
+  churnEscalations: number;
+  failoverChurnCount: number;
+  failoverChurnWindowMin: number;
+}
+
+export interface HealthSweepConfig {
+  enabled: boolean;
+  intervalMinutes: number;
+  cooldownMinutes: number;
+  rules: HealthSweepRulesConfig;
+}
+
+export const DEFAULT_HEALTH_SWEEP_CONFIG: HealthSweepConfig = {
+  enabled: true,
+  intervalMinutes: 10,
+  cooldownMinutes: 120,
+  rules: {
+    checkingOrphanMin: 20,
+    reviewOrphanMin: 30,
+    queuedStarvedMin: 60,
+    runningNoProgressMin: 90,
+    churnWorkerRuns: 8,
+    churnEscalations: 2,
+    failoverChurnCount: 4,
+    failoverChurnWindowMin: 120,
+  },
 };
 
 export const DEFAULT_STALL_CONFIG: StallConfig = {
@@ -522,6 +560,7 @@ export interface AgentHubConfig {
   scheduler: SchedulerConfig;
   schedulerLimits: SchedulerLimitsConfig;
   profileCooling: ProfileCoolingConfig;
+  healthSweep: HealthSweepConfig;
 }
 
 type ReviewerConfigPatch = Partial<Omit<AgentHubConfig['reviewer'], 'fallback' | 'arbiter'>> & {
@@ -590,6 +629,7 @@ export function saveConfig(
     ui?: Partial<UiConfig>;
     branding?: Partial<BrandingConfig>;
     integrations?: Partial<{ openproject: { sources: unknown[] }; cockpit: CockpitIntegrationPatch }>;
+    healthSweep?: Partial<Omit<HealthSweepConfig, 'rules'>> & { rules?: Partial<HealthSweepRulesConfig> };
   }>,
 ): void {
   const configFilePath = path.join(hubHome, 'config.json');
@@ -734,6 +774,22 @@ export function saveConfig(
           },
         }
       : {}),
+    ...(patch.healthSweep && typeof patch.healthSweep === 'object'
+      ? {
+          healthSweep: {
+            ...((current.healthSweep as Record<string, unknown>) || {}),
+            ...patch.healthSweep,
+            ...(patch.healthSweep.rules && typeof patch.healthSweep.rules === 'object'
+              ? {
+                  rules: {
+                    ...(((current.healthSweep as Record<string, unknown>)?.rules as Record<string, unknown>) || {}),
+                    ...patch.healthSweep.rules,
+                  },
+                }
+              : {}),
+          },
+        }
+      : {}),
   };
   fs.writeFileSync(configFilePath, JSON.stringify(updated, null, 2), 'utf-8');
 }
@@ -793,6 +849,7 @@ export function updateConfigInMemory(
     ui?: Partial<UiConfig>;
     branding?: Partial<BrandingConfig>;
     integrations?: Partial<{ openproject: { sources: unknown[] }; cockpit: CockpitIntegrationPatch }>;
+    healthSweep?: Partial<Omit<HealthSweepConfig, 'rules'>> & { rules?: Partial<HealthSweepRulesConfig> };
   }>,
 ): void {
   if (patch.modelChainHard) {
@@ -1042,6 +1099,16 @@ export function updateConfigInMemory(
           ...prev.autoSync,
           ...(incoming.autoSync || {}),
         },
+      },
+    };
+  }
+  if (patch.healthSweep) {
+    config.healthSweep = {
+      ...config.healthSweep,
+      ...patch.healthSweep,
+      rules: {
+        ...config.healthSweep.rules,
+        ...(patch.healthSweep.rules || {}),
       },
     };
   }
@@ -1599,6 +1666,45 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
         coolingMin: typeof raw.coolingMin === 'number' && raw.coolingMin > 0
           ? raw.coolingMin
           : DEFAULT_PROFILE_COOLING.coolingMin,
+      };
+    })(),
+    healthSweep: (() => {
+      const raw = (userConfig.healthSweep as Record<string, unknown>) || {};
+      const rawRules = (raw.rules as Record<string, unknown>) || {};
+      return {
+        enabled: raw.enabled !== false,
+        intervalMinutes: typeof raw.intervalMinutes === 'number' && raw.intervalMinutes > 0
+          ? raw.intervalMinutes
+          : DEFAULT_HEALTH_SWEEP_CONFIG.intervalMinutes,
+        cooldownMinutes: typeof raw.cooldownMinutes === 'number' && raw.cooldownMinutes > 0
+          ? raw.cooldownMinutes
+          : DEFAULT_HEALTH_SWEEP_CONFIG.cooldownMinutes,
+        rules: {
+          checkingOrphanMin: typeof rawRules.checkingOrphanMin === 'number' && rawRules.checkingOrphanMin > 0
+            ? rawRules.checkingOrphanMin
+            : DEFAULT_HEALTH_SWEEP_CONFIG.rules.checkingOrphanMin,
+          reviewOrphanMin: typeof rawRules.reviewOrphanMin === 'number' && rawRules.reviewOrphanMin > 0
+            ? rawRules.reviewOrphanMin
+            : DEFAULT_HEALTH_SWEEP_CONFIG.rules.reviewOrphanMin,
+          queuedStarvedMin: typeof rawRules.queuedStarvedMin === 'number' && rawRules.queuedStarvedMin > 0
+            ? rawRules.queuedStarvedMin
+            : DEFAULT_HEALTH_SWEEP_CONFIG.rules.queuedStarvedMin,
+          runningNoProgressMin: typeof rawRules.runningNoProgressMin === 'number' && rawRules.runningNoProgressMin > 0
+            ? rawRules.runningNoProgressMin
+            : DEFAULT_HEALTH_SWEEP_CONFIG.rules.runningNoProgressMin,
+          churnWorkerRuns: typeof rawRules.churnWorkerRuns === 'number' && rawRules.churnWorkerRuns > 0
+            ? rawRules.churnWorkerRuns
+            : DEFAULT_HEALTH_SWEEP_CONFIG.rules.churnWorkerRuns,
+          churnEscalations: typeof rawRules.churnEscalations === 'number' && rawRules.churnEscalations > 0
+            ? rawRules.churnEscalations
+            : DEFAULT_HEALTH_SWEEP_CONFIG.rules.churnEscalations,
+          failoverChurnCount: typeof rawRules.failoverChurnCount === 'number' && rawRules.failoverChurnCount > 0
+            ? rawRules.failoverChurnCount
+            : DEFAULT_HEALTH_SWEEP_CONFIG.rules.failoverChurnCount,
+          failoverChurnWindowMin: typeof rawRules.failoverChurnWindowMin === 'number' && rawRules.failoverChurnWindowMin > 0
+            ? rawRules.failoverChurnWindowMin
+            : DEFAULT_HEALTH_SWEEP_CONFIG.rules.failoverChurnWindowMin,
+        },
       };
     })(),
   };

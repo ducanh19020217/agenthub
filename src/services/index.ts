@@ -721,6 +721,7 @@ export const UpdateConfigSchema = z.object({
       taskDone: z.boolean().optional(),
       projectIdle: z.boolean().optional(),
       interrupted: z.boolean().optional(),
+      healthIssue: z.boolean().optional(),
     }).optional(),
   }).optional(),
   updates: z.object({
@@ -741,6 +742,21 @@ export const UpdateConfigSchema = z.object({
         intervalMinutes: z.number().positive().optional(),
         engines: z.array(z.enum(['antigravity', 'codex', 'claude'])).optional(),
       }).optional(),
+    }).optional(),
+  }).optional(),
+  healthSweep: z.object({
+    enabled: z.boolean().optional(),
+    intervalMinutes: z.number().int().positive().optional(),
+    cooldownMinutes: z.number().int().positive().optional(),
+    rules: z.object({
+      checkingOrphanMin: z.number().int().positive().optional(),
+      reviewOrphanMin: z.number().int().positive().optional(),
+      queuedStarvedMin: z.number().int().positive().optional(),
+      runningNoProgressMin: z.number().int().positive().optional(),
+      churnWorkerRuns: z.number().int().positive().optional(),
+      churnEscalations: z.number().int().positive().optional(),
+      failoverChurnCount: z.number().int().positive().optional(),
+      failoverChurnWindowMin: z.number().int().positive().optional(),
     }).optional(),
   }).optional(),
 });

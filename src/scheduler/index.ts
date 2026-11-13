@@ -1161,20 +1161,30 @@ export class Scheduler {
       };
 
       if (chain.length === 0) {
-        this.reviewNotified.set(task.id, 'complete:0');
-        if (autoMergeEnabled && !hasMergeOutcome()) {
-          const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
-          if (lastWorker?.outcome === 'done') {
+        const lastReview = this.reviewRepo?.getByTask(task.id).at(-1);
+        const hasApprovedAutoReview = Boolean(lastReview && isAutoReviewer(lastReview.actor) && lastReview.verdict === 'approved');
+
+        if (hasApprovedAutoReview) {
+          this.reviewNotified.set(task.id, 'complete:0');
+          if (autoMergeEnabled && !hasMergeOutcome()) {
             const checks = this.getCheckResults(task.id);
             this.emitReviewReadyIfReview(task.id, {
               reviewChainComplete: true,
               checksPassed: checks.length > 0 ? checks.every((c) => c.ok) : true,
             });
           }
+        } else {
+          if (!autoMergeEnabled || task.reviewerEscalated) {
+            this.reviewNotified.set(task.id, 'complete:0');
+          }
+          // Task đang chờ reviewer: không đánh dấu complete, không gửi thông báo;
+          // scheduler tick bình thường sẽ dispatch reviewer.
         }
       } else if (stepIdx >= chain.length) {
         this.reviewNotified.set(task.id, `complete:${stepIdx}`);
-        if (autoMergeEnabled && !hasMergeOutcome()) {
+        const lastReview = this.reviewRepo?.getByTask(task.id).at(-1);
+        const hasApprovedAutoReview = Boolean(lastReview && isAutoReviewer(lastReview.actor) && lastReview.verdict === 'approved');
+        if (autoMergeEnabled && hasApprovedAutoReview && !hasMergeOutcome()) {
           const checks = this.getCheckResults(task.id);
           this.emitReviewReadyIfReview(task.id, {
             reviewChainComplete: true,
@@ -1319,7 +1329,6 @@ export class Scheduler {
       if (run.lockFile) this.locks.reserve(run.profileName, run.lockFile);
       this.eventBus.emit('run.adopted', run.taskId, { taskId: run.taskId, runId: run.id, pid: run.pid, note: 'Hub khởi động lại, tiếp tục theo dõi worker' });
     }
-
   }
 
   /** Adopt live detached workers before the first scheduling tick. */

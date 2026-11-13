@@ -322,11 +322,12 @@
   - Ngoài ra, trong trường hợp race condition khi đang audit task A, task B được merge vào integration, auto-publish của B nhận 409 từ publish lock. Nếu A merge tip hiện tại của integration thay vì SHA tại thời điểm audit, code của B bị đẩy lên remote mà không qua audit gate.
 - **Quyết định thiết kế**:
   1. **Lưu mốc thời gian bật publish (`enabledAt`)**:
-     - `projects.settings.publish.enabledAt` ghi nhận thời điểm tính năng publish được bật (hoặc thời điểm chạy migration `migration:publish_default_on_at`, fallback về `project.createdAt`).
+     - `projects.settings.publish.enabledAt` ghi nhận thời điểm tính năng publish được bật (hoặc thời điểm chạy migration `migration:publish_default_on_at`).
+     - Client/API không được quyền tự ý chỉnh sửa `enabledAt`: `enabledAt` chỉ do hệ thống ghi khi tính năng publish chuyển từ tắt sang bật hoặc khi chạy migration. Mọi giá trị client gửi lên đều bị bỏ qua; các giá trị ở tương lai bị từ chối tuyệt đối (`ts <= Date.now()`, loại bỏ hoàn toàn khoảng dung sai 60 giây để tránh bypass baseline qua mốc tương lai gần).
      - Khi người dùng bật lại publish từ trạng thái tắt (`publish.enabled: false` sang `true`), `enabledAt` được cập nhật lại theo thời gian hiện tại (`new Date().toISOString()`).
-     - Đối với database đã chạy migration ở bản trước nhưng chưa có `enabledAt`, hệ thống dùng `project.createdAt` (hoặc mốc migration cũ nếu đã ghi) cho các project đã bật publish thay vì gán thời điểm deploy hiện tại, đảm bảo code merge sau khi bật publish không bị vô tình coi là baseline mà không qua audit gate.
-     - **Giới hạn chủ đích**: Dùng `project.createdAt` làm mốc cho project cũ đồng nghĩa với việc toàn bộ backlog chưa push tạo sau mốc này vẫn được tính vào `maxTasks`; đây là sự đánh đổi có chủ đích để bảo đảm an toàn tuyệt đối, không đẩy code chưa audit lên remote.
+     - Đối với database đã chạy migration ở bản trước nhưng thiếu `enabledAt` (hoặc từng bị gán sai theo `project.createdAt`), fallback dùng thời điểm migration `publish_default_on` đã chạy (lấy từ `meta:migration:publish_default_on_at`), hoặc mốc thời điểm sửa lỗi này chạy (và ghi nhận vào `meta`). Tuyệt đối không dùng `project.createdAt` vì sẽ làm toàn bộ task tồn đọng cũ bị coi là sau mốc bật và bị kẹt `maxTasks` không thể publish.
      - Project có `settings` NULL hoặc thiếu cấu hình `publish` trong database đã migrate được bổ sung cấu hình publish mặc định kèm `enabledAt` để backlog cũ được phân loại baseline, không bị kẹt `maxTasks`.
+     - Trong `publishTask`, `enabledAt` ở tương lai bị coi là không hợp lệ để ngăn chặn việc vượt qua audit gate.
   2. **Phân tách task baseline và miễn trừ audit gate**:
      - Trong `findTasksToAudit`: các task đã hoàn thành và được merge trước mốc `enabledAt` được phân loại là **task baseline**.
      - Mốc thời gian hoàn thành của task được xác định ưu tiên theo các mốc ổn định: (1) commit date của merge commit, (2) commit date của nhánh task trên git, (3) thời điểm approved review hoặc hoàn thành run. Khi không xác định được mốc merge thật, hệ thống an toàn đưa task vào diện audit (fail-closed) thay vì dựa vào `createdAt` (có thể làm task tạo trước nhưng merge sau bị lọt thành baseline).
@@ -340,8 +341,14 @@
      - Cờ `suppressNotification: true` chỉ áp dụng cho publish tự động (`!options?.manual`). Khi người dùng publish thủ công, thông báo luôn được gửi để phản hồi thao tác.
      - Các dịch vụ thông báo (`NotificationService` cho desktop và `TelegramBotService` cho Telegram) kiểm tra cờ này và bỏ qua việc gửi thông báo lặp lại, giữ cho luồng thông báo của người dùng không bị nhiễu.
      - Khi một lượt publish thành công, bản ghi lỗi của project được xoá để sẵn sàng ghi nhận nếu có lỗi mới phát sinh sau này.
-  4. **Snapshot SHA nguồn trước audit và xếp hàng auto-publish khi gặp xung đột lock (P1)**:
-     - Trước khi audit, SHA của `sourceBranch` được snapshot (`sourceSha`). Publish chỉ audit và merge/push đúng commit `sourceSha` đó, ngăn việc vô tình đẩy code của task merge muộn chưa được audit.
+  4. **Snapshot SHA nguồn và đích trước audit, cô lập worktree và xếp hàng auto-publish khi gặp xung đột lock (P1)**:
+     - Trước khi audit, cả SHA của nhánh nguồn (`sourceSha`) và SHA của nhánh đích local (`targetSha`) đều được chụp lại snapshot.
+     - Candidate discovery (`findTasksToAudit`), audit gate (`getTaskDiff`) và quá trình merge/push trong worktree tách rời (`worktreePath`) chỉ thao tác trên đúng snapshot SHA này (`startPoint = targetSha || prevRemoteSha || sourceSha`), ngăn chặn triệt để tình trạng race condition ở chế độ không dùng integration (nhánh task merge vào nhánh đích local `main` trong lúc audit task khác đang chạy).
+     - Trong candidate discovery (`findTasksToAudit`), hệ thống ưu tiên `mergeCommit` (trong snapshot `targetSha`/`sourceSha`) hơn ref nhánh động hiện tại; nhờ đó các task đã nằm trong snapshot đích nhưng nhánh task có commit mới phát sinh sau snapshot vẫn được nhận diện chính xác và audit/push đúng lượt, không bị loại bỏ sai hay rơi vào `push_failed`.
+     - Trong audit gate (`getTaskDiff`), hàm nhận và sử dụng đúng snapshot `sourceSha`/`targetSha`; diff và `branchSha` được trích xuất từ đúng commit snapshot thay vì đọc ref nhánh đang sống, bảo đảm các commit phát sinh trên nhánh task sau snapshot không bị đưa vào audit sai lượt trước khi push.
+     - Khi nhánh đích local lẫn remote đều chưa tồn tại, worktree khởi tạo từ `sourceSha` để không kéo theo các commit mới đẩy vào nhánh nguồn sau thời điểm audit.
+     - Task merge sau snapshot được để lại cho lượt publish sau kèm audit đầy đủ. Task đã thực sự nằm trong commit đã push và đã audit được cập nhật `status: 'pushed'`, không bị rơi vào `done` kèm `push_failed`.
+     - Khi cập nhật ref local (`updateLocalBranchSafely`), nếu nhánh đích local đã có commit mới hơn commit vừa push, hệ thống bảo toàn nhánh local thay vì ép ghi đè lùi SHA.
      - Khi auto-publish nhận 409 do publish khác đang chạy, task được xếp hàng chờ (`enqueueAutoPublish`) và tự động kích hoạt publish lại ngay khi lock được nhả (`onProjectPublishLockReleased`).
      - Hàng đợi chờ 409 chỉ lưu trong bộ nhớ (in-memory); đây là thiết kế an toàn vì ngay cả khi khởi động lại, lần publish tiếp theo sẽ tự động gom và audit toàn bộ backlog chưa push trên nhánh tích hợp.
      - Khi nhận 409, `enqueueAutoPublish` kiểm tra `isProjectPublishing` ngay sau khi đăng ký listener để kích hoạt xử lý ngay nếu lock đã được nhả trước thời điểm đăng ký callback.

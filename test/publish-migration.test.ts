@@ -96,8 +96,8 @@ describe('Publish default-on migration', () => {
     expect(secondRun.explicitlyDisabled).toEqual([]);
   });
 
-  it('nhánh đã migrate (meta = 1): project cũ giữ enabledAt theo project.createdAt, project chưa có settings được migrate bổ sung', () => {
-    // Simulate database migrated by earlier version of publish_default_on
+  it('nhánh đã migrate (meta = 1): fallback enabledAt dùng mốc migration_at hoặc thời điểm sửa lỗi, không dùng project.createdAt', () => {
+    // Simulate database migrated by earlier version of publish_default_on where migration_at was missing
     db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_default_on', '1')").run();
     db.prepare("DELETE FROM meta WHERE key = 'migration:publish_default_on_at'").run();
 
@@ -121,32 +121,64 @@ describe('Publish default-on migration', () => {
       brain: { mode: 'auto' },
     }), '2026-02-01T08:00:00.000Z');
 
+    // 4. Project that was set to project.createdAt by previous buggy migration
+    db.prepare(
+      'INSERT INTO projects (id, name, path, defaultBranch, settings, createdAt) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run('proj-buggy-migrated', 'Buggy Migrated', '/tmp/p-buggy', 'main', JSON.stringify({
+      publish: { enabled: true, remote: 'origin', enabledAt: '2026-01-15T00:00:00.000Z' },
+    }), '2026-01-15T00:00:00.000Z');
+
     const result = ensureProjectPublishMigration(db);
 
     expect(result.migrated).toContain('proj-old-null-settings');
     expect(result.migrated).toContain('proj-old-no-publish');
     expect(result.migrated).not.toContain('proj-old-enabled');
 
-    // proj-old-enabled must NOT have enabledAt set to new Date(), but project.createdAt
+    // meta migration:publish_default_on_at is created
+    const metaMigrationAt = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_default_on_at'").get() as { value: string };
+    expect(metaMigrationAt).toBeDefined();
+    expect(metaMigrationAt.value).toBeDefined();
+
+    // proj-old-enabled must have enabledAt populated with migrationAt (not project.createdAt)
     const p1 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-old-enabled') as ProjectRow;
     const s1 = projectSettings(p1);
     expect(s1.publish.enabled).toBe(true);
-    expect(s1.publish.enabledAt).toBe(pastCreatedAt);
+    expect(s1.publish.enabledAt).toBe(metaMigrationAt.value);
+    expect(s1.publish.enabledAt).not.toBe(pastCreatedAt);
 
-    // proj-old-null-settings must have publish enabled and enabledAt populated with project.createdAt (not now)
+    // proj-old-null-settings must have publish enabled and enabledAt populated with migrationAt (not project.createdAt)
     const p2 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-old-null-settings') as ProjectRow;
     const s2 = projectSettings(p2);
     expect(s2.publish.enabled).toBe(true);
-    expect(s2.publish.enabledAt).toBe('2026-02-01T08:00:00.000Z');
+    expect(s2.publish.enabledAt).toBe(metaMigrationAt.value);
 
-    // proj-old-no-publish must have publish enabled and enabledAt populated with project.createdAt (not now)
+    // proj-old-no-publish must have publish enabled and enabledAt populated with migrationAt (not project.createdAt)
     const p3 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-old-no-publish') as ProjectRow;
     const s3 = projectSettings(p3);
     expect(s3.publish.enabled).toBe(true);
-    expect(s3.publish.enabledAt).toBe('2026-02-01T08:00:00.000Z');
+    expect(s3.publish.enabledAt).toBe(metaMigrationAt.value);
 
-    // Ensure migration:publish_default_on_at was NOT created in meta when metaRow was already 1
-    const metaMigrationAt = db.prepare("SELECT value FROM meta WHERE key = 'migration:publish_default_on_at'").get();
-    expect(metaMigrationAt).toBeUndefined();
+    // proj-buggy-migrated: previously set to project.createdAt, must be repaired to migrationAt
+    const p4 = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-buggy-migrated') as ProjectRow;
+    const s4 = projectSettings(p4);
+    expect(s4.publish.enabledAt).toBe(metaMigrationAt.value);
+  });
+
+  it('nhánh đã migrate (meta = 1): có sẵn migration:publish_default_on_at thì tái sử dụng đúng mốc đó', () => {
+    const recordedMigrationAt = '2026-03-01T12:00:00.000Z';
+    db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_default_on', '1')").run();
+    db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_default_on_at', ?)").run(recordedMigrationAt);
+
+    db.prepare(
+      'INSERT INTO projects (id, name, path, defaultBranch, settings, createdAt) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run('proj-with-meta-at', 'Meta At', '/tmp/p-meta', 'main', JSON.stringify({
+      publish: { enabled: true, remote: 'origin' },
+    }), '2026-01-01T00:00:00.000Z');
+
+    ensureProjectPublishMigration(db);
+
+    const p = db.prepare('SELECT * FROM projects WHERE id = ?').get('proj-with-meta-at') as ProjectRow;
+    const s = projectSettings(p);
+    expect(s.publish.enabledAt).toBe(recordedMigrationAt);
   });
 });

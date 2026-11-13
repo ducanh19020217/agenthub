@@ -1223,9 +1223,7 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
     let migrationAt = migrationAtRow?.value;
     if (!migrationAt) {
       migrationAt = new Date().toISOString();
-      if (!metaRow || metaRow.value !== '1') {
-        db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_default_on_at', ?)").run(migrationAt);
-      }
+      db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_default_on_at', ?)").run(migrationAt);
     }
 
     const projects = db.prepare('SELECT id, defaultBranch, settings, createdAt FROM projects').all() as Array<{
@@ -1250,7 +1248,7 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
 
     if (metaRow && metaRow.value === '1') {
       for (const project of projects) {
-        const effectiveEnabledAt = migrationAtRow?.value || project.createdAt || migrationAt;
+        const effectiveEnabledAt = migrationAtRow?.value || migrationAt;
 
         if (!project.settings) {
           const newSettings = {
@@ -1285,10 +1283,8 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
         } else if (publishVal.enabled === false) {
           // Explicitly disabled, keep disabled
           continue;
-        } else if (!publishVal.enabledAt) {
-          // Project already had publish enabled in the previous version (where enabledAt was not recorded).
-          // Use project.createdAt (or previously recorded migrationAt) to ensure recent tasks merged
-          // after publish was enabled are not silently converted to baseline without audit.
+        } else if (!publishVal.enabledAt || publishVal.enabledAt === project.createdAt) {
+          // Fallback uses migration timestamp from meta or current fix run, NOT project.createdAt
           publishVal.enabledAt = effectiveEnabledAt;
           updateStmt.run(JSON.stringify(parsed), project.id);
         }

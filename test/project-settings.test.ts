@@ -8,6 +8,9 @@ import { createContext } from '../src/daemon.js';
 import { FakeEngine, type Engine } from '../src/engines/index.js';
 import {
   DEFAULT_PROJECT_SETTINGS,
+  PublishSettingsSchema,
+  PublishSettingsInputSchema,
+  type ProjectSettings,
   mergeProjectSettings,
   parseProjectSettings,
   projectSettings,
@@ -346,5 +349,65 @@ describe('project settings through the service', () => {
     expect(proj3.settings.review.order).toBeUndefined();
     expect(proj3.settings.review.fallback).toBeUndefined();
     expect(proj3.settings.review).toEqual({ autoMerge: false });
+  });
+
+  describe('publish.enabledAt protection and validation', () => {
+    it('từ chối giá trị enabledAt ở tương lai qua PublishSettingsSchema và PublishSettingsInputSchema', () => {
+      const futureDate = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+      const pastDate = new Date(Date.now() - 3600 * 1000).toISOString();
+
+      // Valid past date
+      expect(PublishSettingsSchema.safeParse({ enabledAt: pastDate }).success).toBe(true);
+      expect(PublishSettingsInputSchema.safeParse({ enabledAt: pastDate }).success).toBe(true);
+
+      // Invalid future date (both distant future and near future within 60s)
+      const r1 = PublishSettingsSchema.safeParse({ enabledAt: futureDate });
+      expect(r1.success).toBe(false);
+      expect(r1.error?.issues[0]?.message).toContain('enabledAt không được ở tương lai');
+
+      const r2 = PublishSettingsInputSchema.safeParse({ enabledAt: futureDate });
+      expect(r2.success).toBe(false);
+      expect(r2.error?.issues[0]?.message).toContain('enabledAt không được ở tương lai');
+
+      // Near future date (+5 seconds) must also be rejected strictly
+      const nearFutureDate = new Date(Date.now() + 5000).toISOString();
+      const rNear1 = PublishSettingsSchema.safeParse({ enabledAt: nearFutureDate });
+      expect(rNear1.success).toBe(false);
+      expect(rNear1.error?.issues[0]?.message).toContain('enabledAt không được ở tương lai');
+
+      const rNear2 = PublishSettingsInputSchema.safeParse({ enabledAt: nearFutureDate });
+      expect(rNear2.success).toBe(false);
+      expect(rNear2.error?.issues[0]?.message).toContain('enabledAt không được ở tương lai');
+    });
+
+    it('mergeProjectSettings bỏ qua enabledAt do client gửi lên và chỉ cập nhật khi chuyển từ tắt sang bật', () => {
+      const initial = parseProjectSettings(JSON.stringify({
+        publish: { enabled: true, enabledAt: '2026-01-01T00:00:00.000Z' },
+      }));
+
+      // Client attempts to overwrite enabledAt with an arbitrary date
+      const merged1 = mergeProjectSettings(initial, {
+        publish: { enabledAt: '2026-02-01T00:00:00.000Z' } as unknown as ProjectSettings['publish'],
+      });
+      // Client value must be ignored, original enabledAt retained
+      expect(merged1.publish.enabledAt).toBe('2026-01-01T00:00:00.000Z');
+
+      // Disabling publish retains enabledAt
+      const mergedDisabled = mergeProjectSettings(initial, {
+        publish: { enabled: false },
+      });
+      expect(mergedDisabled.publish.enabled).toBe(false);
+      expect(mergedDisabled.publish.enabledAt).toBe('2026-01-01T00:00:00.000Z');
+
+      // Enabling publish from disabled state sets new current timestamp
+      const beforeEnable = Date.now();
+      const mergedReEnabled = mergeProjectSettings(mergedDisabled, {
+        publish: { enabled: true },
+      });
+      expect(mergedReEnabled.publish.enabled).toBe(true);
+      expect(mergedReEnabled.publish.enabledAt).toBeDefined();
+      const newEnabledTime = Date.parse(mergedReEnabled.publish.enabledAt!);
+      expect(newEnabledTime).toBeGreaterThanOrEqual(beforeEnable);
+    });
   });
 });

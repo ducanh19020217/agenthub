@@ -1787,6 +1787,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         settings: {
           publish: {
             enabled: true,
+            enabledAt: '2020-01-01T00:00:00Z',
             remote: 'origin',
             branch: 'main',
             pushIntegrationBranch: false,

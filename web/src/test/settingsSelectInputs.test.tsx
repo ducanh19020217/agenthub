@@ -229,6 +229,12 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(validateReviewerModelSyntax('codex:x', 'codex', (k) => k)).toBe('settings.invalidModelSyntax');
       expect(validateReviewerModelSyntax('gpt-5.6-luna', 'claude', (k) => k)).toBe('settings.invalidChatModelSyntax');
       expect(validateReviewerModelSyntax('sonnet', 'codex', (k) => k)).toBe('settings.invalidModelSyntax');
+
+      // Accepts newly discovered Codex models when knownModels is passed
+      expect(validateReviewerModelSyntax('o3-mini', 'codex', (k) => k, ['codex:o3-mini'])).toBeNull();
+      expect(validateReviewerModelSyntax('codex:o3-mini', 'codex', (k) => k, ['o3-mini'])).toBeNull();
+      expect(validateReviewerModelSyntax('custom-reviewer', 'codex', (k) => k, ['custom-reviewer'])).toBeNull();
+      expect(validateReviewChainReviewerSyntax('codex:o3-mini', (k) => k, ['codex:o3-mini'])).toBeNull();
     });
   });
 
@@ -1215,6 +1221,66 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       const step1Select = within(chainBlock).getByRole('combobox', { name: /^Bước review 1$/i }) as HTMLSelectElement;
       expect(step1Select.value).toBe('');
       expect(within(step1Select).queryByText(/gpt-5.6-luna/i)).not.toBeInTheDocument();
+    });
+
+    it('does not insert hardcoded codex:gpt-5.6-luna when applying presets or quick-fix in ProjectSettingsDrawer with empty codex models', async () => {
+      const cleanProject = {
+        ...mockProject,
+        review: null,
+        settings: {
+          ...mockProject.settings,
+          review: undefined,
+        },
+      };
+
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        models: [
+          { id: 'sonnet', name: 'Claude Sonnet', engine: 'claude', profiles: ['p1'], verified: true, available: true },
+        ],
+        suggestions: ['sonnet'],
+      });
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        chat: { model: 'sonnet', models: ['sonnet'] },
+        reviewer: { model: '', claudeModel: 'sonnet' },
+        modelChainHard: [],
+        modelChainEasy: [],
+      } as any);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <ProjectSettingsDrawer
+                  project={cleanProject}
+                  isOpen={true}
+                  onClose={() => {}}
+                />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      const advancedSummary = screen.getByTestId('advanced-settings-section').querySelector('summary');
+      if (advancedSummary) fireEvent.click(advancedSummary);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('project-review-chain')).toBeInTheDocument();
+      });
+
+      // Quick fix button should be disabled when no codex model is available
+      const fixBtn = screen.queryByTestId('automerge-fix-chain');
+      if (fixBtn) {
+        expect(fixBtn).toBeDisabled();
+      }
+
+      // Applying balanced preset should not contain codex:gpt-5.6-luna
+      const balancedBtn = screen.getByTestId('project-preset-card-balanced');
+      fireEvent.click(balancedBtn);
+
+      const chainBlock = screen.getByTestId('project-review-chain');
+      expect(within(chainBlock).queryByText(/gpt-5.6-luna/i)).not.toBeInTheDocument();
     });
   });
 

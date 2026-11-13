@@ -560,6 +560,28 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     ).filter(Boolean);
   }, [availableCodexReviewerModels, reviewChain.chain, project]);
 
+  const allDiscoveredReviewerModels = useMemo(() => {
+    const list: string[] = [];
+    if (modelOptions?.models) {
+      for (const m of modelOptions.models) {
+        list.push(m.id);
+      }
+    }
+    if (modelOptions?.suggestions) {
+      list.push(...modelOptions.suggestions);
+    }
+    return list;
+  }, [modelOptions]);
+
+  const knownReviewerValidatorModels = useMemo(() => {
+    return new Set([
+      ...availableCodexReviewerModels,
+      ...availableClaudeReviewerModels,
+      ...availableReviewChainReviewers,
+      ...allDiscoveredReviewerModels,
+    ]);
+  }, [availableCodexReviewerModels, availableClaudeReviewerModels, availableReviewChainReviewers, allDiscoveredReviewerModels]);
+
   const [checksError, setChecksError] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [reviewerOrderError, setReviewerOrderError] = useState<string | null>(null);
@@ -780,20 +802,22 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       if (preset === 'safe') {
         updateReviewChainState({ chain: [], maxRounds: 2 }, true);
       } else if (preset === 'balanced') {
-        const codexModel = availableCodexReviewerModels[0] || 'codex:gpt-5.6-luna';
-        const cleanCodex = codexModel.startsWith('codex:') ? codexModel : `codex:${codexModel}`;
+        const codexModel = availableCodexReviewerModels[0];
+        const cleanCodex = codexModel ? (codexModel.startsWith('codex:') ? codexModel : `codex:${codexModel}`) : null;
         updateReviewChainState({
           chain: [
-            { reviewer: cleanCodex, mode: 'gate' },
-            { reviewer: 'claude', mode: 'final' },
+            ...(cleanCodex ? [{ reviewer: cleanCodex, mode: 'gate' as const }] : []),
+            { reviewer: 'claude', mode: 'final' as const },
           ],
           maxRounds: 2,
         }, true);
       } else if (preset === 'auto') {
-        const codexModel = availableCodexReviewerModels[0] || 'codex:gpt-5.6-luna';
-        const cleanCodex = codexModel.startsWith('codex:') ? codexModel : `codex:${codexModel}`;
+        const codexModel = availableCodexReviewerModels[0];
+        const cleanCodex = codexModel ? (codexModel.startsWith('codex:') ? codexModel : `codex:${codexModel}`) : null;
         updateReviewChainState({
-          chain: [{ reviewer: cleanCodex, mode: 'final' }],
+          chain: cleanCodex
+            ? [{ reviewer: cleanCodex, mode: 'final' as const }]
+            : [{ reviewer: 'claude', mode: 'final' as const }],
           maxRounds: 3,
         }, true);
       }
@@ -819,7 +843,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   };
 
   const quickFixChain = () => {
-    const codexModel = availableCodexReviewerModels[0] || 'codex:gpt-5.6-luna';
+    const codexModel = availableCodexReviewerModels[0];
+    if (!codexModel) return;
     const cleanCodex = codexModel.startsWith('codex:') ? codexModel : `codex:${codexModel}`;
     if (reviewChain.chain.length === 0) {
       updateReviewChainState({ ...reviewChain, chain: [{ reviewer: cleanCodex, mode: 'final' }] }, true);
@@ -1890,7 +1915,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                       variant="ghost"
                       data-testid="automerge-fix-chain"
                       onClick={quickFixChain}
-                      className="text-xs text-[var(--t-accent)] h-6 px-2"
+                      disabled={availableCodexReviewerModels.length === 0}
+                      className="text-xs text-[var(--t-accent)] h-6 px-2 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {t('projects.autoMergeFixBtn')}
                     </Button>
@@ -3762,7 +3788,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                                   updateReviewerOrderState(next, true);
                                 }}
                                 options={engineModelOptions}
-                                validate={(val) => validateReviewerModelSyntax(val, item.engine, t)}
+                                validate={(val) => validateReviewerModelSyntax(val, item.engine, t, knownReviewerValidatorModels)}
                                 placeholder={item.engine === 'codex' ? 'codex:model' : 'sonnet'}
                               />
                             </div>
@@ -4044,7 +4070,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                               updateReviewChainState({ ...reviewChain, chain: nextChain }, true);
                             }}
                             options={availableReviewChainReviewers}
-                            validate={(val) => validateReviewChainReviewerSyntax(val, t)}
+                            validate={(val) => validateReviewChainReviewerSyntax(val, t, knownReviewerValidatorModels)}
                             ariaLabel={`${t('settings.reviewStep')} ${index + 1}`}
                             placeholder={t('settings.reviewerPlaceholder')}
                           />

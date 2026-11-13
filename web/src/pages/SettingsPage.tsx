@@ -1118,7 +1118,7 @@ export const SettingsPage: React.FC = () => {
                           value={item.model}
                           onChange={(val) => setReviewOrder((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, model: val } : row))}
                           options={engineModelOptions}
-                          validate={(val) => validateReviewerModelSyntax(val, item.engine, t)}
+                          validate={(val) => validateReviewerModelSyntax(val, item.engine, t, knownDiscovered)}
                           placeholder={item.engine === 'codex' ? 'codex:model' : 'sonnet'}
                         />
                       </div>
@@ -1201,7 +1201,7 @@ export const SettingsPage: React.FC = () => {
                     value={arbiter.model}
                     onChange={(val) => setArbiter((value) => ({ ...value, model: val }))}
                     options={arbiter.engine === 'codex' ? availableCodexReviewerModels : availableClaudeReviewerModels}
-                    validate={(val) => validateReviewerModelSyntax(val, arbiter.engine, t)}
+                    validate={(val) => validateReviewerModelSyntax(val, arbiter.engine, t, knownDiscovered)}
                     placeholder={arbiter.engine === 'codex' ? 'codex:model' : 'sonnet'}
                   />
                 </div>
@@ -1216,7 +1216,7 @@ export const SettingsPage: React.FC = () => {
                 value={reviewerModel}
                 onChange={setReviewerModel}
                 options={availableCodexReviewerModels}
-                validate={(val) => validateReviewerModelSyntax(val, val.startsWith('claude') ? 'claude' : 'codex', t)}
+                validate={(val) => validateReviewerModelSyntax(val, val.startsWith('claude') ? 'claude' : 'codex', t, knownDiscovered)}
                 placeholder="codex:model"
                 className="w-full"
               />

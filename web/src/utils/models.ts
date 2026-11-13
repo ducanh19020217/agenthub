@@ -231,7 +231,15 @@ export function validateReviewerModelSyntax(
   }
   if (knownModels) {
     const knownSet = new Set(knownModels);
-    if (knownSet.has(trimmed) || knownSet.has(`codex:${trimmed}`) || knownSet.has(`claude:${trimmed}`)) {
+    const unprefix = trimmed.replace(/^(codex:|claude:)/, '');
+    if (
+      knownSet.has(trimmed) ||
+      knownSet.has(`codex:${trimmed}`) ||
+      knownSet.has(`claude:${trimmed}`) ||
+      knownSet.has(unprefix) ||
+      knownSet.has(`codex:${unprefix}`) ||
+      knownSet.has(`claude:${unprefix}`)
+    ) {
       return null;
     }
   }

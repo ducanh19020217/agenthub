@@ -36,6 +36,14 @@ describe('TaskDetailPage', () => {
 
     vi.spyOn(sse, 'subscribeToRunOutput').mockImplementation(() => () => {});
     vi.spyOn(client, 'getTaskLog').mockResolvedValue('');
+    vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+      models: [
+        { id: 'gemini-3.8-flash-high', name: 'Gemini Flash High', engine: 'agy', available: true, profiles: ['agy1'] },
+        { id: 'claude-sonnet-4-6', name: 'Claude Sonnet', engine: 'claude', available: true, profiles: ['claude1'] },
+        { id: 'codex:gpt-5.6-luna', name: 'Codex Luna', engine: 'codex', available: true, profiles: ['codex1'] },
+      ],
+      suggestions: ['gemini-3.8-flash-high', 'claude-sonnet-4-6', 'codex:gpt-5.6-luna'],
+    });
   });
 
   afterEach(() => {
@@ -1185,6 +1193,36 @@ describe('TaskDetailPage', () => {
     const skippedBanner = await screen.findByTestId('publish-skipped-dirty-banner');
     expect(skippedBanner).toBeInTheDocument();
     expect(skippedBanner).toHaveTextContent('main');
+  });
+
+  it('33. Modal Sửa: không dùng VALID_MODELS khi discovery trống và hiển thị cảnh báo cho model không khả dụng', async () => {
+    vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+      models: [
+        { id: 'gemini-3.8-flash-high', engine: 'agy', available: false, profiles: [] },
+      ],
+      suggestions: [],
+    });
+
+    const taskWithUnavailableModel = {
+      ...baseTask,
+      modelChain: JSON.stringify(['gemini-3.8-flash-high']),
+    };
+    vi.spyOn(client, 'getTask').mockResolvedValue(taskWithUnavailableModel);
+
+    renderPage();
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Sửa$/i }));
+
+    // Model item in chain should display unavailable warning
+    expect(screen.getByTestId('model-item-0')).toHaveTextContent('gemini-3.8-flash-high');
+    expect(screen.getByTestId('model-item-0')).toHaveTextContent(/không còn khả dụng/i);
+
+    // Dropdown should not have hardcoded VALID_MODELS
+    const select = screen.getByTestId('add-model-select') as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+    expect(within(select).queryByText('codex:gpt-5.6-luna')).not.toBeInTheDocument();
+    expect(within(select).queryByText('claude-sonnet-4-6')).not.toBeInTheDocument();
   });
 });
 

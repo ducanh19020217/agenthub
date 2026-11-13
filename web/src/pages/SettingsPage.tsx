@@ -426,7 +426,7 @@ export const SettingsPage: React.FC = () => {
       return;
     }
 
-    const invalidChat = validateChatModelSyntax(chatModel, t);
+    const invalidChat = validateChatModelSyntax(chatModel, t, availableChatModels);
     if (invalidChat) {
       failValidation(`${t('extra.chatModel')}: ${invalidChat} ("${chatModel}")`);
       return;
@@ -958,9 +958,10 @@ export const SettingsPage: React.FC = () => {
                     value={chatModel}
                     onChange={setChatModel}
                     options={Array.from(new Set([...chatModels, ...availableChatModels]))}
-                    validate={(m) => validateChatModelSyntax(m, t)}
+                    validate={(m) => validateChatModelSyntax(m, t, availableChatModels)}
                     placeholder="sonnet"
                     className="w-full max-w-sm"
+                    showCustomWarning={true}
                   />
                   <p className="text-[11px] text-[var(--t-text-3)] mt-1">
                     {t('extra.defaultChatModel')} {chatModels.join(', ')}
@@ -994,14 +995,15 @@ export const SettingsPage: React.FC = () => {
                       value={newChatModel}
                       onChange={setNewChatModel}
                       options={availableChatModels.filter((m) => !chatModels.includes(m))}
-                      validate={(m) => validateChatModelSyntax(m, t)}
+                      validate={(m) => validateChatModelSyntax(m, t, availableChatModels)}
                       placeholder="opus"
                       ariaLabel={t('extra.chatModelsLabel')}
                       className="flex-1"
+                      showCustomWarning={true}
                     />
                     <button
                       type="button"
-                      disabled={!newChatModel.trim() || chatModels.includes(newChatModel.trim()) || Boolean(validateChatModelSyntax(newChatModel.trim(), t))}
+                      disabled={!newChatModel.trim() || chatModels.includes(newChatModel.trim()) || Boolean(validateChatModelSyntax(newChatModel.trim(), t, availableChatModels))}
                       onClick={() => {
                         const trimmed = newChatModel.trim();
                         if (trimmed && !chatModels.includes(trimmed)) {
@@ -1386,9 +1388,10 @@ export const SettingsPage: React.FC = () => {
                       value={step.model}
                       onChange={(val) => { const next = [...fallback]; next[index] = { ...step, model: val }; setFallback(next); }}
                       options={Array.from(new Set([...availableChatModels, ...chatModels, step.model].filter(Boolean)))}
-                      validate={(m) => validateChatModelSyntax(m, t)}
+                      validate={(m) => validateChatModelSyntax(m, t, availableChatModels)}
                       placeholder="sonnet"
                       ariaLabel={`Fallback model ${index + 1}`}
+                      showCustomWarning={true}
                     />
                   </div>
                 )}

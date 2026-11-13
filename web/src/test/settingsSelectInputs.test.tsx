@@ -208,8 +208,15 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(validateChatModelSyntax('sonnet', (k) => k)).toBeNull();
       expect(validateChatModelSyntax('opus', (k) => k)).toBeNull();
       expect(validateChatModelSyntax('haiku', (k) => k)).toBeNull();
-      expect(validateChatModelSyntax('gemini-3.8-flash-high', (k) => k)).toBe('settings.invalidChatModelSyntax');
-      expect(validateChatModelSyntax('codex:gpt-5.6-luna', (k) => k)).toBe('settings.invalidChatModelSyntax');
+      // Accepts newly discovered Claude models
+      expect(validateChatModelSyntax('claude-sonnet-5-5', (k) => k, ['claude-sonnet-5-5'])).toBeNull();
+      // Accepts custom models without whitespace
+      expect(validateChatModelSyntax('custom-model-id', (k) => k)).toBeNull();
+      expect(validateChatModelSyntax('gemini-3.8-flash-high', (k) => k)).toBeNull();
+      expect(validateChatModelSyntax('codex:gpt-5.6-luna', (k) => k)).toBeNull();
+      // Rejects model strings with whitespace
+      expect(validateChatModelSyntax('custom model with space', (k) => k)).toBe('settings.invalidChatModelSyntax');
+      expect(validateChatModelSyntax('sonnet with space', (k) => k)).toBe('settings.invalidChatModelSyntax');
     });
 
     it('validates review chain reviewer syntax and reviewer model syntax', () => {
@@ -678,6 +685,24 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
         </ThemeProvider>
       </LocaleProvider>,
     );
+
+    it('allows saving a custom chat model without whitespace', async () => {
+      const updateSpy = vi.spyOn(client, 'updateConfig').mockResolvedValue({} as any);
+      renderSettings();
+
+      const chatSelect = await screen.findByLabelText('Model chat Claude');
+      expect(chatSelect).toBeInTheDocument();
+      fireEvent.change(chatSelect, { target: { value: '__custom__' } });
+
+      const customInput = screen.getByPlaceholderText('sonnet');
+      expect(customInput).toBeInTheDocument();
+      fireEvent.change(customInput, { target: { value: 'custom-claude-model' } });
+
+      fireEvent.click(screen.getByRole('button', { name: /Lưu cấu hình/i }));
+      await waitFor(() => expect(updateSpy).toHaveBeenCalled());
+      const payload = updateSpy.mock.calls[0][0];
+      expect(payload.chat?.model).toBe('custom-claude-model');
+    });
 
     it('shows a success toast after saving the config', async () => {
       let resolveSave: (value: any) => void = () => {};

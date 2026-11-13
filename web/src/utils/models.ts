@@ -141,15 +141,22 @@ export function validateModelSyntax(
 export function validateChatModelSyntax(
   model: string,
   t?: (key: string) => string,
+  knownModels?: Iterable<string>,
 ): string | null {
   const trimmed = model.trim();
   if (!trimmed) {
     return null;
   }
-  if (!DEFAULT_CLAUDE_MODELS.includes(trimmed)) {
+  if (/\s/.test(trimmed)) {
     return t
       ? t('settings.invalidChatModelSyntax')
-      : 'Chat model must be sonnet, opus, or haiku';
+      : 'Chat model cannot contain whitespace';
+  }
+  if (DEFAULT_CLAUDE_MODELS.includes(trimmed)) {
+    return null;
+  }
+  if (knownModels && new Set(knownModels).has(trimmed)) {
+    return null;
   }
   return null;
 }

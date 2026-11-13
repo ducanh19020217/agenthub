@@ -8,6 +8,9 @@
      - Chấp nhận số nguyên không âm (`>= 0`).
      - Cho phép cấu hình 0 để tắt cơ chế resume khi timeout.
      - Fallback về giá trị mặc định 2 nếu cấu hình không hợp lệ hoặc số âm.
+   - Thêm `scheduler.maxTimeoutResumes` vào allowlist của `SetupTools.configSet` (`src/setup-tools.ts`).
+   - Bổ sung trường `scheduler` vào `UpdateConfigSchema` và trả về `scheduler` trong `AppService.getConfig()` (`src/services/index.ts`).
+   - Bổ sung `scheduler` vào `SystemConfig` trong `web/src/types/api.ts`.
 
 2. **Cơ chế timeout resume dựa trên tiến độ và số lần timeout liên tiếp**:
    - Trong `src/scheduler/index.ts` (xử lý outcome `timeout` của worker run):
@@ -30,15 +33,20 @@
      - `task.failed` với `reason: 'timeout'`: thông báo task thất bại do quá thời gian.
 
 4. **Tài liệu quyết định kiến trúc (`docs/DECISIONS.md`)**:
-   - Thêm `DEC-031: Tự động resume task khi worker timeout nếu có tiến độ và phát sự kiện task.failed` mô tả bối cảnh, lý do thiết kế, cơ chế resume và các mốc sự kiện.
+   - Thêm và cập nhật `DEC-031: Tự động resume task khi worker timeout nếu có tiến độ và phát sự kiện task.failed` mô tả bối cảnh, lý do thiết kế, cơ chế resume, mốc sự kiện và các kênh cấu hình.
 
-5. **Unit tests (`test/scheduler.test.ts`)**:
-   - Kiểm tra cấu hình `maxTimeoutResumes`: giá trị mặc định 2, validate số âm, nhận giá trị 0, lưu và tải từ file cấu hình.
-   - Kiểm tra timeout có commit được requeue với cờ `resume: 1`, body và task.md được bổ sung ghi chú, lần timeout thứ 3 chuyển sang `failed` và phát `task.failed`.
-   - Kiểm tra timeout không có commit chuyển sang `failed` ngay, phát cả `task.failed` lẫn `task.timeout`.
-   - Kiểm tra `maxTimeoutResumes = 0` giữ hành vi cũ (fail ngay) nhưng vẫn phát `task.failed`.
-   - Kiểm tra mốc `run.startedAt` dùng trực tiếp, không tính commit xảy ra trước run là tiến độ khi `rt.startTime` sớm hơn.
-   - Xác thực sự kiện `task.timeout` được phát trong tất cả các kịch bản timeout.
+5. **Unit & Integration tests**:
+   - `test/scheduler.test.ts`:
+     - Kiểm tra cấu hình `maxTimeoutResumes`: giá trị mặc định 2, validate số âm, nhận giá trị 0, lưu và tải từ file cấu hình.
+     - Kiểm tra timeout có commit được requeue với cờ `resume: 1`, body và task.md được bổ sung ghi chú, lần timeout thứ 3 chuyển sang `failed` và phát `task.failed`.
+     - Kiểm tra timeout không có commit chuyển sang `failed` ngay, phát cả `task.failed` lẫn `task.timeout`.
+     - Kiểm tra `maxTimeoutResumes = 0` giữ hành vi cũ (fail ngay) nhưng vẫn phát `task.failed`.
+     - Kiểm tra mốc `run.startedAt` dùng trực tiếp, không tính commit xảy ra trước run là tiến độ khi `rt.startTime` sớm hơn.
+     - Xác thực sự kiện `task.timeout` được phát trong tất cả các kịch bản timeout.
+   - `test/setup-tools-contract.test.ts`:
+     - Kiểm tra `configSet('scheduler.maxTimeoutResumes', 0)` hỗ trợ cả dry-run (sinh diff chuẩn) và write path (gọi `service.updateConfig`).
+   - `test/config-presets.test.ts`:
+     - Kiểm tra `UpdateConfigSchema` và `PUT /api/config` nhận và lưu trường `scheduler.maxTimeoutResumes`.
 
 ## Kết quả kiểm tra
 
@@ -47,6 +55,8 @@
 - **Build**: `npm run build` (`tsc && cp src/protocol.md dist/protocol.md`) -> PASS.
 - **Test Backend**:
   - `test/scheduler.test.ts`: 150/150 passed.
+  - `test/setup-tools-contract.test.ts`: 6/6 passed.
+  - `test/config-presets.test.ts`: 19/19 passed.
   - Toàn bộ backend test suite (`npm test`): 144 test files passed, 1813/1813 passed.
 - **Test Web**:
   - `npm run test:web`: 74 test files passed, 675/675 passed.
@@ -60,3 +70,5 @@
 - `cb767641`: docs(decisions): add DEC-031 for timeout resume and brain wakeup events
 - `f2f21a40`: fix(scheduler): emit task.timeout on all timeouts and use direct run.startedAt for progress check
 - `b9d60ce9`: docs(decisions): update DEC-031 with timeout event and progress timestamp refinements
+- `28645692`: docs(tasks): add completion report for t-timeout-resume
+- `a8e7bc9a`: feat(setup-tools): allow scheduler.maxTimeoutResumes in configSet and UpdateConfigSchema

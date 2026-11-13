@@ -37,10 +37,11 @@ describe('TaskDetailPage', () => {
     vi.spyOn(sse, 'subscribeToRunOutput').mockImplementation(() => () => {});
     vi.spyOn(client, 'getTaskLog').mockResolvedValue('');
     vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+      configured: [],
       models: [
-        { id: 'gemini-3.8-flash-high', name: 'Gemini Flash High', engine: 'agy', available: true, profiles: ['agy1'] },
-        { id: 'claude-sonnet-4-6', name: 'Claude Sonnet', engine: 'claude', available: true, profiles: ['claude1'] },
-        { id: 'codex:gpt-5.6-luna', name: 'Codex Luna', engine: 'codex', available: true, profiles: ['codex1'] },
+        { id: 'gemini-3.8-flash-high', name: 'Gemini Flash High', engine: 'agy', verified: true, available: true, profiles: ['agy1'] },
+        { id: 'claude-sonnet-4-6', name: 'Claude Sonnet', engine: 'claude', verified: true, available: true, profiles: ['claude1'] },
+        { id: 'codex:gpt-5.6-luna', name: 'Codex Luna', engine: 'codex', verified: true, available: true, profiles: ['codex1'] },
       ],
       suggestions: ['gemini-3.8-flash-high', 'claude-sonnet-4-6', 'codex:gpt-5.6-luna'],
     });
@@ -1197,8 +1198,9 @@ describe('TaskDetailPage', () => {
 
   it('33. Modal Sửa: không dùng VALID_MODELS khi discovery trống và hiển thị cảnh báo cho model không khả dụng', async () => {
     vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+      configured: [],
       models: [
-        { id: 'gemini-3.8-flash-high', engine: 'agy', available: false, profiles: [] },
+        { id: 'gemini-3.8-flash-high', name: 'Gemini Flash High', engine: 'agy', verified: false, available: false, profiles: [] },
       ],
       suggestions: [],
     });

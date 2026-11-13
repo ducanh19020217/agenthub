@@ -1234,6 +1234,7 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       };
 
       vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        configured: [],
         models: [
           { id: 'sonnet', name: 'Claude Sonnet', engine: 'claude', profiles: ['p1'], verified: true, available: true },
         ],

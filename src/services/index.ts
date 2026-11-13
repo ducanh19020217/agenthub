@@ -6481,8 +6481,9 @@ export class AppService {
     const enabledProfiles = this.profileRepo.getAll().filter((profile) => Boolean(profile.enabled) && !profile.deletedAt);
     const modelMap = new Map<string, DiscoveredModelApiItem>();
 
-    // 1. Collect verified models from enabled profiles that actually have discovery records
+    // 1. Collect verified models from enabled and logged-in profiles that actually have discovery records
     for (const profile of enabledProfiles) {
+      if (!isProfileLoggedIn(profile)) continue;
       if (!this.profileModelRepo) continue;
       const rows = this.profileModelRepo.getForProfile(profile.name);
       for (const r of rows) {

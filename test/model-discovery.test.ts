@@ -442,8 +442,7 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     profileRepo.upsert({
       name: 'agy-p1',
       engine: 'agy',
-      kind: 'isolated',
-      home: '/home/agy1',
+      kind: 'keyring',
       email: 'p1@example.com',
       enabled: 1,
       accountType: 'personal',
@@ -456,8 +455,7 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     profileRepo.upsert({
       name: 'agy-p2',
       engine: 'agy',
-      kind: 'isolated',
-      home: '/home/agy2',
+      kind: 'keyring',
       email: 'p2@example.com',
       enabled: 1,
       accountType: 'personal',
@@ -467,12 +465,15 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
       { modelId: 'claude-sonnet-4-6', modelName: 'Claude Sonnet 4.6', engine: 'agy', verified: true },
     ]);
 
-    // 3. Add codex profile
+    // 3. Add codex profile with auth.json
+    const codexHome = path.join(tmpDir, 'codex-p1-home');
+    fs.mkdirSync(codexHome, { recursive: true });
+    fs.writeFileSync(path.join(codexHome, 'auth.json'), '{}');
     profileRepo.upsert({
       name: 'codex-p1',
       engine: 'codex',
       kind: 'isolated',
-      home: '/home/codex1',
+      home: codexHome,
       email: 'codex1@example.com',
       enabled: 1,
       accountType: 'personal',
@@ -496,52 +497,9 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
       profileRepo,
       profileModelRepo,
       config: fakeConfig,
-      getModelOptions: () => {
-        // test the exact logic
-        const enabledProfiles = profileRepo.getAll().filter((p) => Boolean(p.enabled) && !p.deletedAt);
-        const modelMap = new Map<string, any>();
-        for (const p of enabledProfiles) {
-          const rows = profileModelRepo.getForProfile(p.name);
-          for (const item of rows) {
-            const existing = modelMap.get(item.modelId);
-            if (existing) {
-              if (!existing.profiles.includes(p.name)) existing.profiles.push(p.name);
-              if (item.verified) existing.verified = true;
-            } else {
-              modelMap.set(item.modelId, {
-                id: item.modelId,
-                engine: item.engine,
-                name: item.modelName || item.modelId,
-                profiles: [p.name],
-                verified: Boolean(item.verified),
-                available: true,
-                warning: null,
-              });
-            }
-          }
-        }
-        for (const m of ['nonexistent-model']) {
-          if (!modelMap.has(m)) {
-            modelMap.set(m, {
-              id: m,
-              engine: 'agy',
-              name: m,
-              profiles: [],
-              verified: false,
-              available: false,
-              warning: 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp',
-            });
-          }
-        }
-        return {
-          models: Array.from(modelMap.values()),
-          suggestions: Array.from(modelMap.values()).filter((m) => m.available).map((m) => m.id),
-          configured: ['gemini-3.8-flash-high', 'nonexistent-model'],
-        };
-      },
     };
 
-    const result = service.getModelOptions();
+    const result = AppService.prototype.getModelOptions.call(service as any);
     expect(result.suggestions).toContain('gemini-3.8-flash-high');
     expect(result.suggestions).toContain('claude-sonnet-4-6');
     expect(result.suggestions).toContain('codex:gpt-6.1-sol');
@@ -640,8 +598,7 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     profileRepo.upsert({
       name: 'agy-with-disc',
       engine: 'agy',
-      kind: 'isolated',
-      home: '/home/agy-with-disc',
+      kind: 'keyring',
       email: 'disc@example.com',
       enabled: 1,
       accountType: 'personal',
@@ -654,8 +611,7 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     profileRepo.upsert({
       name: 'agy-no-disc',
       engine: 'agy',
-      kind: 'isolated',
-      home: '/home/agy-no-disc',
+      kind: 'keyring',
       email: 'nodisc@example.com',
       enabled: 1,
       accountType: 'personal',
@@ -670,5 +626,59 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(known.has('gemini-custom-model')).toBe(true);
     expect(known.has('gemini-3.8-flash-high')).toBe(true);
     expect(known.has('claude-opus-4-6-thinking')).toBe(true);
+  });
+
+  it('logged-out profile marks cache unverified and is treated as unavailable across discovery, API, and scheduler', async () => {
+    // 1. Profile with authState not_logged_in
+    profileRepo.upsert({
+      name: 'agy-logged-out',
+      engine: 'agy',
+      kind: 'keyring',
+      email: 'loggedout@example.com',
+      enabled: 1,
+      accountType: 'personal',
+      authState: 'not_logged_in',
+    });
+
+    // Previously verified cache in DB
+    profileModelRepo.setForProfile('agy-logged-out', [
+      { modelId: 'gemini-exclusive-model', modelName: 'Gemini Exclusive', engine: 'agy', verified: true },
+    ]);
+
+    // A. ModelDiscoveryService.discoverForProfile returns verified: false and marks cache verified: 0
+    const discoveryService = new ModelDiscoveryService(profileRepo, profileModelRepo);
+    const discovered = await discoveryService.discoverForProfile(profileRepo.get('agy-logged-out')!);
+    expect(discovered.find((m) => m.id === 'gemini-exclusive-model')?.verified).toBe(false);
+
+    const dbCached = profileModelRepo.getForProfile('agy-logged-out');
+    expect(dbCached.find((m) => m.modelId === 'gemini-exclusive-model')?.verified).toBe(0);
+
+    // B. AppService.getModelOptions does NOT include logged-out profile or mark model available
+    const service = {
+      profileRepo,
+      profileModelRepo,
+      config: {
+        defaultModelChains: { hard: [], easy: [] },
+        reviewer: { order: [] },
+      },
+    };
+    const options = AppService.prototype.getModelOptions.call(service as any);
+    const exclusiveModel = options.models.find((m) => m.id === 'gemini-exclusive-model');
+    // Model not provided by any logged-in profile must not be available
+    expect(exclusiveModel?.available ?? false).toBe(false);
+    expect(exclusiveModel?.profiles ?? []).not.toContain('agy-logged-out');
+    expect(options.suggestions).not.toContain('gemini-exclusive-model');
+
+    // C. Scheduler: profileHasModel returns false for logged-out profile
+    const scheduler = {
+      profileRepo,
+      profileModelRepo,
+    };
+    const hasModel = Scheduler.prototype.profileHasModel.call(scheduler as any, 'agy-logged-out', 'gemini-exclusive-model');
+    expect(hasModel).toBe(false);
+
+    // D. Scheduler: getKnownDiscoveredModels does not include models only on logged-out profile
+    const known = Scheduler.prototype.getKnownDiscoveredModels.call(scheduler as any);
+    expect(known.has('gemini-exclusive-model')).toBe(false);
   });
 });

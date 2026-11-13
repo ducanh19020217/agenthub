@@ -35,6 +35,7 @@ import { ensureWorktreeNodeModules, nodeModulesCacheSummary, pruneNodeModulesCac
 import { AgentHubConfig, DEFAULT_SCHEDULER_LIMITS } from '../config.js';
 import { ProfileLockService } from '../profiles/locks.js';
 import { sameAccount } from '../profiles/account.js';
+import { isProfileLoggedIn } from '../profiles/index.js';
 import { QuotaUsageService } from '../quota/usage.js';
 import { CheckRunner, getCheckResults } from '../checks.js';
 import { parseDbTime } from '../db/time.js';
@@ -495,11 +496,15 @@ export class Scheduler {
     const known = new Set<string>();
     const enabledProfiles = this.profileRepo.getEnabled();
     for (const p of enabledProfiles) {
+      if (p.authState === 'not_logged_in') continue;
       if (this.profileModelRepo) {
         const rows = this.profileModelRepo.getForProfile(p.name);
         if (rows.length > 0) {
+          if (!isProfileLoggedIn(p)) continue;
           for (const r of rows) {
-            known.add(r.modelId);
+            if (r.verified) {
+              known.add(r.modelId);
+            }
           }
           continue;
         }
@@ -525,11 +530,13 @@ export class Scheduler {
   profileHasModel(profileName: string, model: string): boolean {
     const profile = this.profileRepo.get(profileName);
     if (!profile) return false;
+    if (profile.authState === 'not_logged_in') return false;
 
     if (this.profileModelRepo) {
       const rows = this.profileModelRepo.getForProfile(profileName);
       if (rows.length > 0) {
-        return rows.some((r) => r.modelId === model);
+        if (!isProfileLoggedIn(profile)) return false;
+        return rows.some((r) => r.modelId === model && Boolean(r.verified));
       }
     }
 

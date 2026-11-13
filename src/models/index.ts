@@ -47,18 +47,30 @@ export class ModelDiscoveryService {
   }
 
   private async doDiscoverForProfile(profile: ProfileRow, force = false): Promise<DiscoveredModelItem[]> {
-    // If not logged in, return cached from DB or defaults
+    // If not logged in, return cached from DB marked unverified or defaults
     if (!isProfileLoggedIn(profile)) {
       const cached = this.profileModelRepo.getForProfile(profile.name);
       if (cached.length > 0) {
+        this.profileModelRepo.setForProfile(
+          profile.name,
+          cached.map((c) => ({
+            modelId: c.modelId,
+            modelName: c.modelName,
+            engine: c.engine,
+            verified: false,
+          })),
+        );
         return cached.map((c) => ({
           id: c.modelId,
           name: c.modelName || c.modelId,
           engine: c.engine as 'agy' | 'codex' | 'claude',
-          verified: Boolean(c.verified),
+          verified: false,
         }));
       }
-      return getDefaultModelsForEngine(profile.engine);
+      return getDefaultModelsForEngine(profile.engine).map((item) => ({
+        ...item,
+        verified: false,
+      }));
     }
 
     try {

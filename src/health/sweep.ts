@@ -74,16 +74,6 @@ export interface HealthSweepServiceOptions {
   now?: () => number;
 }
 
-function isPidAlive(pid: number | null | undefined): boolean {
-  if (!pid || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function collectEvidence(
   db: Database.Database,
   taskId: string,
@@ -175,7 +165,9 @@ export class HealthSweepService {
     const intervalMinutes = this.opts.getConfig().intervalMinutes || 10;
     const intervalMs = Math.max(1, intervalMinutes) * 60_000;
     this.timer = setInterval(() => {
-      void this.runSweep();
+      this.runSweep().catch((error) => {
+        console.error('[health] periodic sweep failed:', error);
+      });
     }, intervalMs);
     this.timer.unref?.();
   }
@@ -487,8 +479,12 @@ export class HealthSweepService {
           if (ts < cutoff) return false;
           if (e.type === 'task.failover') return true;
           if (e.type === 'task.queued') {
-            const p = e.payload ? (typeof e.payload === 'string' ? JSON.parse(e.payload) : e.payload) : {};
-            return p?.reason === 'quota_retry';
+            try {
+              const p = e.payload ? (typeof e.payload === 'string' ? JSON.parse(e.payload) : e.payload) : {};
+              return p?.reason === 'quota_retry';
+            } catch {
+              return false;
+            }
           }
           return false;
         });
@@ -508,14 +504,29 @@ export class HealthSweepService {
       const unendedRuns = db.prepare('SELECT * FROM runs WHERE outcome IS NULL').all() as RunRow[];
       for (const run of unendedRuns) {
         if (scheduler.isRunActive(run.id)) continue;
-        if (isPidAlive(run.pid)) continue;
+
+        const startedAt = parseDbTime(run.startedAt);
+        const sinceMinutes = Math.floor(Math.max(0, now - startedAt) / 60_000);
+
+        if (run.pid == null) {
+          // Scheduler inserts runs before spawn then updates pid. Ignore newly created runs without PID
+          // unless orphaned for >= 10 minutes and task is not running in scheduler.
+          const PIDLESS_GRACE_MINUTES = 10;
+          if (sinceMinutes < PIDLESS_GRACE_MINUTES) {
+            continue;
+          }
+          if (scheduler.isRunning(run.taskId) || scheduler.isReviewing?.(run.taskId)) {
+            continue;
+          }
+        } else {
+          if (scheduler.isProcessAlive(run.pid, run.pidStart)) {
+            continue;
+          }
+        }
 
         const task = taskRepo.get(run.taskId);
         const projectId = task?.projectId || run.taskId.split('/')[0] || '';
         const currentStatus = task?.status || 'unknown';
-
-        const startedAt = parseDbTime(run.startedAt);
-        const sinceMinutes = Math.floor(Math.max(0, now - startedAt) / 60_000);
 
         if (shouldEmitWithCooldown(cooldownRepo, run.taskId, 'stale_run', currentStatus, now, cooldownMinutes)) {
           cooldownRepo.set(run.taskId, 'stale_run', new Date(now).toISOString(), currentStatus);

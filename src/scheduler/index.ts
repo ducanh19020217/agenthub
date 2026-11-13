@@ -4827,7 +4827,7 @@ export class Scheduler {
     }
   }
 
-  private getProcessStartTime(pid: number): number | null {
+  getProcessStartTime(pid: number): number | null {
     try {
       const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
       const afterComm = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
@@ -4837,8 +4837,8 @@ export class Scheduler {
     }
   }
 
-  private isProcessAlive(pid: number | null, expectedStart?: number | null): boolean {
-    if (!pid) return false;
+  isProcessAlive(pid: number | null, expectedStart?: number | null): boolean {
+    if (!pid || pid <= 0) return false;
     try {
       process.kill(pid, 0);
       if (expectedStart != null) {

@@ -1294,6 +1294,33 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
       const result = await sweepService.runSweep(now);
       expect(result.issues.some((i) => i.rule === 'failover_churn' && i.taskId === 'p1/t-failover-normal')).toBe(false);
     });
+
+    it('bỏ qua an toàn khi event task.queued có payload JSON hỏng (malformed string)', async () => {
+      const now = Date.now();
+      ctx.taskRepo.insert({
+        id: 'p1/t-failover-corrupt-payload',
+        projectId: 'p1',
+        title: 'Task corrupt payload',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-failover-corrupt-payload', {
+        status: 'queued',
+      });
+
+      // Insert event with corrupted JSON payload string directly into DB
+      ctx.db
+        .prepare('INSERT INTO events (ts, type, taskId, payload) VALUES (?, ?, ?, ?)')
+        .run(new Date(now).toISOString(), 'task.queued', 'p1/t-failover-corrupt-payload', '{malformed json string');
+
+      // Also insert 3 valid failover events (total 3, below threshold of 4)
+      for (let i = 0; i < 3; i++) {
+        ctx.eventRepo.insert('task.failover', 'p1/t-failover-corrupt-payload', { reason: 'quota_exhausted' });
+      }
+
+      // Sweep should not throw error and should not count the corrupted event as quota_retry
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'failover_churn' && i.taskId === 'p1/t-failover-corrupt-payload')).toBe(false);
+    });
   });
 
   // 7. stale_run
@@ -1366,6 +1393,111 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
 
       const result = await sweepService.runSweep(now);
       expect(result.issues.some((i) => i.rule === 'stale_run')).toBe(false);
+    });
+
+    it('không đánh dấu crashed với run mới tạo chưa có PID (pid IS NULL dưới ngưỡng 10 phút)', async () => {
+      const now = Date.now();
+      ctx.taskRepo.insert({
+        id: 'p1/t-new-run-nopid',
+        projectId: 'p1',
+        title: 'Task new run no pid',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-new-run-nopid', {
+        status: 'running',
+      });
+
+      // Insert newly created run (started 2 minutes ago) without PID
+      const past2m = new Date(now - 2 * 60 * 1000).toISOString();
+      ctx.runRepo.insert({
+        id: 'run-new-nopid',
+        taskId: 'p1/t-new-run-nopid',
+        engine: 'agy',
+        model: 'gemini',
+        profileName: 'prof1',
+        startedAt: past2m,
+        kind: 'worker',
+      });
+
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'stale_run' && i.taskId === 'p1/t-new-run-nopid')).toBe(false);
+
+      const runRow = ctx.runRepo.get('run-new-nopid');
+      expect(runRow?.outcome).toBeNull();
+    });
+
+    it('tự sửa run không có PID nhưng mồ côi quá 10 phút và task không còn running trong scheduler', async () => {
+      const now = Date.now();
+      ctx.taskRepo.insert({
+        id: 'p1/t-orphaned-nopid',
+        projectId: 'p1',
+        title: 'Task orphaned no pid',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-orphaned-nopid', {
+        status: 'running',
+      });
+
+      // Insert run without PID started 15 minutes ago
+      const past15m = new Date(now - 15 * 60 * 1000).toISOString();
+      ctx.runRepo.insert({
+        id: 'run-orphaned-nopid',
+        taskId: 'p1/t-orphaned-nopid',
+        engine: 'agy',
+        model: 'gemini',
+        profileName: 'prof1',
+        startedAt: past15m,
+        kind: 'worker',
+      });
+
+      // Task is not running in scheduler
+      vi.spyOn(ctx.scheduler, 'isRunning').mockReturnValue(false);
+
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'stale_run' && i.taskId === 'p1/t-orphaned-nopid')).toBe(true);
+
+      const runRow = ctx.runRepo.get('run-orphaned-nopid');
+      expect(runRow?.outcome).toBe('crashed');
+      const updatedTask = ctx.taskRepo.get('p1/t-orphaned-nopid');
+      expect(updatedTask?.status).toBe('queued');
+      expect(updatedTask?.resume).toBe(1);
+    });
+
+    it('phát hiện stale_run khi PID của run còn sống nhưng pidStart không khớp (PID bị tái sử dụng)', async () => {
+      const now = Date.now();
+      ctx.taskRepo.insert({
+        id: 'p1/t-reused-pid',
+        projectId: 'p1',
+        title: 'Task reused pid',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-reused-pid', {
+        status: 'running',
+      });
+
+      // Insert run with current living process pid, but with a mismatched pidStart
+      const realStart = ctx.scheduler.getProcessStartTime(process.pid) ?? 10000;
+      ctx.runRepo.insert({
+        id: 'run-reused-pid',
+        taskId: 'p1/t-reused-pid',
+        engine: 'agy',
+        model: 'gemini',
+        profileName: 'prof1',
+        pid: process.pid,
+        pidStart: realStart + 999999, // Mismatched start time indicates reused PID
+        kind: 'worker',
+      });
+
+      vi.spyOn(ctx.scheduler, 'isRunActive').mockReturnValue(false);
+
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'stale_run' && i.taskId === 'p1/t-reused-pid')).toBe(true);
+
+      const runRow = ctx.runRepo.get('run-reused-pid');
+      expect(runRow?.outcome).toBe('crashed');
+      const updatedTask = ctx.taskRepo.get('p1/t-reused-pid');
+      expect(updatedTask?.status).toBe('queued');
+      expect(updatedTask?.resume).toBe(1);
     });
   });
 
@@ -1546,6 +1678,29 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
 
       const statusAfter = ctx.service.getHealthSweepStatus();
       expect(statusAfter.timestamp).toBe(sweepResult.timestamp);
+    });
+  });
+
+  // Periodic sweep timer error handling
+  describe('Periodic sweep timer error handling', () => {
+    it('bắt và log lỗi an toàn khi runSweep bị reject trong timer setInterval', async () => {
+      vi.useFakeTimers();
+      try {
+        const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        vi.spyOn(sweepService, 'runSweep').mockRejectedValue(new Error('database locked'));
+
+        sweepService.start();
+        // Fast-forward interval
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+
+        expect(consoleErrorSpy).toHaveBeenCalledWith(
+          '[health] periodic sweep failed:',
+          expect.any(Error),
+        );
+      } finally {
+        sweepService.stop();
+        vi.useRealTimers();
+      }
     });
   });
 });

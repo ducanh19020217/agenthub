@@ -644,9 +644,18 @@ export class Scheduler {
     if (this.getCheckResults(task.id).length === 0) return false;
     const focus = this.getFocus();
     if (focus.projectId && task.projectId !== focus.projectId) return false;
+    if (this.reviewerRuns.has(task.id)) return false;
+
     if (task.reviewerEscalated) {
-      if (!this.needsEscalationArbiter(task)) return false;
+      const last = this.reviewRepo?.getByTask(task.id).at(-1);
+      if (last && isAutoReviewer(last.actor) && last.verdict === 'approved') {
+        // An automated reviewer approved after the escalation: it is resolved.
+      } else {
+        if (!this.needsEscalationArbiter(task)) return false;
+        return this.canStartEscalationArbiter(task);
+      }
     }
+
     const chain = this.reviewChainForTask(task);
     const step = chain[task.reviewStep ?? 0];
     if (chain.length > 0 && !isAutomatedStep(step)) return false;
@@ -656,7 +665,6 @@ export class Scheduler {
       const snapshot = this.failoverState?.snapshot() || { active: false, step: undefined };
       if (!snapshot.active || snapshot.step?.type !== 'engine' || snapshot.step.engine !== 'codex') return false;
     }
-    if (this.reviewerRuns.has(task.id)) return false;
     const defaultReviewer = this.config.reviewer?.order?.[0];
     const model = reviewerModel(step || { reviewer: defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna', mode: 'gate' }) || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna');
     const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
@@ -667,6 +675,53 @@ export class Scheduler {
       : this.pickReviewer(task, lastWorker?.model === model ? lastWorker.profileName : undefined, preferDifferentEngine, true);
     if ('wait' in picked) return false;
     return true;
+  }
+
+  canStartEscalationArbiter(task: TaskRow): boolean {
+    if (!task.worktreePath) return false;
+    const arbiter = this.config.reviewer?.arbiter || { engine: 'claude' as const, model: 'opus' };
+    if (arbiter.engine === 'claude' && !this.claudeBudgetAvailable(task)) {
+      return false;
+    }
+    const engineKey = arbiter.engine === 'claude' ? CLAUDE_REVIEW_ENGINE_KEY : 'codex';
+    const engine = this.engines.get(engineKey);
+    if (engine) {
+      const preferred = arbiter.engine === 'claude' ? (this.config.reviewer?.claudeProfiles ?? []) : [];
+      const hasCandidate = this.profileRepo.getEnabled().some((p) =>
+        p.engine === arbiter.engine &&
+        (p.authState == null || p.authState === 'ok') &&
+        (preferred.length === 0 || preferred.includes(p.name)) &&
+        !this.quotaService.isExhausted(p.name, arbiter.engine === 'claude' ? 'claude' : 'codex') &&
+        !this.reviewerInBackoff(p.name) &&
+        !this.reviewerRunsForProfile(p.name) &&
+        this.locks.findFreeSlotSync(p) !== null,
+      );
+      if (hasCandidate) return true;
+    }
+
+    const arbiterEngine = this.config.reviewer?.arbiter?.engine ?? 'claude';
+    if (arbiterEngine === 'codex') {
+      const claudeEngine = this.engines.get(CLAUDE_REVIEW_ENGINE_KEY);
+      if (!claudeEngine || !this.claudeBudgetAvailable(task)) return false;
+      return this.profileRepo.getEnabled().some((profile) =>
+        profile.engine === 'claude'
+        && (profile.authState == null || profile.authState === 'ok')
+        && !this.quotaService.isExhausted(profile.name, 'claude')
+        && !this.reviewerInBackoff(profile.name)
+        && !this.reviewerRunsForProfile(profile.name)
+        && this.locks.findFreeSlotSync(profile) !== null,
+      );
+    }
+
+    const codexEngine = this.engines.get('codex');
+    if (!codexEngine) return false;
+    return this.profileRepo.getEnabled().some((profile) =>
+      profile.engine === 'codex'
+      && !this.quotaService.isExhausted(profile.name, 'codex')
+      && !this.reviewerInBackoff(profile.name)
+      && !this.reviewerRunsForProfile(profile.name)
+      && this.locks.findFreeSlotSync(profile) !== null,
+    );
   }
 
   beginRestartDrain(timeoutMinutes = 120, reason?: string, onReady?: () => void): RestartState {

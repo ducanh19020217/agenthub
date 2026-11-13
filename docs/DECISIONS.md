@@ -405,7 +405,7 @@
      - Không chạy khi daemon đang drain restart hoặc scheduler đã dừng (`isDraining()` hoặc `isStopped()`).
      - Triển khai 7 luật phát hiện với ngưỡng cấu hình linh hoạt trong `config.healthSweep.rules`:
        - `checking_orphan`: checking > 20 phút không có check active/queued và không có run đang chạy.
-       - `review_orphan`: review > 30 phút, đủ điều kiện auto-review nhưng không có reviewer chạy và không bị chặn bởi quota hay backoff.
+       - `review_orphan`: review > 30 phút, đủ điều kiện auto-review nhưng không có reviewer chạy và không bị chặn bởi quota hay backoff. Với task đã leo thang (`reviewerEscalated`), đối chiếu chính xác khả năng chạy của arbiter (`canStartEscalationArbiter`) thay vì rơi xuống reviewer thông thường, tránh báo nhầm khi arbiter đang bị quota/backoff hợp lệ.
        - `queued_starved`: queued > 60 phút, không chờ quota, không có dependency chưa xong, không có notBefore tương lai, project còn slot song song.
        - `running_no_progress`: worker chạy > 90 phút không có commit mới và không đổi file trong worktree.
        - `churn`: worker runs >= 8 hoặc review.escalated >= 2 lần.

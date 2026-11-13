@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { apiFetch, apiFetchBlob, API_REQUEST_TIMEOUT_MS, AuthError, clearToken, getTasksPage, setToken } from '../api/client';
+import { apiFetch, apiFetchBlob, API_REQUEST_TIMEOUT_MS, AuthError, clearToken, getTaskLog, getTasksPage, setToken } from '../api/client';
 
 describe('API Client', () => {
   const originalFetch = window.fetch;
@@ -128,6 +128,20 @@ describe('API Client', () => {
       total: 1,
       nextCursor: null,
     });
+  });
+
+  it('normalizes slash task IDs to the project~slug route form', async () => {
+    setToken('task_route_token');
+    window.fetch = vi.fn().mockResolvedValue(new Response('stored log', {
+      status: 200,
+      headers: { 'Content-Type': 'text/plain' },
+    }));
+
+    await expect(getTaskLog('agenthub-video-auto/image-review-stage', { tail: 500, scope: 'all' })).resolves.toBe('stored log');
+    expect(window.fetch).toHaveBeenCalledWith(
+      '/api/tasks/agenthub-video-auto~image-review-stage/log?tail=500&scope=all',
+      expect.objectContaining({ headers: expect.any(Headers) }),
+    );
   });
 
   it('translates API error payload { error: "conflict", message: "..." } with code fallback when unmapped in EN', async () => {

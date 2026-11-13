@@ -766,16 +766,21 @@ export async function createTaskFromError(data: CaptureTaskInput): Promise<Task>
   return apiFetch<Task>('/api/tasks/from-error', { method: 'POST', body: JSON.stringify(data) });
 }
 
+/** Task API routes use project~slug; normalize legacy project/slug IDs first. */
+export function toTaskRouteId(id: string): string {
+  return id.replace('/', '~');
+}
+
 export async function getTask(id: string): Promise<TaskDetail> {
-  return apiFetch<TaskDetail>(`/api/tasks/${encodeURIComponent(id)}`);
+  return apiFetch<TaskDetail>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}`);
 }
 
 export async function getTaskTimeline(id: string): Promise<TaskTimelineItem[]> {
-  return apiFetch<TaskTimelineItem[]>(`/api/tasks/${encodeURIComponent(id)}/timeline`);
+  return apiFetch<TaskTimelineItem[]>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/timeline`);
 }
 
 export async function updateTask(id: string, data: UpdateTaskInput): Promise<Task> {
-  return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}`, {
+  return apiFetch<Task>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}`, {
     method: 'PATCH',
     body: JSON.stringify(data),
   });
@@ -783,38 +788,38 @@ export async function updateTask(id: string, data: UpdateTaskInput): Promise<Tas
 
 export async function rerunChecks(id: string): Promise<{ passed: boolean; failed: string[] }> {
   return apiFetch<{ passed: boolean; failed: string[] }>(
-    `/api/tasks/${encodeURIComponent(id)}/checks/rerun`,
+    `/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/checks/rerun`,
     { method: 'POST' },
   );
 }
 
 export async function startTask(id: string): Promise<Task> {
-  return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/start`, {
+  return apiFetch<Task>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/start`, {
     method: 'POST',
   });
 }
 
 export async function cancelTask(id: string, reason?: string): Promise<Task> {
-  return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/cancel`, {
+  return apiFetch<Task>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/cancel`, {
     method: 'POST',
     body: JSON.stringify({ reason: reason?.trim() || null, by: 'dashboard' }),
   });
 }
 
 export async function pauseTask(id: string): Promise<{ ok: boolean; paused: boolean }> {
-  return apiFetch<{ ok: boolean; paused: boolean }>(`/api/tasks/${encodeURIComponent(id)}/pause`, {
+  return apiFetch<{ ok: boolean; paused: boolean }>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/pause`, {
     method: 'POST',
   });
 }
 
 export async function resumeTask(id: string): Promise<{ ok: boolean; paused: boolean }> {
-  return apiFetch<{ ok: boolean; paused: boolean }>(`/api/tasks/${encodeURIComponent(id)}/resume`, {
+  return apiFetch<{ ok: boolean; paused: boolean }>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/resume`, {
     method: 'POST',
   });
 }
 
 export async function deleteTask(id: string): Promise<{ ok: boolean }> {
-  return apiFetch<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(id)}`, {
+  return apiFetch<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}`, {
     method: 'DELETE',
   });
 }
@@ -880,7 +885,7 @@ export async function reviewTask(
   id: string,
   data: ReviewTaskInput,
 ): Promise<Task> {
-  return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/review`, {
+  return apiFetch<Task>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/review`, {
     method: 'POST',
     body: JSON.stringify(data),
   });
@@ -894,20 +899,20 @@ export async function submitOpenProjectTriageInput(sourceId: string, wpId: numbe
 }
 
 export async function splitTask(id: string): Promise<{ ok: boolean; taskId: string; task: Task }> {
-  return apiFetch<{ ok: boolean; taskId: string; task: Task }>(`/api/tasks/${encodeURIComponent(id)}/split`, {
+  return apiFetch<{ ok: boolean; taskId: string; task: Task }>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/split`, {
     method: 'POST',
   });
 }
 
 export async function retryTask(id: string, data?: RetryTaskInput): Promise<Task> {
-  return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/retry`, {
+  return apiFetch<Task>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/retry`, {
     method: 'POST',
     body: JSON.stringify(data || {}),
   });
 }
 
 export async function retryReviewer(id: string): Promise<Task> {
-  return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/review/retry-reviewer`, {
+  return apiFetch<Task>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/review/retry-reviewer`, {
     method: 'POST',
   });
 }
@@ -937,7 +942,7 @@ export async function publishTask(
   }>;
 }> {
   return apiFetch(
-    `/api/tasks/${encodeURIComponent(id)}/publish`,
+    `/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/publish`,
     {
       method: 'POST',
       body: JSON.stringify(options || {}),
@@ -946,7 +951,7 @@ export async function publishTask(
 }
 
 export async function deleteWorktree(id: string): Promise<{ ok: boolean }> {
-  return apiFetch<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(id)}/worktree`, {
+  return apiFetch<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/worktree`, {
     method: 'DELETE',
   });
 }
@@ -960,7 +965,7 @@ export async function getTaskLog(
   if (params?.tail) query.set('tail', String(params.tail));
   if (params?.scope) query.set('scope', params.scope);
   const qStr = query.toString();
-  return apiFetch<string>(`/api/tasks/${encodeURIComponent(id)}/log${qStr ? `?${qStr}` : ''}`);
+  return apiFetch<string>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/log${qStr ? `?${qStr}` : ''}`);
 }
 
 export async function getTaskRunsPage(
@@ -970,7 +975,7 @@ export async function getTaskRunsPage(
   const query = new URLSearchParams({ limit: String(params?.limit ?? 20) });
   if (params?.offset !== undefined) query.set('offset', String(params.offset));
   if (params?.cursor) query.set('cursor', params.cursor);
-  return apiFetch<PageResponse<Run>>(`/api/tasks/${encodeURIComponent(id)}/runs?${query.toString()}`);
+  return apiFetch<PageResponse<Run>>(`/api/tasks/${encodeURIComponent(toTaskRouteId(id))}/runs?${query.toString()}`);
 }
 
 export async function getProjectNotes(
@@ -988,7 +993,7 @@ export async function getProjectNotes(
 }
 
 export async function getTaskNotes(id: string): Promise<TaskNote[]> {
-  const normalizedId = id.replace(/\//g, '~');
+  const normalizedId = toTaskRouteId(id);
   return apiFetch<TaskNote[]>(`/api/tasks/${encodeURIComponent(normalizedId)}/notes`);
 }
 
@@ -996,7 +1001,7 @@ export async function createTaskNote(
   taskId: string,
   data: { content: string; kind?: 'note' | 'overlap' },
 ): Promise<TaskNote> {
-  const normalizedId = taskId.replace(/\//g, '~');
+  const normalizedId = toTaskRouteId(taskId);
   return apiFetch<TaskNote>(`/api/tasks/${encodeURIComponent(normalizedId)}/notes`, {
     method: 'POST',
     body: JSON.stringify(data),

@@ -169,9 +169,9 @@ describe('Web SSE client (web/src/api/sse.ts)', () => {
     });
     expect(getRunLog('run-99')).toBe('Line 1\nLine 2\n');
 
-    // Query cache should be updated
+    // Per-run output remains cached, but taskLog is reserved for complete API snapshots.
     expect(queryClient.getQueryData(['runLog', 'run-99'])).toBe('Line 1\nLine 2\n');
-    expect(queryClient.getQueryData(['taskLog', 'myproj/task-1'])).toBe('Line 1\nLine 2\n');
+    expect(queryClient.getQueryData(['taskLog', 'myproj/task-1'])).toBeUndefined();
 
     unsub();
     cleanup();

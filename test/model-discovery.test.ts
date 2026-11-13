@@ -643,8 +643,9 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(isKnownModel('my-custom-model', custom)).toBe(true);
     expect(isKnownModel('gemini-3.8-flash-high', custom)).toBe(true);
     expect(isKnownModel('claude-opus-4-6-thinking', custom)).toBe(false);
-    // When discovered models only contain agy models, codex engine models fall back to engine syntax
+    // When discovered models only contain agy models, codex engine models fall back to defined fallback models
     expect(isKnownModel('codex:gpt-5.6-luna', custom)).toBe(true);
+    expect(isKnownModel('codex:non-existent', custom)).toBe(false);
     expect(isKnownModel('codex:', custom)).toBe(false);
   });
 
@@ -681,6 +682,28 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(known.has('gemini-custom-model')).toBe(true);
     expect(known.has('gemini-3.8-flash-high')).toBe(true);
     expect(known.has('claude-opus-4-6-thinking')).toBe(true);
+  });
+
+  it('Scheduler.profileHasModel only allows defined fallback models for undiscovered codex profiles', () => {
+    profileRepo.upsert({
+      name: 'codex-undiscovered',
+      engine: 'codex',
+      kind: 'isolated',
+      home: '/tmp/dummy-codex',
+      email: 'codex@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+
+    const scheduler = {
+      profileRepo,
+      profileModelRepo,
+    };
+
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'codex-undiscovered', 'codex:gpt-5.6-luna')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'codex-undiscovered', 'gpt-5.6-luna')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'codex-undiscovered', 'codex:model-khong-ton-tai')).toBe(false);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'codex-undiscovered', 'codex:gpt-fake')).toBe(false);
   });
 
   it('logged-out profile marks cache unverified and is treated as unavailable across discovery, API, and scheduler', async () => {

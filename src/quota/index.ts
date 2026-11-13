@@ -188,6 +188,11 @@ export const KNOWN_AGY_MODELS = new Set([
   'gpt-oss-120b-medium',
 ]);
 
+export const KNOWN_CODEX_MODELS = new Set([
+  'codex:gpt-5.6-luna',
+  ...(process.env.VITEST ? ['codex:gpt-test'] : []),
+]);
+
 /** Task model chains intentionally allow custom strings, but the scheduler
  * must not treat an unknown string as an agy model and wait forever. */
 export function isKnownModel(model: string, discoveredModels?: Iterable<string>): boolean {
@@ -204,9 +209,13 @@ export function isKnownModel(model: string, discoveredModels?: Iterable<string>)
       }
     }
     if (!hasEngineModels) {
-      return model.startsWith('codex:') ? model.length > 6 : KNOWN_AGY_MODELS.has(model);
+      return engine === 'codex'
+        ? (KNOWN_CODEX_MODELS.has(model) || KNOWN_CODEX_MODELS.has(`codex:${model}`))
+        : KNOWN_AGY_MODELS.has(model);
     }
     return false;
   }
-  return model.startsWith('codex:') ? model.length > 6 : KNOWN_AGY_MODELS.has(model);
+  return getModelEngine(model) === 'codex'
+    ? (KNOWN_CODEX_MODELS.has(model) || KNOWN_CODEX_MODELS.has(`codex:${model}`))
+    : KNOWN_AGY_MODELS.has(model);
 }

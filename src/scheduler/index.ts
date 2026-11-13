@@ -28,7 +28,7 @@ import { renderCommitTemplate, renderTaskBranch, taskCommitRef } from '../commit
 import { isProjectWorktreeRootAccessible, projectWorktreeRoot, projectWorktreeRoots } from '../projects/paths.js';
 import { Engine, AgyEngine, CodexEngine } from '../engines/index.js';
 import { findAgyBin } from '../agy.js';
-import { getModelFamily, getModelEngine, isKnownModel, QuotaService, KNOWN_AGY_MODELS } from '../quota/index.js';
+import { getModelFamily, getModelEngine, isKnownModel, QuotaService, KNOWN_AGY_MODELS, KNOWN_CODEX_MODELS } from '../quota/index.js';
 import { DEFAULT_CODEX_DISCOVERED_MODELS, DEFAULT_CLAUDE_DISCOVERED_MODELS } from '../models/index.js';
 import { DependencyContext, isDeletableWorktreePath, WorktreeService } from '../worktrees/index.js';
 import { ensureWorktreeNodeModules, nodeModulesCacheSummary, pruneNodeModulesCache } from '../cache.js';
@@ -545,7 +545,7 @@ export class Scheduler {
       return KNOWN_AGY_MODELS.has(model);
     }
     if (profile.engine === 'codex') {
-      return model.startsWith('codex:') ? model.length > 6 : (model.startsWith('gpt-') && model.length > 4);
+      return KNOWN_CODEX_MODELS.has(model) || KNOWN_CODEX_MODELS.has(`codex:${model}`);
     }
     if (profile.engine === 'claude') {
       const raw = model.startsWith('claude:') ? model.slice('claude:'.length) : model;
@@ -4068,7 +4068,7 @@ export class Scheduler {
     );
     return chain.filter((model) => {
       if (isKnownModel(model, knownDiscovered.size > 0 ? knownDiscovered : undefined)) return true;
-      if (hasUndiscoveredCodex && model.startsWith('codex:') && model.length > 6) return true;
+      if (hasUndiscoveredCodex && (KNOWN_CODEX_MODELS.has(model) || KNOWN_CODEX_MODELS.has(`codex:${model}`))) return true;
       const key = `${task.id}:${model}`;
       if (!this.notifiedSkippedModels.has(key)) {
         this.notifiedSkippedModels.add(key);

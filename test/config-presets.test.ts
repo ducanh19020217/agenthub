@@ -669,6 +669,9 @@ describe('Config Presets, Priority, and Effective Config', () => {
               disk: false,
             },
           },
+          scheduler: {
+            maxTimeoutResumes: 0,
+          },
         },
       });
       expect(putRes.statusCode).toBe(200);
@@ -697,6 +700,7 @@ describe('Config Presets, Priority, and Effective Config', () => {
         end: '07:00',
       });
       expect(cfg.telegram?.notify?.disk).toBe(false);
+      expect(cfg.scheduler?.maxTimeoutResumes).toBe(0);
     });
   });
 

@@ -2234,8 +2234,8 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         },
       });
 
-      // Simulate a future enabledAt maliciously injected into DB
-      const futureDate = new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
+      // Simulate a future enabledAt maliciously injected into DB (+10s, strictly in future)
+      const futureDate = new Date(Date.now() + 10_000).toISOString();
       const proj = ctx.projectRepo.get('proj-future-enabled')!;
       const s = projectSettings(proj);
       s.publish.enabledAt = futureDate;
@@ -2533,6 +2533,145 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(pendingSet?.size ?? 0).toBe(0);
 
       ctx.service.publishTask = origPublishTask;
+    });
+
+    it('getTaskDiff dùng snapshot sourceSha: khi nhánh task thay đổi sau snapshot, diff và branchSha chỉ phản ánh đúng commit snapshot', async () => {
+      const { getTaskDiff } = await import('../src/publish.js');
+      const repoPath = path.join(tmpDir, 'repo-diff-snapshot');
+      fs.mkdirSync(repoPath, { recursive: true });
+      execFileSync('git', ['init', '-b', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'init.txt'), 'init');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/diff-task'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'task.txt'), 'commit 1 snapshot content\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: commit 1 in snapshot'], { cwd: repoPath, env: testEnv });
+
+      const snapshotSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+      // Later commit made after snapshot
+      fs.writeFileSync(path.join(repoPath, 'task.txt'), 'commit 1 snapshot content\ncommit 2 late content\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: commit 2 after snapshot'], { cwd: repoPath, env: testEnv });
+
+      const lateSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+      expect(lateSha).not.toBe(snapshotSha);
+
+      const task: TaskRow = {
+        id: 'proj-diff/t1',
+        projectId: 'proj-diff',
+        slug: 'diff-task',
+        title: 'Diff Task',
+        status: 'done',
+        branch: 'agenthub/diff-task',
+        baseRef: 'main',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      } as any;
+
+      const diffResult = await getTaskDiff(
+        repoPath,
+        task,
+        'agenthub/diff-task',
+        'main',
+        'main',
+        testEnv,
+        snapshotSha,
+      );
+
+      expect(diffResult.commitSha).toBe(snapshotSha);
+      expect(diffResult.branchSha).toBe(snapshotSha);
+      expect(diffResult.diff).toContain('commit 1 snapshot content');
+      expect(diffResult.diff).not.toContain('commit 2 late content');
+    });
+
+    it('candidate discovery ưu tiên mergeCommit của snapshot: khi task B đã nằm trong targetSha nhưng nhánh task B có commit mới sau snapshot, task B vẫn được phát hiện và publish thành công', async () => {
+      const remotePath = path.join(tmpDir, 'remote-candidate-discovery.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-candidate-discovery');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      // Create Task B, merge into main local
+      execFileSync('git', ['checkout', '-b', 'agenthub/task-b'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'b.txt'), 'b code\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: task b initial'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/task-b', '-m', "Merge branch 'agenthub/task-b' into main"], { cwd: repoPath, env: testEnv });
+
+      // Create Task A, merge into main local
+      execFileSync('git', ['checkout', '-b', 'agenthub/task-a'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'a.txt'), 'a code\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: task a initial'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/task-a', '-m', "Merge branch 'agenthub/task-a' into main"], { cwd: repoPath, env: testEnv });
+
+      // After merge, new commit is added to agenthub/task-b
+      execFileSync('git', ['checkout', 'agenthub/task-b'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'b-late.txt'), 'b late code\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: task b late commit after merge'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-candidate-discovery',
+        name: 'Project Candidate Discovery',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          integration: { enabled: false },
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-candidate-discovery/task-a',
+        projectId: 'proj-candidate-discovery',
+        slug: 'task-a',
+        title: 'Task A',
+        status: 'done',
+        branch: 'agenthub/task-a',
+        baseRef: 'main',
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-candidate-discovery/task-b',
+        projectId: 'proj-candidate-discovery',
+        slug: 'task-b',
+        title: 'Task B',
+        status: 'done',
+        branch: 'agenthub/task-b',
+        baseRef: 'main',
+      });
+
+      process.env.FAKE_MODE = 'audit-pass';
+
+      // Publish task A: candidate discovery discovers both task A and task B from targetSha snapshot
+      // (even though agenthub/task-b has late commits not in targetSha)
+      const res = await ctx.service.publishTask('proj-candidate-discovery/task-a');
+      expect(res.ok).toBe(true);
+
+      const updatedA = ctx.taskRepo.get('proj-candidate-discovery/task-a');
+      const updatedB = ctx.taskRepo.get('proj-candidate-discovery/task-b');
+      expect(updatedA?.status).toBe('pushed');
+      expect(updatedB?.status).toBe('pushed');
+      expect(JSON.parse(updatedB!.pushResult!).state).toBe('pushed');
+
+      const remoteLog = execFileSync('git', ['--git-dir', remotePath, 'log', '--oneline', 'main'], { encoding: 'utf8', env: testEnv });
+      expect(remoteLog).toContain('feat: task a initial');
+      expect(remoteLog).toContain('feat: task b initial');
+      expect(remoteLog).not.toContain('feat: task b late commit after merge');
     });
   });
 });

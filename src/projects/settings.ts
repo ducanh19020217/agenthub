@@ -82,7 +82,7 @@ export const PublishSettingsSchema = z.object({
   enabled: z.boolean().default(true),
   enabledAt: z.string().refine((val) => {
     const ts = Date.parse(val);
-    return isNaN(ts) || ts <= Date.now() + 60_000;
+    return !isNaN(ts) && ts <= Date.now();
   }, 'enabledAt không được ở tương lai').optional(),
   remote: z.string().trim().min(1).default('origin'),
   branch: z.string().trim().min(1, 'Tên nhánh không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
@@ -95,7 +95,7 @@ export const PublishSettingsInputSchema = z.object({
   enabled: z.boolean().optional(),
   enabledAt: z.string().refine((val) => {
     const ts = Date.parse(val);
-    return isNaN(ts) || ts <= Date.now() + 60_000;
+    return !isNaN(ts) && ts <= Date.now();
   }, 'enabledAt không được ở tương lai').optional(),
   remote: z.string().trim().min(1).optional(),
   branch: z.string().trim().min(1, 'Tên nhánh không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),

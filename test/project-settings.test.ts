@@ -360,7 +360,7 @@ describe('project settings through the service', () => {
       expect(PublishSettingsSchema.safeParse({ enabledAt: pastDate }).success).toBe(true);
       expect(PublishSettingsInputSchema.safeParse({ enabledAt: pastDate }).success).toBe(true);
 
-      // Invalid future date
+      // Invalid future date (both distant future and near future within 60s)
       const r1 = PublishSettingsSchema.safeParse({ enabledAt: futureDate });
       expect(r1.success).toBe(false);
       expect(r1.error?.issues[0]?.message).toContain('enabledAt không được ở tương lai');
@@ -368,6 +368,16 @@ describe('project settings through the service', () => {
       const r2 = PublishSettingsInputSchema.safeParse({ enabledAt: futureDate });
       expect(r2.success).toBe(false);
       expect(r2.error?.issues[0]?.message).toContain('enabledAt không được ở tương lai');
+
+      // Near future date (+5 seconds) must also be rejected strictly
+      const nearFutureDate = new Date(Date.now() + 5000).toISOString();
+      const rNear1 = PublishSettingsSchema.safeParse({ enabledAt: nearFutureDate });
+      expect(rNear1.success).toBe(false);
+      expect(rNear1.error?.issues[0]?.message).toContain('enabledAt không được ở tương lai');
+
+      const rNear2 = PublishSettingsInputSchema.safeParse({ enabledAt: nearFutureDate });
+      expect(rNear2.success).toBe(false);
+      expect(rNear2.error?.issues[0]?.message).toContain('enabledAt không được ở tương lai');
     });
 
     it('mergeProjectSettings bỏ qua enabledAt do client gửi lên và chỉ cập nhật khi chuyển từ tắt sang bật', () => {

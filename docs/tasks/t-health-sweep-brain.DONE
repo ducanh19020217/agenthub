@@ -15,8 +15,10 @@
      - `queued_starved`: task `queued` quá 60 phút, kiểm tra `notBefore` chính xác theo epoch seconds, tôn trọng trạng thái pause của scheduler (`scheduler.isPaused()`), không bị chặn bởi dependency, quota waitReason, hay pause focus.
      - `running_no_progress`: worker chạy quá 90 phút mà không có commit hoặc đổi file trong worktree. Bỏ qua các runtime đang pause (`rt.paused`), và tính thời gian tiến độ từ thời điểm resume (`rt.resumedAt`). Đánh giá trong cửa sổ tiến độ `now - runningNoProgressMin * 60_000`, đối chiếu `cachedWorktreeMtime`, mtime `.git/index` (hỗ trợ git worktree pointer file), `lastCommitAt`, và dữ liệu `noCommitMinutes`. Không dùng `lastCommitCheckAt` làm bằng chứng tiến độ; fallback lấy thời điểm commit thực tế từ git log worktree hoặc `effectiveStartTime`.
      - `churn`: worker runs >= 8 hoặc `review.escalated` >= 2.
-     - `failover_churn`: task bị `task.failover`/`quota_retry` >= 4 lần trong 2 giờ.
-     - `stale_run`: run DB có `outcome IS NULL` nhưng PID đã chết và không có trong memory. Tự sửa an toàn bằng cách đánh dấu crashed và requeue với `resume = 1`.
+     - `failover_churn`: task bị `task.failover`/`quota_retry` >= 4 lần trong 2 giờ. Bọc try/catch khi parse payload JSON của `task.queued`, bỏ qua payload hỏng mà không gây sập vòng quét.
+     - `stale_run`: run DB có `outcome IS NULL`. Bỏ qua các run mới tạo chưa có PID trong khoảng ân hạn 10 phút để scheduler kịp spawn và cập nhật PID. Chỉ coi là mồ côi khi run thiếu PID quá 10 phút và task không còn running trong scheduler. Với run có PID, dùng lại `scheduler.isProcessAlive(run.pid, run.pidStart)` để kiểm tra process identity và nhận diện đúng các trường hợp PID bị tái sử dụng. Tự sửa an toàn bằng cách đánh dấu crashed và requeue với `resume = 1`.
+   - An toàn khi thực thi:
+     - Lời gọi `runSweep()` định kỳ từ timer `setInterval` được bọc `.catch()` để log lỗi an toàn, tránh unhandled promise rejection.
    - Chống spam: cooldown theo cặp (taskId, rule) lưu trong DB. Bỏ qua quét khi scheduler đang drain restart hoặc đã stop.
 
 4. **Đánh thức Brain & Quan sát**:
@@ -36,15 +38,17 @@
 - `npm run lint`: 0 lỗi (`eslint src/ test/` thành công, 115 warnings có sẵn từ baseline).
 - `npm run build`: 0 lỗi (`tsc && cp src/protocol.md dist/protocol.md` thành công).
 - Test suites:
-  - `test/health-sweep.test.ts`: 42/42 tests passed.
+  - `test/health-sweep.test.ts`: 47/47 tests passed.
   - `test/cli.test.ts`: 22/22 tests passed (bao gồm 6 tests cho `cmdHealthSweep`).
   - `test/mcp.test.ts`: 30/30 tests passed (bao gồm 5 tests cho `hub_health_sweep`).
-  - Toàn bộ test suite: 140/140 files passed, 1824/1824 tests passed.
+  - Tổng các test trực tiếp liên quan đến health sweep/CLI/MCP: 99/99 tests passed.
 
 ## Việc còn thiếu
-- Không có. Toàn bộ yêu cầu và các phản hồi review (scheduler pause trong queued_starved, runtime pause/resumedAt trong running_no_progress, self-repair rejection handling trong checking_orphan, notBefore epoch seconds, điều kiện autochecks/worktreePath cho review_orphan, escalation arbiter eligibility, CLI/MCP test coverage, running_no_progress time-window, và fallback commit thực tế) đã được giải quyết triệt để.
+- Không có. Toàn bộ yêu cầu và các phản hồi review từ các vòng trước và vòng hiện tại (stale_run unassigned PID grace period, xác thực PID reuse bằng scheduler.isProcessAlive với pidStart, bảo vệ timer runSweep và try/catch parse JSON trong failover_churn, scheduler/task pause handling, self-repair rejection safety, notBefore epoch seconds, autochecks/worktreePath cho review_orphan, escalation arbiter eligibility, CLI/MCP test coverage, running_no_progress time-window, và fallback commit thực tế) đã được hoàn thiện và xác minh đầy đủ.
 
 ## Danh sách commit
+- `dc953138 fix(health): handle pidless runs, verify pidStart on stale_run, and safeguard timer and json parsing`
+- `3a161130 docs(tasks): update completion report with pause handling and rejection safety details`
 - `c5f7660b fix(health): respect scheduler and task pause states and catch self-repair errors`
 - `4be0de68 docs(tasks): update completion report with running_no_progress commit fallback details`
 - `03066c35 fix(health): use actual commit time or start time fallback in running_no_progress`

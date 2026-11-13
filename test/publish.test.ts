@@ -1560,6 +1560,249 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(remoteCommitsFinal).toContain('feat: task B');
     });
 
+    it('chế độ không integration: Task B merge vào main local trong lúc audit Task A đang chạy -> B không bị đẩy theo A; sau đó B được audit và publish', async () => {
+      const remotePath = path.join(tmpDir, 'remote-no-integ-race.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-no-integ-race');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      // Prepare Task A branch and merge it into main local
+      execFileSync('git', ['checkout', '-b', 'agenthub/task-a'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'file-a.txt'), 'Task A code\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: task A'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/task-a', '-m', "Merge branch 'agenthub/task-a' into main"], { cwd: repoPath, env: testEnv });
+
+      // Prepare Task B branch (not yet merged into main)
+      execFileSync('git', ['checkout', '-b', 'agenthub/task-b'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'file-b.txt'), 'Task B code\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: task B'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-no-integ-race',
+        name: 'Project No Integ Race',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          integration: { enabled: false },
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 2 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-no-integ-race/task-a',
+        projectId: 'proj-no-integ-race',
+        slug: 'task-a',
+        title: 'Task A',
+        status: 'done',
+        branch: 'agenthub/task-a',
+        baseRef: 'main',
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-no-integ-race/task-b',
+        projectId: 'proj-no-integ-race',
+        slug: 'task-b',
+        title: 'Task B',
+        status: 'done',
+        branch: 'agenthub/task-b',
+        baseRef: 'main',
+      });
+
+      process.env.FAKE_MODE = 'audit-pass';
+
+      let taskBMergedDuringAudit = false;
+      let remoteCommitsAfterA = '';
+
+      // When audit for Task A starts: merge Task B into main local and enqueue auto-publish for B
+      ctx.scheduler.getEventBus().on('task.audit_started', async (_id, p) => {
+        if (p.taskId === 'proj-no-integ-race/task-a' && !taskBMergedDuringAudit) {
+          taskBMergedDuringAudit = true;
+          // Merge Task B into main local now while A's audit is running!
+          execFileSync('git', ['merge', '--no-ff', 'agenthub/task-b', '-m', "Merge branch 'agenthub/task-b' into main"], { cwd: repoPath, env: testEnv });
+
+          // Trigger auto-publish for B (queued due to publish lock)
+          ctx.service.enqueueAutoPublish('proj-no-integ-race', 'proj-no-integ-race/task-b');
+        }
+      });
+
+      // Listen for when A is pushed
+      ctx.scheduler.getEventBus().on('task.pushed', async (_id, p) => {
+        if (p.taskId === 'proj-no-integ-race/task-a') {
+          // Inspect remote main right after A is pushed
+          remoteCommitsAfterA = execFileSync('git', ['--git-dir', remotePath, 'log', '--oneline', 'main'], { encoding: 'utf8', env: testEnv });
+        }
+      });
+
+      // Start publishing Task A
+      const resultA = await ctx.service.publishTask('proj-no-integ-race/task-a');
+      expect(resultA.ok).toBe(true);
+
+      // Verify Task A was pushed
+      const taskAAfter = ctx.taskRepo.get('proj-no-integ-race/task-a');
+      expect(taskAAfter?.status).toBe('pushed');
+
+      // Verify that when A was pushed, Task B was NOT included on remote main!
+      expect(remoteCommitsAfterA).toContain('feat: task A');
+      expect(remoteCommitsAfterA).not.toContain('feat: task B');
+
+      // Now wait for Task B's queued publish to complete with audit
+      await vi.waitFor(() => {
+        const taskBAfter = ctx.taskRepo.get('proj-no-integ-race/task-b');
+        expect(taskBAfter?.status).toBe('pushed');
+      }, { timeout: 5000 });
+
+      // Verify remote main now contains Task B as well
+      const remoteCommitsFinal = execFileSync('git', ['--git-dir', remotePath, 'log', '--oneline', 'main'], { encoding: 'utf8', env: testEnv });
+      expect(remoteCommitsFinal).toContain('feat: task B');
+    });
+
+    it('cả nhánh đích local lẫn remote đều không tồn tại: chỉ push đúng snapshot sourceSha đã audit, commit thêm sau không bị kéo theo', async () => {
+      const remotePath = path.join(tmpDir, 'remote-no-target-branch.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-no-target-branch');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      // Neither local nor remote 'production' branch exists.
+      // Create task branch
+      execFileSync('git', ['checkout', '-b', 'agenthub/task-init'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'file-init.txt'), 'initial commit\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: initial audited code'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-no-target',
+        name: 'Project No Target',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          integration: { enabled: false },
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'production',
+            audit: { enabled: true },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-no-target/task-init',
+        projectId: 'proj-no-target',
+        slug: 'task-init',
+        title: 'Task Init',
+        status: 'done',
+        branch: 'agenthub/task-init',
+        baseRef: 'production',
+      });
+
+      process.env.FAKE_MODE = 'audit-pass';
+
+      let commitAddedDuringAudit = false;
+      ctx.scheduler.getEventBus().on('task.audit_started', async (_id, p) => {
+        if (p.taskId === 'proj-no-target/task-init' && !commitAddedDuringAudit) {
+          commitAddedDuringAudit = true;
+          // Commit added to agenthub/task-init during audit
+          fs.writeFileSync(path.join(repoPath, 'file-uncommitted-audit.txt'), 'late change\n');
+          execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+          execFileSync('git', ['commit', '-m', 'feat: late change after snapshot'], { cwd: repoPath, env: testEnv });
+        }
+      });
+
+      const res = await ctx.service.publishTask('proj-no-target/task-init');
+      expect(res.ok).toBe(true);
+
+      const updated = ctx.taskRepo.get('proj-no-target/task-init');
+      expect(updated?.status).toBe('pushed');
+
+      // Verify remote production received ONLY the audited snapshot, not the late commit
+      const remoteCommits = execFileSync('git', ['--git-dir', remotePath, 'log', '--oneline', 'production'], { encoding: 'utf8', env: testEnv });
+      expect(remoteCommits).toContain('feat: initial audited code');
+      expect(remoteCommits).not.toContain('feat: late change after snapshot');
+    });
+
+    it('chế độ không integration: task đã thực sự nằm trong commit đã push và đã audit được đánh dấu pushed', async () => {
+      const remotePath = path.join(tmpDir, 'remote-batch-no-integ.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-batch-no-integ');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      // Task 1 and Task 2 both merged into main local before publish
+      execFileSync('git', ['checkout', '-b', 'agenthub/task-1'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'f1.txt'), 'f1\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: task 1'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/task-1', '-m', "Merge branch 'agenthub/task-1' into main"], { cwd: repoPath, env: testEnv });
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/task-2'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'f2.txt'), 'f2\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: task 2'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['merge', '--no-ff', 'agenthub/task-2', '-m', "Merge branch 'agenthub/task-2' into main"], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-batch-no-integ',
+        name: 'Project Batch No Integ',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          integration: { enabled: false },
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-batch-no-integ/task-1',
+        projectId: 'proj-batch-no-integ',
+        slug: 'task-1',
+        title: 'Task 1',
+        status: 'done',
+        branch: 'agenthub/task-1',
+        baseRef: 'main',
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-batch-no-integ/task-2',
+        projectId: 'proj-batch-no-integ',
+        slug: 'task-2',
+        title: 'Task 2',
+        status: 'done',
+        branch: 'agenthub/task-2',
+        baseRef: 'main',
+      });
+
+      process.env.FAKE_MODE = 'audit-pass';
+
+      // Publish task-2 (which also contains task-1 in local main snapshot)
+      const res = await ctx.service.publishTask('proj-batch-no-integ/task-2');
+      expect(res.ok).toBe(true);
+
+      const t1 = ctx.taskRepo.get('proj-batch-no-integ/task-1');
+      const t2 = ctx.taskRepo.get('proj-batch-no-integ/task-2');
+      expect(t1?.status).toBe('pushed');
+      expect(t2?.status).toBe('pushed');
+      expect(JSON.parse(t1!.pushResult!).auditPassed).toBe(true);
+      expect(JSON.parse(t2!.pushResult!).auditPassed).toBe(true);
+    });
+
     it('verdict fail + findings rỗng -> không push, retryable, task không bị trả về', async () => {
       const remotePath = path.join(tmpDir, 'remote-fail-empty.git');
       initBareRemote(remotePath);

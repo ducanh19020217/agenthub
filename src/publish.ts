@@ -435,6 +435,53 @@ function parseTimestamp(raw: string | null | undefined): number {
   return new Date(str).getTime();
 }
 
+async function getTaskCompletionTime(
+  t: TaskRow,
+  mergeCommit: string | null | undefined,
+  branchRef: string | null | undefined,
+  repoPath: string,
+  env: NodeJS.ProcessEnv,
+  deps: PublishTaskDeps,
+): Promise<number | null> {
+  if (mergeCommit) {
+    try {
+      const commitDate = await runGit(['-C', repoPath, 'show', '-s', '--format=%cI', mergeCommit], repoPath, env);
+      const ts = parseTimestamp(commitDate);
+      if (!isNaN(ts)) return ts;
+    } catch {
+      // ignore
+    }
+  }
+
+  if (branchRef && (await refExists(repoPath, branchRef, env))) {
+    try {
+      const commitDate = await runGit(['-C', repoPath, 'show', '-s', '--format=%cI', branchRef], repoPath, env);
+      const ts = parseTimestamp(commitDate);
+      if (!isNaN(ts)) return ts;
+    } catch {
+      // ignore
+    }
+  }
+
+  const revs = deps.reviewRepo?.getByTask(t.id);
+  const approvedRev = revs?.find((r) => r.verdict === 'approved' && r.createdAt);
+  if (approvedRev?.createdAt) {
+    const ts = parseTimestamp(approvedRev.createdAt);
+    if (!isNaN(ts)) return ts;
+  }
+
+  if (deps.runRepo) {
+    const runs = deps.runRepo.getByTask(t.id);
+    const doneRun = runs?.slice().reverse().find((r) => r.outcome === 'done' && (r.endedAt || r.startedAt));
+    if (doneRun) {
+      const ts = parseTimestamp(doneRun.endedAt || doneRun.startedAt);
+      if (!isNaN(ts)) return ts;
+    }
+  }
+
+  return null;
+}
+
 /**
  * Identifies tasks merged into sourceBranch or targetBranch but not yet pushed to remote target branch.
  * Uses range remote/target..source to exclude tasks already present in remote/target.
@@ -449,6 +496,7 @@ async function findTasksToAudit(
   env: NodeJS.ProcessEnv,
   deps: PublishTaskDeps,
   sourceSha?: string | null,
+  targetSha?: string | null,
 ): Promise<{ tasksToAudit: TaskRow[]; baselineTasks: TaskRow[] }> {
   const mainTask = deps.taskRepo.get(taskId);
   const allTasks = deps.taskRepo.getByProject
@@ -458,9 +506,9 @@ async function findTasksToAudit(
   const remoteTargetRef = `refs/remotes/${remote}/${targetBranch}`;
   const hasRemoteTarget = await refExists(repoPath, remoteTargetRef, env);
   const sourceRef = `refs/heads/${sourceBranch}`;
-  const hasSource = await refExists(repoPath, sourceRef, env);
+  const hasSource = Boolean(sourceSha) || (await refExists(repoPath, sourceRef, env));
   const targetRef = `refs/heads/${targetBranch}`;
-  const hasTarget = await refExists(repoPath, targetRef, env);
+  const hasTarget = Boolean(targetSha) || (await refExists(repoPath, targetRef, env));
 
   const doneTasks = allTasks.filter((t) => t.status === 'done');
   const allCandidates: TaskRow[] = [];
@@ -470,7 +518,7 @@ async function findTasksToAudit(
     const tBranch = t.branch || `agenthub/${t.slug}`;
     const branchRef = `refs/heads/${tBranch}`;
     const branchExists = await refExists(repoPath, branchRef, env);
-    const mergeCommit = await findMergeCommitForTask(repoPath, t, [sourceSha || sourceBranch, targetBranch], env);
+    const mergeCommit = await findMergeCommitForTask(repoPath, t, [sourceSha || sourceBranch, targetSha || targetBranch], env);
     taskMergeCommitMap.set(t.id, mergeCommit);
 
     const taskRef = branchExists ? branchRef : mergeCommit;
@@ -494,9 +542,11 @@ async function findTasksToAudit(
     let mergedToPushTarget = false;
     if (hasSource && (await isAncestor(repoPath, taskRef, sourceSha || sourceRef, env))) {
       mergedToPushTarget = true;
-    } else if (hasTarget && (await isAncestor(repoPath, taskRef, targetRef, env))) {
+    }
+    if (!mergedToPushTarget && hasTarget && (await isAncestor(repoPath, taskRef, targetSha || targetRef, env))) {
       mergedToPushTarget = true;
-    } else if (!hasSource && branchExists && t.id === taskId) {
+    }
+    if (!mergedToPushTarget && !hasSource && branchExists && t.id === taskId) {
       mergedToPushTarget = true;
     }
 
@@ -506,19 +556,24 @@ async function findTasksToAudit(
   }
 
   if (!allCandidates.some((t) => t.id === taskId) && mainTask && (mainTask.status === 'done' || mainTask.status === 'pushed')) {
+    const taskBranch = mainTask.branch || `agenthub/${mainTask.slug}`;
+    const branchRef = `refs/heads/${taskBranch}`;
+    const branchExists = await refExists(repoPath, branchRef, env);
+    const mergeCommit = await findMergeCommitForTask(repoPath, mainTask, [sourceSha || sourceBranch, targetSha || targetBranch], env);
+    const taskRef = branchExists ? branchRef : mergeCommit;
+
+    let include = false;
     if (!hasSource || !sourceSha) {
+      include = true;
+    } else if (!taskRef) {
+      include = true;
+    } else if (await isAncestor(repoPath, taskRef, sourceSha, env)) {
+      include = true;
+    } else if (targetSha && (await isAncestor(repoPath, taskRef, targetSha, env))) {
+      include = true;
+    }
+    if (include) {
       allCandidates.push(mainTask);
-    } else {
-      const taskBranch = mainTask.branch || `agenthub/${mainTask.slug}`;
-      const branchRef = `refs/heads/${taskBranch}`;
-      const branchExists = await refExists(repoPath, branchRef, env);
-      const mergeCommit = await findMergeCommitForTask(repoPath, mainTask, [sourceSha || sourceBranch, targetBranch], env);
-      const taskRef = branchExists ? branchRef : mergeCommit;
-      if (!taskRef) {
-        allCandidates.push(mainTask);
-      } else if (await isAncestor(repoPath, taskRef, sourceSha, env)) {
-        allCandidates.push(mainTask);
-      }
     }
   }
 
@@ -534,48 +589,10 @@ async function findTasksToAudit(
     const baselineTasks: TaskRow[] = [];
 
     for (const t of allCandidates) {
-      let mergeTime: number | null = null;
       const mergeCommit = taskMergeCommitMap.get(t.id);
-      if (mergeCommit) {
-        try {
-          const commitDate = await runGit(['-C', repoPath, 'show', '-s', '--format=%cI', mergeCommit], repoPath, env);
-          const ts = parseTimestamp(commitDate);
-          if (!isNaN(ts)) mergeTime = ts;
-        } catch {
-          // ignore
-        }
-      }
-      if (mergeTime === null) {
-        const tBranch = t.branch || `agenthub/${t.slug}`;
-        const branchRef = `refs/heads/${tBranch}`;
-        if (await refExists(repoPath, branchRef, env)) {
-          try {
-            const commitDate = await runGit(['-C', repoPath, 'show', '-s', '--format=%cI', branchRef], repoPath, env);
-            const ts = parseTimestamp(commitDate);
-            if (!isNaN(ts)) mergeTime = ts;
-          } catch {
-            // ignore
-          }
-        }
-      }
-
-      if (mergeTime === null) {
-        const revs = deps.reviewRepo?.getByTask(t.id);
-        const approvedRev = revs?.find((r) => r.verdict === 'approved' && r.createdAt);
-        if (approvedRev?.createdAt) {
-          const ts = parseTimestamp(approvedRev.createdAt);
-          if (!isNaN(ts)) mergeTime = ts;
-        }
-      }
-
-      if (mergeTime === null && deps.runRepo) {
-        const runs = deps.runRepo.getByTask(t.id);
-        const doneRun = runs?.slice().reverse().find((r) => r.outcome === 'done' && (r.endedAt || r.startedAt));
-        if (doneRun) {
-          const ts = parseTimestamp(doneRun.endedAt || doneRun.startedAt);
-          if (!isNaN(ts)) mergeTime = ts;
-        }
-      }
+      const tBranch = t.branch || `agenthub/${t.slug}`;
+      const branchRef = `refs/heads/${tBranch}`;
+      const mergeTime = await getTaskCompletionTime(t, mergeCommit, branchRef, repoPath, env, deps);
 
       // Root task being published must never be categorized as baseline (always audit the gated root task).
       // Other tasks without a verifiable merge timestamp safely fall back to audit (fail-closed).
@@ -836,7 +853,21 @@ export async function updateLocalBranchSafely(
       return 'skipped_dirty';
     }
   } else {
-    await runGit(['-C', repoPath, 'update-ref', `refs/heads/${targetBranch}`, pushedCommit], repoPath, env);
+    const targetRef = `refs/heads/${targetBranch}`;
+    const targetExists = await refExists(repoPath, targetRef, env);
+    if (targetExists) {
+      const alreadyHasPushedCommit = await isAncestor(repoPath, pushedCommit, targetRef, env);
+      if (alreadyHasPushedCommit) {
+        return 'updated';
+      }
+      const canFastForward = await isAncestor(repoPath, targetRef, pushedCommit, env);
+      if (canFastForward) {
+        await runGit(['-C', repoPath, 'update-ref', targetRef, pushedCommit], repoPath, env);
+        return 'updated';
+      }
+      return 'skipped_dirty';
+    }
+    await runGit(['-C', repoPath, 'update-ref', targetRef, pushedCommit], repoPath, env);
     return 'updated';
   }
 }
@@ -942,9 +973,13 @@ export async function publishTask(
     if (await refExists(repoPath, remoteRef, env)) {
       prevRemoteSha = await runGit(['-C', repoPath, 'rev-parse', remoteRef], repoPath, env);
     }
-    const auditBaseRef = prevRemoteSha
-      ? remoteRef
-      : ((await refExists(repoPath, `refs/heads/${targetBranch}`, env)) ? `refs/heads/${targetBranch}` : targetBranch);
+
+    // Snapshot local target branch SHA before computing tasksToAudit
+    const localTargetRef = `refs/heads/${targetBranch}`;
+    let targetSha: string | null = null;
+    if (await refExists(repoPath, localTargetRef, env)) {
+      targetSha = await runGit(['-C', repoPath, 'rev-parse', localTargetRef], repoPath, env);
+    }
 
     // Snapshot source branch SHA before computing tasksToAudit so concurrent merges are not included without audit
     const sourceRef = `refs/heads/${sourceBranch}`;
@@ -952,6 +987,10 @@ export async function publishTask(
     if (await refExists(repoPath, sourceRef, env)) {
       sourceSha = await runGit(['-C', repoPath, 'rev-parse', sourceRef], repoPath, env);
     }
+
+    const auditBaseRef = prevRemoteSha
+      ? remoteRef
+      : (targetSha ? targetSha : (sourceSha ? sourceSha : targetBranch));
 
     // --- Pre-Publish Audit Gate ---
     const isSkipAudit = isManual && Boolean(options?.skipAudit);
@@ -969,6 +1008,7 @@ export async function publishTask(
       env,
       deps,
       sourceSha,
+      targetSha,
     );
     const tasksToAudit = candidates.tasksToAudit;
     const baselineTasks = candidates.baselineTasks;
@@ -976,6 +1016,78 @@ export async function publishTask(
     const rootInAudit = tasksToAudit.some((t) => t.id === taskId);
     const rootInBaseline = baselineTasks.some((t) => t.id === taskId);
     if (!rootInAudit && !rootInBaseline) {
+      const mainTask = deps.taskRepo.get(taskId);
+      const tBranch = mainTask?.branch || (mainTask?.slug ? `agenthub/${mainTask.slug}` : null);
+      const branchRef = tBranch ? `refs/heads/${tBranch}` : null;
+      const branchExists = branchRef ? await refExists(repoPath, branchRef, env) : false;
+      const mergeCommit = mainTask ? await findMergeCommitForTask(repoPath, mainTask, [sourceSha || sourceBranch, targetSha || targetBranch], env) : null;
+      const taskRef = branchExists ? branchRef! : mergeCommit;
+
+      const isAlreadyOnRemote = Boolean(
+        prevRemoteSha &&
+        taskRef &&
+        (await isAncestor(repoPath, taskRef, remoteRef, env))
+      );
+
+      if (isAlreadyOnRemote && mainTask) {
+        let hasAuditPassed = false;
+        try {
+          const pr = mainTask.pushResult ? JSON.parse(mainTask.pushResult) : null;
+          if (pr?.auditPassed === true) hasAuditPassed = true;
+        } catch {}
+
+        const hasPrePublishReview = deps.reviewRepo?.getByTask(taskId).some(
+          (r) => r.actor === 'audit-prepublish' && r.verdict === 'approved'
+        );
+
+        const isBaseline = await (async () => {
+          const enabledAt = currentSettings.publish?.enabledAt;
+          const enabledTime = parseTimestamp(enabledAt);
+          const isValidEnabledTime = !isNaN(enabledTime) && enabledTime <= Date.now() + 60_000;
+          if (!isValidEnabledTime) return false;
+          const compTime = await getTaskCompletionTime(mainTask, mergeCommit, branchExists ? branchRef : null, repoPath, env, deps);
+          return compTime !== null && compTime < enabledTime;
+        })();
+
+        if (hasAuditPassed || hasPrePublishReview || isBaseline || isSkipAudit || !isAuditConfigEnabled) {
+          const { compareUrl } = buildGitUrls(remoteUrl, prevRemoteSha || '', prevRemoteSha);
+          const pushedAt = mainTask.pushedAt || new Date().toISOString();
+          const commitSha = prevRemoteSha || '';
+          const tPushResultObj = {
+            state: 'pushed',
+            remote,
+            branch: targetBranch,
+            commit: commitSha,
+            compareUrl,
+            pushedIntegrationBranch: false,
+            auditPassed: hasAuditPassed || Boolean(hasPrePublishReview) || isBaseline || !isAuditConfigEnabled,
+            auditSkipped: isSkipAudit || !isAuditConfigEnabled,
+            findings: [],
+            localUpdate: 'updated',
+          };
+          deps.taskRepo.update(taskId, {
+            status: 'pushed',
+            pushedAt,
+            pushResult: JSON.stringify(tPushResultObj),
+          });
+          deps.eventBus.emit('task.pushed', taskId, {
+            taskId,
+            projectId: currentProject.id,
+            remote,
+            branch: targetBranch,
+            commit: commitSha,
+          });
+          return {
+            ok: true,
+            remote,
+            branch: targetBranch,
+            commit: commitSha,
+            pushedIntegrationBranch: false,
+            pushedAt,
+          };
+        }
+      }
+
       const errorMsg = `Task ${taskId} is not included in the push commit or source snapshot (${sourceSha || sourceBranch})`;
       const failedAt = new Date().toISOString();
       deps.taskRepo.update(taskId, {
@@ -1319,15 +1431,21 @@ export async function publishTask(
 
     try {
       const localRef = `refs/heads/${targetBranch}`;
-      const localExists = await refExists(repoPath, localRef, env);
+      const localExists = Boolean(targetSha) || (await refExists(repoPath, localRef, env));
       const remoteExists = Boolean(prevRemoteSha);
 
       // Determine initial commit-ish to detach from
       let startPoint: string;
-      if (localExists) {
+      if (targetSha) {
+        startPoint = targetSha;
+      } else if (localExists) {
         startPoint = targetBranch;
+      } else if (prevRemoteSha) {
+        startPoint = prevRemoteSha;
       } else if (remoteExists) {
         startPoint = remoteRef;
+      } else if (sourceSha) {
+        startPoint = sourceSha;
       } else {
         startPoint = sourceBranch;
       }
@@ -1335,14 +1453,14 @@ export async function publishTask(
       await runGit(['-C', repoPath, 'worktree', 'add', '--detach', worktreePath, startPoint], repoPath, env);
 
       // 2. If remote target branch exists and local started from local target, fast-forward / merge remote changes
-      if (remoteExists && localExists) {
+      if (remoteExists && targetSha) {
         try {
-          await runGit(['-C', worktreePath, 'merge', '--ff-only', remoteRef], worktreePath, env);
+          await runGit(['-C', worktreePath, 'merge', '--ff-only', prevRemoteSha || remoteRef], worktreePath, env);
         } catch {
           // If ff not possible, attempt standard merge
           try {
             const identity = await gitIdentityArgs(worktreePath, env);
-            await runGit(['-C', worktreePath, ...identity, 'merge', '--no-edit', remoteRef], worktreePath, env);
+            await runGit(['-C', worktreePath, ...identity, 'merge', '--no-edit', prevRemoteSha || remoteRef], worktreePath, env);
           } catch (mergeErr) {
             throw new Error(`Xung đột merge với remote ${targetBranch}: ${mergeErr instanceof Error ? mergeErr.message : String(mergeErr)}`);
           }
@@ -1350,7 +1468,7 @@ export async function publishTask(
       }
 
       // 3. Merge source branch into target branch (if sourceBranch differs or has commits)
-      const sourceExists = await refExists(repoPath, `refs/heads/${sourceBranch}`, env);
+      const sourceExists = Boolean(sourceSha) || (await refExists(repoPath, `refs/heads/${sourceBranch}`, env));
       if (sourceExists) {
         const commitToMerge = sourceSha || sourceBranch;
         const isAncestor = await execFileAsync('git', ['-C', worktreePath, 'merge-base', '--is-ancestor', commitToMerge, 'HEAD'], { env })

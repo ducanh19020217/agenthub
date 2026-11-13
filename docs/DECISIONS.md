@@ -341,8 +341,12 @@
      - Cờ `suppressNotification: true` chỉ áp dụng cho publish tự động (`!options?.manual`). Khi người dùng publish thủ công, thông báo luôn được gửi để phản hồi thao tác.
      - Các dịch vụ thông báo (`NotificationService` cho desktop và `TelegramBotService` cho Telegram) kiểm tra cờ này và bỏ qua việc gửi thông báo lặp lại, giữ cho luồng thông báo của người dùng không bị nhiễu.
      - Khi một lượt publish thành công, bản ghi lỗi của project được xoá để sẵn sàng ghi nhận nếu có lỗi mới phát sinh sau này.
-  4. **Snapshot SHA nguồn trước audit và xếp hàng auto-publish khi gặp xung đột lock (P1)**:
-     - Trước khi audit, SHA của `sourceBranch` được snapshot (`sourceSha`). Publish chỉ audit và merge/push đúng commit `sourceSha` đó, ngăn việc vô tình đẩy code của task merge muộn chưa được audit.
+  4. **Snapshot SHA nguồn và đích trước audit, cô lập worktree và xếp hàng auto-publish khi gặp xung đột lock (P1)**:
+     - Trước khi audit, cả SHA của nhánh nguồn (`sourceSha`) và SHA của nhánh đích local (`targetSha`) đều được chụp lại snapshot.
+     - Candidate discovery (`findTasksToAudit`), audit gate và quá trình merge/push trong worktree tách rời (`worktreePath`) chỉ thao tác trên đúng snapshot SHA này (`startPoint = targetSha || prevRemoteSha || sourceSha`), ngăn chặn triệt để tình trạng race condition ở chế độ không dùng integration (nhánh task merge vào nhánh đích local `main` trong lúc audit task khác đang chạy).
+     - Khi nhánh đích local lẫn remote đều chưa tồn tại, worktree khởi tạo từ `sourceSha` để không kéo theo các commit mới đẩy vào nhánh nguồn sau thời điểm audit.
+     - Task merge sau snapshot được để lại cho lượt publish sau kèm audit đầy đủ. Task đã thực sự nằm trong commit đã push và đã audit được cập nhật `status: 'pushed'`, không bị rơi vào `done` kèm `push_failed`.
+     - Khi cập nhật ref local (`updateLocalBranchSafely`), nếu nhánh đích local đã có commit mới hơn commit vừa push, hệ thống bảo toàn nhánh local thay vì ép ghi đè lùi SHA.
      - Khi auto-publish nhận 409 do publish khác đang chạy, task được xếp hàng chờ (`enqueueAutoPublish`) và tự động kích hoạt publish lại ngay khi lock được nhả (`onProjectPublishLockReleased`).
      - Hàng đợi chờ 409 chỉ lưu trong bộ nhớ (in-memory); đây là thiết kế an toàn vì ngay cả khi khởi động lại, lần publish tiếp theo sẽ tự động gom và audit toàn bộ backlog chưa push trên nhánh tích hợp.
      - Khi nhận 409, `enqueueAutoPublish` kiểm tra `isProjectPublishing` ngay sau khi đăng ký listener để kích hoạt xử lý ngay nếu lock đã được nhả trước thời điểm đăng ký callback.

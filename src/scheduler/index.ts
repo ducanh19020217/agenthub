@@ -608,6 +608,59 @@ export class Scheduler {
 
   isDraining(): boolean { return this.restartState.draining; }
 
+  isStopped(): boolean { return this.stopped; }
+
+  isChecking(taskId: string): boolean {
+    return this.checkingActive.has(taskId) || this.checkingQueue.some((e) => e.taskId === taskId);
+  }
+
+  isRunning(taskId: string): boolean {
+    return this.running.has(taskId);
+  }
+
+  isReviewing(taskId: string): boolean {
+    return this.reviewerRuns.has(taskId);
+  }
+
+  isRunActive(runId: string): boolean {
+    for (const rt of this.running.values()) {
+      if (rt.runId === runId) return true;
+    }
+    for (const rr of this.reviewerRuns.values()) {
+      if (rr.runId === runId) return true;
+    }
+    return false;
+  }
+
+  getRunningTask(taskId: string): RunningTask | undefined {
+    return this.running.get(taskId);
+  }
+
+  isReviewOrphanEligible(task: TaskRow): boolean {
+    if (this.config.reviewer?.enabled === false) return false;
+    const project = this.projectRepo.get(task.projectId);
+    if (!project) return false;
+    if (task.reviewerEscalated) {
+      if (!this.needsEscalationArbiter(task)) return false;
+    }
+    const chain = this.reviewChainForTask(task);
+    const step = chain[task.reviewStep ?? 0];
+    if (chain.length > 0 && !isAutomatedStep(step)) return false;
+    if (chain.length > 0 && step?.reviewer === 'claude') return false;
+    if (chain.length > 0 && (task.reviewStep ?? 0) >= chain.length) return false;
+    if (this.reviewerRuns.has(task.id)) return false;
+    const defaultReviewer = this.config.reviewer?.order?.[0];
+    const model = reviewerModel(step || { reviewer: defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna', mode: 'gate' }) || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna');
+    const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
+    const isPlan = task.slug.endsWith('-plan');
+    const preferDifferentEngine = isPlan ? lastWorker?.engine : undefined;
+    const picked = chain.length > 0
+      ? this.pickChainReviewer(task, step, model, lastWorker?.profileName, true)
+      : this.pickReviewer(task, lastWorker?.model === model ? lastWorker.profileName : undefined, preferDifferentEngine, true);
+    if ('wait' in picked) return false;
+    return true;
+  }
+
   beginRestartDrain(timeoutMinutes = 120, reason?: string, onReady?: () => void): RestartState {
     const now = Date.now();
     const timeoutAt = now + Math.max(1, timeoutMinutes) * 60_000;
@@ -691,7 +744,7 @@ export class Scheduler {
     };
   }
 
-  private hasParallelCapacity(project: { id: string; maxParallel: number; departmentId?: string }): boolean {
+  hasParallelCapacity(project: { id: string; maxParallel: number; departmentId?: string }): boolean {
     const usage = this.parallelUsage(project);
     if (usage.project >= this.effectiveParallel(project)) return false;
     const department = project.departmentId ? this.departmentRepo?.get(project.departmentId) : undefined;

@@ -1450,7 +1450,7 @@ export class Scheduler {
     if (this.stopped) return;
     if (this.restartState.draining) return;
 
-    const maxCheckingMin = (this.config.scheduler as { maxCheckingMin?: number } | undefined)?.maxCheckingMin ?? 30;
+    const maxCheckingMin = this.config.scheduler?.maxCheckingMin ?? DEFAULT_SCHEDULER_LIMITS.maxCheckingMin ?? 30;
     const thresholdMs = maxCheckingMin * 60_000;
     const now = Date.now();
 
@@ -1472,6 +1472,7 @@ export class Scheduler {
       this.eventBus.emit('task.checking_recovered', task.id, {
         runId: lastWorker.id,
         waitedMinutes,
+        maxCheckingMin,
         reason: 'stuck_checking',
       });
 

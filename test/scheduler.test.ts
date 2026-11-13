@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { execFileSync, spawn } from 'node:child_process';
-import { loadConfig } from '../src/config.js';
+import { loadConfig, DEFAULT_SCHEDULER_LIMITS, saveConfig } from '../src/config.js';
 import { openDatabase, ProjectRepo, DepartmentRepo, ProfileRepo, QuotaMarkRepo, TaskRepo, RunRepo, EventRepo, ReviewRepo } from '../src/db/index.js';
 import { Scheduler } from '../src/scheduler/index.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
@@ -3430,6 +3430,85 @@ describe('Checking queue lifecycle', () => {
     expect(taskRepo.get('test-project/dup-test')?.status).toBe('review');
     expect(runCount).toBe(1);
     scheduler.stop();
+  });
+
+  it('safety net respects custom maxCheckingMin configuration', async () => {
+    addCheckTask('custom-threshold-stuck');
+    const fifteenMinAgo = new Date(Date.now() - 15 * 60_000).toISOString();
+    taskRepo.update('test-project/custom-threshold-stuck', {
+      status: 'checking',
+      statusChangedAt: fifteenMinAgo,
+    });
+
+    addCheckTask('custom-threshold-fresh');
+    const fiveMinAgo = new Date(Date.now() - 5 * 60_000).toISOString();
+    taskRepo.update('test-project/custom-threshold-fresh', {
+      status: 'checking',
+      statusChangedAt: fiveMinAgo,
+    });
+
+    const scheduler = makeCheckingScheduler();
+    scheduler.config.scheduler.maxCheckingMin = 10;
+    const run = vi.fn(async () => ({ passed: true, failed: [], results: [] }));
+    scheduler.checkRunner = { run };
+
+    scheduler.recoverStuckCheckingTasks();
+
+    await vi.waitFor(() => expect(taskRepo.get('test-project/custom-threshold-stuck')?.status).not.toBe('checking'));
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(taskRepo.get('test-project/custom-threshold-stuck')?.status).toBe('review');
+    expect(taskRepo.get('test-project/custom-threshold-fresh')?.status).toBe('checking');
+
+    const recoveryEvent = eventRepo.getRecent(10).find((e) => e.type === 'task.checking_recovered' && e.taskId === 'test-project/custom-threshold-stuck');
+    expect(recoveryEvent).toBeDefined();
+    const payload = JSON.parse(recoveryEvent?.payload as string);
+    expect(payload.maxCheckingMin).toBe(10);
+    expect(payload.reason).toBe('stuck_checking');
+
+    scheduler.stop();
+  });
+});
+
+describe('Scheduler limits configuration', () => {
+  it('defaults maxCheckingMin to 30 when omitted or invalid', () => {
+    expect(DEFAULT_SCHEDULER_LIMITS.maxCheckingMin).toBe(30);
+
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-cfg-default-'));
+    try {
+      const cfg = loadConfig(testDir);
+      expect(cfg.scheduler.maxCheckingMin).toBe(30);
+      expect(cfg.schedulerLimits.maxCheckingMin).toBe(30);
+
+      fs.writeFileSync(path.join(testDir, 'config.json'), JSON.stringify({
+        scheduler: { maxCheckingMin: -5 },
+      }));
+      const invalidCfg = loadConfig(testDir);
+      expect(invalidCfg.scheduler.maxCheckingMin).toBe(30);
+      expect(invalidCfg.schedulerLimits.maxCheckingMin).toBe(30);
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('loads and persists custom maxCheckingMin in scheduler config', () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-cfg-custom-'));
+    try {
+      fs.writeFileSync(path.join(testDir, 'config.json'), JSON.stringify({
+        scheduler: { maxCheckingMin: 12, maxRunsPerTask: 10 },
+      }));
+      const loaded = loadConfig(testDir);
+      expect(loaded.scheduler.maxCheckingMin).toBe(12);
+      expect(loaded.scheduler.maxRunsPerTask).toBe(10);
+      expect(loaded.schedulerLimits.maxCheckingMin).toBe(12);
+
+      saveConfig(testDir, { scheduler: { maxCheckingMin: 20 } });
+      const reloaded = loadConfig(testDir);
+      expect(reloaded.scheduler.maxCheckingMin).toBe(20);
+      expect(reloaded.scheduler.maxRunsPerTask).toBe(10);
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
   });
 });
 

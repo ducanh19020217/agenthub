@@ -694,7 +694,7 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(chatSelect).toBeInTheDocument();
       fireEvent.change(chatSelect, { target: { value: '__custom__' } });
 
-      const customInput = screen.getByPlaceholderText('sonnet');
+      const customInput = within(chatSelect.closest('div')!).getByPlaceholderText('sonnet');
       expect(customInput).toBeInTheDocument();
       fireEvent.change(customInput, { target: { value: 'custom-claude-model' } });
 
@@ -1776,6 +1776,153 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       await waitFor(() => {
         expect(screen.getByTestId('custom-warning')).toBeInTheDocument();
       });
+    });
+
+    it('SettingsPage Claude reviewer select uses SelectOrCustomInput and shows model-unavailable-warning when configured model is unavailable', async () => {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['claude-sonnet-4-6'],
+        configured: ['old-unavailable-claude'],
+        models: [
+          { id: 'claude-sonnet-4-6', engine: 'claude', profiles: ['p1'], verified: true, available: true },
+          { id: 'old-unavailable-claude', engine: 'claude', profiles: [], verified: false, available: false },
+        ],
+      });
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        modelChainHard: ['gemini-3.8-flash-high'],
+        modelChainEasy: ['gemini-3.8-flash-medium'],
+        chat: { claudeBin: 'claude', model: 'claude-sonnet-4-6', models: ['claude-sonnet-4-6'] },
+        reviewer: {
+          claudeFallback: true,
+          claudeModel: 'old-unavailable-claude',
+          claudeProfiles: [],
+        },
+        brain: { fallback: [] },
+      } as any);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+      vi.spyOn(client, 'getTelegramStatus').mockResolvedValue({ enabled: false, hasToken: false, chats: [], notify: {} } as any);
+      vi.spyOn(client, 'getTelegramPairingCode').mockResolvedValue({ code: '123' } as any);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await screen.findByTestId('reviewer-settings');
+      const claudeSelect = screen.getByTestId('claude-model-select');
+      expect(claudeSelect).toBeInTheDocument();
+
+      // Warning should be displayed for old-unavailable-claude
+      await waitFor(() => {
+        expect(screen.getAllByTestId('model-unavailable-warning').length).toBeGreaterThan(0);
+      });
+    });
+
+    it('SettingsPage isolates unavailable models in chatModel, chatModels badges, and fallback chain with warning badges', async () => {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['claude-sonnet-4-6'],
+        configured: ['old-chat-model', 'old-fallback-model'],
+        models: [
+          { id: 'claude-sonnet-4-6', engine: 'claude', profiles: ['p1'], verified: true, available: true },
+          { id: 'old-chat-model', engine: 'claude', profiles: [], verified: false, available: false },
+          { id: 'old-fallback-model', engine: 'claude', profiles: [], verified: false, available: false },
+        ],
+      });
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        modelChainHard: ['gemini-3.8-flash-high'],
+        modelChainEasy: ['gemini-3.8-flash-medium'],
+        chat: {
+          claudeBin: 'claude',
+          model: 'old-chat-model',
+          models: ['old-chat-model', 'claude-sonnet-4-6'],
+        },
+        reviewer: { claudeFallback: false, claudeProfiles: [] },
+        brain: {
+          fallback: [{ type: 'model', model: 'old-fallback-model' }],
+        },
+      } as any);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+      vi.spyOn(client, 'getTelegramStatus').mockResolvedValue({ enabled: false, hasToken: false, chats: [], notify: {} } as any);
+      vi.spyOn(client, 'getTelegramPairingCode').mockResolvedValue({ code: '123' } as any);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await screen.findByText(/Cấu hình Chat với Claude/i);
+      const warnings = await screen.findAllByTestId('model-unavailable-warning');
+      expect(warnings.length).toBeGreaterThanOrEqual(3);
+    });
+
+    it('DepartmentsPage brain model uses SelectOrCustomInput and shows model-unavailable-warning when model is unavailable', async () => {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['sonnet'],
+        configured: ['unavailable-brain-model'],
+        models: [
+          { id: 'sonnet', engine: 'claude', profiles: ['p1'], verified: true, available: true },
+          { id: 'unavailable-brain-model', engine: 'claude', profiles: [], verified: false, available: false },
+        ],
+      });
+      vi.spyOn(client, 'getDepartments').mockResolvedValue([
+        {
+          id: 'dept-1',
+          name: 'Security Dept',
+          priority: 1,
+          maxParallel: 2,
+          claudeDailyTokenBudget: 0,
+          telegramTopicId: null,
+          brainEngine: 'claude',
+          brainModel: 'unavailable-brain-model',
+          brainCodexProfile: null,
+          brainMode: 'auto',
+          brainPermissions: 'trusted',
+          brainDailyTokenBudget: 100,
+          brainMaxTurnsPerHour: 2,
+          profiles: [],
+          projects: [],
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ]);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+      vi.spyOn(client, 'getProjects').mockResolvedValue([]);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <DepartmentsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await screen.findByText('Security Dept');
+      fireEvent.click(screen.getByText('Cấu hình Brain'));
+
+      const brainModelSelect = screen.getByLabelText('Model Brain');
+      expect(brainModelSelect).toBeInTheDocument();
+
+      const warning = await screen.findByTestId('model-unavailable-warning');
+      expect(warning).toBeInTheDocument();
     });
   });
 });

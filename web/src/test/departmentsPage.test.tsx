@@ -19,7 +19,15 @@ describe('DepartmentsPage', () => {
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     vi.spyOn(client, 'getDepartments').mockResolvedValue([department]);
     vi.spyOn(client, 'getProfiles').mockResolvedValue([{ name: 'worker-1' }] as any);
-    vi.spyOn(client, 'getModelOptions').mockResolvedValue({ suggestions: ['sonnet', 'opus', 'codex:gpt-5.6-luna'], configured: [] });
+    vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+      suggestions: ['sonnet', 'opus', 'codex:gpt-5.6-luna'],
+      configured: [],
+      models: [
+        { id: 'sonnet', engine: 'claude', available: true, verified: true, profiles: ['worker-1'] },
+        { id: 'opus', engine: 'claude', available: true, verified: true, profiles: ['worker-1'] },
+        { id: 'codex:gpt-5.6-luna', engine: 'codex', available: true, verified: true, profiles: ['worker-1'] },
+      ],
+    });
   });
 
   afterEach(() => vi.restoreAllMocks());

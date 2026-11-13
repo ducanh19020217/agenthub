@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Building2, Plus, Trash2 } from 'lucide-react';
-import { Card, Button, Input } from '../components/ui';
+import { AlertCircle, Building2, Plus, Trash2 } from 'lucide-react';
+import { Card, Button, Input, SelectOrCustomInput } from '../components/ui';
 import {
   createDepartment,
   deleteDepartment,
@@ -16,7 +16,6 @@ import {
 } from '../api/client';
 import { Department, Profile } from '../types/api';
 import { useLocale } from '../context/LocaleContext';
-import { DEFAULT_CLAUDE_MODELS, DEFAULT_CODEX_MODELS } from '../utils/models';
 
 export const DepartmentsPage: React.FC = () => {
   const { t } = useLocale();
@@ -80,15 +79,25 @@ export const DepartmentsPage: React.FC = () => {
         codex: Array.from(new Set(codex)),
       };
     }
-    const suggestions = modelOptions?.suggestions || [];
-    const claude = suggestions.filter((model) => DEFAULT_CLAUDE_MODELS.includes(model) || model.startsWith('claude-'));
-    const codex = suggestions
-      .map((model) => (model.startsWith('codex:') ? model.slice('codex:'.length) : model))
-      .filter((model) => DEFAULT_CODEX_MODELS.includes(model) || model.startsWith('gpt-'));
     return {
-      claude: Array.from(new Set(claude)),
-      codex: Array.from(new Set(codex)),
+      claude: [],
+      codex: [],
     };
+  }, [modelOptions]);
+
+  const unavailableModels = useMemo(() => {
+    const set = new Set<string>();
+    if (modelOptions?.models) {
+      for (const m of modelOptions.models) {
+        if (!m.available) {
+          set.add(m.id);
+          if (m.id.startsWith('codex:')) {
+            set.add(m.id.slice('codex:'.length));
+          }
+        }
+      }
+    }
+    return set;
   }, [modelOptions]);
 
   return <div className="p-6 max-w-6xl mx-auto space-y-6">
@@ -230,7 +239,45 @@ export const DepartmentsPage: React.FC = () => {
           <summary className="cursor-pointer text-sm font-semibold">{t('departments.brainSettings')}</summary>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3 text-xs">
             <label>{t('departments.brainEngine')}<select aria-label={t('departments.brainEngine')} value={brainEngines[department.id] ?? department.brainEngine ?? 'inherit'} onChange={(e) => { const brainEngine = e.target.value as 'inherit' | 'claude' | 'codex'; setBrainEngines((current) => ({ ...current, [department.id]: brainEngine })); update.mutate({ id: department.id, data: { brainEngine } }); }} className="w-full rounded border p-2 bg-[var(--t-surface-2)]"><option value="inherit">{t('departments.inherit')}</option><option value="claude">Claude</option><option value="codex">Codex</option></select></label>
-            <label>{t('departments.brainModel')}<select aria-label={t('departments.brainModel')} value={department.brainModel ?? 'inherit'} onChange={(e) => update.mutate({ id: department.id, data: { brainModel: e.target.value } })} className="w-full rounded border p-2 bg-[var(--t-surface-2)]"><option value="inherit">{t('departments.inherit')}</option><option value="" disabled>{t('departments.chooseModel')}</option>{Array.from(new Set([...(modelOptionsByEngine[(brainEngines[department.id] ?? department.brainEngine) === 'codex' ? 'codex' : 'claude'] || []), ...(department.brainModel && department.brainModel !== 'inherit' ? [department.brainModel] : [])])).map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
+            <div>
+              <span className="block mb-1">{t('departments.brainModel')}</span>
+              {(() => {
+                const currentEngine = (brainEngines[department.id] ?? department.brainEngine) === 'codex' ? 'codex' : 'claude';
+                const availableModels = modelOptionsByEngine[currentEngine] || [];
+                const options = [
+                  { value: 'inherit', label: t('departments.inherit') },
+                  ...availableModels,
+                ];
+                const currentModel = department.brainModel ?? 'inherit';
+                const isUnavailable = Boolean(
+                  currentModel &&
+                  currentModel !== 'inherit' &&
+                  (unavailableModels.has(currentModel) || (modelOptions?.models && !availableModels.includes(currentModel)))
+                );
+                return (
+                  <div>
+                    <SelectOrCustomInput
+                      ariaLabel={t('departments.brainModel')}
+                      value={currentModel}
+                      onChange={(val) => update.mutate({ id: department.id, data: { brainModel: val } })}
+                      options={options}
+                      showCustomWarning={true}
+                      placeholder={t('departments.chooseModel')}
+                    />
+                    {isUnavailable && (
+                      <div
+                        className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                        data-testid="model-unavailable-warning"
+                        title={t('models.unavailableWarning')}
+                      >
+                        <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                        <span>{t('models.unavailableWarning')}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
             {(brainEngines[department.id] ?? department.brainEngine) === 'codex' && <label><span className="font-semibold">{t('departments.brainCodexProfile')}</span><span className="block text-[var(--t-text-3)]">{t('departments.brainCodexProfileHint')}</span><select value={department.brainCodexProfile ?? ''} onChange={(e) => update.mutate({ id: department.id, data: { brainCodexProfile: e.target.value || null } })} className="w-full rounded border p-2 bg-[var(--t-surface-2)]" aria-label={t('departments.brainCodexProfile')}><option value="">{t('departments.brainCodexProfileAuto')}</option>{profiles.filter((profile) => profile.engine === 'codex' && isProfileEnabled(profile)).map((profile) => <option key={profile.name} value={profile.name}>{profile.name}</option>)}{department.brainCodexProfile && !profiles.some((profile) => profile.name === department.brainCodexProfile) && <option value={department.brainCodexProfile}>{department.brainCodexProfile} ({t('departments.inactiveProfile')})</option>}</select></label>}
             <label>{t('departments.brainMode')}<select aria-label={t('departments.brainMode')} defaultValue={department.brainMode ?? 'inherit'} onChange={(e) => update.mutate({ id: department.id, data: { brainMode: e.target.value as 'inherit' | 'off' | 'suggest' | 'auto' } })} className="w-full rounded border p-2 bg-[var(--t-surface-2)]"><option value="inherit">{t('departments.inherit')}</option><option value="off">{t('departments.off')}</option><option value="suggest">{t('departments.suggest')}</option><option value="auto">{t('departments.auto')}</option></select></label>
             <label>{t('departments.brainPermissions')}<select aria-label={t('departments.brainPermissions')} defaultValue={department.brainPermissions ?? 'inherit'} onChange={(e) => update.mutate({ id: department.id, data: { brainPermissions: e.target.value as 'inherit' | 'standard' | 'trusted' | 'full' } })} className="w-full rounded border p-2 bg-[var(--t-surface-2)]"><option value="inherit">{t('departments.inherit')}</option><option value="standard">Standard</option><option value="trusted">Trusted</option><option value="full">Full</option></select></label>

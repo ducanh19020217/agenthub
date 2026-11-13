@@ -1222,9 +1222,47 @@ describe('TaskDetailPage', () => {
 
     // Dropdown should not have hardcoded VALID_MODELS
     const select = screen.getByTestId('add-model-select') as HTMLSelectElement;
-    expect(select.disabled).toBe(true);
     expect(within(select).queryByText('codex:gpt-5.6-luna')).not.toBeInTheDocument();
     expect(within(select).queryByText('claude-sonnet-4-6')).not.toBeInTheDocument();
+  });
+
+  it('34. Modal Sửa: ô thêm model dùng SelectOrCustomInput cho phép nhập custom kèm cảnh báo', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue(baseTask);
+    vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+      configured: [],
+      models: [
+        { id: 'gemini-3.8-flash-high', name: 'Gemini Flash High', engine: 'agy', verified: true, available: true, profiles: ['agy-1'] },
+      ],
+      suggestions: ['gemini-3.8-flash-high'],
+    });
+
+    renderPage();
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Sửa$/i }));
+
+    const select = screen.getByTestId('add-model-select') as HTMLSelectElement;
+    expect(select).toBeInTheDocument();
+
+    // Switch to custom mode
+    fireEvent.change(select, { target: { value: '__custom__' } });
+
+    const customInput = within(select.closest('div')!).getByRole('textbox');
+    expect(customInput).toBeInTheDocument();
+
+    // Enter a custom model
+    fireEvent.change(customInput, { target: { value: 'custom-unverified-model' } });
+
+    // Custom warning is displayed
+    expect(await screen.findByTestId('custom-warning')).toBeInTheDocument();
+
+    // Click add model button
+    const addBtn = screen.getByTestId('add-model-btn');
+    expect(addBtn).not.toBeDisabled();
+    fireEvent.click(addBtn);
+
+    // Custom model is added to chain
+    expect(screen.getByTestId('model-item-0')).toHaveTextContent('custom-unverified-model');
   });
 });
 

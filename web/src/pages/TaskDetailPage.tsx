@@ -33,6 +33,7 @@ import { subscribeToRunOutput, subscribeToEvents } from '../api/sse';
 import { formatDateTime, formatIsoTitle, parseApiTime, formatShortContextualTime, formatDuration } from '../lib/time';
 import { CheckResults } from '../components/CheckResults';
 import { StatusBadge } from '../components/StatusBadge';
+import { SelectOrCustomInput } from '../components/ui/SelectOrCustomInput';
 import { SilentRunIndicator } from '../components/SilentRunIndicator';
 import { ModelBadge } from '../components/ModelBadge';
 import { useLocale } from '../context/LocaleContext';
@@ -1847,31 +1848,23 @@ export const TaskDetailPage: React.FC = () => {
                   {t('taskDetail.modelChainLabel')}
                 </label>
                 <div className="flex gap-2">
-                  <select
-                    data-testid="add-model-select"
+                  <SelectOrCustomInput
+                    testId="add-model-select"
                     value={selectedModelToAdd}
-                    onChange={(e) => setSelectedModelToAdd(e.target.value)}
-                    disabled={modelSuggestions.length === 0}
-                    className="flex-1 text-xs rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-2.5 py-1.5 text-[var(--t-text)] focus:outline-none focus:ring-2 focus:ring-[var(--t-accent)] disabled:opacity-50"
-                  >
-                    {modelSuggestions.length === 0 ? (
-                      <option value="" disabled>
-                        —
-                      </option>
-                    ) : (
-                      modelSuggestions.map((m) => (
-                        <option key={m} value={m}>
-                          {m}
-                        </option>
-                      ))
-                    )}
-                  </select>
+                    onChange={setSelectedModelToAdd}
+                    options={modelSuggestions}
+                    placeholder="—"
+                    showCustomWarning={true}
+                    className="flex-1"
+                    selectClassName="text-xs py-1.5 px-2.5"
+                    inputClassName="text-xs py-1.5 px-2.5"
+                  />
                   <button
                     type="button"
                     data-testid="add-model-btn"
                     onClick={addModel}
-                    disabled={!selectedModelToAdd || modelSuggestions.length === 0}
-                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] inline-flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    disabled={!selectedModelToAdd.trim()}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] inline-flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
                   >
                     <Plus className="w-3.5 h-3.5" />
                     <span>{t('taskDetail.addModelBtn')}</span>

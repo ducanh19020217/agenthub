@@ -276,6 +276,13 @@ export const SettingsPage: React.FC = () => {
     return [];
   }, [modelOptions]);
 
+  const availableDiscoveredClaudeModels = useMemo(() => {
+    if (modelOptions?.models) {
+      return formatDiscoveredModelOptions(modelOptions.models, t, 'claude', true);
+    }
+    return [];
+  }, [modelOptions, t]);
+
   useEffect(() => {
     if (config) {
       setBrandingName(config.branding?.name || 'AgentHub');
@@ -957,12 +964,22 @@ export const SettingsPage: React.FC = () => {
                     ariaLabel={t('extra.chatModel')}
                     value={chatModel}
                     onChange={setChatModel}
-                    options={Array.from(new Set([...chatModels, ...availableChatModels]))}
+                    options={availableChatModels}
                     validate={(m) => validateChatModelSyntax(m, t, availableChatModels)}
                     placeholder="sonnet"
                     className="w-full max-w-sm"
                     showCustomWarning={true}
                   />
+                  {chatModel && unavailableModels.has(chatModel) && (
+                    <div
+                      className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                      data-testid="model-unavailable-warning"
+                      title={t('models.unavailableWarning')}
+                    >
+                      <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                      <span>{t('models.unavailableWarning')}</span>
+                    </div>
+                  )}
                   <p className="text-[11px] text-[var(--t-text-3)] mt-1">
                     {t('extra.defaultChatModel')} {chatModels.join(', ')}
                   </p>
@@ -979,6 +996,15 @@ export const SettingsPage: React.FC = () => {
                         className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-[var(--t-surface-2)] border border-[var(--t-border)] text-[var(--t-text)]"
                       >
                         <span>{m}</span>
+                        {unavailableModels.has(m) && (
+                          <span
+                            className="text-[var(--t-crit)] flex items-center gap-0.5 font-medium"
+                            data-testid="model-unavailable-warning"
+                            title={t('models.unavailableWarning')}
+                          >
+                            <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                          </span>
+                        )}
                         <button
                           type="button"
                           aria-label={`${t('common.remove')} ${m}`}
@@ -1257,17 +1283,28 @@ export const SettingsPage: React.FC = () => {
                 <label htmlFor="claude-model-select" className="block text-xs font-semibold text-[var(--t-text)] mb-1">
                   {t('settings.claudeModel')}
                 </label>
-                <select
+                <SelectOrCustomInput
                   id="claude-model-select"
-                  data-testid="claude-model-select"
+                  testId="claude-model-select"
+                  ariaLabel={t('settings.claudeModel')}
                   value={claudeModel}
-                  onChange={(e) => setClaudeModel(e.target.value)}
-                  className="w-full text-sm rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-[var(--t-text)]"
-                >
-                  <option value="sonnet">sonnet</option>
-                  <option value="opus">opus</option>
-                  <option value="haiku">haiku</option>
-                </select>
+                  onChange={setClaudeModel}
+                  options={availableDiscoveredClaudeModels}
+                  validate={(val) => validateReviewerModelSyntax(val, 'claude', t, knownDiscovered)}
+                  placeholder="sonnet"
+                  showCustomWarning={true}
+                  className="w-full"
+                />
+                {claudeModel && unavailableModels.has(claudeModel) && (
+                  <div
+                    className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                    data-testid="model-unavailable-warning"
+                    title={t('models.unavailableWarning')}
+                  >
+                    <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                    <span>{t('models.unavailableWarning')}</span>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -1387,12 +1424,22 @@ export const SettingsPage: React.FC = () => {
                     <SelectOrCustomInput
                       value={step.model}
                       onChange={(val) => { const next = [...fallback]; next[index] = { ...step, model: val }; setFallback(next); }}
-                      options={Array.from(new Set([...availableChatModels, ...chatModels, step.model].filter(Boolean)))}
+                      options={availableChatModels}
                       validate={(m) => validateChatModelSyntax(m, t, availableChatModels)}
                       placeholder="sonnet"
                       ariaLabel={`Fallback model ${index + 1}`}
                       showCustomWarning={true}
                     />
+                    {step.model && unavailableModels.has(step.model) && (
+                      <div
+                        className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                        data-testid="model-unavailable-warning"
+                        title={t('models.unavailableWarning')}
+                      >
+                        <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                        <span>{t('models.unavailableWarning')}</span>
+                      </div>
+                    )}
                   </div>
                 )}
                 {step.type === 'apiKey' && <input type="number" min={0.01} step={0.01} value={step.dailyCapUSD} onChange={(event) => { const next = [...fallback]; next[index] = { ...step, dailyCapUSD: Number(event.target.value) }; setFallback(next); }} className="w-24 text-xs rounded border border-[var(--t-border)] bg-[var(--t-surface)] p-1.5 text-[var(--t-text)]" />}

@@ -237,6 +237,7 @@ interface RunningTask {
   // Stall & looping detection
   lastCommitCheckAt?: number;
   lastCommitCount?: number;
+  lastCommitAt?: number;
   lastNoCommitThresholdEmitted?: number;
   noCommitMinutes?: number;
   isLooping?: boolean;
@@ -2197,6 +2198,11 @@ export class Scheduler {
     rt.lastCommitCount = commitCount;
 
     const lastCommitTime = commitCount > 0 ? timestamps[0] : rt.startTime;
+    if (commitCount > 0) {
+      rt.lastCommitAt = timestamps[0];
+    } else {
+      rt.lastCommitAt = undefined;
+    }
     const elapsedMs = Math.max(0, now - lastCommitTime);
     const elapsedMinutes = Math.floor(elapsedMs / (60 * 1000));
 

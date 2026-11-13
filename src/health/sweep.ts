@@ -15,6 +15,7 @@ import {
 } from '../db/index.js';
 import { parseDbTime } from '../db/time.js';
 import { getCheckResults } from '../checks.js';
+import { renderTaskBranch } from '../commit-convention.js';
 import type { Scheduler, EventBus } from '../scheduler/index.js';
 
 export type HealthRule =
@@ -356,12 +357,44 @@ export class HealthSweepService {
         const progressWindowMs = rules.runningNoProgressMin * 60_000;
         const progressThreshold = now - progressWindowMs;
 
-        // Check recent commits using no_commit watchdog data if available
+        // Check recent commits using watchdog data or actual commit time from git
         let latestCommitTime = rt.startTime;
-        if (typeof rt.noCommitMinutes === 'number') {
+        if (typeof rt.lastCommitAt === 'number') {
+          latestCommitTime = rt.lastCommitAt;
+        } else if (typeof rt.noCommitMinutes === 'number') {
           latestCommitTime = now - Math.max(0, rt.noCommitMinutes) * 60_000;
-        } else if (rt.lastCommitCheckAt) {
-          latestCommitTime = now;
+        } else if (task.worktreePath && fs.existsSync(task.worktreePath)) {
+          try {
+            const project = projectRepo.get(task.projectId);
+            const baseRef = task.baseRef || project?.defaultBranch || 'main';
+            let stdout = '';
+            try {
+              stdout = execFileSync('git', ['-C', task.worktreePath, 'log', '-1', '--format=%ct', `${baseRef}..HEAD`], {
+                encoding: 'utf-8',
+                stdio: ['ignore', 'pipe', 'ignore'],
+                timeout: 5000,
+              }).trim();
+            } catch {
+              const branch = task.branch || (project ? renderTaskBranch(project, task) : `agenthub/${task.slug}`);
+              try {
+                stdout = execFileSync('git', ['-C', task.worktreePath, 'log', '-1', '--format=%ct', `${baseRef}..${branch}`], {
+                  encoding: 'utf-8',
+                  stdio: ['ignore', 'pipe', 'ignore'],
+                  timeout: 5000,
+                }).trim();
+              } catch {
+                stdout = '';
+              }
+            }
+            if (stdout) {
+              const ts = parseInt(stdout, 10) * 1000;
+              if (!isNaN(ts) && ts >= rt.startTime - 5000) {
+                latestCommitTime = ts;
+              }
+            }
+          } catch {
+            // fallback to rt.startTime
+          }
         }
 
         // Check recent changes in worktree or git index
@@ -375,6 +408,7 @@ export class HealthSweepService {
                 const gitPath = execFileSync('git', ['-C', task.worktreePath, 'rev-parse', '--git-path', 'index'], {
                   encoding: 'utf-8',
                   stdio: ['ignore', 'pipe', 'ignore'],
+                  timeout: 5000,
                 }).trim();
                 if (gitPath) {
                   gitIndexPath = path.isAbsolute(gitPath) ? gitPath : path.join(task.worktreePath, gitPath);

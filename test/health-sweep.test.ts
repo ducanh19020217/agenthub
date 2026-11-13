@@ -833,6 +833,210 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
       const result = await sweepService.runSweep(now);
       expect(result.issues.some((i) => i.rule === 'running_no_progress' && i.taskId === 'p1/t-running-wt')).toBe(false);
     });
+
+    it('phát hiện đúng khi runningNoProgressMin < stall.noCommitMin của watchdog và worker chưa commit (lastCommitCheckAt không che giấu lỗi)', async () => {
+      const now = Date.now();
+      const start35m = now - 35 * 60 * 1000;
+
+      const gitIndex = path.join(projectPath, '.git', 'index');
+      if (fs.existsSync(gitIndex)) {
+        fs.utimesSync(gitIndex, new Date(start35m), new Date(start35m));
+      }
+
+      // Configure health sweep threshold to 30m (< watchdog default 45m)
+      ctx.config.healthSweep.rules.runningNoProgressMin = 30;
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-running-starved-commits',
+        projectId: 'p1',
+        title: 'Task running starved commits',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-running-starved-commits', {
+        status: 'running',
+        worktreePath: projectPath,
+      });
+
+      vi.spyOn(ctx.scheduler, 'getRunningTask').mockReturnValue({
+        runId: 'r-watchdog-lower',
+        taskId: 'p1/t-running-starved-commits',
+        pid: 99994,
+        pidStart: null,
+        profileName: 'prof1',
+        model: 'gemini',
+        engine: fakeEngine,
+        startTime: start35m,
+        timeoutMs: 3600000,
+        timeoutAt: now + 3600000,
+        retryCount: 0,
+        projectId: 'p1',
+        lastOutputAt: start35m,
+        lastActivityAt: start35m,
+        activitySource: 'log',
+        activityCheckedAt: now,
+        cachedConversationMtime: 0,
+        cachedWorktreeMtime: 0,
+        usageBefore: null,
+        lastCommitCheckAt: now, // Watchdog just checked at now
+        noCommitMinutes: undefined, // Watchdog did not set noCommitMinutes because 35m < watchdog threshold 45m
+        lastCommitAt: undefined, // No commits made
+      });
+
+      const result = await sweepService.runSweep(now);
+      expect(
+        result.issues.some((i) => i.rule === 'running_no_progress' && i.taskId === 'p1/t-running-starved-commits'),
+      ).toBe(true);
+
+      // Restore threshold
+      ctx.config.healthSweep.rules.runningNoProgressMin = 90;
+    });
+
+    it('không báo khi runningNoProgressMin < stall.noCommitMin của watchdog nhưng worker đã commit gần đây', async () => {
+      const now = Date.now();
+      const start35m = now - 35 * 60 * 1000;
+      const commit10m = now - 10 * 60 * 1000;
+
+      // Configure health sweep threshold to 30m (< watchdog default 45m)
+      ctx.config.healthSweep.rules.runningNoProgressMin = 30;
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-running-committed-recently',
+        projectId: 'p1',
+        title: 'Task running committed recently',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-running-committed-recently', {
+        status: 'running',
+        worktreePath: projectPath,
+      });
+
+      vi.spyOn(ctx.scheduler, 'getRunningTask').mockReturnValue({
+        runId: 'r-committed-recently',
+        taskId: 'p1/t-running-committed-recently',
+        pid: 99993,
+        pidStart: null,
+        profileName: 'prof1',
+        model: 'gemini',
+        engine: fakeEngine,
+        startTime: start35m,
+        timeoutMs: 3600000,
+        timeoutAt: now + 3600000,
+        retryCount: 0,
+        projectId: 'p1',
+        lastOutputAt: commit10m,
+        lastActivityAt: commit10m,
+        activitySource: 'log',
+        activityCheckedAt: now,
+        cachedConversationMtime: 0,
+        cachedWorktreeMtime: 0,
+        usageBefore: null,
+        lastCommitCheckAt: now,
+        noCommitMinutes: undefined, // Watchdog has not hit 45m
+        lastCommitAt: commit10m, // Worker committed 10m ago (within 30m window)
+      });
+
+      const result = await sweepService.runSweep(now);
+      expect(
+        result.issues.some((i) => i.rule === 'running_no_progress' && i.taskId === 'p1/t-running-committed-recently'),
+      ).toBe(false);
+
+      // Restore threshold
+      ctx.config.healthSweep.rules.runningNoProgressMin = 90;
+    });
+
+    it('không báo khi watchdog chưa chạy nhưng git log worktree có commit trong cửa sổ progress', async () => {
+      const now = Date.now();
+      const start35m = now - 35 * 60 * 1000;
+      const commit10m = now - 10 * 60 * 1000;
+
+      ctx.config.healthSweep.rules.runningNoProgressMin = 30;
+
+      const wtDir = path.join(tmpDir, 'worktree-commit');
+      fs.mkdirSync(wtDir, { recursive: true });
+      execFileSync('git', ['init', '--template='], { cwd: wtDir });
+      execFileSync('git', ['checkout', '-b', 'main'], { cwd: wtDir });
+      fs.writeFileSync(path.join(wtDir, 'README.md'), '# Main');
+      execFileSync('git', ['add', '.'], { cwd: wtDir });
+      execFileSync('git', ['commit', '-m', 'initial commit'], {
+        cwd: wtDir,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: 'test',
+          GIT_AUTHOR_EMAIL: 'test@test.com',
+          GIT_COMMITTER_NAME: 'test',
+          GIT_COMMITTER_EMAIL: 'test@test.com',
+          GIT_AUTHOR_DATE: `${Math.floor(start35m / 1000)} +0000`,
+          GIT_COMMITTER_DATE: `${Math.floor(start35m / 1000)} +0000`,
+        },
+      });
+
+      // Checkout task branch and make commit 10m ago
+      execFileSync('git', ['checkout', '-b', 'agenthub/t-running-git-commit'], { cwd: wtDir });
+      fs.writeFileSync(path.join(wtDir, 'file.txt'), 'progress content');
+      execFileSync('git', ['add', '.'], { cwd: wtDir });
+      execFileSync('git', ['commit', '-m', 'worker commit 10m ago'], {
+        cwd: wtDir,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: 'test',
+          GIT_AUTHOR_EMAIL: 'test@test.com',
+          GIT_COMMITTER_NAME: 'test',
+          GIT_COMMITTER_EMAIL: 'test@test.com',
+          GIT_AUTHOR_DATE: `${Math.floor(commit10m / 1000)} +0000`,
+          GIT_COMMITTER_DATE: `${Math.floor(commit10m / 1000)} +0000`,
+        },
+      });
+
+      // Intentionally touch index to an older time to ensure commit timestamp is what prevents alert
+      const gitIndex = path.join(wtDir, '.git', 'index');
+      if (fs.existsSync(gitIndex)) {
+        fs.utimesSync(gitIndex, new Date(start35m), new Date(start35m));
+      }
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-running-git-commit',
+        projectId: 'p1',
+        title: 'Task running git commit',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-running-git-commit', {
+        status: 'running',
+        worktreePath: wtDir,
+      });
+
+      vi.spyOn(ctx.scheduler, 'getRunningTask').mockReturnValue({
+        runId: 'r-git-commit',
+        taskId: 'p1/t-running-git-commit',
+        pid: 99992,
+        pidStart: null,
+        profileName: 'prof1',
+        model: 'gemini',
+        engine: fakeEngine,
+        startTime: start35m,
+        timeoutMs: 3600000,
+        timeoutAt: now + 3600000,
+        retryCount: 0,
+        projectId: 'p1',
+        lastOutputAt: start35m,
+        lastActivityAt: start35m,
+        activitySource: 'log',
+        activityCheckedAt: now,
+        cachedConversationMtime: 0,
+        cachedWorktreeMtime: 0,
+        usageBefore: null,
+        lastCommitCheckAt: undefined, // watchdog hasn't run
+        noCommitMinutes: undefined,
+        lastCommitAt: undefined,
+      });
+
+      const result = await sweepService.runSweep(now);
+      expect(
+        result.issues.some((i) => i.rule === 'running_no_progress' && i.taskId === 'p1/t-running-git-commit'),
+      ).toBe(false);
+
+      // Restore threshold
+      ctx.config.healthSweep.rules.runningNoProgressMin = 90;
+    });
   });
 
   // 5. churn

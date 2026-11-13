@@ -36,7 +36,7 @@ export function getFlowRefetchInterval(activeCount: number): number {
   return activeCount > 0 ? FLOW_ACTIVE_REFETCH_INTERVAL : FLOW_IDLE_REFETCH_INTERVAL;
 }
 
-const EDGE_STYLE = { stroke: 'var(--t-text-3)', strokeOpacity: 0.82 } as const;
+const EDGE_STYLE = { stroke: 'var(--t-text-3)', strokeOpacity: 0.6 } as const;
 
 const STATUS_ICON: Record<TaskStatus, LucideIcon> = {
   draft: FilePen,
@@ -89,13 +89,11 @@ interface NodeRect {
 
 const getFallbackBox = (status: TaskStatus): NodeRect => {
   const def = NODE_DEFS.find((n) => n.status === status) || NODE_DEFS[0];
-  const colW = 150;
+  const colW = 160;
   const gapX = 32;
-  const x = def.col * (colW + gapX);
-  const rowHeight = 104;
-  const rowGap = 96;
-  const y = def.row === 1 ? 56 : 56 + rowHeight + rowGap;
-  return { x, y, w: colW, h: rowHeight };
+  const x = 24 + def.col * (colW + gapX);
+  const y = def.row === 1 ? 52 : 240;
+  return { x, y, w: colW, h: 88 };
 };
 
 export function useStatusTotal(
@@ -295,45 +293,6 @@ const FlowNodeCard: React.FC<{
   );
 };
 
-const FlowPill: React.FC<{
-  x: number;
-  y: number;
-  label: string;
-  anchor?: 'start' | 'middle' | 'end';
-  testId?: string;
-  placement?: string;
-}> = ({ x, y, label, anchor = 'middle', testId, placement }) => {
-  const width = label.length * 6.2 + 16;
-  const rectX = anchor === 'start' ? x : anchor === 'end' ? x - width : x - width / 2;
-  const textX = anchor === 'start' ? x + 8 : anchor === 'end' ? x - 8 : x;
-
-  return (
-    <g>
-      <rect
-        x={rectX}
-        y={y - 10}
-        width={width}
-        height={20}
-        rx={10}
-        fill="var(--t-surface-2)"
-        stroke="var(--t-border)"
-      />
-      <text
-        x={textX}
-        y={y + 4}
-        fontSize={11}
-        fontWeight={500}
-        textAnchor={anchor}
-        className="select-none fill-[var(--t-text-2)]"
-        data-testid={testId}
-        data-placement={placement}
-      >
-        {label}
-      </text>
-    </g>
-  );
-};
-
 const Edge: React.FC<{
   d: string;
   label?: string;
@@ -342,22 +301,34 @@ const Edge: React.FC<{
   dashed?: boolean;
   animated?: boolean;
   anchor?: 'start' | 'middle' | 'end';
-  testId?: string;
-  placement?: string;
-}> = ({ d, label, lx, ly, dashed, animated, anchor = 'middle', testId, placement }) => (
+}> = ({ d, label, lx, ly, dashed, animated, anchor = 'middle' }) => (
   <g>
     <path
       d={d}
       fill="none"
       strokeWidth={animated ? 2 : 1.75}
-      strokeDasharray={dashed ? '6 5' : undefined}
-      markerEnd={animated ? 'url(#flow-arrow-active)' : 'url(#flow-arrow)'}
+      strokeDasharray={animated || dashed ? '6 5' : undefined}
+      markerEnd="url(#flow-arrow)"
       style={EDGE_STYLE}
       className={animated ? 'flow-edge-animated' : undefined}
       data-animated={animated ? 'true' : undefined}
     />
     {label && lx !== undefined && ly !== undefined && (
-      <FlowPill x={lx} y={ly} label={label} anchor={anchor} testId={testId} placement={placement} />
+      <text
+        x={lx}
+        y={ly}
+        fontSize={11.5}
+        textAnchor={anchor}
+        className="select-none fill-[var(--t-text-3)] font-medium"
+        style={{
+          paintOrder: 'stroke fill',
+          stroke: 'var(--t-surface)',
+          strokeWidth: 3,
+          strokeLinejoin: 'round',
+        }}
+      >
+        {label}
+      </text>
     )}
   </g>
 );
@@ -394,14 +365,12 @@ const FlowEdges: React.FC<{
     bFailed.y + bFailed.h,
     bBlocked.y + bBlocked.h,
   );
-  const laneY = maxBottom + 30;
+  const laneY = maxBottom + 28;
 
   const bQueued = getNodeBox('queued');
   const queuedX = bQueued.x + bQueued.w / 2;
-  const queuedBottom = bQueued.y + bQueued.h;
-  const laneRight = bBlocked.x + bBlocked.w / 2 + 28 - 10;
-  const laneLeft = queuedX + 10;
-  const retryLabelX = (queuedX + bWaiting.x + bWaiting.w / 2) / 2;
+  const queuedBottom = bQueued.y + bQueued.h + 6;
+  const laneStart = bBlocked.x + bBlocked.w / 2 + 24;
 
   const retryAnimated = (counts.waiting_quota ?? 0) > 0 || (counts.failed ?? 0) > 0 || (counts.blocked ?? 0) > 0;
   const reworkAnimated = (counts.review ?? 0) > 0;
@@ -409,10 +378,10 @@ const FlowEdges: React.FC<{
   const bReview = getNodeBox('review');
   const bRunning = getNodeBox('running');
   const reworkStartX = bReview.x + bReview.w / 2;
-  const reworkStartY = bReview.y;
+  const reworkStartY = bReview.y - 2;
   const reworkEndX = bRunning.x + bRunning.w / 2;
-  const reworkEndY = bRunning.y;
-  const reworkArchY = Math.min(bReview.y, bRunning.y) - 40;
+  const reworkEndY = bRunning.y - 8;
+  const reworkArchY = Math.min(bReview.y, bRunning.y) - 38;
 
   return (
     <g data-testid="flow-edges">
@@ -420,23 +389,36 @@ const FlowEdges: React.FC<{
       {main.map(([from, to]) => {
         const bFrom = getNodeBox(from);
         const bTo = getNodeBox(to);
-        const startX = bFrom.x + bFrom.w;
-        const endX = bTo.x;
-        const midY = bFrom.y + 36;
+        const startX = bFrom.x + bFrom.w + 2;
+        const endX = bTo.x - 6;
+        const midY = bFrom.y + 28; // Align horizontally with icon center
         const animated = isStatusActive(from) || isStatusActive(to);
         const isDoneToPushed = from === 'done' && to === 'pushed';
 
         return (
           <g key={`${from}-${to}`}>
-            <Edge d={`M ${startX} ${midY} L ${endX} ${midY}`} animated={animated} />
+            <Edge
+              d={`M ${startX} ${midY} L ${endX} ${midY}`}
+              animated={animated}
+            />
             {isDoneToPushed && (
-              <FlowPill
+              <text
+                data-testid="flow-merge-label"
+                data-placement="above-node"
                 x={(startX + endX) / 2}
-                y={bFrom.y - 12}
-                label={t('tasks.flow.edgeAutoMergePush')}
-                testId="flow-merge-label"
-                placement="above-node"
-              />
+                y={Math.min(bFrom.y, bTo.y) - 10}
+                fontSize={11.5}
+                textAnchor="middle"
+                className="select-none fill-[var(--t-text-3)] font-medium"
+                style={{
+                  paintOrder: 'stroke fill',
+                  stroke: 'var(--t-surface)',
+                  strokeWidth: 3,
+                  strokeLinejoin: 'round',
+                }}
+              >
+                {t('tasks.flow.edgeAutoMergePush')}
+              </text>
             )}
           </g>
         );
@@ -446,10 +428,10 @@ const FlowEdges: React.FC<{
       {down.map(({ from, to, label }) => {
         const bFrom = getNodeBox(from);
         const bTo = getNodeBox(to);
-        const startX = bFrom.x + bFrom.w / 2 - 28;
-        const startY = bFrom.y + bFrom.h;
-        const endX = bTo.x + bTo.w / 2 - 28;
-        const endY = bTo.y;
+        const startX = bFrom.x + bFrom.w / 2 - 24;
+        const startY = bFrom.y + bFrom.h + 2;
+        const endX = bTo.x + bTo.w / 2 - 24;
+        const endY = bTo.y - 6;
         const animated = isStatusActive(from);
 
         return (
@@ -458,9 +440,8 @@ const FlowEdges: React.FC<{
             d={`M ${startX} ${startY} L ${endX} ${endY}`}
             label={label}
             lx={startX + 8}
-            ly={(startY + endY) / 2}
+            ly={(startY + endY) / 2 + 4}
             anchor="start"
-            dashed
             animated={animated}
           />
         );
@@ -469,14 +450,14 @@ const FlowEdges: React.FC<{
       {/* 3. Drop lines to bottom return lane */}
       {(['waiting_quota', 'failed', 'blocked'] as TaskStatus[]).map((status) => {
         const b = getNodeBox(status);
-        const dropX = b.x + b.w / 2 + 28;
-        const dropStartY = b.y + b.h;
+        const dropX = b.x + b.w / 2 + 24;
+        const dropStartY = b.y + b.h + 2;
         const animated = (counts[status] ?? 0) > 0;
 
         return (
           <path
             key={`lane-${status}`}
-            d={`M ${dropX} ${dropStartY} L ${dropX} ${laneY - 10} Q ${dropX} ${laneY} ${dropX - 10} ${laneY}`}
+            d={`M ${dropX} ${dropStartY} L ${dropX} ${laneY}`}
             fill="none"
             strokeWidth={animated ? 2 : 1.75}
             strokeDasharray="6 5"
@@ -489,12 +470,13 @@ const FlowEdges: React.FC<{
 
       {/* 4. Bottom return lane to queued */}
       <Edge
-        d={`M ${laneRight} ${laneY} L ${laneLeft} ${laneY} Q ${queuedX} ${laneY} ${queuedX} ${laneY - 10} L ${queuedX} ${queuedBottom}`}
+        d={`M ${laneStart} ${laneY} L ${queuedX} ${laneY} L ${queuedX} ${queuedBottom}`}
         dashed
         animated={retryAnimated}
         label={t('tasks.flow.edgeRetry')}
-        lx={retryLabelX}
-        ly={laneY}
+        lx={queuedX + 10}
+        ly={laneY - 8}
+        anchor="start"
       />
 
       {/* 5. Reviewer rework curve back to running */}
@@ -504,7 +486,7 @@ const FlowEdges: React.FC<{
         animated={reworkAnimated}
         label={t('tasks.flow.edgeRework')}
         lx={(reworkStartX + reworkEndX) / 2}
-        ly={reworkArchY + 10}
+        ly={reworkArchY + 6}
       />
     </g>
   );
@@ -760,7 +742,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
       >
         <div
           ref={boardRef}
-          className="relative min-w-[1240px]"
+          className="relative min-w-[1240px] min-h-[max(480px,calc(100vh-280px))]"
           role="group"
           aria-label={t('tasks.flow.ariaLabel')}
         >
@@ -772,32 +754,21 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
             <defs>
               <marker
                 id="flow-arrow"
-                viewBox="0 0 8 8"
-                refX="7"
-                refY="4"
-                markerWidth="5.5"
-                markerHeight="5.5"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
                 orient="auto-start-reverse"
               >
-                <path d="M 0 0 L 8 4 L 0 8 z" style={{ fill: 'var(--t-text-3)', fillOpacity: 0.82 }} />
-              </marker>
-              <marker
-                id="flow-arrow-active"
-                viewBox="0 0 8 8"
-                refX="7"
-                refY="4"
-                markerWidth="5.5"
-                markerHeight="5.5"
-                orient="auto-start-reverse"
-              >
-                <path d="M 0 0 L 8 4 L 0 8 z" style={{ fill: 'var(--t-accent)' }} />
+                <path d="M 0 0 L 10 5 L 0 10 z" style={{ fill: 'var(--t-text-3)', fillOpacity: 0.6 }} />
               </marker>
             </defs>
             <FlowEdges counts={counts} getNodeBox={getNodeBox} />
           </svg>
 
           {/* HTML / CSS Grid for nodes */}
-          <div className="relative z-1 grid grid-cols-[repeat(7,minmax(150px,1fr))] gap-x-6 gap-y-24 lg:gap-x-8 pt-14 pb-16">
+          <div className="relative z-1 grid min-h-[max(480px,calc(100vh-280px))] grid-cols-[repeat(7,minmax(150px,1fr))] content-between gap-x-6 gap-y-16 lg:gap-x-8 lg:gap-y-20 pt-12 pb-16">
             {NODE_DEFS.map((def) => (
               <FlowNodeCard
                 key={def.status}

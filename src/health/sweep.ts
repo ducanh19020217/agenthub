@@ -286,6 +286,7 @@ export class HealthSweepService {
         const statusTime = task.statusChangedAt ? parseDbTime(task.statusChangedAt) : parseDbTime(task.updatedAt);
         const sinceMinutes = Math.floor(Math.max(0, now - statusTime) / 60_000);
         if (sinceMinutes >= rules.reviewOrphanMin) {
+          if (!task.worktreePath) continue;
           if (scheduler.isReviewOrphanEligible(task)) {
             emitIssue(
               'review_orphan',
@@ -305,7 +306,7 @@ export class HealthSweepService {
         const sinceMinutes = Math.floor(Math.max(0, now - statusTime) / 60_000);
         if (sinceMinutes < rules.queuedStarvedMin) continue;
         if (task.waitReason) continue;
-        if (task.notBefore && task.notBefore > now) continue;
+        if (task.notBefore != null && task.notBefore > Math.floor(now / 1000)) continue;
 
         let hasUnfinishedDep = false;
         if (task.dependsOn) {

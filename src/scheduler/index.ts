@@ -640,6 +640,10 @@ export class Scheduler {
     if (this.config.reviewer?.enabled === false) return false;
     const project = this.projectRepo.get(task.projectId);
     if (!project) return false;
+    if (!task.worktreePath) return false;
+    if (this.getCheckResults(task.id).length === 0) return false;
+    const focus = this.getFocus();
+    if (focus.projectId && task.projectId !== focus.projectId) return false;
     if (task.reviewerEscalated) {
       if (!this.needsEscalationArbiter(task)) return false;
     }
@@ -648,6 +652,10 @@ export class Scheduler {
     if (chain.length > 0 && !isAutomatedStep(step)) return false;
     if (chain.length > 0 && step?.reviewer === 'claude') return false;
     if (chain.length > 0 && (task.reviewStep ?? 0) >= chain.length) return false;
+    if (chain.length === 0) {
+      const snapshot = this.failoverState?.snapshot() || { active: false, step: undefined };
+      if (!snapshot.active || snapshot.step?.type !== 'engine' || snapshot.step.engine !== 'codex') return false;
+    }
     if (this.reviewerRuns.has(task.id)) return false;
     const defaultReviewer = this.config.reviewer?.order?.[0];
     const model = reviewerModel(step || { reviewer: defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna', mode: 'gate' }) || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna');

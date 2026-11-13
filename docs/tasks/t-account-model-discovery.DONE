@@ -29,39 +29,41 @@
    - Khi chọn profile thực thi task, chỉ xét các profile thực sự cung cấp model và đang đăng nhập (`profileHasModel`), tránh phân bổ task vào profile không hỗ trợ.
 
 5. **Giao diện Web (`web/src/...`)**:
-   - Mọi ô chọn model (Cài đặt chuỗi HARD/EASY, Reviewer chain, Brain model trong ProjectSettingsDrawer và DepartmentsPage, NewSessionModal, ChatPage, CreateTaskPage) sử dụng dữ liệu từ `/api/models`.
+   - Mọi ô chọn model (Cài đặt chuỗi HARD/EASY, Reviewer chain, Brain model trong ProjectSettingsDrawer và DepartmentsPage, NewSessionModal, ChatPage, CreateTaskPage, TaskDetailPage) sử dụng dữ liệu từ `/api/models`.
    - Đề xuất model nhóm trực quan theo engine, hiển thị số lượng tài khoản khả dụng; loại bỏ triệt để việc chèn model fallback hardcode khi profile chưa xác minh.
-   - Hiển thị badge / cảnh báo đỏ nổi bật ngay trong danh sách chuỗi nếu model đang cấu hình không còn tài khoản nào cung cấp.
-   - Cho phép nhập model tùy chỉnh với cảnh báo hợp lệ thời gian thực.
-   - Nút "Làm mới danh sách model" gọi `POST /api/models/refresh` và cập nhật tức thì dữ liệu qua React Query.
-
-6. **Ổn định hóa bài kiểm tra (`test/publish.test.ts`)**:
-   - Thiết lập `enabledAt` cố định cho project trong bài test `huỷ bỏ publish khi số lượng task cần audit vượt quá maxTasks`, tránh race condition giữa timestamp commit git và thời điểm tạo project qua ranh giới giây dưới tải CPU cao.
+   - Project reviewer-chain validator (`validateReviewerModelSyntax` và `validateReviewChainReviewerSyntax`) nhận danh sách model discovery khả dụng/đã cấu hình để không từ chối các model Codex mới hợp lệ.
+   - Preset và quick-fix không còn chèn `codex:gpt-5.6-luna` khi không có tài khoản Codex khả dụng.
+   - Ô chọn model trong modal sửa task của `TaskDetailPage` loại bỏ danh sách viết cứng `VALID_MODELS`; chỉ hiển thị model khả dụng từ discovery và hiển thị cảnh báo đỏ nổi bật cho các model cũ trong chuỗi không còn khả dụng.
+   - Revert thay đổi ngoài phạm vi task tại `test/publish.test.ts`.
 
 ## 2. Kết quả kiểm tra & nghiệm thu
 
 - `npm run lint`: Đạt (0 errors, 130 baseline warnings).
 - `npx tsc --noEmit -p .`: Đạt (0 errors).
 - `npx tsc --noEmit -p web`: Đạt (0 errors).
-- `npm run test -- --run`: Đạt 140/140 test files, 1,776/1,776 tests passed.
-  - Bao gồm `test/model-discovery.test.ts`: 20/20 tests passed.
-  - Bao gồm `test/publish.test.ts`: 34/34 tests passed.
-  - Bao gồm `test/migrations-append-only.test.ts`: 1/1 tests passed.
-- `npm run test:web -- --run`: Đạt 74/74 test files, 682/682 tests passed.
-  - Bao gồm `web/src/test/settingsSelectInputs.test.tsx`: 40/40 tests passed.
+- `npm run build`: Đạt (Backend compile thành công).
+- `npm run build:web`: Đạt (Vite production build thành công trong 5.92s).
+- `npm run test:web -- --run`: Đạt 74/74 test files, 684/684 tests passed.
+  - Bao gồm `web/src/test/settingsSelectInputs.test.tsx`: 41/41 tests passed.
+  - Bao gồm `web/src/test/taskDetailPage.test.tsx`: 34/34 tests passed.
   - Bao gồm `web/src/test/departmentsPage.test.tsx`: 10/10 tests passed.
   - Bao gồm `web/src/test/chat.test.tsx`: 7/7 tests passed.
-- `npm run build:web`: Đạt (Vite production build thành công trong 30.84s).
-
-**Tổng số test:** 2,458 tests passed (1,776 backend + 682 frontend).
+- Backend test:
+  - `test/model-discovery.test.ts`: 20/20 tests passed.
+  - `test/publish.test.ts`: 34/34 tests passed.
+  - `test/scheduler.test.ts`: 131/131 tests passed.
 
 ## 3. Việc chưa làm được / Ghi chú thiết kế
 
 - Không có việc tồn đọng.
-- Tất cả các yêu cầu từ đề bài ban đầu và các điểm phản hồi review (P1, P2) qua 3 lượt review và tự sửa đều đã được giải quyết trọn vẹn và kiểm tra nghiêm ngặt.
+- Tất cả các yêu cầu từ đề bài ban đầu và các phản hồi review P1/P2 qua 4 vòng review đều đã được giải quyết trọn vẹn và kiểm tra nghiêm ngặt.
 
 ## 4. Danh sách commits trên nhánh
 
+- `d8f1a65c`: `test(web): fix ModelOptions and DiscoveredModel mock types`
+- `e6769ea9`: `fix(web): pass discovered models to drawer reviewer validation and prevent hardcoded codex fallbacks`
+- `283ce923`: `revert(test): revert out-of-scope publish audit test change`
+- `91e2d58c`: `docs(tasks): add completion report for t-account-model-discovery`
 - `5bb48b6d`: `fix(test): stabilize publish audit maxTasks test against timestamp race`
 - `0341fe7d`: `fix(web): use discovered models in chat selectors and remove unverified defaults from brain selectors`
 - `ded920ec`: `feat(models): merge models by engine and ID and validate chat models from discovery`

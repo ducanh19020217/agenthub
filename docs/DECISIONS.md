@@ -424,3 +424,28 @@
      - Điều kiện kích hoạt: task không nằm trong `checkingActive`/`checkingQueue`, không có run nào đang chạy (cả in-memory và DB), và worker run cuối có outcome `done`.
      - Scheduler phát sự kiện `task.checking_recovered` để dễ dàng quan sát/giám sát và gọi lại `runChecksForTask`.
      - Lưới an toàn hoàn toàn không can thiệp khi scheduler đang ở trạng thái drain (`this.restartState.draining === true`).
+
+## DEC-031: Trạng thái dẫn xuất merge_failed và push_failed trên sơ đồ quy trình TaskFlow
+
+- **Bối cảnh**:
+  - Khi task merge vào integration bị xung đột (`merge.conflict` / `review.auto_merge_skipped` với `reason: merge_failed`) hoặc publish lên nhánh đích thất bại (`task.push_failed`, `tasks.pushResult` có `state: push_failed` hoặc `error`), task vẫn giữ trạng thái `done` (hoặc `review`).
+  - Trên sơ đồ Quy trình (`TaskFlow.tsx`), task vẫn hiển thị ở ô "Hoàn thành", khiến người dùng không biết task nào chưa được gộp vào git (sự cố ngày 2026-11-13 với `t-publish-race-fix-2`, `t-status-timestamps-fix`, `t-drain-stuck-checking`).
+- **Quyết định thiết kế**:
+  1. **Trạng thái dẫn xuất (Derived Status) ở tầng Service, không đổi schema DB**:
+     - Không thêm giá trị mới vào `tasks.status` trong SQLite để tránh phải rebuild bảng hay migration dữ liệu phức tạp.
+     - `merge_failed`: Task không ở trạng thái kết thúc khác (`pushed`, `cancelled`, `failed`), có lần merge thất bại gần nhất (sự kiện `merge.conflict`, `merge.failed`, hoặc `review.auto_merge_skipped` với `merge_failed`), chưa có sự kiện `task.merged` sau đó, và nhánh task thực sự chưa được merge vào nhánh integration/target (xác minh qua `git merge-base --is-ancestor`).
+     - `push_failed`: Task `done` có `pushResult` lỗi gần nhất hoặc sự kiện `task.push_failed`, chưa có sự kiện `task.pushed` hay `pushedAt`, và commit của task chưa có trên nhánh đích (cả local và remote qua `git merge-base --is-ancestor`).
+     - Tự động xóa trạng thái dẫn xuất ngay khi merge hoặc push thành công sau đó.
+  2. **Tối ưu hóa và cache gọi Git (Zero git overhead cho luồng chuẩn)**:
+     - 99% task không có sự kiện lỗi merge hay push sẽ không bao giờ gọi lệnh git.
+     - Với các task ứng viên, kết quả kiểm tra `isAncestor` được cache trong bộ nhớ với TTL ngắn (15s); nếu git xác nhận đã là ancestor (đã gộp tay), kết quả được cache dài hạn. Cache tự động invalidate khi có sự kiện merge/push/publish mới.
+  3. **API hỗ trợ thao tác và phân trang**:
+     - `GET /api/tasks`: Hỗ trợ filter `?derived=merge_failed|push_failed` (và tương thích `?status=merge_failed|push_failed`).
+     - `GET /api/tasks/:id`: Trả thêm trường `deliveryIssue: { kind, error, failedAt, files? }`.
+     - `POST /api/tasks/:id/merge/retry`: Chạy lại luồng auto-merge hiện có (`mergeTaskIntoBase`). Nếu thành công trả 200 kèm `mergeCommit`; nếu còn xung đột trả 409 Conflict kèm danh sách `files`. Hỗ trợ body `{ assignWorker: true }` để chuyển task về `queued`, bổ sung ghi chú danh sách file xung đột vào body để worker giải quyết.
+  4. **Hiển thị trực quan trên TaskFlow và TaskDetailPage**:
+     - Bổ sung 2 node ở hàng nhánh lỗi (row 2): "Merge lỗi" (dưới cột done) và "Push lỗi" (dưới cột pushed) với mũi tên kết nối và nhãn "xung đột" / "push lỗi".
+     - Màu cảnh báo nổi bật theo token CSS (`--t-crit`) khi số lượng > 0.
+     - Modal danh sách (`FlowTaskList`) hiển thị danh sách task có delivery issue kèm các nút thao tác (Merge lại, Push lại, Giao worker xử lý) với confirm và toast thông báo kết quả.
+     - `TaskDetailPage`: Hiển thị banner cảnh báo lỗi giao hàng kèm các nút xử lý, và bước lỗi trên timeline với mốc thời gian.
+

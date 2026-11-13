@@ -267,6 +267,18 @@
   --status-waiting_quota-border: color-mix(in srgb, var(--t-warn) 25%, transparent);
   --status-waiting_quota-dot: var(--t-warn);
 
+  --status-merge_failed-color: var(--t-crit);
+  --status-merge_failed-bg: color-mix(in srgb, var(--t-crit) 15%, transparent);
+  --status-merge_failed-text: var(--t-crit);
+  --status-merge_failed-border: color-mix(in srgb, var(--t-crit) 25%, transparent);
+  --status-merge_failed-dot: var(--t-crit);
+
+  --status-push_failed-color: var(--t-crit);
+  --status-push_failed-bg: color-mix(in srgb, var(--t-crit) 15%, transparent);
+  --status-push_failed-text: var(--t-crit);
+  --status-push_failed-border: color-mix(in srgb, var(--t-crit) 25%, transparent);
+  --status-push_failed-dot: var(--t-crit);
+
   /* Wait Reason Tokens (Light) */
   --wait-disk-color: #ea580c;
   --wait-disk-bg: color-mix(in srgb, #ea580c 12%, transparent);
@@ -477,6 +489,18 @@
   --status-waiting_quota-text: var(--t-warn);
   --status-waiting_quota-border: color-mix(in srgb, var(--t-warn) 25%, transparent);
   --status-waiting_quota-dot: var(--t-warn);
+
+  --status-merge_failed-color: var(--t-crit);
+  --status-merge_failed-bg: color-mix(in srgb, var(--t-crit) 15%, transparent);
+  --status-merge_failed-text: var(--t-crit);
+  --status-merge_failed-border: color-mix(in srgb, var(--t-crit) 25%, transparent);
+  --status-merge_failed-dot: var(--t-crit);
+
+  --status-push_failed-color: var(--t-crit);
+  --status-push_failed-bg: color-mix(in srgb, var(--t-crit) 15%, transparent);
+  --status-push_failed-text: var(--t-crit);
+  --status-push_failed-border: color-mix(in srgb, var(--t-crit) 25%, transparent);
+  --status-push_failed-dot: var(--t-crit);
 
   /* Wait Reason Tokens (Dark) */
   --wait-disk-color: #f97316;

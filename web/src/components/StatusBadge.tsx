@@ -4,7 +4,7 @@ import { TaskStatus, WaitReason, HubStatus, BlockingDiskInfo } from '../types/ap
 import { useLocale } from '../context/LocaleContext';
 import { formatReason } from '../utils/events';
 
-export type ExtendedTaskStatus = TaskStatus | 'checking';
+export type ExtendedTaskStatus = TaskStatus | 'checking' | 'merge_failed' | 'push_failed';
 
 export interface StatusBadgeProps {
   status: ExtendedTaskStatus;

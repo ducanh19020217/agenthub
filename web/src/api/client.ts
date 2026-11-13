@@ -674,6 +674,7 @@ export async function deleteQuota(name: string, family: string): Promise<{ ok: b
 export interface TaskQuery {
   project?: string;
   status?: string;
+  derived?: string;
   search?: string;
   limit?: number;
   cursor?: string;
@@ -688,6 +689,7 @@ export async function getTasks(params?: Omit<TaskQuery, 'limit'> & { limit?: und
   const query = new URLSearchParams();
   if (params?.project) query.set('project', params.project);
   if (params?.status) query.set('status', params.status);
+  if (params?.derived) query.set('derived', params.derived);
   if (params?.search) query.set('search', params.search);
   if (params?.cursor) query.set('cursor', params.cursor);
   const qStr = query.toString();
@@ -712,6 +714,7 @@ export async function getTasksPage(params?: TaskQuery): Promise<PageResponse<Tas
   const query = new URLSearchParams();
   if (params?.project) query.set('project', params.project);
   if (params?.status) query.set('status', params.status);
+  if (params?.derived) query.set('derived', params.derived);
   if (params?.search) query.set('search', params.search);
   query.set('limit', String(params?.limit ?? 20));
   if (params?.cursor) query.set('cursor', params.cursor);
@@ -910,6 +913,19 @@ export async function retryReviewer(id: string): Promise<Task> {
   return apiFetch<Task>(`/api/tasks/${encodeURIComponent(id)}/review/retry-reviewer`, {
     method: 'POST',
   });
+}
+
+export async function retryTaskMerge(
+  id: string,
+  options?: { assignWorker?: boolean },
+): Promise<{ ok: boolean; mergeResult?: unknown; mergeCommit?: string; assignedWorker?: boolean; files?: string[] }> {
+  return apiFetch(
+    `/api/tasks/${encodeURIComponent(id)}/merge/retry`,
+    {
+      method: 'POST',
+      body: JSON.stringify(options || {}),
+    },
+  );
 }
 
 export async function publishTask(

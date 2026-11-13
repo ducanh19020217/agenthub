@@ -923,13 +923,18 @@ export const handlers = [
     const url = new URL(request.url);
     const project = url.searchParams.get('project');
     const status = url.searchParams.get('status');
+    const derived = url.searchParams.get('derived') || (status === 'merge_failed' || status === 'push_failed' ? status : null);
+    const effectiveStatus = (status === 'merge_failed' || status === 'push_failed') ? null : status;
 
     let tasks = [...mockTasks];
     if (project) {
       tasks = tasks.filter((t) => t.projectId === project);
     }
-    if (status) {
-      tasks = tasks.filter((t) => t.status === status);
+    if (effectiveStatus) {
+      tasks = tasks.filter((t) => t.status === effectiveStatus);
+    }
+    if (derived) {
+      tasks = tasks.filter((t) => t.deliveryIssue?.kind === derived);
     }
     return HttpResponse.json(tasks);
   }),
@@ -1174,6 +1179,41 @@ export const handlers = [
     task.attempt += 1;
     task.updatedAt = new Date().toISOString();
     return HttpResponse.json(task);
+  }),
+
+  // POST /api/tasks/:id/merge/retry
+  http.post('/api/tasks/:id/merge/retry', async ({ params, request }) => {
+    if (!checkAuth(request)) {
+      return HttpResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const { id } = params;
+    const body = (await request.json().catch(() => ({}))) as { assignWorker?: boolean };
+    const task = mockTasks.find((t) => t.id === id);
+    if (!task) {
+      return HttpResponse.json({ error: 'not_found', message: `Task "${id}" không tồn tại` }, { status: 404 });
+    }
+    if (body.assignWorker) {
+      task.status = 'queued';
+      delete (task as any).deliveryIssue;
+      return HttpResponse.json({ ok: true, status: 'queued', assignedWorker: true });
+    }
+    delete (task as any).deliveryIssue;
+    return HttpResponse.json({ ok: true, mergeCommit: 'mock-commit-sha' });
+  }),
+
+  // POST /api/tasks/:id/publish
+  http.post('/api/tasks/:id/publish', async ({ params, request }) => {
+    if (!checkAuth(request)) {
+      return HttpResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const { id } = params;
+    const task = mockTasks.find((t) => t.id === id);
+    if (!task) {
+      return HttpResponse.json({ error: 'not_found', message: `Task "${id}" không tồn tại` }, { status: 404 });
+    }
+    task.status = 'pushed';
+    delete (task as any).deliveryIssue;
+    return HttpResponse.json({ ok: true, started: true });
   }),
 
   // DELETE /api/tasks/:id/worktree

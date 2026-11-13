@@ -692,14 +692,14 @@ Cách dùng:
   }
 }
 
-async function cmdHealthSweep(config: ReturnType<typeof loadConfig>, extraArgs: string[]): Promise<void> {
+export async function cmdHealthSweep(config: ReturnType<typeof loadConfig>, extraArgs: string[]): Promise<void> {
   const runNow = extraArgs.includes('--run') || extraArgs.includes('-r') || extraArgs.includes('run');
-  const token = readExistingToken(config.hubHome);
+  const token = readExistingToken(config.tokenPath || path.join(config.hubHome, 'token'));
   if (!token) {
     console.error('Không tìm thấy token của daemon. Hãy đảm bảo daemon đang chạy.');
     process.exit(1);
   }
-  const port = process.env.AGENTHUB_PORT ? parseInt(process.env.AGENTHUB_PORT, 10) : 7700;
+  const port = process.env.AGENTHUB_PORT ? parseInt(process.env.AGENTHUB_PORT, 10) : (config.port || 7700);
   const method = runNow ? 'POST' : 'GET';
   const url = `http://127.0.0.1:${port}/api/health/sweep`;
   try {

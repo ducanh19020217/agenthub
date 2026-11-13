@@ -9,7 +9,7 @@ import { projectSettings } from '../projects/settings.js';
 import { buildProjectKnowledgeContext } from '../projects/knowledge-context.js';
 import { effectiveBrainCodexProfile } from './engine.js';
 
-const EVENT_TYPES = new Set(['task.review_ready', 'task.failed', 'task.blocked', 'task.done', 'batch.created', 'batch.dispatched', 'merge.failed', 'merge.conflict', 'quota.exhausted', 'claude.quota_exhausted', 'disk.low', 'load.high', 'brain.directive_added', 'brain.department_summary', 'brain.profile_transfer', 'ci.failed', 'brain.trust_changed', 'config.updated', 'brain.notify', 'review.escalated']);
+const EVENT_TYPES = new Set(['task.review_ready', 'task.failed', 'task.blocked', 'task.done', 'batch.created', 'batch.dispatched', 'merge.failed', 'merge.conflict', 'quota.exhausted', 'claude.quota_exhausted', 'disk.low', 'load.high', 'brain.directive_added', 'brain.department_summary', 'brain.profile_transfer', 'ci.failed', 'brain.trust_changed', 'config.updated', 'brain.notify', 'review.escalated', 'task.health_issue']);
 const SYSTEM_EVENTS = new Set(['quota.exhausted', 'claude.quota_exhausted', 'disk.low', 'load.high']);
 const MAX_RETRIES = 3;
 
@@ -18,6 +18,12 @@ function isPriorityEvent(type: string, payload?: unknown): boolean {
     return true;
   }
   const data = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
+  if (type === 'task.health_issue') {
+    const rule = typeof data.rule === 'string' ? data.rule : '';
+    if (rule === 'churn' || rule === 'queued_starved' || rule === 'review_orphan') {
+      return true;
+    }
+  }
   if ((type === 'quota.exhausted' || type === 'claude.quota_exhausted') && (data.allExhausted || data.quotaAllExhausted || data.fallbackAvailable === false)) {
     return true;
   }
@@ -539,7 +545,19 @@ export class BrainRunner {
       ? `\nCHECKLIST KHI DUYỆT (BẮT BUỘC):\n${settings.reviewChecklist.map((item) => `- ${item}`).join('\n')}\nKhi review phải liệt kê mục vi phạm hoặc ghi rõ “đã đối chiếu checklist: không vi phạm”.`
       : '';
     const ticketRules = buildBrainTicketWorkflowInstruction(settings);
-    return { text: `${context}\n${knowledgePrompt}${checklist}${ticketRules}\nCHỈ THỊ CỦA NGƯỜI DÙNG (bắt buộc tuân theo):\n${directives}\nSự kiện: ${lines.join('\n')}\n${mode === 'suggest' ? 'Chế độ suggest: chỉ đề xuất, chờ người dùng duyệt.' : 'Chế độ auto: làm theo BRAIN-PLAYBOOK khi an toàn.'}`, knowledgeHash };
+    const hasHealthIssue = events.some((event) => event.type === 'task.health_issue');
+    const healthInstruction = hasHealthIssue
+      ? '\nHƯỚNG DẪN XỬ LÝ SỰ CỐ SỨC KHOẺ TASK (task.health_issue):\n' +
+        'Khi phát hiện bất thường sức khoẻ, hãy phân tích bằng chứng (evidence) và gợi ý (suggestion) rồi xử lý qua các công cụ sẵn có:\n' +
+        '- retry: thử lại task nếu lỗi tạm thời hoặc bị gián đoạn.\n' +
+        '- cancel: huỷ task nếu bị treo vĩnh viễn, loop vô ích hoặc không còn khả thi.\n' +
+        '- thêm ghi chú hay chỉ dẫn cho task (qua hub_update_task hoặc chỉ thị).\n' +
+        '- đổi model chain: chuyển sang model chain khác phù hợp hơn nếu model hiện tại liên tục churn hoặc failover.\n' +
+        '- tách task: chia nhỏ đề bài nếu task quá phức tạp dẫn đến churn/quá nhiều vòng sửa.\n' +
+        '- hoặc báo người dùng qua brain.notify (level: decision hoặc incident) nếu cần con người can thiệp.\n' +
+        'Tuyệt đối không thực hiện các hành động vượt ngoài quyền hạn sẵn có.'
+      : '';
+    return { text: `${context}\n${knowledgePrompt}${checklist}${ticketRules}${healthInstruction}\nCHỈ THỊ CỦA NGƯỜI DÙNG (bắt buộc tuân theo):\n${directives}\nSự kiện: ${lines.join('\n')}\n${mode === 'suggest' ? 'Chế độ suggest: chỉ đề xuất, chờ người dùng duyệt.' : 'Chế độ auto: làm theo BRAIN-PLAYBOOK khi an toàn.'}`, knowledgeHash };
   }
 
   private formatDirectiveAcknowledgement(event: BrainQueuedEvent, projectId: string | null): string {

@@ -11,8 +11,6 @@ import {
   discoverClaudeModels,
   ModelDiscoveryService,
   DEFAULT_AGY_DISCOVERED_MODELS,
-  DEFAULT_CODEX_DISCOVERED_MODELS,
-  DEFAULT_CLAUDE_DISCOVERED_MODELS,
 } from '../src/models/index.js';
 import { openDatabase, ProfileModelRepo, ProfileRepo, ProfileRow } from '../src/db/index.js';
 import { isKnownModel } from '../src/quota/index.js';

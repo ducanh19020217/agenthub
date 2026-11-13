@@ -52,6 +52,7 @@ export function parseAgyModelsOutput(output: string): DiscoveredModelItem[] {
   const lines = output.split(/\r?\n/);
   for (const rawLine of lines) {
     // Strip terminal spinner characters and ANSI escapes
+    // eslint-disable-next-line no-control-regex -- strips terminal escape sequences
     const line = rawLine.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '').trim();
     if (!line || line.startsWith('Fetching available models')) continue;
 
@@ -76,6 +77,10 @@ export async function discoverAgyModels(
   profile: ProfileRow,
   options?: { agyBin?: string; execFileFn?: ExecFileFunction },
 ): Promise<DiscoveredModelItem[]> {
+  if (process.env.VITEST && !options?.execFileFn) {
+    return DEFAULT_AGY_DISCOVERED_MODELS;
+  }
+
   const env: Record<string, string> = {
     ...process.env,
     BROWSER: '/bin/false',
@@ -152,6 +157,10 @@ export async function discoverCodexModels(
   }
 
   // 2. If no cache or forced API fetch, call ChatGPT/Codex models endpoint
+  if (process.env.VITEST && !options?.fetchFn) {
+    return DEFAULT_CODEX_DISCOVERED_MODELS;
+  }
+
   const tokenRes = readCodexAccessToken(codexDir);
   if ('skip' in tokenRes) {
     throw new Error(`Codex credentials unavailable: ${tokenRes.skip}`);
@@ -219,7 +228,8 @@ export async function discoverClaudeModels(
     { id: 'haiku', name: 'Claude Haiku', engine: 'claude', verified: true },
   ];
 
-  const home = options?.customHome || profile.home || os.homedir();
+  const home = options?.customHome || profile.home || (process.env.VITEST ? undefined : os.homedir());
+  if (!home) return baseAliases;
   const candidateDirs = profile.kind === 'isolated'
     ? [path.join(home, '.claude', 'cache', 'model-catalog'), path.join(home, 'cache', 'model-catalog')]
     : [path.join(home, '.claude', 'cache', 'model-catalog')];

@@ -46,6 +46,7 @@ import type { GiteaSyncService } from '../integrations/gitea/service.js';
 import { isGiteaTokenConfigured, saveGiteaToken } from '../integrations/gitea/secrets.js';
 import { parseRemote } from '../integrations/gitea/client.js';
 import { BulletinService } from '../bulletin.js';
+import type { HealthSweepService, HealthSweepResult } from '../health/sweep.js';
 import { parseCodexTokenItem, writeCodexAuthFile } from '../profiles/codexToken.js';
 import { parseClaudeTokenItem, verifyClaudeOAuthToken, writeClaudeIsolatedFiles, type ClaudeVerifyResult } from '../profiles/claudeToken.js';
 import {
@@ -1116,6 +1117,7 @@ export class AppService {
   public dailyReportService?: DailyReportService;
   public timesheetService?: OpenProjectTimesheetService;
   public giteaSyncService?: GiteaSyncService;
+  public healthSweepService?: HealthSweepService;
   private perfCollector?: PerfCollector;
   private profileChecks = new Set<string>();
   private reviewingTasks = new Set<string>();
@@ -6578,5 +6580,19 @@ export class AppService {
 
   getEffectiveConfig(projectId: string) {
     return computeEffectiveConfig(this, projectId);
+  }
+
+  getHealthSweepStatus(): HealthSweepResult {
+    if (!this.healthSweepService) {
+      return { timestamp: null, issues: [] };
+    }
+    return this.healthSweepService.getStatus();
+  }
+
+  async runHealthSweep(): Promise<HealthSweepResult> {
+    if (!this.healthSweepService) {
+      return { timestamp: null, issues: [] };
+    }
+    return this.healthSweepService.runSweep();
   }
 }

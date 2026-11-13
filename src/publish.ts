@@ -1034,7 +1034,9 @@ export async function publishTask(
         try {
           const pr = mainTask.pushResult ? JSON.parse(mainTask.pushResult) : null;
           if (pr?.auditPassed === true) hasAuditPassed = true;
-        } catch {}
+        } catch {
+          // ignore parse error
+        }
 
         const hasPrePublishReview = deps.reviewRepo?.getByTask(taskId).some(
           (r) => r.actor === 'audit-prepublish' && r.verdict === 'approved'

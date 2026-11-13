@@ -528,19 +528,26 @@ export class HealthSweepService {
         const projectId = task?.projectId || run.taskId.split('/')[0] || '';
         const currentStatus = task?.status || 'unknown';
 
-        if (shouldEmitWithCooldown(cooldownRepo, run.taskId, 'stale_run', currentStatus, now, cooldownMinutes)) {
-          cooldownRepo.set(run.taskId, 'stale_run', new Date(now).toISOString(), currentStatus);
-
-          // Self repair: finish run and requeue task if worker
-          runRepo.finish(run.id, 'crashed', undefined, 'stale_run_sweep');
-          if (run.kind === 'worker') {
-            if (task && task.status === 'running') {
-              taskRepo.update(task.id, { status: 'queued', resume: 1 });
-              eventBus.emit('task.queued', task.id, { reason: 'stale_run_sweep' });
-            }
-          } else if (task && task.status === 'review') {
-            scheduler.triggerTick?.();
+        // Self repair: finish run and requeue task if worker
+        runRepo.finish(run.id, 'crashed', undefined, 'stale_run_sweep');
+        if (run.kind === 'worker') {
+          if (task && task.status === 'running') {
+            taskRepo.update(task.id, { status: 'queued', resume: 1 });
+            eventBus.emit('task.queued', task.id, { reason: 'stale_run_sweep' });
           }
+        } else if (task && task.status === 'review') {
+          scheduler.triggerTick?.();
+        }
+
+        const taskAfterRepair = taskRepo.get(run.taskId);
+        const postRepairStatus = taskAfterRepair?.status || currentStatus;
+
+        if (issues.some((i) => i.taskId === run.taskId && i.rule === 'stale_run')) {
+          continue;
+        }
+
+        if (shouldEmitWithCooldown(cooldownRepo, run.taskId, 'stale_run', currentStatus, now, cooldownMinutes)) {
+          cooldownRepo.set(run.taskId, 'stale_run', new Date(now).toISOString(), postRepairStatus);
 
           const evidence = collectEvidence(db, run.taskId, task, runRepo, reviewRepo);
           const issue: HealthIssue = {
@@ -551,9 +558,9 @@ export class HealthSweepService {
             sinceMinutes,
             evidence,
             suggestion:
-              run.kind === 'worker' && task?.status === 'running'
+              run.kind === 'worker' && currentStatus === 'running'
                 ? 'Run trong DB bị mồ côi (pid không tồn tại và không nằm trong running); sweep đã đánh dấu crashed và requeue task.'
-                : run.kind !== 'worker' && task?.status === 'review'
+                : run.kind !== 'worker' && currentStatus === 'review'
                   ? 'Run reviewer trong DB bị mồ côi (pid không tồn tại và không nằm trong running); sweep đã đánh dấu crashed và giữ task ở review để scheduler dispatch lại reviewer.'
                   : 'Run trong DB bị mồ côi (pid không tồn tại và không nằm trong running); sweep đã đánh dấu crashed.',
           };

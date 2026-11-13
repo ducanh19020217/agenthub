@@ -1546,6 +1546,84 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
       expect(updatedTask?.status).toBe('queued');
       expect(updatedTask?.resume).toBe(1);
     });
+
+    it('một task có 2 run stale cùng lúc thì cả 2 run đều được finish trong một lần quét, và lần quét tiếp theo trong thời gian cooldown không phát event trùng', async () => {
+      const now = Date.now();
+      ctx.taskRepo.insert({
+        id: 'p1/t-two-stale-runs',
+        projectId: 'p1',
+        title: 'Task two stale runs',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-two-stale-runs', {
+        status: 'running',
+      });
+
+      // Insert 2 stale runs with dead pids for the same task
+      ctx.runRepo.insert({
+        id: 'run-stale-1',
+        taskId: 'p1/t-two-stale-runs',
+        engine: 'agy',
+        model: 'gemini',
+        profileName: 'prof1',
+        pid: 999991,
+        kind: 'worker',
+      });
+      ctx.runRepo.insert({
+        id: 'run-stale-2',
+        taskId: 'p1/t-two-stale-runs',
+        engine: 'agy',
+        model: 'gemini',
+        profileName: 'prof1',
+        pid: 999992,
+        kind: 'worker',
+      });
+
+      const healthIssueEvents: Array<{ id?: string; issue?: Record<string, unknown> }> = [];
+      ctx.scheduler.getEventBus().on('task.health_issue', (id, issue) => {
+        healthIssueEvents.push({ id, issue: issue as Record<string, unknown> });
+      });
+
+      // Lần quét 1: cả 2 run đều được finish trong một lần quét
+      const res1 = await sweepService.runSweep(now);
+      expect(res1.issues.some((i) => i.rule === 'stale_run' && i.taskId === 'p1/t-two-stale-runs')).toBe(true);
+
+      const run1 = ctx.runRepo.get('run-stale-1');
+      const run2 = ctx.runRepo.get('run-stale-2');
+      expect(run1?.outcome).toBe('crashed');
+      expect(run2?.outcome).toBe('crashed');
+
+      const updatedTask = ctx.taskRepo.get('p1/t-two-stale-runs');
+      expect(updatedTask?.status).toBe('queued');
+      expect(updatedTask?.resume).toBe(1);
+
+      // Chỉ phát 1 event cho task này trong lần quét 1
+      const eventsInSweep1 = healthIssueEvents.filter((e) => e.id === 'p1/t-two-stale-runs' && e.issue?.rule === 'stale_run');
+      expect(eventsInSweep1).toHaveLength(1);
+
+      // Thêm 1 run stale mới trong thời gian cooldown
+      ctx.runRepo.insert({
+        id: 'run-stale-3',
+        taskId: 'p1/t-two-stale-runs',
+        engine: 'agy',
+        model: 'gemini',
+        profileName: 'prof1',
+        pid: 999993,
+        kind: 'worker',
+      });
+
+      // Lần quét tiếp theo trong thời gian cooldown (sau 10 giây, cooldown mặc định 120 phút)
+      const res2 = await sweepService.runSweep(now + 10_000);
+
+      // Run mới vẫn được finish (self-repair luôn chạy)
+      const run3 = ctx.runRepo.get('run-stale-3');
+      expect(run3?.outcome).toBe('crashed');
+
+      // Nhưng không phát event trùng do cooldown
+      expect(res2.issues.some((i) => i.rule === 'stale_run' && i.taskId === 'p1/t-two-stale-runs')).toBe(false);
+      const eventsTotal = healthIssueEvents.filter((e) => e.id === 'p1/t-two-stale-runs' && e.issue?.rule === 'stale_run');
+      expect(eventsTotal).toHaveLength(1);
+    });
   });
 
   // Cooldown

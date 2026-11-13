@@ -471,6 +471,49 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
       expect(result.issues.some((i) => i.rule === 'review_orphan' && i.taskId === 'p1/t-review-escalated-manual')).toBe(false);
     });
 
+    it('không báo nhầm review_orphan khi task reviewerEscalated đã được review tự động duyệt trong trạng thái chuyển tiếp', async () => {
+      const now = Date.now();
+      const past35m = new Date(now - 35 * 60 * 1000).toISOString();
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-review-escalated-approved',
+        projectId: 'p1',
+        title: 'Task review escalated approved transition',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-review-escalated-approved', {
+        status: 'review',
+        statusChangedAt: past35m,
+        worktreePath: projectPath,
+        reviewerEscalated: 1,
+        reviewerEscalationReason: 'reviewer_changes_limit',
+      });
+
+      ctx.runRepo.insert({
+        id: 'run-check-esc-approved',
+        taskId: 'p1/t-review-escalated-approved',
+        engine: 'agy',
+        model: 'model',
+        profileName: 'prof1',
+      });
+      ctx.db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('p1/t-review-escalated-approved', 'run-check-esc-approved', 'test', 1, 0, 100, 'pass');
+
+      ctx.reviewRepo.insert({
+        id: 'rev-arbiter-approved',
+        taskId: 'p1/t-review-escalated-approved',
+        actor: 'claude-reviewer',
+        verdict: 'approved',
+        feedback: 'Approved by arbiter',
+      });
+
+      const isEligible = ctx.scheduler.isReviewOrphanEligible(ctx.taskRepo.get('p1/t-review-escalated-approved')!);
+      expect(isEligible).toBe(false);
+
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'review_orphan' && i.taskId === 'p1/t-review-escalated-approved')).toBe(false);
+    });
+
     it('canStartEscalationArbiter kiểm tra đúng quota và backoff của arbiter profile', () => {
       ctx.config.reviewer = {
         ...ctx.config.reviewer,

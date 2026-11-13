@@ -666,10 +666,12 @@ export class Scheduler {
       const last = this.reviewRepo?.getByTask(task.id).at(-1);
       if (last && isAutoReviewer(last.actor) && last.verdict === 'approved') {
         // An automated reviewer approved after the escalation: it is resolved.
-      } else {
-        if (!this.needsEscalationArbiter(task)) return false;
-        return this.canStartEscalationArbiter(task);
+        // In this transitional state before the scheduler tick resets escalation,
+        // it is not an orphan waiting for an automated reviewer.
+        return false;
       }
+      if (!this.needsEscalationArbiter(task)) return false;
+      return this.canStartEscalationArbiter(task);
     }
 
     const chain = this.reviewChainForTask(task);

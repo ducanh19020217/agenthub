@@ -434,9 +434,10 @@
     2. Code chỉ phát `task.timeout`, không phát `task.failed`. Do `task.timeout` không nằm trong danh sách đánh thức mặc định (`DEFAULT_BRAIN_WAKEUP_EVENTS`), Brain không được đánh thức khi task timeout thất bại.
 - **Quyết định thiết kế**:
   1. **Cơ chế timeout resume dựa trên tiến độ và số lần timeout liên tiếp**:
-     - Khi worker run bị timeout, scheduler kiểm tra tiến độ bằng hàm `hasCommitAfter(task, startedAtMs)` sẵn có (xem worktree HEAD có commit mới sau mốc bắt đầu của run hay không).
+     - Khi worker run bị timeout, scheduler kiểm tra tiến độ bằng hàm `hasCommitAfter(task, startedAtMs)` sẵn có (xem worktree HEAD có commit mới sau mốc bắt đầu của run hay không). Mốc `startedAtMs` sử dụng trực tiếp giá trị hợp lệ từ `run.startedAt` trong DB (fallback về `rt.startTime` nếu không hợp lệ), không dùng `Math.min` để tránh lùi mốc thời gian và nhận diện nhầm commit trước run là tiến độ.
      - Đếm số lần timeout liên tiếp dựa trên số run worker có outcome `timeout` liên tiếp ở cuối danh sách runs của task (`getConsecutiveTimeoutCount`), không cần thêm cột DB mới.
      - Cấu hình `scheduler.maxTimeoutResumes` (mặc định 2, đặt 0 để tắt) giới hạn số lần resume liên tiếp do timeout.
+     - Phát sự kiện `task.timeout` cho mọi outcome timeout (kể cả khi requeue lẫn khi fail) để Telegram và các thành phần hiện tại tiếp tục hoạt động không đổi.
      - Nếu có tiến độ và số lần timeout liên tiếp chưa vượt `maxTimeoutResumes`:
        - Task được chuyển về `queued` với cờ `resume: 1`.
        - Ghi chú `TIMEOUT_RESUME_NOTE` ("Lượt trước bị timeout nhưng đã có tiến độ. Kiểm tra git log/status rồi làm tiếp, không làm lại, và commit thường xuyên.") vào `.agenthub/task.md` của worktree và `task.body`.
@@ -444,6 +445,5 @@
      - Nếu không có tiến độ hoặc đã vượt quá `maxTimeoutResumes`:
        - Chuyển task sang `failed`.
        - Phát sự kiện `task.failed` với `{ reason: 'timeout', progress: boolean, timeoutResumes: number }` để kích hoạt đánh thức Brain.
-       - Tiếp tục phát sự kiện `task.timeout` để Telegram và các thành phần hiện tại tiếp tục hoạt động không đổi.
   2. **Bảo toàn hành vi cho các luồng khác**:
      - Giữ nguyên toàn bộ hành vi khi task bị cancel, stall, hoặc quota; không thay đổi logic xử lý reviewer timeout.

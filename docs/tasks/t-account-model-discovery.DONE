@@ -3,7 +3,7 @@
 ## 1. Tóm tắt việc đã làm
 
 1. **Khám phá model theo từng profile (Backend Discovery)**:
-   - Tạo `ProfileModelRepo` và migration 72 (`profile_models`) lưu trữ danh sách model được khám phá theo từng profile: `profileName`, `engine`, `modelId`, `displayName`, `verified`, `fetchedAt`.
+   - Tạo `ProfileModelRepo` và migration 72 / migration 76 (`profile_models`) lưu trữ danh sách model được khám phá theo từng profile với khóa chính hợp nhất `PRIMARY KEY (profileName, engine, modelId)`.
    - Cập nhật migration hash vào `test/fixtures/migrations.lock` theo quy tắc append-only.
    - Triển khai bộ phân tích và hàm khám phá độc lập cho từng engine (`src/models/discovery.ts`):
      - **Antigravity (agy)**: Thực thi binary CLI trong môi trường sandbox cô lập qua thư mục tạm, bóc tách danh sách model từ output (loại bỏ spinner ANSI, ký tự thừa).
@@ -30,10 +30,10 @@
 
 5. **Giao diện Web (`web/src/...`)**:
    - Mọi ô chọn model (Cài đặt chuỗi HARD/EASY, Reviewer chain, Brain model trong ProjectSettingsDrawer và DepartmentsPage, NewSessionModal, ChatPage, CreateTaskPage, TaskDetailPage) sử dụng dữ liệu từ `/api/models`.
-   - Đề xuất model nhóm trực quan theo engine, hiển thị số lượng tài khoản khả dụng; loại bỏ triệt để việc chèn model fallback hardcode khi profile chưa xác minh.
+   - Loại bỏ toàn bộ fallback chèn model hardcode vào danh sách gợi ý dropdown / datalist (`CreateTaskPage`, `ProjectSettingsDrawer`, `SettingsPage`, `DepartmentsPage`) khi danh sách model discovery trống hoặc model chưa xác minh.
+   - Đề xuất model nhóm trực quan theo engine, hiển thị số lượng tài khoản khả dụng; hiển thị cảnh báo đỏ nổi bật (`data-testid="model-unavailable-warning"`) cho các model đã cấu hình nhưng không khả dụng trong `CreateTaskPage`, `ProjectSettingsDrawer` (reviewer order và review chain), `SettingsPage` (reviewer order và model chains), `TaskDetailPage`.
    - Project reviewer-chain validator (`validateReviewerModelSyntax` và `validateReviewChainReviewerSyntax`) nhận danh sách model discovery khả dụng/đã cấu hình để không từ chối các model Codex mới hợp lệ.
    - Preset và quick-fix không còn chèn `codex:gpt-5.6-luna` khi không có tài khoản Codex khả dụng.
-   - Ô chọn model trong modal sửa task của `TaskDetailPage` loại bỏ danh sách viết cứng `VALID_MODELS`; chỉ hiển thị model khả dụng từ discovery và hiển thị cảnh báo đỏ nổi bật cho các model cũ trong chuỗi không còn khả dụng.
    - Revert thay đổi ngoài phạm vi task tại `test/publish.test.ts`.
 
 ## 2. Kết quả kiểm tra & nghiệm thu
@@ -41,25 +41,30 @@
 - `npm run lint`: Đạt (0 errors, 130 baseline warnings).
 - `npx tsc --noEmit -p .`: Đạt (0 errors).
 - `npx tsc --noEmit -p web`: Đạt (0 errors).
-- `npm run build`: Đạt (Backend compile thành công).
-- `npm run build:web`: Đạt (Vite production build thành công trong 5.92s).
-- `npm run test:web -- --run`: Đạt 74/74 test files, 684/684 tests passed.
-  - Bao gồm `web/src/test/settingsSelectInputs.test.tsx`: 41/41 tests passed.
+- `npm run build:web`: Đạt (Vite production build thành công trong 5.70s).
+- `npm run test:web -- --run`: Đạt 74/74 test files, 686/686 tests passed.
+  - Bao gồm `web/src/test/settingsSelectInputs.test.tsx`: 42/42 tests passed.
+  - Bao gồm `web/src/test/createTaskPage.test.tsx`: 11/11 tests passed.
   - Bao gồm `web/src/test/taskDetailPage.test.tsx`: 34/34 tests passed.
   - Bao gồm `web/src/test/departmentsPage.test.tsx`: 10/10 tests passed.
   - Bao gồm `web/src/test/chat.test.tsx`: 7/7 tests passed.
 - Backend test:
-  - `test/model-discovery.test.ts`: 20/20 tests passed.
+  - `test/migrations-append-only.test.ts`: 1/1 passed.
+  - `test/model-discovery.test.ts`: 21/21 tests passed.
   - `test/publish.test.ts`: 34/34 tests passed.
   - `test/scheduler.test.ts`: 131/131 tests passed.
 
 ## 3. Việc chưa làm được / Ghi chú thiết kế
 
 - Không có việc tồn đọng.
-- Tất cả các yêu cầu từ đề bài ban đầu và các phản hồi review P1/P2 qua 4 vòng review đều đã được giải quyết trọn vẹn và kiểm tra nghiêm ngặt.
+- Tất cả các yêu cầu từ đề bài ban đầu và các phản hồi review P1/P2 qua 5 vòng review đều đã được giải quyết trọn vẹn và kiểm tra nghiêm ngặt.
 
 ## 4. Danh sách commits trên nhánh
 
+- `9442ce59`: `fix(web): exclude unavailable models from project drawer reviewer suggestions and show warning badge`
+- `c4b52935`: `fix(web): only propose discovered available models in CreateTaskPage datalist`
+- `e1f8e150`: `fix(db): include engine in profile_models primary key`
+- `fba07681`: `docs(tasks): update completion report for round 4 review fixes`
 - `d8f1a65c`: `test(web): fix ModelOptions and DiscoveredModel mock types`
 - `e6769ea9`: `fix(web): pass discovered models to drawer reviewer validation and prevent hardcoded codex fallbacks`
 - `283ce923`: `revert(test): revert out-of-scope publish audit test change`

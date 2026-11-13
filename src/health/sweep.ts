@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { HealthSweepConfig } from '../config.js';
@@ -352,26 +353,59 @@ export class HealthSweepService {
         const runningMinutes = Math.floor(elapsedMs / 60_000);
         if (runningMinutes < rules.runningNoProgressMin) continue;
 
-        const noCommitMinutes = rt.noCommitMinutes ?? runningMinutes;
-        if (noCommitMinutes < rules.runningNoProgressMin) continue;
+        const progressWindowMs = rules.runningNoProgressMin * 60_000;
+        const progressThreshold = now - progressWindowMs;
 
-        let worktreeChanged = false;
-        if (rt.cachedWorktreeMtime > rt.startTime) {
-          worktreeChanged = true;
-        } else if (task.worktreePath && fs.existsSync(task.worktreePath)) {
+        // Check recent commits using no_commit watchdog data if available
+        let latestCommitTime = rt.startTime;
+        if (typeof rt.noCommitMinutes === 'number') {
+          latestCommitTime = now - Math.max(0, rt.noCommitMinutes) * 60_000;
+        } else if (rt.lastCommitCheckAt) {
+          latestCommitTime = now;
+        }
+
+        // Check recent changes in worktree or git index
+        let latestWorktreeChange = rt.cachedWorktreeMtime || 0;
+        if (task.worktreePath && fs.existsSync(task.worktreePath)) {
           try {
-            const gitIndex = path.join(task.worktreePath, '.git', 'index');
-            if (fs.existsSync(gitIndex)) {
-              const stat = fs.statSync(gitIndex);
-              if (stat.mtimeMs > rt.startTime) {
-                worktreeChanged = true;
+            let gitIndexPath = path.join(task.worktreePath, '.git', 'index');
+            const dotGit = path.join(task.worktreePath, '.git');
+            if (fs.existsSync(dotGit) && fs.statSync(dotGit).isFile()) {
+              try {
+                const gitPath = execFileSync('git', ['-C', task.worktreePath, 'rev-parse', '--git-path', 'index'], {
+                  encoding: 'utf-8',
+                  stdio: ['ignore', 'pipe', 'ignore'],
+                }).trim();
+                if (gitPath) {
+                  gitIndexPath = path.isAbsolute(gitPath) ? gitPath : path.join(task.worktreePath, gitPath);
+                }
+              } catch {
+                try {
+                  const content = fs.readFileSync(dotGit, 'utf8');
+                  const match = content.match(/^gitdir:\s*(.+)$/m);
+                  if (match) {
+                    const gitDir = match[1].trim();
+                    const resolvedGitDir = path.isAbsolute(gitDir) ? gitDir : path.resolve(task.worktreePath, gitDir);
+                    gitIndexPath = path.join(resolvedGitDir, 'index');
+                  }
+                } catch {
+                  // ignore
+                }
+              }
+            }
+            if (fs.existsSync(gitIndexPath)) {
+              const stat = fs.statSync(gitIndexPath);
+              if (stat.mtimeMs > latestWorktreeChange) {
+                latestWorktreeChange = stat.mtimeMs;
               }
             }
           } catch {
             // ignore stat error
           }
         }
-        if (worktreeChanged) continue;
+
+        const latestProgressTime = Math.max(latestWorktreeChange, latestCommitTime);
+        if (latestProgressTime >= progressThreshold) continue;
 
         emitIssue(
           'running_no_progress',

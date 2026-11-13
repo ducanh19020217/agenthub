@@ -686,6 +686,153 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
       const result = await sweepService.runSweep(now);
       expect(result.issues.some((i) => i.rule === 'running_no_progress' && i.taskId === 'p1/t-running-active')).toBe(false);
     });
+
+    it('phát hiện đúng khi worktree đổi 1 lần sau start rồi đứng yên quá ngưỡng runningNoProgressMin', async () => {
+      const start95m = Date.now();
+      const now = start95m + 95 * 60 * 1000;
+      const change2m = start95m + 2 * 60 * 1000;
+
+      const gitIndex = path.join(projectPath, '.git', 'index');
+      if (fs.existsSync(gitIndex)) {
+        fs.utimesSync(gitIndex, new Date(change2m), new Date(change2m));
+      }
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-running-stalled-after-change',
+        projectId: 'p1',
+        title: 'Task running stalled after change',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-running-stalled-after-change', {
+        status: 'running',
+        worktreePath: projectPath,
+      });
+
+      vi.spyOn(ctx.scheduler, 'getRunningTask').mockReturnValue({
+        runId: 'r-stalled',
+        taskId: 'p1/t-running-stalled-after-change',
+        pid: 99997,
+        pidStart: null,
+        profileName: 'prof1',
+        model: 'gemini',
+        engine: fakeEngine,
+        startTime: start95m,
+        timeoutMs: 3600000,
+        timeoutAt: now + 3600000,
+        retryCount: 0,
+        projectId: 'p1',
+        lastOutputAt: change2m,
+        lastActivityAt: change2m,
+        activitySource: 'worktree',
+        activityCheckedAt: now,
+        cachedConversationMtime: 0,
+        cachedWorktreeMtime: change2m, // Changed once 2 minutes after start, then hung
+        usageBefore: null,
+        noCommitMinutes: 95,
+      });
+
+      const result = await sweepService.runSweep(now);
+      expect(
+        result.issues.some((i) => i.rule === 'running_no_progress' && i.taskId === 'p1/t-running-stalled-after-change'),
+      ).toBe(true);
+    });
+
+    it('không báo khi worktree đổi gần đây (trong cửa sổ runningNoProgressMin)', async () => {
+      const start95m = Date.now();
+      const now = start95m + 95 * 60 * 1000;
+      const recentChange = now - 10 * 60 * 1000;
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-running-recent',
+        projectId: 'p1',
+        title: 'Task running recent',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-running-recent', {
+        status: 'running',
+        worktreePath: projectPath,
+      });
+
+      vi.spyOn(ctx.scheduler, 'getRunningTask').mockReturnValue({
+        runId: 'r-recent',
+        taskId: 'p1/t-running-recent',
+        pid: 99996,
+        pidStart: null,
+        profileName: 'prof1',
+        model: 'gemini',
+        engine: fakeEngine,
+        startTime: start95m,
+        timeoutMs: 3600000,
+        timeoutAt: now + 3600000,
+        retryCount: 0,
+        projectId: 'p1',
+        lastOutputAt: recentChange,
+        lastActivityAt: recentChange,
+        activitySource: 'worktree',
+        activityCheckedAt: now,
+        cachedConversationMtime: 0,
+        cachedWorktreeMtime: recentChange,
+        usageBefore: null,
+        noCommitMinutes: 95,
+      });
+
+      const result = await sweepService.runSweep(now);
+      expect(
+        result.issues.some((i) => i.rule === 'running_no_progress' && i.taskId === 'p1/t-running-recent'),
+      ).toBe(false);
+    });
+
+    it('không báo khi .git là file (git worktree) có index thay đổi gần đây', async () => {
+      const start95m = Date.now();
+      const now = start95m + 95 * 60 * 1000;
+      const recentChange = now - 5 * 60 * 1000;
+
+      const wtDir = path.join(tmpDir, 'worktree-wt');
+      const gitDir = path.join(tmpDir, 'gitdir-wt');
+      fs.mkdirSync(wtDir, { recursive: true });
+      fs.mkdirSync(gitDir, { recursive: true });
+      fs.writeFileSync(path.join(wtDir, '.git'), `gitdir: ${gitDir}\n`);
+      const wtIndex = path.join(gitDir, 'index');
+      fs.writeFileSync(wtIndex, 'mock index');
+      fs.utimesSync(wtIndex, new Date(recentChange), new Date(recentChange));
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-running-wt',
+        projectId: 'p1',
+        title: 'Task running git worktree',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-running-wt', {
+        status: 'running',
+        worktreePath: wtDir,
+      });
+
+      vi.spyOn(ctx.scheduler, 'getRunningTask').mockReturnValue({
+        runId: 'r-wt',
+        taskId: 'p1/t-running-wt',
+        pid: 99995,
+        pidStart: null,
+        profileName: 'prof1',
+        model: 'gemini',
+        engine: fakeEngine,
+        startTime: start95m,
+        timeoutMs: 3600000,
+        timeoutAt: now + 3600000,
+        retryCount: 0,
+        projectId: 'p1',
+        lastOutputAt: start95m,
+        lastActivityAt: start95m,
+        activitySource: 'log',
+        activityCheckedAt: now,
+        cachedConversationMtime: 0,
+        cachedWorktreeMtime: 0,
+        usageBefore: null,
+        noCommitMinutes: 95,
+      });
+
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'running_no_progress' && i.taskId === 'p1/t-running-wt')).toBe(false);
+    });
   });
 
   // 5. churn

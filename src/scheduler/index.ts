@@ -1450,6 +1450,41 @@ export class Scheduler {
     await Promise.all(promises);
   }
 
+  recoverStuckCheckingTasks(): void {
+    if (this.stopped) return;
+    if (this.restartState.draining) return;
+
+    const maxCheckingMin = (this.config.scheduler as { maxCheckingMin?: number } | undefined)?.maxCheckingMin ?? 30;
+    const thresholdMs = maxCheckingMin * 60_000;
+    const now = Date.now();
+
+    for (const task of this.taskRepo.getByStatus('checking')) {
+      if (!this.projectRepo.get(task.projectId)) continue;
+      if (this.checkingActive.has(task.id) || this.checkingQueue.some((entry) => entry.taskId === task.id)) continue;
+      if (this.running.has(task.id) || this.starting.has(task.id)) continue;
+      const activeRuns = this.runRepo.getByTask(task.id).filter((r) => r.outcome === null);
+      if (activeRuns.length > 0) continue;
+
+      const changedAt = parseDbTime(task.statusChangedAt || task.updatedAt || task.createdAt);
+      const waitedMs = Number.isNaN(changedAt) ? 0 : now - changedAt;
+      if (waitedMs < thresholdMs) continue;
+
+      const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
+      if (!lastWorker || lastWorker.outcome !== 'done') continue;
+
+      const waitedMinutes = Math.floor(waitedMs / 60_000);
+      this.eventBus.emit('task.checking_recovered', task.id, {
+        runId: lastWorker.id,
+        waitedMinutes,
+        reason: 'stuck_checking',
+      });
+
+      void this.runChecksForTask(task.id, lastWorker.id).catch((error) => {
+        if (!this.stopped) console.error(`[scheduler] stuck checking recovery failed for ${task.id}:`, error);
+      });
+    }
+  }
+
   async runChecksForTask(taskId: string, runId: string, reuseSavedResults = false): Promise<void> {
     if (this.stopped) return;
     if (this.restartState.draining) return;
@@ -1915,6 +1950,9 @@ export class Scheduler {
 
     // 1. Check quota expiry → move waiting_quota tasks back to queued
     this.checkQuotaExpiry();
+
+    // 1b. Safety net: recover orphaned checking tasks
+    this.recoverStuckCheckingTasks();
 
     // 2. Check running tasks for completion
     void this.checkRunningTasks().catch(() => {});

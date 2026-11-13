@@ -19,6 +19,7 @@ import {
   ChatRetryRepo,
   ChatRetryRow,
   KnowledgeRepo,
+  ProfileModelRepo,
 } from '../db/index.js';
 import { PermissionBroker, canAlwaysAllowCommand, commandPermissionLabel } from './permissions.js';
 import { EventBus } from '../scheduler/index.js';
@@ -208,7 +209,7 @@ export class ChatService {
     public quotaMarkRepo?: QuotaMarkRepo,
     public quotaUsageRepo?: QuotaUsageRepo,
     public eventRepo?: EventRepo,
-    options?: { claudeBin?: string; codexBin?: string; failoverState?: ClaudeFailoverState; retryRepo?: ChatRetryRepo; knowledgeRepo?: KnowledgeRepo },
+    options?: { claudeBin?: string; codexBin?: string; failoverState?: ClaudeFailoverState; retryRepo?: ChatRetryRepo; knowledgeRepo?: KnowledgeRepo; profileModelRepo?: ProfileModelRepo },
   ) {
     if (options?.claudeBin) {
       this.claudeBinOverride = options.claudeBin;
@@ -221,12 +222,18 @@ export class ChatService {
     this.chatSessionRepo.resetAllBusy();
     this.retryRepo = options?.retryRepo;
     this.knowledgeRepo = options?.knowledgeRepo;
+    this.profileModelRepo = options?.profileModelRepo;
     for (const retry of this.retryRepo?.getPending() || []) this.armRetry(retry);
   }
 
+  public profileModelRepo?: ProfileModelRepo;
   private failoverState: ClaudeFailoverState;
   private retryRepo?: ChatRetryRepo;
   private knowledgeRepo?: KnowledgeRepo;
+
+  setProfileModelRepo(repo: ProfileModelRepo): void {
+    this.profileModelRepo = repo;
+  }
 
   private assistantPrompt(session: ChatSessionRow): string {
     const project = session.projectId ? this.projectRepo.get(session.projectId) : undefined;
@@ -800,6 +807,17 @@ export class ChatService {
     }
     const model = body.model ?? this.config.chat.model;
     const allowedModels = new Set(['', ...(this.config.chat.models || ['opus', 'sonnet', 'haiku']), this.config.chat.model]);
+    if (this.profileModelRepo) {
+      const enabledProfiles = this.profileRepo
+        ? new Set(this.profileRepo.getAll().filter((p) => Boolean(p.enabled) && !p.deletedAt && isProfileLoggedIn(p)).map((p) => p.name))
+        : null;
+      const rows = this.profileModelRepo.getAll();
+      for (const row of rows) {
+        if (row.verified && (!enabledProfiles || enabledProfiles.has(row.profileName))) {
+          allowedModels.add(row.modelId);
+        }
+      }
+    }
     if (!allowedModels.has(model)) {
       throw new HttpError(400, 'bad_request', 'Model chat phải là mặc định, sonnet hoặc haiku');
     }

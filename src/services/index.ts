@@ -1164,6 +1164,9 @@ export class AppService {
       const db = this.scheduler.getDatabase();
       if (db) this.profileModelRepo = new ProfileModelRepo(db);
     }
+    if (this.chatService && this.profileModelRepo) {
+      this.chatService.setProfileModelRepo(this.profileModelRepo);
+    }
     if (!this.modelDiscoveryService && this.profileModelRepo) {
       this.modelDiscoveryService = new ModelDiscoveryService(this.profileRepo, this.profileModelRepo);
     }
@@ -6488,7 +6491,8 @@ export class AppService {
       const rows = this.profileModelRepo.getForProfile(profile.name);
       for (const r of rows) {
         if (!r.verified) continue; // Only verified models are considered available on the account
-        const existing = modelMap.get(r.modelId);
+        const key = `${r.engine}:${r.modelId}`;
+        const existing = modelMap.get(key);
         if (existing) {
           if (!existing.profiles.includes(profile.name)) {
             existing.profiles.push(profile.name);
@@ -6496,7 +6500,7 @@ export class AppService {
           existing.verified = true;
           existing.available = true;
         } else {
-          modelMap.set(r.modelId, {
+          modelMap.set(key, {
             id: r.modelId,
             engine: r.engine as 'agy' | 'codex' | 'claude',
             name: r.modelName || r.modelId,
@@ -6518,8 +6522,9 @@ export class AppService {
       if (!hasVerifiedForEngine) {
         const defaults = getDefaultModelsForEngine(engine);
         for (const item of defaults) {
-          if (!modelMap.has(item.id)) {
-            modelMap.set(item.id, {
+          const key = `${item.engine}:${item.id}`;
+          if (!modelMap.has(key)) {
+            modelMap.set(key, {
               id: item.id,
               engine: item.engine,
               name: item.name,
@@ -6543,33 +6548,56 @@ export class AppService {
       .filter((step): step is { type: 'model'; model: string } => step.type === 'model' && Boolean(step.model))
       .map((step) => step.model);
 
-    const configuredRaw = [
-      ...this.config.defaultModelChains.hard,
-      ...this.config.defaultModelChains.easy,
-      ...this.config.reviewer.order.map((item) => (item.engine === 'codex' ? (item.model.startsWith('codex:') ? item.model : `codex:${item.model}`) : item.model)),
-      ...(arbiterModel ? [arbiterModel] : []),
-      ...(this.config.brain?.model ? [this.config.brain.model] : []),
-      ...(this.config.brain?.codexModel ? [this.config.brain.codexModel] : []),
-      ...(this.config.brain?.director?.model ? [this.config.brain.director.model] : []),
-      ...brainFallbackModels,
-      ...(this.config.chat?.model ? [this.config.chat.model] : []),
-      ...(this.config.chat?.models || []),
-    ].filter(Boolean);
-    const configuredModels = [...new Set(configuredRaw)];
+    const brainCodexModel = this.config.brain?.codexModel
+      ? (this.config.brain.codexModel.startsWith('codex:') ? this.config.brain.codexModel : `codex:${this.config.brain.codexModel}`)
+      : null;
 
-    for (const model of configuredModels) {
-      const existing = modelMap.get(model);
-      if (!existing) {
-        let engine: 'agy' | 'codex' | 'claude' = 'agy';
-        if (model.startsWith('codex:') || (model.startsWith('gpt-') && !model.startsWith('gpt-oss-'))) {
+    const configuredItems: Array<{ model: string; engine?: 'agy' | 'codex' | 'claude' }> = [
+      ...this.config.defaultModelChains.hard.map((m) => ({ model: m })),
+      ...this.config.defaultModelChains.easy.map((m) => ({ model: m })),
+      ...this.config.reviewer.order.map((item) => ({
+        model: item.engine === 'codex' ? (item.model.startsWith('codex:') ? item.model : `codex:${item.model}`) : item.model,
+        engine: item.engine as 'agy' | 'codex' | 'claude',
+      })),
+      ...(arbiterModel ? [{
+        model: arbiterModel,
+        engine: this.config.reviewer.arbiter?.engine as 'agy' | 'codex' | 'claude',
+      }] : []),
+      ...(this.config.brain?.model ? [{ model: this.config.brain.model }] : []),
+      ...(brainCodexModel ? [{ model: brainCodexModel, engine: 'codex' as const }] : []),
+      ...(this.config.brain?.director?.model ? [{ model: this.config.brain.director.model }] : []),
+      ...brainFallbackModels.map((m) => ({ model: m })),
+      ...(this.config.chat?.model ? [{ model: this.config.chat.model, engine: 'claude' as const }] : []),
+      ...(this.config.chat?.models || []).map((m) => ({ model: m, engine: 'claude' as const })),
+    ].filter((item) => Boolean(item.model));
+
+    const configuredModels = [...new Set(configuredItems.map((item) => item.model))];
+
+    for (const item of configuredItems) {
+      let engine: 'agy' | 'codex' | 'claude' = item.engine || 'agy';
+      if (!item.engine) {
+        if (item.model.startsWith('codex:') || (item.model.startsWith('gpt-') && !item.model.startsWith('gpt-oss-'))) {
           engine = 'codex';
-        } else if (model.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(model)) {
+        } else if (item.model.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(item.model)) {
           engine = 'claude';
+        } else {
+          for (const eng of ['agy', 'codex', 'claude'] as const) {
+            const entry = modelMap.get(`${eng}:${item.model}`);
+            if (entry && entry.available) {
+              engine = eng;
+              break;
+            }
+          }
         }
-        modelMap.set(model, {
-          id: model,
+      }
+
+      const key = `${engine}:${item.model}`;
+      const existing = modelMap.get(key);
+      if (!existing) {
+        modelMap.set(key, {
+          id: item.model,
           engine,
-          name: model,
+          name: item.model,
           profiles: [],
           verified: false,
           available: false,
@@ -6589,7 +6617,7 @@ export class AppService {
       return a.id.localeCompare(b.id);
     });
 
-    const suggestions = allModels.filter((m) => m.available).map((m) => m.id);
+    const suggestions = [...new Set(allModels.filter((m) => m.available).map((m) => m.id))];
 
     return {
       models: allModels,

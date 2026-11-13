@@ -16,6 +16,7 @@ import { openDatabase, ProfileModelRepo, ProfileRepo, ProfileRow } from '../src/
 import { isKnownModel } from '../src/quota/index.js';
 import { AppService } from '../src/services/index.js';
 import { Scheduler } from '../src/scheduler/index.js';
+import { ChatService } from '../src/chat/service.js';
 
 describe('Model Discovery Parsers', () => {
   it('parseAgyModelsOutput handles spinner output, tabs and spaces correctly', () => {
@@ -680,5 +681,144 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     // D. Scheduler: getKnownDiscoveredModels does not include models only on logged-out profile
     const known = Scheduler.prototype.getKnownDiscoveredModels.call(scheduler as any);
     expect(known.has('gemini-exclusive-model')).toBe(false);
+  });
+
+  it('getModelOptions unifies models by (engine, modelId) without cross-assigning profiles between engines sharing model ID', () => {
+    // 1. Add agy profile providing claude-3-5-sonnet
+    profileRepo.upsert({
+      name: 'agy-sonnet-prof',
+      engine: 'agy',
+      kind: 'keyring',
+      email: 'agy@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('agy-sonnet-prof', [
+      { modelId: 'claude-3-5-sonnet', modelName: 'Claude 3.5 Sonnet', engine: 'agy', verified: true },
+    ]);
+
+    // 2. Add claude profile providing claude-3-5-sonnet
+    const claudeHome = path.join(tmpDir, 'claude-sonnet-home');
+    fs.mkdirSync(claudeHome, { recursive: true });
+    fs.writeFileSync(path.join(claudeHome, '.credentials.json'), '{}');
+    profileRepo.upsert({
+      name: 'claude-sonnet-prof',
+      engine: 'claude',
+      kind: 'isolated',
+      home: claudeHome,
+      email: 'claude@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('claude-sonnet-prof', [
+      { modelId: 'claude-3-5-sonnet', modelName: 'Claude 3.5 Sonnet', engine: 'claude', verified: true },
+    ]);
+
+    const service = {
+      profileRepo,
+      profileModelRepo,
+      config: {
+        defaultModelChains: { hard: [], easy: [] },
+        reviewer: { order: [] },
+      },
+    };
+
+    const result = AppService.prototype.getModelOptions.call(service as any);
+    const sonnetModels = result.models.filter((m) => m.id === 'claude-3-5-sonnet');
+    expect(sonnetModels).toHaveLength(2);
+
+    const agyEntry = sonnetModels.find((m) => m.engine === 'agy');
+    const claudeEntry = sonnetModels.find((m) => m.engine === 'claude');
+
+    expect(agyEntry).toBeDefined();
+    expect(agyEntry?.profiles).toEqual(['agy-sonnet-prof']);
+    expect(agyEntry?.available).toBe(true);
+
+    expect(claudeEntry).toBeDefined();
+    expect(claudeEntry?.profiles).toEqual(['claude-sonnet-prof']);
+    expect(claudeEntry?.available).toBe(true);
+  });
+
+  it('getModelOptions normalizes brain.codexModel into codex: namespace without creating false warning or duplicate', () => {
+    const codexHome = path.join(tmpDir, 'codex-brain-home');
+    fs.mkdirSync(codexHome, { recursive: true });
+    fs.writeFileSync(path.join(codexHome, 'auth.json'), '{}');
+    profileRepo.upsert({
+      name: 'codex-brain-prof',
+      engine: 'codex',
+      kind: 'isolated',
+      home: codexHome,
+      email: 'codex-brain@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('codex-brain-prof', [
+      { modelId: 'codex:gpt-5.6-luna', modelName: 'GPT-5.6-Luna', engine: 'codex', verified: true },
+    ]);
+
+    const service = {
+      profileRepo,
+      profileModelRepo,
+      config: {
+        defaultModelChains: { hard: [], easy: [] },
+        reviewer: { order: [] },
+        brain: {
+          codexModel: 'gpt-5.6-luna', // Configured without codex: prefix
+        },
+      },
+    };
+
+    const result = AppService.prototype.getModelOptions.call(service as any);
+    expect(result.configured).toContain('codex:gpt-5.6-luna');
+    expect(result.configured).not.toContain('gpt-5.6-luna');
+
+    const codexLuna = result.models.find((m) => m.id === 'codex:gpt-5.6-luna');
+    expect(codexLuna).toBeDefined();
+    expect(codexLuna?.available).toBe(true);
+    expect(codexLuna?.warning).toBeNull();
+    expect(codexLuna?.profiles).toContain('codex-brain-prof');
+
+    // Should NOT have a duplicate or warning model for 'gpt-5.6-luna'
+    const bareLuna = result.models.find((m) => m.id === 'gpt-5.6-luna');
+    expect(bareLuna).toBeUndefined();
+  });
+
+  it('ChatService.validateSessionOptions accepts models discovered in profileModelRepo for active profiles', () => {
+    const claudeHome = path.join(tmpDir, 'claude-chat-home');
+    fs.mkdirSync(claudeHome, { recursive: true });
+    fs.writeFileSync(path.join(claudeHome, '.credentials.json'), '{}');
+    profileRepo.upsert({
+      name: 'claude-chat-prof',
+      engine: 'claude',
+      kind: 'isolated',
+      home: claudeHome,
+      email: 'chat@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('claude-chat-prof', [
+      { modelId: 'claude-3-5-sonnet-20241022', modelName: 'Claude 3.5 Sonnet', engine: 'claude', verified: true },
+    ]);
+
+    const chatService = {
+      config: {
+        chat: { model: 'sonnet', models: ['opus', 'sonnet', 'haiku'] },
+      },
+      profileRepo,
+      profileModelRepo,
+    };
+
+    // Calling validateSessionOptions with discovered model should succeed
+    const validated = (ChatService.prototype as any).validateSessionOptions.call(chatService, {
+      model: 'claude-3-5-sonnet-20241022',
+    });
+    expect(validated.model).toBe('claude-3-5-sonnet-20241022');
+
+    // Calling with unverified / undiscovered model should throw 400
+    expect(() => {
+      (ChatService.prototype as any).validateSessionOptions.call(chatService, {
+        model: 'unknown-undiscovered-model',
+      });
+    }).toThrow();
   });
 });

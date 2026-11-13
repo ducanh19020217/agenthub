@@ -135,7 +135,7 @@ export function useStatusTotal(
     queryFn: () =>
       getTasksPage({
         project,
-        status: isDerived ? undefined : status,
+        status,
         derived: isDerived ? status : undefined,
         search,
         limit: 1,
@@ -593,7 +593,7 @@ export const FlowTaskList: React.FC<{ status: FlowStatus; project?: string; sear
     queryFn: () =>
       getTasksPage({
         project,
-        status: isIssueView ? undefined : status,
+        status,
         derived: isIssueView ? status : undefined,
         search,
         limit: pageSize,
@@ -617,7 +617,7 @@ export const FlowTaskList: React.FC<{ status: FlowStatus; project?: string; sear
     try {
       const next = await getTasksPage({
         project,
-        status: isIssueView ? undefined : status,
+        status,
         derived: isIssueView ? status : undefined,
         search,
         limit: pageSize,

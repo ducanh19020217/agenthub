@@ -1622,6 +1622,21 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
       expect(calls).toHaveLength(0);
     });
 
+    it('sends critical Claude auth expiry with the escaped login command regardless of fallback notification setting', async () => {
+      await bot.stop();
+      config.telegram.notify.fallback = false;
+      bot.handleEvent('profile.auth_expired', undefined, {
+        name: 'NCS',
+        loginCommand: 'CLAUDE_CONFIG_DIR=/tmp/NCS & work claude /login',
+      });
+      await bot.flushQueue(CHAT_ID);
+
+      const calls = recordedCalls.filter((call) => call.url.includes('/sendMessage'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body?.text).toContain('NCS');
+      expect(calls[0].body?.text).toContain('CLAUDE_CONFIG_DIR=/tmp/NCS &amp; work claude /login');
+    });
+
     it('silences partial family exhaustion and only broadcasts critical outage when capacity is 0', async () => {
       await bot.stop();
       for (const name of ['p1', 'p2']) {
@@ -3085,6 +3100,21 @@ describe('Brain Notifications & Digest (b-brain-notify)', () => {
     bot.handleEvent('task.cancelled', 'pc/t-2', { reason: 'x', by: 'y' });
     await bot.flushQueue(CHAT_ID);
     expect(recordedCalls.filter((c) => c.url.includes('/sendMessage'))).toHaveLength(3);
+  });
+
+  it('does not send telegram notifications for draftDiscard tasks when discarded from batch', async () => {
+    ctx.projectRepo.insert({ id: 'pdisc', name: 'PDisc', path: tmpDir, defaultBranch: 'main', envTemplate: null, maxParallel: 1 });
+    ctx.taskRepo.insert({ id: 'pdisc/t-1', projectId: 'pdisc', slug: 't-1', title: 'Draft Task', body: '', level: 'easy', status: 'cancelled' });
+    const bot = createBot('auto');
+
+    bot.handleEvent('task.cancelled', 'pdisc/t-1', {
+      reason: 'Đợt "B" bị bỏ khi còn nháp',
+      by: 'batch:discard',
+      draftDiscard: true,
+    });
+    await bot.flushQueue(CHAT_ID);
+    const sends = recordedCalls.filter((c) => c.url.includes('/sendMessage'));
+    expect(sends).toHaveLength(0);
   });
 
   it('notifies when a worker is adopted after restart', async () => {

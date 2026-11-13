@@ -68,7 +68,9 @@ function StatusBadge({ profile }: { profile: Profile }) {
   const { t } = useLocale();
   const loggedIn = profile.loggedIn ?? Boolean(profile.email);
   const state =
-    profile.authState === 'needs_verification'
+    profile.authState === 'not_logged_in' && profile.engine === 'claude'
+      ? 'off'
+      : profile.authState === 'needs_verification'
       ? 'verify'
       : profile.authState === 'error'
         ? 'error'
@@ -908,14 +910,17 @@ function ProfileCard({
       {profile.authState === 'needs_verification' && (
         <p className="mt-1 text-xs text-[var(--t-text-3)]">{t('profiles.verificationTip')}</p>
       )}
+      {profile.authState === 'not_logged_in' && profile.engine === 'claude' && (
+        <p className="mt-1 text-xs text-[var(--t-crit)]">{profile.authMessage || t('profiles.notLoggedIn')} · <code>{profile.kind === 'isolated' && profile.home ? `CLAUDE_CONFIG_DIR=${profile.home} claude /login` : 'claude /login'}</code></p>
+      )}
       <div className="mt-2.5 rounded-lg bg-[var(--t-surface-2)] p-2.5">
         <div className="flex items-center justify-between text-xs">
           <span className="font-medium text-[11px] text-[var(--t-text-2)]">{t('profiles.quotaTitle')}</span>
-          <span className="text-[11px] text-[var(--t-text-3)]">{usageText(profile)}</span>
+          <span className="text-[11px] text-[var(--t-text-3)]">{profile.authState === 'not_logged_in' && profile.engine === 'claude' ? (profile.authMessage || t('profiles.notLoggedIn')) : usageText(profile)}</span>
         </div>
-        <div className="mt-1.5">
+        {!(profile.authState === 'not_logged_in' && profile.engine === 'claude') && <div className="mt-1.5">
           <QuotaUsage usage={profile.usage} onRefresh={() => onRefresh()} refreshing={refreshing} />
-        </div>
+        </div>}
         {activeMarks.map((mark) => (
           <div key={mark.family} data-testid={`quota-mark-${mark.family}`} title={mark.reason || undefined} className="mt-2 flex items-center justify-between rounded border border-[var(--t-warn)] px-2 py-1 text-xs text-[var(--t-warn)]">
             <span title={formatTimeTitle(mark.until, locale, mark.reason || 'quota mark')}>{t('profiles.quotaLocked', { family: mark.family, time: formatReset(mark.until, Date.now(), locale) })}</span>

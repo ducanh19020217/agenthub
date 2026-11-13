@@ -1,4 +1,41 @@
-import { ProfileAuthState } from '../db/index.js';
+import { ProfileAuthState, ProfileRepo } from '../db/index.js';
+import { sameAccount } from './account.js';
+
+export function claudeLoginCommand(profile: { kind?: string | null; home?: string | null }): string {
+  return profile.kind === 'isolated' && profile.home
+    ? `CLAUDE_CONFIG_DIR=${profile.home} claude /login`
+    : 'claude /login';
+}
+
+/** Match authentication failures only when called with failed-result/error output. */
+export function isClaudeAuthError(text: string): boolean {
+  return /failed to authenticate|oauth session expired|could not be refreshed|invalid api key|please run\s+\/?login|not logged in|http\s*401\b|authentication_error/i.test(text);
+}
+
+export function markClaudeProfileAuthExpired(
+  profileRepo: ProfileRepo | undefined,
+  emit: (type: string, taskId: string | undefined, payload: unknown) => void,
+  profileName: string | null | undefined,
+): void {
+  const profile = profileRepo && profileName ? profileRepo.get(profileName) : undefined;
+  const related = profile?.email && profileRepo
+    ? profileRepo.getAll().filter((candidate) => sameAccount(candidate, profile))
+    : profile ? [profile] : [];
+  const candidates = related.length ? related : [{ name: 'system', email: null, home: null, authState: null } as const];
+  for (const candidate of candidates) {
+    if (candidate.authState === 'not_logged_in') continue;
+    const message = 'Phiên đăng nhập Claude hết hạn – cần đăng nhập lại';
+    if (candidate.name !== 'system' && profileRepo) profileRepo.updateAuthState(candidate.name, 'not_logged_in', message, null);
+    const home = candidate.home || undefined;
+    emit('profile.auth_expired', undefined, {
+      name: candidate.name,
+      email: candidate.email,
+      engine: 'claude',
+      home,
+      loginCommand: claudeLoginCommand(candidate),
+    });
+  }
+}
 
 export interface AuthStateResult {
   authState: ProfileAuthState;

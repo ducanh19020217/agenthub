@@ -1054,6 +1054,7 @@ export const MIGRATIONS: string[] = [
   // Migration 73: explain queued tasks while a safe restart drain is active.
   `
   PRAGMA foreign_keys = OFF;
+  DROP TABLE IF EXISTS tasks_new;
   CREATE TABLE tasks_new (
     id TEXT PRIMARY KEY, projectId TEXT NOT NULL, slug TEXT NOT NULL, title TEXT NOT NULL, body TEXT,
     level TEXT NOT NULL DEFAULT 'easy' CHECK(level IN ('easy','hard')), modelChain TEXT, baseRef TEXT,
@@ -1068,9 +1069,24 @@ export const MIGRATIONS: string[] = [
     doneReport TEXT, blockedReport TEXT, diffStat TEXT, sourceRef TEXT, reviewStep INTEGER NOT NULL DEFAULT 0, batchId TEXT,
     creationSessionId TEXT, creationGoal TEXT, externalRef TEXT,
     cancelReason TEXT, cancelledBy TEXT, pushedAt TEXT, pushResult TEXT,
+    runCount INTEGER NOT NULL DEFAULT 0, consecutiveCrashes INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (projectId) REFERENCES projects(id)
   );
-  INSERT INTO tasks_new SELECT * FROM tasks;
+  INSERT INTO tasks_new (
+    id, projectId, slug, title, body, level, modelChain, baseRef, branch, worktreePath,
+    status, dependsOn, attempt, resume, createdAt, updatedAt, notBefore, transientRetries, slot,
+    checkFixAttempts, reviewerChangesRequested, reviewerEscalated, reviewerEscalatedAt,
+    reviewerEscalationReason, waitReason, doneReport, blockedReport, diffStat, sourceRef, reviewStep, batchId,
+    creationSessionId, creationGoal, externalRef, cancelReason, cancelledBy, pushedAt, pushResult,
+    runCount, consecutiveCrashes
+  ) SELECT
+    id, projectId, slug, title, body, level, modelChain, baseRef, branch, worktreePath,
+    status, dependsOn, attempt, resume, createdAt, updatedAt, notBefore, transientRetries, slot,
+    checkFixAttempts, reviewerChangesRequested, reviewerEscalated, reviewerEscalatedAt,
+    reviewerEscalationReason, waitReason, doneReport, blockedReport, diffStat, sourceRef, reviewStep, batchId,
+    creationSessionId, creationGoal, externalRef, cancelReason, cancelledBy, pushedAt, pushResult,
+    runCount, consecutiveCrashes
+  FROM tasks;
   DROP TABLE tasks;
   ALTER TABLE tasks_new RENAME TO tasks;
   CREATE INDEX IF NOT EXISTS idx_tasks_project_created ON tasks(projectId, createdAt);
@@ -1147,9 +1163,11 @@ export function openDatabase(dbPath: string): Database.Database {
 
   let currentVersion = versionRow ? parseInt(versionRow.value, 10) : -1;
   currentVersion = repairForkAvatarMigration(db, currentVersion);
+  repairMissingTimesheetTable(db, currentVersion);
 
   for (let i = currentVersion + 1; i < MIGRATIONS.length; i++) {
     try {
+      if (i === 73) ensureTaskCounterColumns(db);
       db.exec(MIGRATIONS[i]);
     } catch (error) {
       if (String(error).includes('duplicate column name')) {
@@ -1207,6 +1225,22 @@ function repairForkAvatarMigration(db: Database.Database, currentVersion: number
   return 40;
 }
 
+/**
+ * DB đã ghi schema_version = 64 nhưng không có bảng timesheet_entries (gặp ngày 07/11, có thể do hai bản
+ * build khác nhau cùng migrate một hub.db): migration 65 copy từ bảng đó nên lỗi và daemon không khởi động.
+ * Tạo lại bảng theo migration 64 và bỏ bảng tạm rỗng mà lần migration 65 lỗi để lại.
+ */
+function repairMissingTimesheetTable(db: Database.Database, currentVersion: number): void {
+  const hasTable = (name: string) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+  if (currentVersion !== 64 || hasTable('timesheet_entries')) return;
+  if (hasTable('timesheet_entries_new')) {
+    const { c } = db.prepare('SELECT COUNT(*) AS c FROM timesheet_entries_new').get() as { c: number };
+    if (c > 0) return;
+    db.exec('DROP TABLE timesheet_entries_new');
+  }
+  db.exec(MIGRATIONS[64]);
+}
+
 /** Cột riêng của bản fork (avatarUrl, plan) nằm ngoài MIGRATIONS để không giành số migration với upstream. */
 function ensureProfileAvatarColumn(db: Database.Database): void {
   if (!hasColumn(db, 'profiles', 'avatarUrl')) db.exec('ALTER TABLE profiles ADD COLUMN avatarUrl TEXT');
@@ -1223,11 +1257,16 @@ function ensureSchedulerLimitColumns(db: Database.Database): void {
       if (!String(error).includes('duplicate column name')) throw error;
     }
   };
-  add('tasks', 'runCount', 'INTEGER NOT NULL DEFAULT 0');
-  add('tasks', 'consecutiveCrashes', 'INTEGER NOT NULL DEFAULT 0');
+  ensureTaskCounterColumns(db);
   add('profiles', 'consecutiveCrashes', 'INTEGER NOT NULL DEFAULT 0');
   add('profiles', 'lastCrashAt', 'INTEGER');
   add('profiles', 'coolingUntil', 'INTEGER');
+}
+
+/** Counters live outside MIGRATIONS, but later table rebuilds must carry them forward. */
+function ensureTaskCounterColumns(db: Database.Database): void {
+  if (!hasColumn(db, 'tasks', 'runCount')) db.exec('ALTER TABLE tasks ADD COLUMN runCount INTEGER NOT NULL DEFAULT 0');
+  if (!hasColumn(db, 'tasks', 'consecutiveCrashes')) db.exec('ALTER TABLE tasks ADD COLUMN consecutiveCrashes INTEGER NOT NULL DEFAULT 0');
 }
 
 function ensureCheckResultsColumns(db: Database.Database): void {
@@ -1257,9 +1296,7 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
     let migrationAt = migrationAtRow?.value;
     if (!migrationAt) {
       migrationAt = new Date().toISOString();
-      if (!metaRow || metaRow.value !== '1') {
-        db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_default_on_at', ?)").run(migrationAt);
-      }
+      db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('migration:publish_default_on_at', ?)").run(migrationAt);
     }
 
     const projects = db.prepare('SELECT id, defaultBranch, settings, createdAt FROM projects').all() as Array<{
@@ -1284,7 +1321,7 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
 
     if (metaRow && metaRow.value === '1') {
       for (const project of projects) {
-        const effectiveEnabledAt = migrationAtRow?.value || project.createdAt || migrationAt;
+        const effectiveEnabledAt = migrationAtRow?.value || migrationAt;
 
         if (!project.settings) {
           const newSettings = {
@@ -1319,10 +1356,8 @@ export function ensureProjectPublishMigration(db: Database.Database): { migrated
         } else if (publishVal.enabled === false) {
           // Explicitly disabled, keep disabled
           continue;
-        } else if (!publishVal.enabledAt) {
-          // Project already had publish enabled in the previous version (where enabledAt was not recorded).
-          // Use project.createdAt (or previously recorded migrationAt) to ensure recent tasks merged
-          // after publish was enabled are not silently converted to baseline without audit.
+        } else if (!publishVal.enabledAt || publishVal.enabledAt === project.createdAt) {
+          // Fallback uses migration timestamp from meta or current fix run, NOT project.createdAt
           publishVal.enabledAt = effectiveEnabledAt;
           updateStmt.run(JSON.stringify(parsed), project.id);
         }
@@ -2356,7 +2391,8 @@ export class TaskRepo {
   list(filter?: { project?: string; status?: string }): TaskRow[] {
     const conditions: string[] = [];
     const values: string[] = [];
-    if (filter?.project) {
+    // The dashboard sends project=all for "every project"; page() below treats it the same way.
+    if (filter?.project && filter.project !== 'all') {
       conditions.push('projectId = ?');
       values.push(filter.project);
     }
@@ -2821,6 +2857,12 @@ export class EventRepo {
     return this.db
       .prepare('SELECT * FROM events WHERE id > ? ORDER BY id')
       .all(afterId) as EventRow[];
+  }
+
+  getLatestProfileAuthExpired(profileName: string): EventRow | undefined {
+    return this.db.prepare(`SELECT * FROM events
+      WHERE type = 'profile.auth_expired' AND json_extract(payload, '$.name') = ?
+      ORDER BY id DESC LIMIT 1`).get(profileName) as EventRow | undefined;
   }
 
   getByTask(taskId: string): EventRow[] {
@@ -3804,6 +3846,10 @@ export class TaskNoteRepo {
          ORDER BY id DESC LIMIT 50`,
       )
       .all(...runningTaskIds) as TaskNoteRow[];
+  }
+
+  delete(id: number): void {
+    this.db.prepare('DELETE FROM task_notes WHERE id = ?').run(id);
   }
 }
 

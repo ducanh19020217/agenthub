@@ -401,6 +401,11 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     rawDb.pragma('foreign_keys = ON');
     // Run migrations 0 to 76 (77 migrations total, indexes 0..76)
     for (let i = 0; i < 77; i++) {
+      if (i === 73) {
+        const cols = (rawDb.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+        if (!cols.includes('runCount')) rawDb.exec('ALTER TABLE tasks ADD COLUMN runCount INTEGER NOT NULL DEFAULT 0');
+        if (!cols.includes('consecutiveCrashes')) rawDb.exec('ALTER TABLE tasks ADD COLUMN consecutiveCrashes INTEGER NOT NULL DEFAULT 0');
+      }
       rawDb.exec(MIGRATIONS[i]);
     }
     rawDb.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '76')").run();

@@ -119,6 +119,16 @@ describe('Codex reviewer output', () => {
     expect(missed[1]).toContain('src/brain/digest.ts:305');
   });
 
+  it('bounds huge reviewer context by UTF-8 bytes and retains diff instructions', () => {
+    const reviews = Array.from({ length: 10 }, (_, i) => ({ actor: 'codex-reviewer', verdict: 'changes_requested' as const, feedback: 'é'.repeat(30_000), createdAt: `date-${i}` }));
+    const checks = Array.from({ length: 70 }, (_, i) => ({ name: `check-${i}`, ok: true, outputTail: 'é'.repeat(8_000), runId: `run-${i}`, runStartedAt: 'now' }));
+    const prompt = buildReviewerPrompt('é'.repeat(60_000), '/tmp/worktree', checks, [], '/tmp/project', reviews);
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(96 * 1024);
+    expect(prompt).toContain('git diff --stat <base>...HEAD');
+    expect(prompt).toContain('/tmp/worktree/.agenthub/task.md');
+    expect(prompt).toContain('LỊCH SỬ REVIEW TRƯỚC');
+  });
+
   it('rejects a checklist symlink escaping the canonical project', () => {
     const root = makeTestTempDir('agenthub-reviewer-symlink-');
     const project = path.join(root, 'project');

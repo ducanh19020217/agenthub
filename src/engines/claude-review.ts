@@ -6,6 +6,7 @@ import { lastNLines, type AuthDetection, type Engine, type QuotaDetection, type 
 import { lowPriority } from '../priority.js';
 import { lockCommand } from '../profiles/locks.js';
 import { findClaudeBin } from '../chat/claude.js';
+import { isClaudeAuthError } from '../profiles/auth.js';
 import { formatToolSummary } from '../chat/parse.js';
 
 /** Key of the Claude reviewer in the scheduler's engine map (kept apart from worker engines). */
@@ -380,7 +381,7 @@ export class ClaudeReviewEngine implements Engine {
     if (!errorText) return { expired: false };
     const tail = lastNLines(errorText, 8);
     return {
-      expired: /not logged in|invalid api key|please run \/login|authentication failed|unauthenticated|\b401\b/i.test(tail),
+      expired: isClaudeAuthError(tail) || /authentication failed|unauthenticated|\b401\b/i.test(tail),
     };
   }
 

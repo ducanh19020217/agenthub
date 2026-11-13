@@ -258,7 +258,8 @@ export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 
   }
   if (event.type === 'profile.auth_expired') {
     const name = typeof payload.name === 'string' ? payload.name : (isEn ? 'profile' : 'tài khoản');
-    return isEn ? `Profile ${name} requires re-authentication` : `Hồ sơ ${name} cần đăng nhập lại`;
+    const command = typeof payload.loginCommand === 'string' ? payload.loginCommand : 'claude /login';
+    return isEn ? `Profile ${name} requires re-authentication. Run: ${command}` : `Hồ sơ ${name} cần đăng nhập lại. Chạy: ${command}`;
   }
   if (event.type === 'ci.failed') {
     const projId = (typeof payload.projectId === 'string' ? payload.projectId : event.taskId) || (isEn ? 'project' : 'dự án');
@@ -306,6 +307,7 @@ export function shouldNotifyBrowserEvent(
   if (level === 'off' || !DESKTOP_EVENTS.has(event.type)) return false;
   if (level === 'important' && !IMPORTANT.has(event.type)) return false;
   const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
+  if (event.type === 'task.cancelled' && payload.draftDiscard === true) return false;
   if (event.type === 'merge.conflict') {
     const conflictCount = typeof payload.conflictCount === 'number' ? payload.conflictCount : undefined;
     const isRoutine = (conflictCount === undefined || conflictCount <= 3) && payload.autoRetried !== false;

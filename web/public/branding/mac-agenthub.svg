@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <title>Mac AgentHub</title>
+  <rect width="128" height="128" rx="28" fill="#111117"/>
+  <rect x="2" y="2" width="124" height="124" rx="26" stroke="#373743" stroke-width="4"/>
+  <rect x="18" y="25" width="92" height="77" rx="14" fill="#1C1C25" stroke="#A78BFA" stroke-width="5"/>
+  <path d="M19 47h90" stroke="#4C465D" stroke-width="4"/>
+  <circle cx="32" cy="36" r="4" fill="#FB7185"/>
+  <circle cx="45" cy="36" r="4" fill="#FBBF24"/>
+  <circle cx="58" cy="36" r="4" fill="#34D399"/>
+  <rect x="42" y="57" width="44" height="34" rx="9" fill="#252238" stroke="#C4B5FD" stroke-width="3.5"/>
+  <circle cx="54" cy="70" r="3.5" fill="#DDD6FE"/>
+  <circle cx="74" cy="70" r="3.5" fill="#DDD6FE"/>
+  <path d="M54 81h20" stroke="#A78BFA" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M64 50v7M35 74h7M86 74h7" stroke="#A78BFA" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M46 110h36" stroke="#A78BFA" stroke-width="5" stroke-linecap="round"/>
+</svg>

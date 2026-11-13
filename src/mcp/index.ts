@@ -8,6 +8,7 @@ import { getTokenPath, readExistingToken } from '../auth.js';
 import { toRouteId, toTaskId } from '../services/index.js';
 import { formatRunnableCapacity, QuotaCapacitySnapshot } from '../quota/index.js';
 import { formatYYYYMMDD } from '../integrations/openproject/daily-report.js';
+import { claudeLoginCommand } from '../profiles/auth.js';
 
 export class DaemonDownError extends Error {
   constructor(message = 'AgentHub daemon chưa chạy: `agenthub install-service` hoặc `agenthub daemon`') {
@@ -106,11 +107,11 @@ export function formatProfileSummary(p: {
 }
 
 function formatBestQuotaLine(
-  profiles: Array<{ name: string; usage?: Array<{ grp: string; window: string; remainingPct: number }> }>,
+  profiles: Array<{ name: string; authState?: string | null; usage?: Array<{ grp: string; window: string; remainingPct: number }> }>,
   family: 'gemini' | 'claude',
 ): string {
   const groupPrefix = family === 'gemini' ? 'Gemini' : 'Claude';
-  const values = profiles.flatMap((p) => (p.usage || [])
+  const values = profiles.filter((p) => p.authState !== 'not_logged_in').flatMap((p) => (p.usage || [])
     .filter((u) => u.window === '5h' && (family === 'gemini' ? u.grp.startsWith('Gemini') : !u.grp.startsWith('Gemini')))
     .map((u) => ({ name: p.name, remainingPct: u.remainingPct })));
   if (!values.length) return `Nhiều quota ${groupPrefix} 5h nhất: chưa có số liệu`;
@@ -260,6 +261,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             profileName: string;
             model: string;
             engine: string;
+            kind?: string;
+            home?: string | null;
             elapsedMs: number;
             title?: string;
             projectId?: string;
@@ -537,6 +540,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           Array<{
             name: string;
             engine: string;
+            kind?: string;
+            home?: string | null;
             enabled: boolean | number;
             email?: string | null;
             busy?: boolean;
@@ -565,7 +570,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           if (p.authState === 'needs_verification') {
             authStr = ` [Cần xác minh${p.verifyUrl ? `: ${p.verifyUrl}` : ''}]`;
           } else if (p.authState === 'not_logged_in') {
-            authStr = ' [Chưa đăng nhập]';
+            const command = p.engine === 'claude' ? claudeLoginCommand(p) : undefined;
+            authStr = ` [Cần đăng nhập lại${p.authMessage ? `: ${p.authMessage}` : ''}${command ? ` · ${command}` : ''}]`;
           } else if (p.authState === 'error') {
             authStr = ` [Lỗi xác thực${p.authMessage ? `: ${p.authMessage}` : ''}]`;
           }

@@ -114,7 +114,7 @@ describe('Branding Logo Component in Layout', () => {
     expect(botIcon).toBeInTheDocument();
   });
 
-  it('khi chưa cấu hình logo thì hiển thị icon Bot mặc định mà không gọi /api/branding/logo', () => {
+  it('khi chưa cấu hình logo thì hiển thị logo lõi AgentHub mà không gọi /api/branding/logo', () => {
     const fetchSpy = vi.fn().mockImplementation(async () => {
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
@@ -123,15 +123,13 @@ describe('Branding Logo Component in Layout', () => {
     });
     window.fetch = fetchSpy;
 
-    const { container } = renderLayoutWithBranding({
+    renderLayoutWithBranding({
       name: 'AgentHub',
       shortName: 'AH',
       logo: undefined,
     });
 
-    expect(screen.queryByTestId('branding-logo')).not.toBeInTheDocument();
-    const botIcon = container.querySelector('svg.lucide-bot');
-    expect(botIcon).toBeInTheDocument();
+    expect(screen.getByTestId('branding-logo')).toHaveAttribute('src', '/branding/agenthub-logo-v3.png');
 
     const logoCalls = fetchSpy.mock.calls.filter((call) => String(call[0]).includes('/api/branding/logo'));
     expect(logoCalls).toHaveLength(0);

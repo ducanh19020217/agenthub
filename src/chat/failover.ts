@@ -21,6 +21,8 @@ export interface ClaudeFailoverSnapshot {
   apiKeyConfigured: boolean;
   evidence?: { file: string; line: number; observedAt: string } | null;
   lastActivityAt?: string | null;
+  authProfileName?: string | null;
+  authFailover?: boolean;
 }
 
 export interface ClaudeFailoverEvidence {
@@ -74,7 +76,7 @@ export class ClaudeFailoverState {
   }
 
   private emptyState(): ClaudeFailoverSnapshot {
-    return { active: false, until: null, resetAt: null, reason: null, activatedAt: null, step: null, stepIndex: 0, dailyCostUSD: 0, dailyCostDate: dateKey(this.now()), apiKeyConfigured: this.hasApiKey(), evidence: null, lastActivityAt: null };
+    return { active: false, until: null, resetAt: null, reason: null, activatedAt: null, step: null, stepIndex: 0, dailyCostUSD: 0, dailyCostDate: dateKey(this.now()), apiKeyConfigured: this.hasApiKey(), evidence: null, lastActivityAt: null, authProfileName: null, authFailover: false };
   }
 
   private hasApiKey(): boolean {
@@ -102,7 +104,14 @@ export class ClaudeFailoverState {
   activate(resetSeconds: number, reason = 'usage_limit', evidence?: ClaudeFailoverEvidence): ClaudeFailoverSnapshot {
     const now = this.now();
     const until = now + Math.max(60, resetSeconds);
-    this.state = { ...this.state, active: true, until, resetAt: until, reason, activatedAt: now, stepIndex: 0, step: this.steps[0] || null, evidence: evidence || null, lastActivityAt: null };
+    this.state = { ...this.state, active: true, until, resetAt: until, reason, activatedAt: now, stepIndex: 0, step: this.steps[0] || null, evidence: evidence || null, lastActivityAt: null, authProfileName: null, authFailover: false };
+    this.persist();
+    return this.snapshot();
+  }
+
+  activateAuthExpired(profileName?: string | null): ClaudeFailoverSnapshot {
+    const now = this.now();
+    this.state = { ...this.state, active: true, until: null, resetAt: null, reason: 'claude_auth_expired', authProfileName: profileName || null, authFailover: true, activatedAt: now, stepIndex: 0, step: this.steps[0] || null, evidence: null, lastActivityAt: null };
     this.persist();
     return this.snapshot();
   }
@@ -140,6 +149,8 @@ export class ClaudeFailoverState {
     const activity = at instanceof Date ? at : new Date(at);
     if (Number.isNaN(activity.getTime())) return false;
     this.state.lastActivityAt = activity.toISOString();
+    // Auth failover stays active until credentials are actually restored.
+    if (this.state.authFailover) { this.persist(); return false; }
     if (!this.state.active || this.state.activatedAt === null || activity.getTime() / 1000 <= this.state.activatedAt) { this.persist(); return false; }
     this.clear();
     return true;

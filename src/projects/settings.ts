@@ -80,7 +80,10 @@ export const PublishAuditSettingsInputSchema = z.object({
 
 export const PublishSettingsSchema = z.object({
   enabled: z.boolean().default(true),
-  enabledAt: z.string().optional(),
+  enabledAt: z.string().refine((val) => {
+    const ts = Date.parse(val);
+    return !isNaN(ts) && ts <= Date.now();
+  }, 'enabledAt không được ở tương lai').optional(),
   remote: z.string().trim().min(1).default('origin'),
   branch: z.string().trim().min(1, 'Tên nhánh không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
   pushIntegrationBranch: z.boolean().default(true),
@@ -90,7 +93,10 @@ export type PublishSettings = z.infer<typeof PublishSettingsSchema>;
 
 export const PublishSettingsInputSchema = z.object({
   enabled: z.boolean().optional(),
-  enabledAt: z.string().optional(),
+  enabledAt: z.string().refine((val) => {
+    const ts = Date.parse(val);
+    return !isNaN(ts) && ts <= Date.now();
+  }, 'enabledAt không được ở tương lai').optional(),
   remote: z.string().trim().min(1).optional(),
   branch: z.string().trim().min(1, 'Tên nhánh không được để trống').max(200).refine(isValidBranchName, 'Tên nhánh chứa ký tự không hợp lệ hoặc sai cú pháp').optional(),
   pushIntegrationBranch: z.boolean().optional(),
@@ -312,11 +318,11 @@ export function mergeProjectSettings(current: ProjectSettings, input: ProjectSet
     publish: (() => {
       const currentPublish = current.publish || DEFAULT_PROJECT_SETTINGS.publish;
       const isEnabling = input.publish?.enabled === true && currentPublish.enabled !== true;
-      const enabledAt = input.publish?.enabledAt || (isEnabling ? new Date().toISOString() : currentPublish.enabledAt);
+      const enabledAt = isEnabling ? new Date().toISOString() : currentPublish.enabledAt;
       return {
         ...currentPublish,
         ...input.publish,
-        ...(enabledAt ? { enabledAt } : {}),
+        enabledAt,
         audit: {
           ...(currentPublish.audit || { enabled: true, maxFixRounds: 2 }),
           ...input.publish?.audit,

@@ -2,6 +2,7 @@ import { ChildProcess, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { ProfileRow } from '../db/index.js';
 import { LIMITED_TEST_ENV, lowPriority } from '../priority.js';
 import { workerEnvironment } from '../worker-guard.js';
@@ -113,9 +114,17 @@ export class AgyEngine implements Engine {
   }
 
   spawn(opts: SpawnOpts): ChildProcess {
+    let prompt = opts.prompt;
+    if (Buffer.byteLength(prompt, 'utf8') > 32 * 1024) {
+      const agentHubDir = path.join(opts.cwd, '.agenthub');
+      fs.mkdirSync(agentHubDir, { recursive: true });
+      const promptPath = path.join(agentHubDir, `prompt-${crypto.randomUUID()}.md`);
+      fs.writeFileSync(promptPath, prompt, { mode: 0o600 });
+      prompt = `Đọc toàn bộ file ${promptPath} và làm theo hướng dẫn trong đó.`;
+    }
     const args = [
       '-p',
-      opts.prompt,
+      prompt,
       '--model',
       opts.model,
       '--dangerously-skip-permissions',
@@ -453,7 +462,7 @@ export class CodexEngine implements Engine {
       `model_reasoning_effort=${opts.effort || 'medium'}`,
       '-C',
       opts.cwd,
-      opts.prompt,
+      '-',
     ];
     if (opts.mcpConfigPath) {
       // Codex accepts MCP overrides as CLI config values. The JSON file is the
@@ -557,7 +566,13 @@ export class CodexEngine implements Engine {
       cwd: opts.cwd,
       env,
       detached: true,
-      stdio: opts.streamOutput ? ['ignore', 'pipe', 'pipe'] : ['ignore', logFd, logFd],
+      stdio: opts.streamOutput ? ['pipe', 'pipe', 'pipe'] : ['pipe', logFd, logFd],
+    });
+
+    child.stdin?.on('error', () => { /* child may exit before consuming prompt */ });
+    child.once('spawn', () => {
+      child.stdin?.write(opts.prompt);
+      child.stdin?.end();
     });
 
     child.on('spawn', () => { try { fs.closeSync(logFd); } catch { /* pipe mode */ } });

@@ -210,6 +210,36 @@ describe('CockpitSyncModal', () => {
     expect(await screen.findByText(/Đã nhập 4 tài khoản mới/)).toBeInTheDocument();
   });
 
+  it('imports a Cockpit export file and shows the per-account result', async () => {
+    const exportSpy = vi.spyOn(client, 'importCockpitExport').mockResolvedValue({
+      success: true, total: 2, successCount: 1, failedCount: 1,
+      results: [
+        { name: 'agy-a', email: 'a@gmail.com', action: 'created', status: 'ok' },
+        { name: '', email: 'b@gmail.com', action: 'skipped', status: 'error', message: 'Token không hợp lệ' },
+      ],
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <CockpitSyncModal isOpen={true} onClose={() => {}} />
+      </QueryClientProvider>,
+    );
+    await screen.findByText('Antigravity (Gemini)');
+    const importBtn = screen.getByTestId('cockpit-export-import-btn');
+    expect(importBtn).toBeDisabled();
+
+    const content = JSON.stringify([{ email: 'a@gmail.com', refresh_token: '1//x' }]);
+    const file = new File([content], 'cockpit-export.json', { type: 'application/json' });
+    fireEvent.change(screen.getByTestId('cockpit-export-file'), { target: { files: [file] } });
+    expect(await screen.findByText('cockpit-export.json')).toBeInTheDocument();
+    await waitFor(() => expect(importBtn).not.toBeDisabled());
+
+    fireEvent.click(importBtn);
+    await waitFor(() => expect(exportSpy).toHaveBeenCalledWith(content, { verify: true }));
+    const result = await screen.findByTestId('cockpit-export-result');
+    expect(result.textContent).toContain('Đã nhập 1/2 tài khoản');
+    expect(result.textContent).toContain('b@gmail.com: Token không hợp lệ');
+  });
+
   it('shows missing directory alert when exists is false', async () => {
     vi.spyOn(client, 'scanCockpit').mockResolvedValue({
       dataDir: '/missing/path',

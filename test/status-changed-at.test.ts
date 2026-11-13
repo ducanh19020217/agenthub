@@ -11,6 +11,14 @@ import {
 
 const tempDirs: string[] = [];
 
+// openDatabase adds these counters right before migration 73 (they predate MIGRATIONS on real DBs);
+// raw replays of the migration list must do the same.
+function addTaskCounterColumns(db: Database.Database): void {
+  const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+  if (!cols.includes('runCount')) db.exec('ALTER TABLE tasks ADD COLUMN runCount INTEGER NOT NULL DEFAULT 0');
+  if (!cols.includes('consecutiveCrashes')) db.exec('ALTER TABLE tasks ADD COLUMN consecutiveCrashes INTEGER NOT NULL DEFAULT 0');
+}
+
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -24,6 +32,7 @@ describe('Task statusChangedAt and backfill', () => {
     // Create database up to migration 74 (without statusChangedAt)
     const rawDb = new Database(dbPath);
     for (let i = 0; i <= 74; i++) {
+      if (i === 73) addTaskCounterColumns(rawDb);
       rawDb.exec(MIGRATIONS[i]);
       rawDb.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(String(i));
     }

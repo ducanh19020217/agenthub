@@ -23,6 +23,7 @@ describe('browser notification policy', () => {
     expect(shouldNotifyBrowserEvent(event('deploy.restart_waiting'), 'all')).toBe(false);
     expect(shouldNotifyBrowserEvent(event('claude.quota_available'), 'all')).toBe(false);
     expect(shouldNotifyBrowserEvent(event('brain.updated'), 'all')).toBe(false);
+    expect(shouldNotifyBrowserEvent(event('task.cancelled', { draftDiscard: true }), 'all')).toBe(false);
   });
 
   it('requires complete quota exhaustion (allExhausted: true or empty capacity)', () => {

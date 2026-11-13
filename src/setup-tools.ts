@@ -220,6 +220,7 @@ export class SetupTools {
       'brain.engine', 'brain.model', 'brain.codexProfile', 'brain.mode', 'brain.permissions', 'brain.maxTurnsPerHour', 'brain.dailyTokenBudget',
       'reviewer.order', 'reviewer.fallback', 'reviewer.arbiter', 'notifications.desktop', 'notifications.desktopLevel',
       'planning.requireApproval', 'planning.approvalMinTasks', 'scheduler.maxRunsPerTask', 'scheduler.maxConsecutiveCrashesPerTask',
+      'scheduler.maxTimeoutResumes',
       'integrations.openproject.sources',
     ]).has(pathName);
     if (!allowed || pathName.includes('..')) throw new Error(`Config path không được phép: ${pathName}`);

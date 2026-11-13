@@ -144,6 +144,50 @@ describe('lastNLines', () => {
 });
 
 describe('CodexEngine sandbox configuration', () => {
+  it('keeps small Agy prompts in argv and spills large prompts to an ignored prompt file', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-agy-prompt-'));
+    try {
+      const dump = path.join(tmp, 'argv.json');
+      const fakeAgy = path.join(tmp, 'agy.mjs');
+      fs.writeFileSync(fakeAgy, `#!/usr/bin/env node\nimport fs from 'node:fs';\nfs.writeFileSync(process.env.ARGV_OUT, JSON.stringify(process.argv.slice(2)));\n`, { mode: 0o755 });
+      const engine = new AgyEngine(fakeAgy);
+      const profile = { name: 'test-agy', engine: 'agy', kind: 'default', home: null, email: null, enabled: 1 } as never;
+      const small = 'small prompt';
+      const smallChild = engine.spawn({ profile, model: 'gemini-3.8-flash-low', cwd: tmp, prompt: small, logPath: path.join(tmp, 'small.log'), env: { ARGV_OUT: dump } });
+      await new Promise<void>((resolve) => smallChild.once('exit', () => resolve()));
+      expect(JSON.parse(fs.readFileSync(dump, 'utf8'))).toEqual(['-p', small, '--model', 'gemini-3.8-flash-low', '--dangerously-skip-permissions', '--print-timeout', '0']);
+
+      const prompt = 'é'.repeat(150_000);
+      const largeChild = engine.spawn({ profile, model: 'gemini-3.8-flash-low', cwd: tmp, prompt, logPath: path.join(tmp, 'large.log'), env: { ARGV_OUT: dump } });
+      await new Promise<void>((resolve) => largeChild.once('exit', () => resolve()));
+      const args = JSON.parse(fs.readFileSync(dump, 'utf8')) as string[];
+      expect(args.every((arg) => Buffer.byteLength(arg, 'utf8') < 10 * 1024)).toBe(true);
+      expect(args[0]).toBe('-p');
+      const promptFile = fs.readdirSync(path.join(tmp, '.agenthub')).find((name) => /^prompt-.*\.md$/.test(name));
+      expect(promptFile).toBeDefined();
+      expect(fs.readFileSync(path.join(tmp, '.agenthub', promptFile!), 'utf8')).toBe(prompt);
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  it('sends a large Codex prompt through stdin with a dash positional argument', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-codex-stdin-'));
+    try {
+      const record = path.join(tmp, 'input.json');
+      const fakeCodex = path.join(tmp, 'codex.mjs');
+      fs.writeFileSync(fakeCodex, `#!/usr/bin/env node\nimport fs from 'node:fs';\nlet input='';\nprocess.stdin.on('data', c => input += c);\nprocess.stdin.on('end', () => fs.writeFileSync(process.env.INPUT_OUT, JSON.stringify({ argv: process.argv.slice(2), input })));\n`, { mode: 0o755 });
+      const prompt = 'é'.repeat(150_000);
+      const child = new CodexEngine(fakeCodex).spawn({
+        profile: { name: 'test-codex', engine: 'codex', kind: 'default', home: null, email: null, enabled: 1 } as never,
+        model: 'gpt-5.6-luna', cwd: tmp, prompt, logPath: path.join(tmp, 'run.log'), env: { INPUT_OUT: record },
+      });
+      await new Promise<void>((resolve, reject) => { child.once('error', reject); child.once('exit', () => resolve()); });
+      const seen = JSON.parse(fs.readFileSync(record, 'utf8')) as { argv: string[]; input: string };
+      expect(seen.argv.at(-1)).toBe('-');
+      expect(seen.argv.every((arg) => Buffer.byteLength(arg, 'utf8') < 10 * 1024)).toBe(true);
+      expect(seen.input).toBe(prompt);
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+
   it('defaults codexSandbox to off in config and supports workspace-write', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-codex-config-'));
     try {
@@ -168,8 +212,9 @@ describe('CodexEngine sandbox configuration', () => {
         dumpScript,
         `#!/usr/bin/env node
 import fs from 'node:fs';
-fs.writeFileSync(process.argv[process.argv.length - 1], JSON.stringify(process.argv));
-process.exit(0);
+let input = '';
+process.stdin.on('data', (chunk) => input += chunk);
+process.stdin.on('end', () => fs.writeFileSync(process.env.ARGV_OUT, JSON.stringify({ argv: process.argv, input })));
 `,
         { mode: 0o755 },
       );
@@ -194,9 +239,10 @@ process.exit(0);
         prompt: outOff,
         logPath: path.join(tmp, 'off.log'),
         codexSandbox: 'off',
+        env: { ARGV_OUT: outOff },
       });
       await new Promise<void>((resolve) => childOff.on('exit', () => resolve()));
-      const argsOff: string[] = JSON.parse(fs.readFileSync(outOff, 'utf8'));
+      const argsOff: string[] = JSON.parse(fs.readFileSync(outOff, 'utf8')).argv;
       expect(argsOff).toContain('--dangerously-bypass-approvals-and-sandbox');
       expect(argsOff).not.toContain('--sandbox');
 
@@ -209,9 +255,10 @@ process.exit(0);
         prompt: outWrite,
         logPath: path.join(tmp, 'write.log'),
         codexSandbox: 'workspace-write',
+        env: { ARGV_OUT: outWrite },
       });
       await new Promise<void>((resolve) => childWrite.on('exit', () => resolve()));
-      const argsWrite: string[] = JSON.parse(fs.readFileSync(outWrite, 'utf8'));
+      const argsWrite: string[] = JSON.parse(fs.readFileSync(outWrite, 'utf8')).argv;
       expect(argsWrite).not.toContain('--dangerously-bypass-approvals-and-sandbox');
       expect(argsWrite).toContain('--sandbox');
       expect(argsWrite[argsWrite.indexOf('--sandbox') + 1]).toBe('workspace-write');
@@ -226,9 +273,10 @@ process.exit(0);
         logPath: path.join(tmp, 'readonly.log'),
         readOnly: true,
         codexSandbox: 'workspace-write',
+        env: { ARGV_OUT: outReadOnly },
       });
       await new Promise<void>((resolve) => childReadOnly.on('exit', () => resolve()));
-      const argsReadOnly: string[] = JSON.parse(fs.readFileSync(outReadOnly, 'utf8'));
+      const argsReadOnly: string[] = JSON.parse(fs.readFileSync(outReadOnly, 'utf8')).argv;
       expect(argsReadOnly).toContain('--sandbox');
       expect(argsReadOnly[argsReadOnly.indexOf('--sandbox') + 1]).toBe('read-only');
     } finally {
@@ -514,8 +562,9 @@ describe('CodexEngine MCP argv construction', () => {
         dumpScript,
         `#!/usr/bin/env node
 import fs from 'node:fs';
-fs.writeFileSync(process.argv[process.argv.length - 1], JSON.stringify(process.argv));
-process.exit(0);
+let input = '';
+process.stdin.on('data', (chunk) => input += chunk);
+process.stdin.on('end', () => fs.writeFileSync(process.env.ARGV_OUT, JSON.stringify({ argv: process.argv, input })));
 `,
         { mode: 0o755 },
       );
@@ -558,13 +607,14 @@ process.exit(0);
         prompt: outFile,
         logPath: path.join(tmp, 'run.log'),
         mcpConfigPath: mcpConfigFile,
+        env: { ARGV_OUT: outFile },
       });
 
       await new Promise<void>((resolve, reject) => {
         child.on('error', reject);
         child.on('exit', () => {
           try {
-            const spawnedArgs: string[] = JSON.parse(fs.readFileSync(outFile, 'utf8'));
+            const spawnedArgs: string[] = JSON.parse(fs.readFileSync(outFile, 'utf8')).argv;
 
             // Check command quoting
             const cmdIdx = spawnedArgs.indexOf('mcp_servers.agenthub.command="/opt/special path/node \\"v22\\""');

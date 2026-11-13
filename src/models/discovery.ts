@@ -136,7 +136,7 @@ export function parseCodexModelsData(raw: unknown): DiscoveredModelItem[] {
 
 export async function discoverCodexModels(
   profile: ProfileRow,
-  options?: { fetchApi?: boolean; customHome?: string; fetchFn?: typeof fetch },
+  options?: { force?: boolean; fetchApi?: boolean; customHome?: string; fetchFn?: typeof fetch },
 ): Promise<DiscoveredModelItem[]> {
   const codexDir = options?.customHome || (
     profile.kind === 'isolated' && profile.home
@@ -144,9 +144,11 @@ export async function discoverCodexModels(
       : path.join(profile.home || os.homedir(), '.codex')
   );
 
-  // 1. Try reading `models_cache.json` from the profile's codex directory
+  const isForce = Boolean(options?.force || options?.fetchApi);
   const cacheFile = path.join(codexDir, 'models_cache.json');
-  if (fs.existsSync(cacheFile)) {
+
+  // 1. Try reading `models_cache.json` from the profile's codex directory if not forced
+  if (!isForce && fs.existsSync(cacheFile)) {
     try {
       const content = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
       const parsed = parseCodexModelsData(content);
@@ -163,30 +165,48 @@ export async function discoverCodexModels(
 
   const tokenRes = readCodexAccessToken(codexDir);
   if ('skip' in tokenRes) {
+    if (fs.existsSync(cacheFile)) {
+      try {
+        const content = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+        const parsed = parseCodexModelsData(content);
+        if (parsed.length > 0) return parsed;
+      } catch {}
+    }
     throw new Error(`Codex credentials unavailable: ${tokenRes.skip}`);
   }
 
   const doFetch = options?.fetchFn || fetch;
-  const res = await doFetch('https://chatgpt.com/backend-api/models', {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${tokenRes.accessToken}`,
-      Accept: 'application/json',
-      ...(tokenRes.accountId ? { 'ChatGPT-Account-Id': tokenRes.accountId } : {}),
-    },
-    signal: AbortSignal.timeout(10_000),
-  });
+  try {
+    const res = await doFetch('https://chatgpt.com/backend-api/models', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${tokenRes.accessToken}`,
+        Accept: 'application/json',
+        ...(tokenRes.accountId ? { 'ChatGPT-Account-Id': tokenRes.accountId } : {}),
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
 
-  if (!res.ok) {
-    throw new Error(`Codex API request failed: HTTP ${res.status}`);
-  }
+    if (!res.ok) {
+      throw new Error(`Codex API request failed: HTTP ${res.status}`);
+    }
 
-  const data = await res.json();
-  const parsed = parseCodexModelsData(data);
-  if (parsed.length === 0) {
-    throw new Error('No valid codex models found in API response');
+    const data = await res.json();
+    const parsed = parseCodexModelsData(data);
+    if (parsed.length === 0) {
+      throw new Error('No valid codex models found in API response');
+    }
+    return parsed;
+  } catch (err) {
+    if (fs.existsSync(cacheFile)) {
+      try {
+        const content = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+        const parsed = parseCodexModelsData(content);
+        if (parsed.length > 0) return parsed;
+      } catch {}
+    }
+    throw err;
   }
-  return parsed;
 }
 
 /**

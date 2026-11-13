@@ -6481,40 +6481,53 @@ export class AppService {
     const enabledProfiles = this.profileRepo.getAll().filter((profile) => Boolean(profile.enabled) && !profile.deletedAt);
     const modelMap = new Map<string, DiscoveredModelApiItem>();
 
-    const getProfileModels = (profile: ProfileRow) => {
-      if (this.profileModelRepo) {
-        const rows = this.profileModelRepo.getForProfile(profile.name);
-        if (rows.length > 0) {
-          return rows.map((r) => ({
-            id: r.modelId,
-            name: r.modelName || r.modelId,
-            engine: r.engine as 'agy' | 'codex' | 'claude',
-            verified: Boolean(r.verified),
-          }));
-        }
-      }
-      return getDefaultModelsForEngine(profile.engine);
-    };
-
+    // 1. Collect verified models from enabled profiles that actually have discovery records
     for (const profile of enabledProfiles) {
-      const items = getProfileModels(profile);
-      for (const item of items) {
-        const existing = modelMap.get(item.id);
+      if (!this.profileModelRepo) continue;
+      const rows = this.profileModelRepo.getForProfile(profile.name);
+      for (const r of rows) {
+        if (!r.verified) continue; // Only verified models are considered available on the account
+        const existing = modelMap.get(r.modelId);
         if (existing) {
           if (!existing.profiles.includes(profile.name)) {
             existing.profiles.push(profile.name);
           }
-          if (item.verified) existing.verified = true;
+          existing.verified = true;
+          existing.available = true;
         } else {
-          modelMap.set(item.id, {
-            id: item.id,
-            engine: item.engine,
-            name: item.name,
+          modelMap.set(r.modelId, {
+            id: r.modelId,
+            engine: r.engine as 'agy' | 'codex' | 'claude',
+            name: r.modelName || r.modelId,
             profiles: [profile.name],
-            verified: item.verified,
+            verified: true,
             available: true,
             warning: null,
           });
+        }
+      }
+    }
+
+    // 2. For any enabled engine with no verified models (or all engines if none enabled),
+    // provide fallback default models marked verified: false, available: false, profiles: []
+    const enabledEngines = new Set(enabledProfiles.map((p) => p.engine));
+    const enginesToCheck = enabledEngines.size > 0 ? enabledEngines : new Set(['agy', 'codex', 'claude']);
+    for (const engine of enginesToCheck) {
+      const hasVerifiedForEngine = Array.from(modelMap.values()).some((m) => m.engine === engine && m.verified);
+      if (!hasVerifiedForEngine) {
+        const defaults = getDefaultModelsForEngine(engine);
+        for (const item of defaults) {
+          if (!modelMap.has(item.id)) {
+            modelMap.set(item.id, {
+              id: item.id,
+              engine: item.engine,
+              name: item.name,
+              profiles: [],
+              verified: false,
+              available: false,
+              warning: 'Chưa xác minh qua tài khoản',
+            });
+          }
         }
       }
     }
@@ -6525,19 +6538,31 @@ export class AppService {
         : this.config.reviewer.arbiter.model)
       : null;
 
+    const brainFallbackModels = (this.config.brain?.fallback || [])
+      .filter((step): step is { type: 'model'; model: string } => step.type === 'model' && Boolean(step.model))
+      .map((step) => step.model);
+    const chatFallbackModels = (this.config.chat?.fallback || [])
+      .filter((step): step is { type: 'model'; model: string } => step.type === 'model' && Boolean(step.model))
+      .map((step) => step.model);
+
     const configuredRaw = [
       ...this.config.defaultModelChains.hard,
       ...this.config.defaultModelChains.easy,
       ...this.config.reviewer.order.map((item) => (item.engine === 'codex' ? (item.model.startsWith('codex:') ? item.model : `codex:${item.model}`) : item.model)),
       ...(arbiterModel ? [arbiterModel] : []),
       ...(this.config.brain?.model ? [this.config.brain.model] : []),
+      ...(this.config.brain?.codexModel ? [this.config.brain.codexModel] : []),
+      ...(this.config.brain?.director?.model ? [this.config.brain.director.model] : []),
+      ...brainFallbackModels,
       ...(this.config.chat?.model ? [this.config.chat.model] : []),
       ...(this.config.chat?.models || []),
+      ...chatFallbackModels,
     ].filter(Boolean);
     const configuredModels = [...new Set(configuredRaw)];
 
     for (const model of configuredModels) {
-      if (!modelMap.has(model)) {
+      const existing = modelMap.get(model);
+      if (!existing) {
         let engine: 'agy' | 'codex' | 'claude' = 'agy';
         if (model.startsWith('codex:') || (model.startsWith('gpt-') && !model.startsWith('gpt-oss-'))) {
           engine = 'codex';
@@ -6553,6 +6578,9 @@ export class AppService {
           available: false,
           warning: 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp',
         });
+      } else if (existing.profiles.length === 0) {
+        existing.available = false;
+        existing.warning = 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp';
       }
     }
 

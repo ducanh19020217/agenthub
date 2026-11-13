@@ -214,7 +214,7 @@ export function createContext(
   const profileModelRepo = new ProfileModelRepo(db);
   const modelDiscoveryService = new ModelDiscoveryService(profileRepo, profileModelRepo);
   const usageService = new QuotaUsageService(profileRepo, usageRepo, quotaMarkRepo);
-  usageService.onCollectAll(() => modelDiscoveryService.discoverAll());
+  usageService.onCollectAll(() => modelDiscoveryService.discoverAll({ force: true }));
   const quotaService = new QuotaService(quotaMarkRepo, profileRepo);
   const savingsService = new SavingsService(
     config,

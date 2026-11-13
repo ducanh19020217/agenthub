@@ -70,6 +70,7 @@ export class ModelDiscoveryService {
         });
       } else if (profile.engine === 'codex') {
         items = await discoverCodexModels(profile, {
+          force,
           fetchApi: force,
           fetchFn: this.options?.fetchFn,
         });

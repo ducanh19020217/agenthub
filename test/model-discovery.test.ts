@@ -14,6 +14,7 @@ import {
 } from '../src/models/index.js';
 import { openDatabase, ProfileModelRepo, ProfileRepo, ProfileRow } from '../src/db/index.js';
 import { isKnownModel } from '../src/quota/index.js';
+import { AppService } from '../src/services/index.js';
 
 describe('Model Discovery Parsers', () => {
   it('parseAgyModelsOutput handles spinner output, tabs and spaces correctly', () => {
@@ -225,6 +226,51 @@ describe('Engine Model Discovery with Fixtures', () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(models).toHaveLength(1);
     expect(models[0].id).toBe('codex:gpt-6.1-sol');
+  });
+
+  it('discoverCodexModels with force=true bypasses models_cache.json and fetches fresh models via API', async () => {
+    const codexHome = path.join(tmpDir, 'codex-home-force');
+    fs.mkdirSync(codexHome, { recursive: true });
+
+    // Write models_cache.json with stale models
+    fs.writeFileSync(
+      path.join(codexHome, 'models_cache.json'),
+      JSON.stringify({
+        models: [{ slug: 'gpt-5.6-luna', display_name: 'Stale Model' }],
+      }),
+      'utf8',
+    );
+
+    // Write auth.json
+    fs.writeFileSync(
+      path.join(codexHome, 'auth.json'),
+      JSON.stringify({ tokens: { access_token: 'fake-access-token', account_id: 'acc-123' } }),
+      'utf8',
+    );
+
+    const profile: ProfileRow = {
+      name: 'codex-force-test',
+      engine: 'codex',
+      kind: 'isolated',
+      home: codexHome,
+      enabled: 1,
+      email: 'codex@example.com',
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        models: [
+          { slug: 'gpt-6.2-nova', display_name: 'Fresh GPT-6.2 Nova', visibility: 'list' },
+        ],
+      }),
+    });
+
+    const models = await discoverCodexModels(profile, { force: true, fetchFn: mockFetch as unknown as typeof fetch });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(models).toHaveLength(1);
+    expect(models[0].id).toBe('codex:gpt-6.2-nova');
+    expect(models[0].name).toBe('Fresh GPT-6.2 Nova');
   });
 
   it('discoverClaudeModels finds cache/model-catalog JSON and merges with base aliases', async () => {
@@ -508,6 +554,70 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(nonexistent?.available).toBe(false);
     expect(nonexistent?.profiles).toHaveLength(0);
     expect(nonexistent?.warning).toBeTruthy();
+  });
+
+  it('AppService.getModelOptions marks unverified engine fallback models as unavailable with empty profiles', () => {
+    // Enabled profile with NO discovered models in DB (not logged in or discovery error)
+    profileRepo.upsert({
+      name: 'unverified-agy',
+      engine: 'agy',
+      kind: 'isolated',
+      home: '/home/agy-unverified',
+      email: 'unverified@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+
+    const fakeConfig: any = {
+      defaultModelChains: { hard: [], easy: [] },
+      reviewer: { order: [] },
+    };
+
+    const service = {
+      profileRepo,
+      profileModelRepo,
+      config: fakeConfig,
+    };
+
+    const result = AppService.prototype.getModelOptions.call(service as any);
+    // Unverified default models must NOT list unverified-agy in profiles, and must be available: false
+    const flashHigh = result.models.find((m) => m.id === 'gemini-3.8-flash-high');
+    expect(flashHigh).toBeDefined();
+    expect(flashHigh?.profiles).toEqual([]);
+    expect(flashHigh?.verified).toBe(false);
+    expect(flashHigh?.available).toBe(false);
+    expect(flashHigh?.warning).toBe('Chưa xác minh qua tài khoản');
+    expect(result.suggestions).not.toContain('gemini-3.8-flash-high');
+  });
+
+  it('AppService.getModelOptions includes brain.fallback models and warns if no profile provides them', () => {
+    const fakeConfig: any = {
+      defaultModelChains: { hard: [], easy: [] },
+      reviewer: { order: [] },
+      brain: {
+        model: 'claude-opus-4-6-thinking',
+        fallback: [
+          { type: 'model', model: 'custom-brain-fallback-model' },
+          { type: 'wait' },
+        ],
+      },
+    };
+
+    const service = {
+      profileRepo,
+      profileModelRepo,
+      config: fakeConfig,
+    };
+
+    const result = AppService.prototype.getModelOptions.call(service as any);
+    expect(result.configured).toContain('custom-brain-fallback-model');
+    expect(result.configured).toContain('claude-opus-4-6-thinking');
+
+    const fallbackItem = result.models.find((m) => m.id === 'custom-brain-fallback-model');
+    expect(fallbackItem).toBeDefined();
+    expect(fallbackItem?.available).toBe(false);
+    expect(fallbackItem?.profiles).toEqual([]);
+    expect(fallbackItem?.warning).toContain('Model đang được cấu hình');
   });
 
   it('isKnownModel checks discovered models and falls back to hardcoded models', () => {

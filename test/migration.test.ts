@@ -7,6 +7,14 @@ import { MIGRATIONS, openDatabase } from '../src/db/index.js';
 
 const tempDirs: string[] = [];
 
+// openDatabase adds these counters right before migration 73 (they predate MIGRATIONS on real DBs);
+// raw replays of the migration list must do the same.
+function addTaskCounterColumns(db: Database.Database): void {
+  const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+  if (!cols.includes('runCount')) db.exec('ALTER TABLE tasks ADD COLUMN runCount INTEGER NOT NULL DEFAULT 0');
+  if (!cols.includes('consecutiveCrashes')) db.exec('ALTER TABLE tasks ADD COLUMN consecutiveCrashes INTEGER NOT NULL DEFAULT 0');
+}
+
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -18,6 +26,7 @@ describe('database migrations', () => {
     const dbPath = path.join(dir, 'hub.db');
     const oldDb = new Database(dbPath);
     for (let version = 0; version < MIGRATIONS.length - 1; version += 1) {
+      if (version === 73) addTaskCounterColumns(oldDb);
       oldDb.exec(MIGRATIONS[version]);
       oldDb.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(String(version));
     }

@@ -860,6 +860,13 @@ export interface SystemConfig {
   defaultTimeout: number;
   multiplePerProvider?: boolean;
   planning?: { requireApproval?: boolean; approvalMinTasks?: number };
+  scheduler?: {
+    maxRunsPerTask?: number;
+    maxConsecutiveCrashesPerTask?: number;
+    maxPausedMin?: number;
+    maxCheckingMin?: number;
+    maxTimeoutResumes?: number;
+  };
   slotsPerAgyProfile?: number;
   slotsPerCodexProfile?: number;
   watchdog?: { stallMinutes: number; waitingMinutes: number };
@@ -954,6 +961,10 @@ export interface CockpitScanItem {
   source: CockpitSource;
   cockpitId: string;
   email: string;
+  /** Tên hiển thị trong Cockpit, nếu có. */
+  name?: string;
+  /** Gói tài khoản theo chỉ mục Cockpit, nếu có. */
+  planType?: string;
   disabled: boolean;
   importable: boolean;
   skipReason?: string;

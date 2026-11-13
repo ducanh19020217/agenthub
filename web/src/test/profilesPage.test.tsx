@@ -91,6 +91,21 @@ describe('ProfilesPage - Bật/Tắt, Nút Check và Quota Mark', () => {
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
   });
 
+  it('shows Claude auth expiry and the isolated profile login command', async () => {
+    mockProfiles.push({
+      ...mockProfiles[0],
+      name: 'NCS',
+      engine: 'claude',
+      kind: 'isolated',
+      home: '/tmp/claude-ncs',
+      authState: 'not_logged_in',
+      authMessage: 'Phiên đăng nhập Claude hết hạn – cần đăng nhập lại',
+    });
+    renderPage();
+    expect(await screen.findByText(/CLAUDE_CONFIG_DIR=\/tmp\/claude-ncs claude \/login/)).toBeTruthy();
+    expect(screen.getAllByText(/Phiên đăng nhập Claude hết hạn/).length).toBeGreaterThan(0);
+  });
+
   it('does not scroll again when profile data is refreshed', async () => {
     window.history.replaceState({}, '', '/profiles#profile-g1');
     const scrollIntoView = vi.fn();

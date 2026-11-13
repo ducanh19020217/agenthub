@@ -84,6 +84,8 @@ export const getSetupLog = (tool: string) => apiFetch<string>(`/api/setup/log/${
 
 const TOKEN_STORAGE_KEY = 'agenthub_token';
 export const API_REQUEST_TIMEOUT_MS = 15_000;
+/** Claude usage is read by driving the CLI's /usage screen, which the server allows up to 45s. */
+export const USAGE_REFRESH_TIMEOUT_MS = 60_000;
 
 let unauthorizedListeners: Array<() => void> = [];
 
@@ -148,9 +150,10 @@ export function initTokenFromHash(): string | null {
 
 export interface ApiFetchOptions extends RequestInit {
   responseType?: 'json' | 'text' | 'blob';
+  timeoutMs?: number;
 }
 
-export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
+export async function apiFetch<T>(path: string, { timeoutMs = API_REQUEST_TIMEOUT_MS, ...options }: ApiFetchOptions = {}): Promise<T> {
   const token = getToken();
   if (!token) {
     notifyUnauthorized();
@@ -174,7 +177,7 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
   } else {
     options.signal?.addEventListener('abort', onAbort, { once: true });
   }
-  const timeout = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(path, {
@@ -532,6 +535,7 @@ export async function getProfileAvatarBlob(name: string, signal?: AbortSignal): 
 export async function refreshProfileUsage(name: string): Promise<Profile> {
   return apiFetch<Profile>(`/api/profiles/${encodeURIComponent(name)}/usage/refresh`, {
     method: 'POST',
+    timeoutMs: USAGE_REFRESH_TIMEOUT_MS,
   });
 }
 
@@ -564,6 +568,14 @@ export async function importAgyTokens(data: {
 export async function scanCockpit(dataDir?: string): Promise<CockpitScanResult> {
   const query = dataDir ? `?dataDir=${encodeURIComponent(dataDir)}` : '';
   return apiFetch<CockpitScanResult>(`/api/integrations/cockpit/scan${query}`);
+}
+
+/** Nhập file Export của Cockpit (có thể lẫn Antigravity, Codex, Claude). */
+export async function importCockpitExport(content: string, options?: { verify?: boolean }): Promise<ImportTokensResult> {
+  return apiFetch<ImportTokensResult>('/api/integrations/cockpit/import-export', {
+    method: 'POST',
+    body: JSON.stringify({ content, verify: options?.verify }),
+  });
 }
 
 export async function importCockpit(
@@ -728,7 +740,7 @@ export async function getTaskGraph(params?: {
   includeDone?: string | boolean;
 }): Promise<TaskGraphResponse> {
   const query = new URLSearchParams();
-  if (params?.project) query.set('project', params.project);
+  if (params?.project && params.project !== 'all') query.set('project', params.project);
   if (params?.includeDone !== undefined) query.set('includeDone', String(params.includeDone));
   const qStr = query.toString();
   return apiFetch<TaskGraphResponse>(`/api/tasks/graph${qStr ? `?${qStr}` : ''}`);

@@ -26,6 +26,7 @@ import { HttpError } from '../services/index.js';
 import { isProfileLoggedIn, resolveClaudeProfile, resolveCodexProfile } from '../profiles/index.js';
 import { detectClaudeQuota, ParsedStreamEvent, StreamChunkParser, AssistantUsage, ClaudeQuotaSignal } from './parse.js';
 import { ClaudeFailoverState, ClaudeFallbackStep } from './failover.js';
+import { isClaudeAuthError, markClaudeProfileAuthExpired } from '../profiles/auth.js';
 import { decodeCursor } from '../pagination.js';
 import { findClaudeBin,
   checkClaudePartialSupport,
@@ -194,6 +195,7 @@ export class ChatService {
   private telegramChatBySession = new Map<string, number>();
   private earlyRetryAt = new Map<string, number>();
   private lastClaudeQuotaEventUntil?: number;
+  private expiredClaudeProfilesNotified = new Set<string>();
 
   constructor(
     public config: AgentHubConfig,
@@ -274,6 +276,17 @@ export class ChatService {
 
   getClaudeFailover(): ReturnType<ClaudeFailoverState['snapshot']> {
     return this.failoverState.snapshot();
+  }
+
+  clearClaudeAuthExpiryNotification(profileName: string): void { this.expiredClaudeProfilesNotified.delete(profileName); }
+
+  private emitClaudeAuthExpired(profileName: string | null | undefined): void {
+    markClaudeProfileAuthExpired(this.profileRepo, (type, taskId, payload) => {
+      const name = payload && typeof payload === 'object' && 'name' in payload && typeof payload.name === 'string' ? payload.name : 'system';
+      if (this.expiredClaudeProfilesNotified.has(name)) return;
+      this.expiredClaudeProfilesNotified.add(name);
+      this.eventBus.emit(type, taskId, payload);
+    }, profileName);
   }
 
   clearClaudeFailover(): ReturnType<ClaudeFailoverState['snapshot']> {
@@ -460,7 +473,7 @@ export class ChatService {
     return retried;
   }
 
-  private failoverExecution(turn: QueuedTurn): { engine: 'claude' | 'codex'; model: string; profileName: string | null; env?: Record<string, string>; pausedUntil?: number } {
+  private failoverExecution(turn: QueuedTurn): { engine: 'claude' | 'codex'; model: string; profileName: string | null; env?: Record<string, string>; pausedUntil?: number; error?: string } {
     const snapshot = this.failoverState.snapshot();
     const step = snapshot.active ? snapshot.step : null;
     const session = this.chatSessionRepo.get(turn.sessionId);
@@ -498,6 +511,9 @@ export class ChatService {
       if (!name) return null;
       return { engine: 'codex', model: model || this.config.brain.codexModel || turn.model || 'gpt-5.6-luna', profileName: name };
     };
+    if (!step && snapshot.authFailover) {
+      return { engine: 'claude', model: turn.model, profileName: turn.profileName, error: 'Claude authentication failed and all configured fallback steps were exhausted' };
+    }
     if (!step) {
       if (requestedEngine === 'codex') {
         const selected = codex();
@@ -506,22 +522,27 @@ export class ChatService {
       }
       return { engine: 'claude', model: turn.model, profileName: turn.profileName };
     }
-    if (step.type === 'wait') return { engine: 'claude', model: turn.model, profileName: turn.profileName, pausedUntil: snapshot.until || undefined };
+    if (step.type === 'wait') {
+      if (snapshot.authFailover) return { engine: 'claude', model: turn.model, profileName: turn.profileName, error: 'Claude authentication failed and all configured fallback steps were exhausted' };
+      return { engine: 'claude', model: turn.model, profileName: turn.profileName, pausedUntil: snapshot.until || undefined };
+    }
     if (step.type === 'model') return { engine: 'claude', model: step.model, profileName: turn.profileName };
     if (step.type === 'engine') {
       const selected = codex();
       if (selected) return selected;
       const next = this.failoverState.advance('codex_unavailable');
       this.eventBus.emit('claude.fallback_changed', undefined, { step: next.step, reason: next.reason, resetAt: next.resetAt });
+      if (!next.step && snapshot.authFailover) return { engine: 'claude', model: turn.model, profileName: turn.profileName, error: 'Claude authentication failed and all configured fallback steps were exhausted' };
       return this.failoverExecution(turn);
     }
     if (step.type === 'profile') {
       const selected = step.profile
-        ? this.profileRepo?.getEnabled().find((profile) => profile.engine === 'claude' && profile.name === step.profile && profile.name !== turn.profileName && isProfileLoggedIn(profile))?.name
-        : this.profileRepo?.getEnabled().find((profile) => profile.engine === 'claude' && profile.name !== turn.profileName && isProfileLoggedIn(profile))?.name;
+        ? this.profileRepo?.getEnabled().find((profile) => profile.engine === 'claude' && profile.name === step.profile && profile.name !== turn.profileName && isProfileLoggedIn(profile) && !this.quotaMarkRepo?.isExhausted(profile.name, 'claude'))?.name
+        : this.profileRepo?.getEnabled().find((profile) => profile.engine === 'claude' && profile.name !== turn.profileName && isProfileLoggedIn(profile) && !this.quotaMarkRepo?.isExhausted(profile.name, 'claude'))?.name;
       if (selected) return { engine: 'claude', model: turn.model, profileName: selected };
       const next = this.failoverState.advance('profile_unavailable');
       this.eventBus.emit('claude.fallback_changed', undefined, { step: next.step, reason: next.reason, resetAt: next.resetAt });
+      if (!next.step && snapshot.authFailover) return { engine: 'claude', model: turn.model, profileName: turn.profileName, error: 'Claude authentication failed and all configured fallback steps were exhausted' };
       return this.failoverExecution(turn);
     }
     if (step.type === 'apiKey') {
@@ -785,6 +806,21 @@ export class ChatService {
     const proc = this.persistentProcesses.get(id);
     if (proc) this.closePersistentProcess(proc);
     this.chatSessionRepo.updateMode(id, mode);
+    return this.chatSessionRepo.get(id)!;
+  }
+
+  /** Switch an idle session to another account and restart its persistent CLI process. */
+  setSessionProfile(id: string, profileName: string | null): ChatSessionRow {
+    const session = this.chatSessionRepo.get(id);
+    if (!session) throw new HttpError(404, 'not_found', `Phiên trò chuyện "${id}" không tồn tại`);
+    if (session.profileName === profileName) return session;
+    const proc = this.persistentProcesses.get(id);
+    if (session.busy === 1 || this.runningTurns.has(id) || proc?.active) {
+      throw new HttpError(409, 'conflict', 'Không thể đổi tài khoản khi Brain đang chạy');
+    }
+    if (proc) this.closePersistentProcess(proc);
+    this.chatSessionRepo.updateProfileName(id, profileName);
+    this.chatSessionRepo.clearClaudeSessionId(id);
     return this.chatSessionRepo.get(id)!;
   }
 
@@ -1529,6 +1565,15 @@ export class ChatService {
       }, delay);
       return;
     }
+    if (planned.error) {
+      this.chatSessionRepo.setBusy(turn.sessionId, 0);
+      this.setSessionState(turn.sessionId, 'error');
+      try { this.chatMessageRepo.insert({ id: turn.messageId, sessionId: turn.sessionId, role: 'error', content: planned.error }); } catch { /* shutdown */ }
+      this.emitChatError(turn.sessionId, turn.messageId, planned.error);
+      setBrainActivity('idle').catch(() => {});
+      this.processQueue();
+      return;
+    }
     if (planned.engine === 'codex') {
       if (!planned.profileName) {
         this.chatSessionRepo.setBusy(turn.sessionId, 0);
@@ -1647,12 +1692,16 @@ export class ChatService {
     let accumulatedText = '';
     let hasStreamedPartials = false;
     let resultHandled = false;
+    let failedResultText = '';
+    let deferredAuthResult = false;
+    let stdoutOutput = '';
     let lastAssistantUsage: AssistantUsage | undefined;
     let limitResetSeconds: number | undefined;
     const startTime = Date.now();
 
     child.stdout?.on('data', (chunk: Buffer) => {
       if (this.stopped) return;
+      stdoutOutput += chunk.toString('utf8');
       this.resetTurnWatchdog(runningTurn);
       const events = parser.feed(chunk);
       for (const ev of events) {
@@ -1695,7 +1744,7 @@ export class ChatService {
         } else if (ev.type === 'rate_limit_info' && /rejected|limited|exhausted/i.test(ev.status)) {
           limitResetSeconds = ev.resetsAt ? Math.max(1, ev.resetsAt - Math.floor(Date.now() / 1000) + 60) : 5 * 3600;
         } else if (ev.type === 'result') {
-          resultHandled = true;
+          resultHandled = !ev.isError || !isClaudeAuthError(ev.result || '');
           if (ev.result) accumulatedText += ev.result;
           if (ev.sessionId) {
             const sess = this.chatSessionRepo.get(turn.sessionId);
@@ -1713,6 +1762,11 @@ export class ChatService {
 
           if (ev.isError) {
             const errMsg = ev.result || 'Claude error';
+            failedResultText += `\n${errMsg}`;
+            if (isClaudeAuthError(errMsg)) {
+              deferredAuthResult = true;
+              continue;
+            }
             const quota = detectClaudeQuota({ streamText: errMsg });
             // Let the close handler record the signal once and select the next
             // engine. Scheduling a Claude retry here used to run before the
@@ -1817,7 +1871,31 @@ export class ChatService {
 
       const running = this.runningTurns.get(turn.sessionId);
       if (running && !running.cancelled) {
+        if (!stdoutOutput) {
+          const pendingStdout = running.child.stdout?.read();
+          if (pendingStdout) stdoutOutput = Buffer.isBuffer(pendingStdout) ? pendingStdout.toString('utf8') : String(pendingStdout);
+        }
+        if (!stderrOutput) {
+          const pendingStderr = running.child.stderr?.read();
+          if (pendingStderr) stderrOutput = Buffer.isBuffer(pendingStderr) ? pendingStderr.toString('utf8') : String(pendingStderr);
+        }
         const quota = this.recordClaudeQuota(accumulatedText, stderrOutput, code);
+        const authOutput = code !== 0 ? `${failedResultText}\n${stderrOutput}\n${stdoutOutput}` : `${failedResultText}\n${stderrOutput}`;
+        const authFailed = (code !== 0 || failedResultText.length > 0) && isClaudeAuthError(authOutput);
+        if (authFailed) {
+          this.emitClaudeAuthExpired(planned.profileName || turn.profileName);
+          const prior = this.failoverState.snapshot();
+          const failover = prior.active && prior.authFailover
+            ? this.failoverState.advance('claude_auth_expired')
+            : this.failoverState.activateAuthExpired(planned.profileName || turn.profileName);
+          if (this.chatSessionRepo.get(turn.sessionId)?.kind === 'brain' && failover.step && failover.step.type !== 'wait') {
+            this.runningTurns.delete(turn.sessionId);
+            this.chatSessionRepo.setBusy(turn.sessionId, 0);
+            this.emitEvent('chat.failover', { sessionId: turn.sessionId, messageId: turn.messageId, fromEngine: 'claude', toEngine: failover.step.type === 'engine' ? 'codex' : 'claude', reason: 'claude_auth_expired', step: failover.step });
+            this.executeTurn(turn);
+            return;
+          }
+        }
         if (!quota.exhausted && limitResetSeconds) { quota.exhausted = true; quota.resetSeconds = limitResetSeconds; }
         if (quota.exhausted && this.forceClaude.has(turn.sessionId)) {
           this.forceClaude.delete(turn.sessionId);
@@ -1841,8 +1919,8 @@ export class ChatService {
         if (!resultHandled) {
           if (quota.exhausted && this.scheduleLimitRetry(turn, quota.resetSeconds, stderrOutput.trim())) {
             // The original user message remains pending until the retry succeeds.
-          } else if (code !== 0) {
-            const errMsg = stderrOutput.trim() || `Claude process exited with code ${code}`;
+          } else if (code !== 0 || deferredAuthResult) {
+            const errMsg = failedResultText.trim() || stderrOutput.trim() || `Claude process exited with code ${code}`;
             try {
               this.chatMessageRepo.insert({
                 id: turn.messageId,
@@ -2235,6 +2313,13 @@ export class ChatService {
     proc.active = undefined;
     this.runningTurns.delete(proc.sessionId);
     const quota = this.recordClaudeQuota(ev.result || '', proc.stderrOutput, 0);
+    const authFailed = ev.isError && isClaudeAuthError(`${ev.result || ''}\n${proc.stderrOutput}`);
+    if (authFailed) {
+      this.emitClaudeAuthExpired(running.profileName || this.chatSessionRepo.get(proc.sessionId)?.profileName);
+      const prior = this.failoverState.snapshot();
+      if (prior.active && prior.authFailover) this.failoverState.advance('claude_auth_expired');
+      else this.failoverState.activateAuthExpired(running.profileName || this.chatSessionRepo.get(proc.sessionId)?.profileName);
+    }
     if (!quota.exhausted && proc.limitResetSeconds) { quota.exhausted = true; quota.resetSeconds = proc.limitResetSeconds; }
     if (quota.exhausted && this.forceClaude.has(proc.sessionId)) {
       this.forceClaude.delete(proc.sessionId);
@@ -2260,6 +2345,7 @@ export class ChatService {
     if (ev.isError) {
       const session = this.chatSessionRepo.get(proc.sessionId);
       const retryTurn = this.persistentTurn(running, session);
+      if (authFailed && session?.kind === 'brain' && !this.forceClaude.has(proc.sessionId) && this.failoverPersistentTurn(proc, running, retryTurn, 'claude_auth_expired')) return;
       if (quota.exhausted && session?.kind === 'brain' && !this.forceClaude.has(proc.sessionId) && this.failoverPersistentTurn(proc, running, retryTurn, 'claude_quota_exhausted')) {
         return;
       }

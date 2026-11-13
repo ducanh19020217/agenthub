@@ -378,7 +378,20 @@
      - Hàm `backfillTaskStatusChangedAt` hỗ trợ đầy đủ các nhánh trạng thái của task (`queued`, `running`, `checking`, `review`, `done`, `pushed`, `failed`, `blocked`, `cancelled`, `waiting_quota`, `paused`, `draft`, cũng như `merged`, `changes_requested`, `publishing`, `auditing`) để ưu tiên lấy timestamp chính xác từ event hoặc review tương ứng, chỉ fallback về `updatedAt` kèm cờ `statusChangedAtEstimated: 1` khi thực sự không có lịch sử.
      - `TaskRepo.updateStatus` và `TaskRepo.update` chỉ cập nhật lại `statusChangedAt` khi trạng thái thực sự thay đổi, tránh làm mới sai mốc thời gian khi chỉ cập nhật các trường phụ (như `waitReason`).
 
-## DEC-028: Loại bỏ modal số liệu trùng lặp trên Dashboard và hoàn thiện hiển thị timeline cho trạng thái kết thúc
+- **Giải mã kho Cockpit bản mới (2026-11-10, người dùng đồng ý)**:
+  - Cockpit từ bản có `secure_account_storage` (tham chiếu v1.3.81, `src-tauri/src/modules/secure_account_storage.rs`) mã hoá file chi tiết từng tài khoản bằng AES-256-GCM; file chỉ mục (`accounts.json`, `codex_accounts.json`, `claude_accounts.json`) vẫn để dạng thường và có `email`, `name`, `plan_type`.
+  - Khoá là 32 byte ngẫu nhiên, base64, trong `<dataDir>/secure-account-storage.key`, tạo một lần và không đổi; "rotation 30 ngày" của Cockpit chỉ mã hoá lại bằng nonce mới với cùng khoá. Envelope: `{ version, kind, algorithm, key_id, encrypted_at, nonce, ciphertext }`, nonce 12 byte, ciphertext có tag 16 byte nối ở cuối.
+  - AgentHub đọc khoá này để giải mã **chỉ phía server**, khi quét (để biết tài khoản có nhập được không) và khi nhập. Kết quả giải mã không trả ra API, không log. Vẫn chỉ đọc, không ghi vào thư mục Cockpit. Khoá chỉ bảo vệ khi file bị chép riêng ra ngoài; mọi tiến trình cùng user đều đọc được, nên việc hub đọc không làm giảm thêm độ an toàn trên máy.
+  - Thiếu khoá, sai khoá, hoặc thuật toán lạ: báo lý do theo từng tài khoản và gợi ý nhập file Export. Đường dự phòng `POST /api/integrations/cockpit/import-export` nhận file Export của Cockpit, tự nhận diện Antigravity/Codex/Claude theo từng mục.
+  - Mã giải mã viết lại bằng `node:crypto`, không chép code Cockpit (giấy phép CC BY-NC-SA 4.0).
+
+## DEC-028: Sửa migration 73 để giữ bộ đếm task khi rebuild bảng
+
+- **Bối cảnh**: Migration 73 rebuild `tasks`, trong khi `runCount` và `consecutiveCrashes` được thêm ngoài danh sách migration sau vòng lặp. Bản rebuild cũ dùng `SELECT *`, gây lỗi trên DB đã có hai cột và có thể để lại bảng `tasks_new` rỗng.
+- **Quyết định**: Sửa migration 73 tại chỗ vì migration này chưa được khóa và chưa chạy thành công trên DB thật có các cột bộ đếm. Migration xóa `tasks_new` cũ bằng `DROP TABLE IF EXISTS`, sao chép theo danh sách cột tường minh, và mang theo cả hai bộ đếm. Trước khi chạy migration 73, đảm bảo hai cột bộ đếm đã tồn tại; DB mới cũng cần bước này vì các cột vẫn được quản lý ngoài danh sách migration.
+- **Hệ quả**: DB bị bỏ lại bảng tạm có thể tự chạy tiếp; dữ liệu bộ đếm được giữ nguyên qua rebuild.
+
+## DEC-029: Loại bỏ modal số liệu trùng lặp trên Dashboard và hoàn thiện hiển thị timeline cho trạng thái kết thúc
 
 - **Bối cảnh**:
   - Nhánh `t-status-timestamps` trước đó đã thêm một modal trạng thái dạng popup khi người dùng bấm vào các thẻ số liệu trên `DashboardPage.tsx`, tái sử dụng `FlowTaskList`.
@@ -393,7 +406,49 @@
      - Với bước cuối của các task thuộc tập trạng thái này: chỉ hiển thị mốc thời gian (`at`), không tính toán hoặc hiển thị thời lượng đang chạy (`currentDurationMs`) và ẩn nhãn "đang ở bước này từ...".
      - Các task đang chạy hoặc chờ tiếp tục hiển thị thời lượng thực tế và nhãn ngữ cảnh theo đúng thiết kế.
 
-## DEC-029: Lượt quét sức khoẻ định kỳ (Health Sweep) và đánh thức Brain
+## DEC-030: Xử lý task ở trạng thái checking khi drain restart và lưới an toàn phục hồi task mồ côi
+
+- **Bối cảnh**:
+  - Ngày 2026-11-12, khi có yêu cầu drain restart (`POST /api/system/restart {"mode":"when-idle"}`), worker của các task hoàn thành chạy và chuyển task sang trạng thái `checking`. Tuy nhiên `runChecksForTask` lập tức return sớm khi `this.restartState.draining === true` mà không đưa check vào hàng đợi.
+  - Khi drain hết thời gian chờ (`hub.restart_timeout`) hoặc bị huỷ, daemon không thực hiện restart và không ai kích hoạt lại check, dẫn đến task bị kẹt mồ côi ở trạng thái `checking` suốt nhiều giờ.
+- **Quyết định thiết kế**:
+  1. **Hoãn check khi drain (phương án b)**:
+     - So với phương án (a) (vẫn cho check chạy khi drain và tính check vào `waitingFor`), phương án (b) giúp quá trình drain hoàn thành nhanh hơn vì không phải chờ check chạy và không kích hoạt dây chuyền các bước tiếp theo (auto-fix, review, auto-merge) trong lúc đang chuẩn bị hạ tiến trình.
+     - Khi restart daemon thành công, quy trình startup (`recoverOnStartup`) sẽ tự động phát hiện các task `checking` có worker run kết thúc `done` và chạy lại check.
+  2. **Phục hồi check khi drain kết thúc không restart (timeout hoặc cancel)**:
+     - Khi drain kết thúc do timeout (`hub.restart_timeout`) hoặc do người dùng huỷ (`cancelRestartDrain`), `draining` được đặt về `false` và scheduler gọi hàm dùng chung `recoverCheckingTasks()`.
+     - `recoverCheckingTasks()` quét toàn bộ task ở trạng thái `checking`, nếu worker run cuối cùng có outcome `done` và chưa có check nào đang chạy/xếp hàng (`checkingActive`/`checkingQueue`), scheduler sẽ kích hoạt chạy lại `runChecksForTask`.
+     - Tái cấu trúc logic này từ `recoverOnStartup` thành hàm dùng chung để đảm bảo tính nhất quán giữa startup recovery và drain exit recovery.
+  3. **Lưới an toàn định kỳ trong `tick`**:
+     - Bổ sung `recoverStuckCheckingTasks()` trong `tick` của scheduler để định kỳ rà soát các task mồ côi ở trạng thái `checking` quá N phút (mặc định 30 phút, cấu hình qua `scheduler.maxCheckingMin`).
+     - Điều kiện kích hoạt: task không nằm trong `checkingActive`/`checkingQueue`, không có run nào đang chạy (cả in-memory và DB), và worker run cuối có outcome `done`.
+     - Scheduler phát sự kiện `task.checking_recovered` để dễ dàng quan sát/giám sát và gọi lại `runChecksForTask`.
+     - Lưới an toàn hoàn toàn không can thiệp khi scheduler đang ở trạng thái drain (`this.restartState.draining === true`).
+
+## DEC-031: Tự động resume task khi worker timeout nếu có tiến độ và phát sự kiện task.failed
+
+- **Bối cảnh**:
+  - Khi worker run kết thúc với outcome `timeout` trong `src/scheduler/index.ts`, scheduler trước đây chuyển task sang `failed` ngay lập tức và chỉ phát sự kiện `task.timeout`.
+  - Hai vấn đề thực tế phát sinh (ghi nhận ngày 2026-11-13 với các task `t-flow-merge-push-failed-nodes` và `t-health-sweep-brain`):
+    1. Task đã có tiến độ thật (có từ 2–5 commit hợp lệ trong phiên chạy) nhưng hết giới hạn thời gian (ví dụ 3 tiếng) vẫn bị đánh dấu `failed`, buộc người vận hành phải retry thủ công.
+    2. Code chỉ phát `task.timeout`, không phát `task.failed`. Do `task.timeout` không nằm trong danh sách đánh thức mặc định (`DEFAULT_BRAIN_WAKEUP_EVENTS`), Brain không được đánh thức khi task timeout thất bại.
+- **Quyết định thiết kế**:
+  1. **Cơ chế timeout resume dựa trên tiến độ và số lần timeout liên tiếp**:
+     - Khi worker run bị timeout, scheduler kiểm tra tiến độ bằng hàm `hasCommitAfter(task, startedAtMs)` sẵn có (xem worktree HEAD có commit mới sau mốc bắt đầu của run hay không). Mốc `startedAtMs` sử dụng trực tiếp giá trị hợp lệ từ `run.startedAt` trong DB (fallback về `rt.startTime` nếu không hợp lệ), không dùng `Math.min` để tránh lùi mốc thời gian và nhận diện nhầm commit trước run là tiến độ.
+     - Đếm số lần timeout liên tiếp dựa trên số run worker có outcome `timeout` liên tiếp ở cuối danh sách runs của task (`getConsecutiveTimeoutCount`), không cần thêm cột DB mới.
+     - Cấu hình `scheduler.maxTimeoutResumes` (mặc định 2, đặt 0 để tắt) giới hạn số lần resume liên tiếp do timeout; hỗ trợ cấu hình qua file `config.json`, schema `UpdateConfigSchema` (`PUT /api/config`), và công cụ `SetupTools.configSet` (`POST /api/setup/config-set`).
+     - Phát sự kiện `task.timeout` cho mọi outcome timeout (kể cả khi requeue lẫn khi fail) để Telegram và các thành phần hiện tại tiếp tục hoạt động không đổi.
+     - Nếu có tiến độ và số lần timeout liên tiếp chưa vượt `maxTimeoutResumes`:
+       - Task được chuyển về `queued` với cờ `resume: 1`.
+       - Ghi chú `TIMEOUT_RESUME_NOTE` ("Lượt trước bị timeout nhưng đã có tiến độ. Kiểm tra git log/status rồi làm tiếp, không làm lại, và commit thường xuyên.") vào `.agenthub/task.md` của worktree và `task.body`.
+       - Phát sự kiện `task.queued` với `{ reason: 'timeout_resume', attempt: consecutiveTimeouts }`.
+     - Nếu không có tiến độ hoặc đã vượt quá `maxTimeoutResumes`:
+       - Chuyển task sang `failed`.
+       - Phát sự kiện `task.failed` với `{ reason: 'timeout', progress: boolean, timeoutResumes: number }` để kích hoạt đánh thức Brain.
+  2. **Bảo toàn hành vi cho các luồng khác**:
+     - Giữ nguyên toàn bộ hành vi khi task bị cancel, stall, hoặc quota; không thay đổi logic xử lý reviewer timeout.
+
+## DEC-032: Lượt quét sức khoẻ định kỳ (Health Sweep) và đánh thức Brain
 
 - **Bối cảnh**:
   - Brain trước đây chỉ thức dậy theo sự kiện đột xuất từ daemon.

@@ -140,12 +140,16 @@ export interface SchedulerLimitsConfig {
   maxRunsPerTask: number;
   maxConsecutiveCrashesPerTask: number;
   maxPausedMin?: number;
+  maxCheckingMin?: number;
+  maxTimeoutResumes?: number;
 }
 
 export const DEFAULT_SCHEDULER_LIMITS: SchedulerLimitsConfig = {
   maxRunsPerTask: 15,
   maxConsecutiveCrashesPerTask: 3,
   maxPausedMin: 30,
+  maxCheckingMin: 30,
+  maxTimeoutResumes: 2,
 };
 
 export interface ProfileCoolingConfig {
@@ -790,6 +794,14 @@ export function saveConfig(
           },
         }
       : {}),
+    ...(patch.scheduler && typeof patch.scheduler === 'object'
+      ? {
+          scheduler: {
+            ...((current.scheduler as Record<string, unknown>) || {}),
+            ...patch.scheduler,
+          },
+        }
+      : {}),
   };
   fs.writeFileSync(configFilePath, JSON.stringify(updated, null, 2), 'utf-8');
 }
@@ -1063,8 +1075,23 @@ export function updateConfigInMemory(
       ...patch.workers,
     };
   }
-  if (patch.scheduler) config.scheduler = { ...config.scheduler, ...patch.scheduler };
-  if (patch.scheduler) config.schedulerLimits = config.scheduler;
+  if (patch.scheduler) {
+    const raw = patch.scheduler;
+    const validated: SchedulerConfig = {
+      ...config.scheduler,
+      ...raw,
+      ...(raw.maxTimeoutResumes !== undefined
+        ? {
+            maxTimeoutResumes:
+              typeof raw.maxTimeoutResumes === 'number' && Number.isFinite(raw.maxTimeoutResumes) && raw.maxTimeoutResumes >= 0
+                ? Math.floor(raw.maxTimeoutResumes)
+                : DEFAULT_SCHEDULER_LIMITS.maxTimeoutResumes,
+          }
+        : {}),
+    };
+    config.scheduler = validated;
+    config.schedulerLimits = validated;
+  }
   if (patch.profileCooling) config.profileCooling = { ...config.profileCooling, ...patch.profileCooling };
   if (patch.ui?.tours) config.ui = { ...config.ui, tours: { ...config.ui.tours, ...patch.ui.tours } };
   if (patch.branding) config.branding = parseBranding({ ...config.branding, ...patch.branding });
@@ -1638,6 +1665,10 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
         maxRunsPerTask: typeof raw.maxRunsPerTask === 'number' && raw.maxRunsPerTask > 0 ? Math.floor(raw.maxRunsPerTask) : DEFAULT_SCHEDULER_LIMITS.maxRunsPerTask,
         maxConsecutiveCrashesPerTask: typeof raw.maxConsecutiveCrashesPerTask === 'number' && raw.maxConsecutiveCrashesPerTask > 0 ? Math.floor(raw.maxConsecutiveCrashesPerTask) : DEFAULT_SCHEDULER_LIMITS.maxConsecutiveCrashesPerTask,
         maxPausedMin: typeof raw.maxPausedMin === 'number' && raw.maxPausedMin > 0 ? Math.floor(raw.maxPausedMin) : DEFAULT_SCHEDULER_LIMITS.maxPausedMin,
+        maxCheckingMin: typeof raw.maxCheckingMin === 'number' && raw.maxCheckingMin > 0 ? Math.floor(raw.maxCheckingMin) : DEFAULT_SCHEDULER_LIMITS.maxCheckingMin,
+        maxTimeoutResumes: typeof raw.maxTimeoutResumes === 'number' && Number.isFinite(raw.maxTimeoutResumes) && raw.maxTimeoutResumes >= 0
+          ? Math.floor(raw.maxTimeoutResumes)
+          : DEFAULT_SCHEDULER_LIMITS.maxTimeoutResumes,
       };
     })(),
     schedulerLimits: (() => {
@@ -1652,6 +1683,12 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
         maxPausedMin: typeof raw.maxPausedMin === 'number' && raw.maxPausedMin > 0
           ? Math.floor(raw.maxPausedMin)
           : DEFAULT_SCHEDULER_LIMITS.maxPausedMin,
+        maxCheckingMin: typeof raw.maxCheckingMin === 'number' && raw.maxCheckingMin > 0
+          ? Math.floor(raw.maxCheckingMin)
+          : DEFAULT_SCHEDULER_LIMITS.maxCheckingMin,
+        maxTimeoutResumes: typeof raw.maxTimeoutResumes === 'number' && Number.isFinite(raw.maxTimeoutResumes) && raw.maxTimeoutResumes >= 0
+          ? Math.floor(raw.maxTimeoutResumes)
+          : DEFAULT_SCHEDULER_LIMITS.maxTimeoutResumes,
       };
     })(),
     profileCooling: (() => {

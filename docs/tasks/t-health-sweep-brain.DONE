@@ -31,7 +31,7 @@
    - MCP Tool: `hub_health_sweep` hỗ trợ gọi từ AI agent.
 
 5. **Tài liệu**:
-   - Ghi nhận quyết định kiến trúc DEC-029 trong `docs/DECISIONS.md`.
+   - Ghi nhận quyết định kiến trúc DEC-032 trong `docs/DECISIONS.md`.
 
 ## Kết quả kiểm tra
 - `npm run typecheck`: 0 lỗi (`tsc --noEmit` thành công).

@@ -606,6 +606,15 @@ export async function createServer(
     return service.scanCockpit(query?.dataDir);
   });
 
+  fastify.post('/api/integrations/cockpit/import-export', async (req: FastifyRequest, reply: FastifyReply) => {
+    const body = (req.body || {}) as { content?: unknown; verify?: boolean };
+    if (body.content === undefined || body.content === null || body.content === '') {
+      throw new HttpError(400, 'bad_request', 'Thiếu nội dung file Export ("content")');
+    }
+    const result = await service.importCockpitExport(body.content, { verify: body.verify });
+    return reply.status(200).send(result);
+  });
+
   fastify.post('/api/integrations/cockpit/import', async (req: FastifyRequest, reply: FastifyReply) => {
     const body = (req.body || {}) as {
       items?: Array<{ source: 'antigravity' | 'codex' | 'claude'; cockpitId: string }>;

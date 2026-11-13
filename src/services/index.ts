@@ -48,13 +48,14 @@ import { parseRemote } from '../integrations/gitea/client.js';
 import { BulletinService } from '../bulletin.js';
 import type { HealthSweepService, HealthSweepResult } from '../health/sweep.js';
 import { parseCodexTokenItem, writeCodexAuthFile } from '../profiles/codexToken.js';
-import { parseClaudeTokenItem, verifyClaudeOAuthToken, writeClaudeIsolatedFiles, type ClaudeVerifyResult } from '../profiles/claudeToken.js';
+import { parseClaudeTokenItem, readClaudeOAuthAccessToken, verifyClaudeOAuthToken, writeClaudeIsolatedFiles, type ClaudeVerifyResult } from '../profiles/claudeToken.js';
 import {
   resolveCockpitDir,
   scanCockpit as runScanCockpit,
   readCockpitAgyAccount,
   readCockpitCodexAccount,
   readCockpitClaudeAccount,
+  detectCockpitExportSource,
   type CockpitScanResult,
   type CockpitSource,
 } from '../profiles/cockpit.js';
@@ -561,6 +562,13 @@ export const UpdateConfigSchema = z.object({
     requireApproval: z.boolean().optional(),
     approvalMinTasks: z.number().int().min(0).max(100).optional(),
   }).optional(),
+  scheduler: z.object({
+    maxRunsPerTask: z.number().int().positive().optional(),
+    maxConsecutiveCrashesPerTask: z.number().int().positive().optional(),
+    maxPausedMin: z.number().int().positive().optional(),
+    maxCheckingMin: z.number().int().positive().optional(),
+    maxTimeoutResumes: z.number().int().min(0).optional(),
+  }).optional(),
   watchdog: z.object({
     stallMinutes: z.number().positive().optional(),
     waitingMinutes: z.number().positive().optional(),
@@ -892,6 +900,10 @@ export function formatEventSummary(
       if (reason === 'retry') {
         return `${taskLabel} được đưa vào hàng đợi để thử lại`;
       }
+      if (reason === 'timeout_resume') {
+        const attempt = typeof p.attempt === 'number' ? ` (lần ${p.attempt})` : '';
+        return `${taskLabel} được đưa vào hàng đợi để làm tiếp sau khi quá thời gian${attempt}`;
+      }
       return `${taskLabel} được đưa vào hàng đợi`;
     }
 
@@ -913,8 +925,12 @@ export function formatEventSummary(
     case 'task.blocked':
       return `${taskLabel} bị chặn`;
 
-    case 'task.failed':
+    case 'task.failed': {
+      if (p.reason === 'timeout') {
+        return `${taskLabel} thất bại do quá thời gian`;
+      }
       return `${taskLabel} thất bại`;
+    }
 
     case 'task.done':
       return p.reason === 'merged_elsewhere'
@@ -1162,6 +1178,9 @@ export class AppService {
   ) {
     this.avatarService = new AvatarService(this.config.hubHome, this.profileRepo);
     this.migrateProjectMergeMappings();
+    this.claudeAuthRecoveryTimer = setInterval(() => void this.recheckExpiredClaudeProfiles(), 5 * 60_000);
+    this.claudeAuthRecoveryTimer.unref?.();
+    this.chatService?.eventBus.on('brain.profiles_synced', this.profileSyncHandler);
   }
 
   /** Backfill the legacy merge column for projects registered before automatic mapping existed. */
@@ -1179,6 +1198,60 @@ export class AppService {
   }
 
   setSetupTools(tools: SetupTools): void { this.setupTools = tools; }
+  private claudeAuthRecoveryTimer?: NodeJS.Timeout;
+  private claudeAuthRecoveryInFlight = false;
+  private readonly profileSyncHandler = () => { void this.recheckExpiredClaudeProfiles(); };
+
+  stopClaudeAuthRecovery(): void {
+    if (this.claudeAuthRecoveryTimer) clearInterval(this.claudeAuthRecoveryTimer);
+    this.claudeAuthRecoveryTimer = undefined;
+    this.chatService?.eventBus.off('brain.profiles_synced', this.profileSyncHandler);
+  }
+
+  private credentialsChangedAfterExpiry(profile: ProfileRow): boolean {
+    const expiryEvent = this.eventRepo.getLatestProfileAuthExpired(profile.name);
+    if (!expiryEvent) return true;
+    const timestamp = expiryEvent.ts.includes('T') ? expiryEvent.ts : `${expiryEvent.ts.replace(' ', 'T')}Z`;
+    const expiredAt = Date.parse(timestamp);
+    if (!Number.isFinite(expiredAt)) return true;
+    const home = profile.home || os.homedir();
+    const credentialsPath = path.join(home, profile.kind === 'system' ? '.claude/.credentials.json' : '.credentials.json');
+    const paths = [credentialsPath, path.join(home, '.claude.json')];
+    let newestMtime = Number.NEGATIVE_INFINITY;
+    for (const file of paths) {
+      try { newestMtime = Math.max(newestMtime, fs.statSync(file).mtimeMs); } catch { /* file may not exist yet */ }
+    }
+    return newestMtime > expiredAt;
+  }
+
+  async recheckExpiredClaudeProfiles(verify: typeof verifyClaudeOAuthToken = verifyClaudeOAuthToken): Promise<void> {
+    if (this.claudeAuthRecoveryInFlight) return;
+    this.claudeAuthRecoveryInFlight = true;
+    try {
+      for (const profile of this.profileRepo.getAll().filter((item) => item.engine === 'claude' && item.authState === 'not_logged_in')) {
+        if (!this.credentialsChangedAfterExpiry(profile)) continue;
+        const token = readClaudeOAuthAccessToken(profile.home || os.homedir(), profile.kind === 'system');
+        if (!token) continue;
+        try {
+          const verified = await verify(token, { timeoutMs: 10_000 });
+          if (verified.email && profile.email && verified.email.toLowerCase() !== profile.email.toLowerCase()) continue;
+          this.profileRepo.updateAuthState(profile.name, 'ok', null, null);
+          if (verified.email && verified.email !== profile.email) this.profileRepo.upsert({ ...profile, email: verified.email, authState: 'ok', authMessage: null });
+          const payload = { name: profile.name, email: verified.email || profile.email, engine: 'claude' };
+          if (this.chatService) this.chatService.eventBus.emit('profile.auth_restored', undefined, payload);
+          else this.eventRepo.insert('profile.auth_restored', undefined, payload);
+          this.chatService?.clearClaudeAuthExpiryNotification(profile.name);
+          const failover = this.chatService?.getClaudeFailover();
+          if (failover?.authFailover && failover.authProfileName === profile.name) {
+            this.chatService?.clearClaudeFailover();
+            this.brainRunner?.syncClaudeProfiles();
+          }
+        } catch { /* transient verification failures keep the profile excluded */ }
+      }
+    } finally {
+      this.claudeAuthRecoveryInFlight = false;
+    }
+  }
   setTrackerRepo(repo: TrackerItemRepo): void { this.trackerRepo = repo; }
   setTriageDecisionHandler(handler: (sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string) => Promise<{ action: string; taskIds: string[] }>): void { this.triageDecisionHandler = handler; }
   async decideOpenProjectTicket(sourceId: string, wpId: number, action: 'do' | 'split' | 'ask' | 'skip' | 'manual', note?: string): Promise<{ action: string; taskIds: string[] }> {
@@ -1277,6 +1350,7 @@ export class AppService {
   setPerfCollector(collector: PerfCollector): void { this.perfCollector = collector; }
 
   shutdownForUser(reason = 'user_stop'): { queued: number; reviewers: number; childPids: number[] } {
+    this.stopClaudeAuthRecovery();
     if (reason === 'user_stop') {
       this.userShutdownRequested = true;
     }
@@ -3444,6 +3518,60 @@ export class AppService {
     return runScanCockpit(dir, this.profileRepo.getAll());
   }
 
+  /**
+   * Nhập file Export của Cockpit (đường dự phòng khi không đọc được kho Cockpit).
+   * File có thể chứa lẫn Antigravity, Codex và Claude; mỗi mục được nhận diện riêng rồi
+   * chuyển vào đường nhập token sẵn có của từng engine.
+   */
+  async importCockpitExport(content: unknown, options: { verify?: boolean } = {}): Promise<TokenImportResult> {
+    let parsed: unknown = content;
+    if (typeof parsed === 'string') {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch {
+        throw new HttpError(400, 'bad_request', 'File Export không phải JSON hợp lệ');
+      }
+    }
+    const list: unknown[] = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === 'object' && Array.isArray((parsed as Record<string, unknown>).accounts)
+        ? (parsed as { accounts: unknown[] }).accounts
+        : parsed && typeof parsed === 'object' ? [parsed] : [];
+    if (list.length === 0) {
+      throw new HttpError(400, 'bad_request', 'File Export không có tài khoản nào');
+    }
+    const groups: Record<CockpitSource, Record<string, unknown>[]> = { antigravity: [], codex: [], claude: [] };
+    const results: TokenImportResult['results'] = [];
+    for (const raw of list) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        results.push({ name: '', email: '', action: 'skipped', status: 'error', message: 'Mục dữ liệu không phải là object hợp lệ' });
+        continue;
+      }
+      const item = raw as Record<string, unknown>;
+      const source = detectCockpitExportSource(item);
+      if (!source) {
+        results.push({
+          name: '', email: typeof item.email === 'string' ? item.email : '', action: 'skipped', status: 'error',
+          message: 'Không nhận ra loại tài khoản (cần token Antigravity, Codex hoặc Claude OAuth)',
+        });
+        continue;
+      }
+      if (source === 'antigravity' && item.token && typeof item.token === 'object' && typeof item.refresh_token !== 'string') {
+        groups.antigravity.push({ email: item.email, refresh_token: (item.token as Record<string, unknown>).refresh_token });
+      } else {
+        groups[source].push(item);
+      }
+    }
+    const engineOf: Record<CockpitSource, 'agy' | 'codex' | 'claude'> = { antigravity: 'agy', codex: 'codex', claude: 'claude' };
+    for (const source of ['antigravity', 'codex', 'claude'] as const) {
+      if (groups[source].length === 0) continue;
+      const res = await this.importTokens({ engine: engineOf[source], tokens: groups[source] }, { verify: options.verify });
+      results.push(...res.results);
+    }
+    const successCount = results.filter((r) => r.status === 'ok').length;
+    return { success: successCount > 0, total: results.length, successCount, failedCount: results.length - successCount, results };
+  }
+
   async importFromCockpit(
     items: Array<{ source: CockpitSource; cockpitId: string }>,
     options: { verify?: boolean; customDir?: string } = {},
@@ -3771,8 +3899,10 @@ export class AppService {
         if (refreshedEmail) email = refreshedEmail;
       } else if (profile.engine === 'claude') {
         // Claude profiles: login state comes from the Claude config dir, not from the Codex CLI.
+        if (profile.authState === 'not_logged_in') await this.recheckExpiredClaudeProfiles();
+        const currentProfile = this.profileRepo.get(profile.name) || profile;
         const account = this.coreProfileService.readClaudeAccount(profile.home || os.homedir());
-        if (!isProfileLoggedIn(profile)) {
+        if (!isProfileLoggedIn(currentProfile)) {
           message = 'Chưa đăng nhập Claude';
           // Drop an email left by an earlier wrong check (it used to report the Codex/ChatGPT login).
           if (profile.email) {
@@ -6418,6 +6548,7 @@ export class AppService {
       slotsPerAgyProfile: this.config.slotsPerAgyProfile,
       multiplePerProvider: this.config.multiplePerProvider,
       planning: this.config.planning,
+      scheduler: this.config.scheduler,
       slotsPerCodexProfile: this.config.slotsPerCodexProfile,
       watchdog: this.config.watchdog,
       autoFixOnFail: this.config.autoFixOnFail,
@@ -6529,6 +6660,10 @@ export class AppService {
     updateConfigInMemory(this.config, parsed);
     if (parsed.brain?.fallback) this.chatService?.configureFailoverSteps(this.config.brain.fallback);
     if (parsed.brain?.policy) this.config.brain.policy = [...parsed.brain.policy];
+    if (parsed.chat?.claudeProfile !== undefined || parsed.brain?.claudeProfile !== undefined) {
+      void this.recheckExpiredClaudeProfiles();
+      this.brainRunner?.syncClaudeProfiles();
+    }
 
     // Save to config.json
     saveConfig(this.config.hubHome, parsed);

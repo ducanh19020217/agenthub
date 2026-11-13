@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import './orphan-guard.mjs';
 
+console.log = (...values) => fs.writeSync(1, `${values.map(String).join(' ')}\n`);
+console.error = (...values) => fs.writeSync(2, `${values.map(String).join(' ')}\n`);
+
 const args = process.argv.slice(2);
 
 if (args.includes('--help')) {
@@ -12,9 +15,13 @@ if (args.includes('--help')) {
   process.exit(0);
 }
 
-// Find prompt (last argument that doesn't start with -)
+// Like the real CLI, a trailing `-` means the prompt arrives on stdin (AgentHub always does this).
 let prompt = '';
-for (let i = args.length - 1; i >= 0; i--) {
+if (args.at(-1) === '-') {
+  try { prompt = fs.readFileSync(0, 'utf8'); } catch { prompt = ''; }
+}
+// Otherwise find prompt (last argument that doesn't start with -)
+if (!prompt) for (let i = args.length - 1; i >= 0; i--) {
   if (!args[i].startsWith('-') && (i === 0 || !args[i - 1].startsWith('-m') && !args[i - 1].startsWith('-C'))) {
     prompt = args[i];
     break;
@@ -60,7 +67,9 @@ for (let i = 0; i < args.length; i++) {
 
 // If task review is requested via prompt or env
 const reviewMatch = prompt.match(/hub_review\s+([a-zA-Z0-9_/-]+)/) || prompt.match(/task\s+([a-zA-Z0-9_/-]+)/);
-const taskId = process.env.FAKE_CODEX_TASK_ID || (reviewMatch ? reviewMatch[1] : undefined);
+const taskId = process.env.FAKE_CODEX_NO_TOOLS === '1'
+  ? undefined
+  : (process.env.FAKE_CODEX_TASK_ID || (reviewMatch ? reviewMatch[1] : undefined));
 
 async function run() {
   if (taskId && (mcpEnv.AGENTHUB_PORT || process.env.AGENTHUB_PORT)) {

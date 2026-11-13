@@ -28,6 +28,7 @@ async function run() {
     'reviewer-approved': { verdict: 'approved', feedback: 'Diff and required checks reviewed.' },
     'reviewer-changes': { verdict: 'changes_requested', feedback: 'Please fix the failing check.' },
     'reviewer-malformed': 'not a reviewer result',
+    'reviewer-mentions-limit': { verdict: 'approved', feedback: 'ElevenLabs client now maps HTTP 429 rate limit to a retryable error.' },
   };
   const auditResults = {
     'audit-pass': { verdict: 'pass', findings: [], summary: 'Pre-publish audit passed.' },

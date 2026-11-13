@@ -4410,7 +4410,7 @@ describe('Worker timeout resume and failure events', () => {
       payload: { reason: 'timeout_resume', attempt: 1 },
     });
     expect(failedEvents).toHaveLength(0);
-    expect(timeoutEvents).toHaveLength(0);
+    expect(timeoutEvents).toEqual(['test-project/t-timeout']);
 
     // 2nd run: started 1 minute ago, new commit made -> progress!
     runRepo.insert({
@@ -4455,7 +4455,7 @@ describe('Worker timeout resume and failure events', () => {
       payload: { reason: 'timeout_resume', attempt: 2 },
     });
     expect(failedEvents).toHaveLength(0);
-    expect(timeoutEvents).toHaveLength(0);
+    expect(timeoutEvents).toEqual(['test-project/t-timeout', 'test-project/t-timeout']);
 
     // 3rd run: started 1 minute ago, new commit made (attempt 3 exceeds default maxTimeoutResumes = 2)
     runRepo.insert({
@@ -4503,7 +4503,7 @@ describe('Worker timeout resume and failure events', () => {
         timeoutResumes: 2,
       },
     });
-    expect(timeoutEvents).toEqual(['test-project/t-timeout']);
+    expect(timeoutEvents).toEqual(['test-project/t-timeout', 'test-project/t-timeout', 'test-project/t-timeout']);
 
     scheduler.stop();
   });
@@ -4655,6 +4655,88 @@ describe('Worker timeout resume and failure events', () => {
       },
     });
     expect(timeoutEvents).toEqual(['test-project/t-zero-resume']);
+
+    scheduler.stop();
+  });
+
+  it('uses valid run.startedAt directly to check progress and does not count pre-run commit as progress when rt.startTime is earlier', () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    execFileSync('git', ['checkout', '-b', 'agenthub/t-timing-check'], { cwd: projectPath });
+
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
+    taskRepo.insert({
+      id: 'test-project/t-timing-check',
+      projectId: 'test-project',
+      slug: 't-timing-check',
+      title: 'Timing Check Task',
+      status: 'running',
+      branch: 'agenthub/t-timing-check',
+      worktreePath: projectPath,
+    });
+
+    const failedEvents: Array<{ taskId: string; payload: unknown }> = [];
+    const timeoutEvents: string[] = [];
+    const queuedEvents: Array<{ taskId: string; payload: unknown }> = [];
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map());
+    scheduler.getEventBus().on('task.queued', (taskId, payload) => queuedEvents.push({ taskId, payload }));
+    scheduler.getEventBus().on('task.failed', (taskId, payload) => failedEvents.push({ taskId, payload }));
+    scheduler.getEventBus().on('task.timeout', (taskId) => timeoutEvents.push(taskId));
+
+    const schedulerInternal = scheduler as unknown as {
+      killTask: (taskId: string, outcome: string) => void;
+      running: Map<string, unknown>;
+    };
+
+    // Commit made now
+    fs.writeFileSync(path.join(projectPath, 'file-timing.txt'), 'pre-run commit');
+    execFileSync('git', ['add', '.'], { cwd: projectPath });
+    execFileSync('git', ['commit', '-m', 'pre-run commit'], {
+      cwd: projectPath,
+      env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@test.com', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@test.com' },
+    });
+
+    // Run officially started in DB in the future (AFTER the commit)
+    runRepo.insert({
+      id: 'run-timing-1',
+      taskId: 'test-project/t-timing-check',
+      engine: 'agy',
+      model: 'gemini-3.8-flash-medium',
+      profileName: 'p1',
+      pid: 999995,
+      kind: 'worker',
+    });
+    db.prepare("UPDATE runs SET startedAt = datetime('now', '+10 seconds') WHERE id = 'run-timing-1'").run();
+
+    // rt.startTime in memory is 2 minutes ago (BEFORE the commit, which would cause Math.min to misclassify commit as progress)
+    schedulerInternal.running.set('test-project/t-timing-check', {
+      runId: 'run-timing-1',
+      taskId: 'test-project/t-timing-check',
+      pid: 999995,
+      engine: { id: 'agy' },
+      model: 'gemini-3.8-flash-medium',
+      profileName: 'p1',
+      startTime: Date.now() - 120_000,
+      usageBefore: null,
+      lockFile: null,
+    });
+
+    schedulerInternal.killTask('test-project/t-timing-check', 'timeout');
+
+    // Should NOT treat pre-run commit as progress, so task fails immediately and is not requeued
+    expect(taskRepo.get('test-project/t-timing-check')?.status).toBe('failed');
+    expect(queuedEvents).toHaveLength(0);
+    expect(failedEvents).toHaveLength(1);
+    expect(failedEvents[0]).toEqual({
+      taskId: 'test-project/t-timing-check',
+      payload: {
+        reason: 'timeout',
+        progress: false,
+        timeoutResumes: 0,
+      },
+    });
+    expect(timeoutEvents).toEqual(['test-project/t-timing-check']);
 
     scheduler.stop();
   });

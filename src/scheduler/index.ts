@@ -4801,7 +4801,7 @@ export class Scheduler {
     } else if (outcome === 'timeout') {
       const runRow = this.runRepo.get(rt.runId);
       const parsedRunStartedAt = runRow ? parseDbTime(runRow.startedAt) : NaN;
-      const startedAtMs = !Number.isNaN(parsedRunStartedAt) ? Math.min(parsedRunStartedAt, rt.startTime) : rt.startTime;
+      const startedAtMs = !Number.isNaN(parsedRunStartedAt) ? parsedRunStartedAt : rt.startTime;
       const progress = task ? this.hasCommitAfter(task, startedAtMs) : false;
 
       const consecutiveTimeouts = this.getConsecutiveTimeoutCount(taskId);
@@ -4853,8 +4853,8 @@ export class Scheduler {
           progress,
           timeoutResumes,
         });
-        this.eventBus.emit('task.timeout', taskId);
       }
+      this.eventBus.emit('task.timeout', taskId);
     }
     if (!this.stopped) this.triggerTick();
   }

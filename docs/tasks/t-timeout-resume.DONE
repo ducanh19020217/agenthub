@@ -1,0 +1,62 @@
+# Hoàn thành task: t-timeout-resume
+
+## Tóm tắt việc đã làm
+
+1. **Cấu hình `scheduler.maxTimeoutResumes`**:
+   - Thêm `maxTimeoutResumes` vào `SchedulerLimitsConfig` trong `src/config.ts` với giá trị mặc định là 2.
+   - Thêm xác thực và chuẩn hóa trong `loadConfig` và `updateConfigInMemory`:
+     - Chấp nhận số nguyên không âm (`>= 0`).
+     - Cho phép cấu hình 0 để tắt cơ chế resume khi timeout.
+     - Fallback về giá trị mặc định 2 nếu cấu hình không hợp lệ hoặc số âm.
+
+2. **Cơ chế timeout resume dựa trên tiến độ và số lần timeout liên tiếp**:
+   - Trong `src/scheduler/index.ts` (xử lý outcome `timeout` của worker run):
+     - Xác định mốc thời gian bắt đầu trực tiếp từ `run.startedAt` trong DB (fallback về `rt.startTime` nếu không có hoặc không hợp lệ), không dùng `Math.min` để tránh lùi mốc thời gian nhận nhầm commit trước run là tiến độ.
+     - Kiểm tra tiến độ bằng `this.hasCommitAfter(task, startedAtMs)`.
+     - Tính số lần timeout liên tiếp qua `getConsecutiveTimeoutCount(taskId)`: đếm số run worker có outcome `timeout` liên tiếp ở cuối danh sách runs của task mà không cần thêm cột DB.
+     - Nếu có tiến độ và `consecutiveTimeouts <= maxTimeoutResumes`:
+       - Đưa task về trạng thái `queued` với cờ `resume: 1` và xóa `notBefore`.
+       - Ghi chú `TIMEOUT_RESUME_NOTE` ("Lượt trước bị timeout nhưng đã có tiến độ. Kiểm tra git log/status rồi làm tiếp, không làm lại, và commit thường xuyên.") vào `task.body` và file `.agenthub/task.md` trong worktree.
+       - Phát sự kiện `task.queued` với payload `{ reason: 'timeout_resume', attempt: consecutiveTimeouts }`.
+     - Nếu không có tiến độ hoặc đã vượt quá `maxTimeoutResumes`:
+       - Chuyển task sang `failed`.
+       - Phát sự kiện `task.failed` với `{ reason: 'timeout', progress, timeoutResumes }` để đánh thức Brain (`DEFAULT_BRAIN_WAKEUP_EVENTS`).
+     - Luôn phát sự kiện `task.timeout` cho mọi outcome timeout (cả khi requeue lẫn khi fail) để bảo toàn thông báo cho Telegram và các thành phần tiêu thụ sự kiện.
+   - Giữ nguyên hành vi khi cancel, stall hoặc quota; không can thiệp reviewer timeout.
+
+3. **Cập nhật hiển thị sự kiện trong `src/services/index.ts`**:
+   - Bổ sung định dạng hiển thị thân thiện trong `formatEventSummary`:
+     - `task.queued` với `reason: 'timeout_resume'`: thông báo task được đưa vào hàng đợi để làm tiếp sau khi quá thời gian kèm số lần.
+     - `task.failed` với `reason: 'timeout'`: thông báo task thất bại do quá thời gian.
+
+4. **Tài liệu quyết định kiến trúc (`docs/DECISIONS.md`)**:
+   - Thêm `DEC-031: Tự động resume task khi worker timeout nếu có tiến độ và phát sự kiện task.failed` mô tả bối cảnh, lý do thiết kế, cơ chế resume và các mốc sự kiện.
+
+5. **Unit tests (`test/scheduler.test.ts`)**:
+   - Kiểm tra cấu hình `maxTimeoutResumes`: giá trị mặc định 2, validate số âm, nhận giá trị 0, lưu và tải từ file cấu hình.
+   - Kiểm tra timeout có commit được requeue với cờ `resume: 1`, body và task.md được bổ sung ghi chú, lần timeout thứ 3 chuyển sang `failed` và phát `task.failed`.
+   - Kiểm tra timeout không có commit chuyển sang `failed` ngay, phát cả `task.failed` lẫn `task.timeout`.
+   - Kiểm tra `maxTimeoutResumes = 0` giữ hành vi cũ (fail ngay) nhưng vẫn phát `task.failed`.
+   - Kiểm tra mốc `run.startedAt` dùng trực tiếp, không tính commit xảy ra trước run là tiến độ khi `rt.startTime` sớm hơn.
+   - Xác thực sự kiện `task.timeout` được phát trong tất cả các kịch bản timeout.
+
+## Kết quả kiểm tra
+
+- **Lint**: `npm run lint` (`eslint src/ test/`) -> PASS (0 errors, 115 warnings pre-existing trong test).
+- **Typecheck**: `npm run typecheck` (`tsc --noEmit`) -> PASS.
+- **Build**: `npm run build` (`tsc && cp src/protocol.md dist/protocol.md`) -> PASS.
+- **Test Backend**:
+  - `test/scheduler.test.ts`: 150/150 passed.
+  - Toàn bộ backend test suite (`npm test`): 144 test files passed, 1813/1813 passed.
+- **Test Web**:
+  - `npm run test:web`: 74 test files passed, 675/675 passed.
+
+## Việc còn thiếu
+- Không có. Tất cả các yêu cầu và phản hồi review/audit đã được xử lý đầy đủ và kiểm tra kỹ lưỡng.
+
+## Danh sách commit
+- `ad972814`: feat(config): add maxTimeoutResumes configuration and validation
+- `dcf67ad7`: feat(scheduler): resume worker on timeout with progress and emit task.failed
+- `cb767641`: docs(decisions): add DEC-031 for timeout resume and brain wakeup events
+- `f2f21a40`: fix(scheduler): emit task.timeout on all timeouts and use direct run.startedAt for progress check
+- `b9d60ce9`: docs(decisions): update DEC-031 with timeout event and progress timestamp refinements

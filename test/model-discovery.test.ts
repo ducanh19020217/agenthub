@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import Database from 'better-sqlite3';
 import {
   parseAgyModelsOutput,
   parseCodexModelsData,
@@ -12,7 +13,7 @@ import {
   ModelDiscoveryService,
   DEFAULT_AGY_DISCOVERED_MODELS,
 } from '../src/models/index.js';
-import { openDatabase, ProfileModelRepo, ProfileRepo, ProfileRow } from '../src/db/index.js';
+import { openDatabase, ProfileModelRepo, ProfileRepo, ProfileRow, MIGRATIONS } from '../src/db/index.js';
 import { isKnownModel } from '../src/quota/index.js';
 import { AppService } from '../src/services/index.js';
 import { Scheduler } from '../src/scheduler/index.js';
@@ -391,6 +392,36 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     const saved = profileModelRepo.getForProfile('multi-engine-prof');
     expect(saved).toHaveLength(2);
     expect(saved.map((m) => m.engine).sort()).toEqual(['agy', 'claude']);
+  });
+
+  it('migration 77 upgrades database from schema 76 and preserves existing data', () => {
+    const legacyDbPath = path.join(tmpDir, 'legacy-schema-76.db');
+    const rawDb = new Database(legacyDbPath);
+    rawDb.pragma('journal_mode = WAL');
+    rawDb.pragma('foreign_keys = ON');
+    // Run migrations 0 to 76 (77 migrations total, indexes 0..76)
+    for (let i = 0; i < 77; i++) {
+      rawDb.exec(MIGRATIONS[i]);
+    }
+    rawDb.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '76')").run();
+    rawDb.prepare("INSERT INTO profiles (name, engine, kind, home, email, enabled, accountType, createdAt) VALUES ('prof-m76', 'agy', 'isolated', '/tmp/p', 'm76@example.com', 1, 'personal', '2026-01-01')").run();
+    rawDb.prepare("INSERT INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt) VALUES ('prof-m76', 'shared-model', 'Model 1', 'agy', 1, 1000)").run();
+    rawDb.close();
+
+    // Now open via openDatabase (which runs migration 77, bringing version to 78)
+    const upgradedDb = openDatabase(legacyDbPath);
+    const repo = new ProfileModelRepo(upgradedDb);
+    // Should now allow adding same modelId under claude engine
+    expect(() => {
+      repo.setForProfile('prof-m76', [
+        { modelId: 'shared-model', modelName: 'Model 1', engine: 'agy', verified: true },
+        { modelId: 'shared-model', modelName: 'Model 1', engine: 'claude', verified: true },
+      ]);
+    }).not.toThrow();
+
+    const rows = repo.getForProfile('prof-m76');
+    expect(rows).toHaveLength(2);
+    upgradedDb.close();
   });
 
   it('falls back to DB cache if discovery command fails', async () => {

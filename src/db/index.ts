@@ -1101,9 +1101,28 @@ export const MIGRATIONS: string[] = [
     engine TEXT NOT NULL,
     verified INTEGER NOT NULL DEFAULT 1,
     fetchedAt INTEGER NOT NULL,
+    PRIMARY KEY (profileName, modelId),
+    FOREIGN KEY (profileName) REFERENCES profiles(name) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_profile_models_engine ON profile_models(engine);
+  CREATE INDEX IF NOT EXISTS idx_profile_models_profile ON profile_models(profileName);
+  `,
+  // Migration 77: expand profile_models primary key to (profileName, engine, modelId)
+  `
+  CREATE TABLE IF NOT EXISTS profile_models_new (
+    profileName TEXT NOT NULL,
+    modelId TEXT NOT NULL,
+    modelName TEXT,
+    engine TEXT NOT NULL,
+    verified INTEGER NOT NULL DEFAULT 1,
+    fetchedAt INTEGER NOT NULL,
     PRIMARY KEY (profileName, engine, modelId),
     FOREIGN KEY (profileName) REFERENCES profiles(name) ON DELETE CASCADE
   );
+  INSERT OR IGNORE INTO profile_models_new (profileName, modelId, modelName, engine, verified, fetchedAt)
+    SELECT profileName, modelId, modelName, engine, verified, fetchedAt FROM profile_models;
+  DROP TABLE profile_models;
+  ALTER TABLE profile_models_new RENAME TO profile_models;
   CREATE INDEX IF NOT EXISTS idx_profile_models_engine ON profile_models(engine);
   CREATE INDEX IF NOT EXISTS idx_profile_models_profile ON profile_models(profileName);
   `,

@@ -111,6 +111,7 @@ export async function createServer(
       return reply.status(error.statusCode).send({
         error: error.error,
         message: error.message,
+        ...(error.details || {}),
       });
     }
     if (error.statusCode) {
@@ -748,6 +749,13 @@ export async function createServer(
     const body = (req.body as { skipAudit?: boolean } | undefined) || {};
     const res = service.startPublishTask(id, { manual: true, skipAudit: Boolean(body.skipAudit) });
     return reply.status(202).send(res);
+  });
+
+  fastify.post('/api/tasks/:id/merge/retry', async (req: FastifyRequest, reply: FastifyReply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as { assignWorker?: boolean };
+    const res = await service.retryTaskMerge(id, body);
+    return reply.status(200).send(res);
   });
 
   fastify.delete('/api/tasks/:id/worktree', async (req: FastifyRequest) => {

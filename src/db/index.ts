@@ -1092,6 +1092,16 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN statusChangedAtEstimated INTEGER NOT NULL DEFAULT 0;
   CREATE INDEX IF NOT EXISTS idx_tasks_status_changed ON tasks(status, statusChangedAt);
   `,
+  // Migration 76: health issue cooldowns table
+  `
+  CREATE TABLE IF NOT EXISTS health_issue_cooldowns (
+    taskId TEXT NOT NULL,
+    rule TEXT NOT NULL,
+    lastEmittedAt TEXT NOT NULL,
+    taskStatus TEXT NOT NULL,
+    PRIMARY KEY (taskId, rule)
+  );
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -3952,4 +3962,45 @@ export class TimesheetDayOverrideRepo {
     return this.get(sourceId, date)!;
   }
 }
+
+export interface HealthIssueCooldownRow {
+  taskId: string;
+  rule: string;
+  lastEmittedAt: string;
+  taskStatus: string;
+}
+
+export class HealthIssueCooldownRepo {
+  constructor(private db: Database.Database) {}
+
+  get(taskId: string, rule: string): HealthIssueCooldownRow | undefined {
+    return this.db
+      .prepare('SELECT taskId, rule, lastEmittedAt, taskStatus FROM health_issue_cooldowns WHERE taskId = ? AND rule = ?')
+      .get(taskId, rule) as HealthIssueCooldownRow | undefined;
+  }
+
+  set(taskId: string, rule: string, lastEmittedAt: string, taskStatus: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO health_issue_cooldowns (taskId, rule, lastEmittedAt, taskStatus) VALUES (?, ?, ?, ?)
+         ON CONFLICT(taskId, rule) DO UPDATE SET lastEmittedAt = excluded.lastEmittedAt, taskStatus = excluded.taskStatus`,
+      )
+      .run(taskId, rule, lastEmittedAt, taskStatus);
+  }
+
+  delete(taskId: string, rule?: string): void {
+    if (rule) {
+      this.db.prepare('DELETE FROM health_issue_cooldowns WHERE taskId = ? AND rule = ?').run(taskId, rule);
+    } else {
+      this.db.prepare('DELETE FROM health_issue_cooldowns WHERE taskId = ?').run(taskId);
+    }
+  }
+
+  list(): HealthIssueCooldownRow[] {
+    return this.db
+      .prepare('SELECT taskId, rule, lastEmittedAt, taskStatus FROM health_issue_cooldowns')
+      .all() as HealthIssueCooldownRow[];
+  }
+}
+
 

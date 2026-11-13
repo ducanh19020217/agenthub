@@ -10,10 +10,10 @@
 
 3. **Dịch vụ Health Sweep (`src/health/sweep.ts`)**:
    - Triển khai 7 luật phát hiện định kỳ:
-     - `checking_orphan`: task `checking` quá 20 phút không có check active/queued và không có run đang chạy. Tự sửa an toàn bằng cách chạy lại check.
+     - `checking_orphan`: task `checking` quá 20 phút không có check active/queued và không có run đang chạy. Tự sửa an toàn bằng cách kích hoạt lại check (`runChecksForTask`), bắt và log lỗi async qua `.catch()` tránh unhandled promise rejection.
      - `review_orphan`: task `review` quá 30 phút, kiểm tra đầy đủ autocheck results và `worktreePath`. Với task đã `reviewerEscalated`, kiểm tra chính xác khả năng dispatch arbiter (`canStartEscalationArbiter`), không rơi xuống reviewer thường.
-     - `queued_starved`: task `queued` quá 60 phút, kiểm tra `notBefore` chính xác theo epoch seconds, không bị chặn bởi dependency, quota waitReason, hay pause.
-     - `running_no_progress`: worker chạy quá 90 phút mà không có commit hoặc đổi file trong worktree. Đánh giá trong cửa sổ tiến độ `now - runningNoProgressMin * 60_000`, đối chiếu `cachedWorktreeMtime`, mtime `.git/index` (hỗ trợ git worktree pointer file), `lastCommitAt`, và dữ liệu `noCommitMinutes`. Không dùng `lastCommitCheckAt` làm bằng chứng tiến độ; fallback lấy thời điểm commit thực tế từ git log worktree hoặc `rt.startTime`.
+     - `queued_starved`: task `queued` quá 60 phút, kiểm tra `notBefore` chính xác theo epoch seconds, tôn trọng trạng thái pause của scheduler (`scheduler.isPaused()`), không bị chặn bởi dependency, quota waitReason, hay pause focus.
+     - `running_no_progress`: worker chạy quá 90 phút mà không có commit hoặc đổi file trong worktree. Bỏ qua các runtime đang pause (`rt.paused`), và tính thời gian tiến độ từ thời điểm resume (`rt.resumedAt`). Đánh giá trong cửa sổ tiến độ `now - runningNoProgressMin * 60_000`, đối chiếu `cachedWorktreeMtime`, mtime `.git/index` (hỗ trợ git worktree pointer file), `lastCommitAt`, và dữ liệu `noCommitMinutes`. Không dùng `lastCommitCheckAt` làm bằng chứng tiến độ; fallback lấy thời điểm commit thực tế từ git log worktree hoặc `effectiveStartTime`.
      - `churn`: worker runs >= 8 hoặc `review.escalated` >= 2.
      - `failover_churn`: task bị `task.failover`/`quota_retry` >= 4 lần trong 2 giờ.
      - `stale_run`: run DB có `outcome IS NULL` nhưng PID đã chết và không có trong memory. Tự sửa an toàn bằng cách đánh dấu crashed và requeue với `resume = 1`.
@@ -36,16 +36,19 @@
 - `npm run lint`: 0 lỗi (`eslint src/ test/` thành công, 115 warnings có sẵn từ baseline).
 - `npm run build`: 0 lỗi (`tsc && cp src/protocol.md dist/protocol.md` thành công).
 - Test suites:
-  - `test/health-sweep.test.ts`: 38/38 tests passed.
+  - `test/health-sweep.test.ts`: 42/42 tests passed.
   - `test/cli.test.ts`: 22/22 tests passed (bao gồm 6 tests cho `cmdHealthSweep`).
   - `test/mcp.test.ts`: 30/30 tests passed (bao gồm 5 tests cho `hub_health_sweep`).
-  - Tổng số test kiểm thử trực tiếp cho tính năng: 90/90 tests passed.
+  - Toàn bộ test suite: 140/140 files passed, 1824/1824 tests passed.
 
 ## Việc còn thiếu
-- Không có. Toàn bộ yêu cầu và các phản hồi review (notBefore epoch seconds, điều kiện autochecks/worktreePath cho review_orphan, escalation arbiter eligibility, CLI/MCP test coverage, running_no_progress time-window, và fallback commit thực tế thay vì lastCommitCheckAt) đã được giải quyết triệt để.
+- Không có. Toàn bộ yêu cầu và các phản hồi review (scheduler pause trong queued_starved, runtime pause/resumedAt trong running_no_progress, self-repair rejection handling trong checking_orphan, notBefore epoch seconds, điều kiện autochecks/worktreePath cho review_orphan, escalation arbiter eligibility, CLI/MCP test coverage, running_no_progress time-window, và fallback commit thực tế) đã được giải quyết triệt để.
 
 ## Danh sách commit
+- `c5f7660b fix(health): respect scheduler and task pause states and catch self-repair errors`
+- `4be0de68 docs(tasks): update completion report with running_no_progress commit fallback details`
 - `03066c35 fix(health): use actual commit time or start time fallback in running_no_progress`
+- `57aa5f98 docs(tasks): add completion report for t-health-sweep-brain`
 - `e6a2f390 fix(health): evaluate worktree and index activity within running progress window`
 - `62e33918 test(cli,mcp): add test coverage for agenthub health CLI and hub_health_sweep MCP tool`
 - `ef4a4b02 test(health): add test coverage for escalated review orphan eligibility and arbiter quota/backoff`

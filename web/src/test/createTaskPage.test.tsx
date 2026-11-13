@@ -333,4 +333,27 @@ describe('CreateTaskPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Project chưa có worktree tích hợp cho nhánh main.');
     expect(screen.getByRole('button', { name: /Mở task vừa tạo/i })).toBeInTheDocument();
   });
+
+  it('does not propose unverified configured models in datalist when discovery has no available models', async () => {
+    vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+      suggestions: [],
+      configured: ['deprecated-easy-model'],
+      models: [
+        { id: 'deprecated-easy-model', engine: 'agy', profiles: [], verified: false, available: false, warning: 'Không có tài khoản' },
+      ],
+    });
+    vi.spyOn(client, 'getConfig').mockResolvedValue({
+      modelChainHard: ['deprecated-hard-model'],
+      modelChainEasy: ['deprecated-easy-model'],
+    } as any);
+
+    renderPage();
+    expect(await screen.findByText('Tạo task mới')).toBeInTheDocument();
+
+    const datalist = document.getElementById('create-task-model-suggestions');
+    expect(datalist).toBeInTheDocument();
+    expect(datalist?.querySelectorAll('option')).toHaveLength(0);
+
+    expect(await screen.findByTestId('model-unavailable-warning')).toBeInTheDocument();
+  });
 });

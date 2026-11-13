@@ -182,6 +182,45 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
       const checkingIssues = result.issues.filter((i) => i.rule === 'checking_orphan');
       expect(checkingIssues).toHaveLength(0);
     });
+
+    it('bắt và log lỗi an toàn khi scheduler.runChecksForTask bị reject trong self-repair', async () => {
+      const now = Date.now();
+      const past25m = new Date(now - 25 * 60 * 1000).toISOString();
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-checking-reject',
+        projectId: 'p1',
+        title: 'Task checking reject',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-checking-reject', {
+        status: 'checking',
+        statusChangedAt: past25m,
+      });
+
+      ctx.runRepo.insert({
+        id: 'run-w-reject',
+        taskId: 'p1/t-checking-reject',
+        engine: 'agy',
+        model: 'gemini-3.8-flash-medium',
+        profileName: 'prof1',
+        pid: 1235,
+        kind: 'worker',
+      });
+      ctx.runRepo.finish('run-w-reject', 'done');
+
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(ctx.scheduler, 'runChecksForTask').mockRejectedValue(new Error('re-check runner crashed'));
+
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'checking_orphan' && i.taskId === 'p1/t-checking-reject')).toBe(true);
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[health] self-repair check failed for p1/t-checking-reject:'),
+        expect.any(Error),
+      );
+    });
   });
 
   // 2. review_orphan
@@ -598,6 +637,30 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
 
       const result = await sweepService.runSweep(now);
       expect(result.issues.some((i) => i.rule === 'queued_starved' && i.taskId === 'p1/t-queued-noslot')).toBe(false);
+    });
+
+    it('không báo nhầm khi scheduler đang bị pause (scheduler.isPaused() = true)', async () => {
+      const now = Date.now();
+      const past65m = new Date(now - 65 * 60 * 1000).toISOString();
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-queued-paused',
+        projectId: 'p1',
+        title: 'Task queued when paused',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-queued-paused', {
+        status: 'queued',
+        statusChangedAt: past65m,
+      });
+
+      ctx.scheduler.pause();
+      try {
+        const result = await sweepService.runSweep(now);
+        expect(result.issues.some((i) => i.rule === 'queued_starved' && i.taskId === 'p1/t-queued-paused')).toBe(false);
+      } finally {
+        ctx.scheduler.resume();
+      }
     });
   });
 
@@ -1036,6 +1099,100 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
 
       // Restore threshold
       ctx.config.healthSweep.rules.runningNoProgressMin = 90;
+    });
+
+    it('không báo nhầm khi worker runtime đang bị pause (rt.paused = true)', async () => {
+      const start95m = Date.now();
+      const now = start95m + 95 * 60 * 1000;
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-running-paused',
+        projectId: 'p1',
+        title: 'Task running paused',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-running-paused', {
+        status: 'running',
+        worktreePath: projectPath,
+      });
+
+      vi.spyOn(ctx.scheduler, 'getRunningTask').mockReturnValue({
+        runId: 'r-paused',
+        taskId: 'p1/t-running-paused',
+        pid: 99991,
+        pidStart: null,
+        profileName: 'prof1',
+        model: 'gemini',
+        engine: fakeEngine,
+        startTime: start95m,
+        timeoutMs: 3600000,
+        timeoutAt: now + 3600000,
+        retryCount: 0,
+        projectId: 'p1',
+        lastOutputAt: start95m,
+        lastActivityAt: start95m,
+        activitySource: 'log',
+        activityCheckedAt: now,
+        cachedConversationMtime: 0,
+        cachedWorktreeMtime: 0,
+        usageBefore: null,
+        paused: true,
+        pauseReason: 'manual',
+        pausedAt: now - 30 * 60 * 1000,
+        noCommitMinutes: 95,
+      });
+
+      const result = await sweepService.runSweep(now);
+      expect(
+        result.issues.some((i) => i.rule === 'running_no_progress' && i.taskId === 'p1/t-running-paused'),
+      ).toBe(false);
+    });
+
+    it('không báo nhầm khi worker vừa được resume trong cửa sổ runningNoProgressMin (rt.resumedAt)', async () => {
+      const start120m = Date.now();
+      const resume10m = start120m + 110 * 60 * 1000;
+      const now = start120m + 120 * 60 * 1000;
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-running-resumed',
+        projectId: 'p1',
+        title: 'Task running resumed recently',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-running-resumed', {
+        status: 'running',
+        worktreePath: projectPath,
+      });
+
+      vi.spyOn(ctx.scheduler, 'getRunningTask').mockReturnValue({
+        runId: 'r-resumed',
+        taskId: 'p1/t-running-resumed',
+        pid: 99990,
+        pidStart: null,
+        profileName: 'prof1',
+        model: 'gemini',
+        engine: fakeEngine,
+        startTime: start120m,
+        timeoutMs: 3600000,
+        timeoutAt: now + 3600000,
+        retryCount: 0,
+        projectId: 'p1',
+        lastOutputAt: resume10m,
+        lastActivityAt: resume10m,
+        activitySource: 'log',
+        activityCheckedAt: now,
+        cachedConversationMtime: 0,
+        cachedWorktreeMtime: 0,
+        usageBefore: null,
+        paused: false,
+        resumedAt: resume10m,
+        noCommitMinutes: 120,
+      });
+
+      const result = await sweepService.runSweep(now);
+      expect(
+        result.issues.some((i) => i.rule === 'running_no_progress' && i.taskId === 'p1/t-running-resumed'),
+      ).toBe(false);
     });
   });
 

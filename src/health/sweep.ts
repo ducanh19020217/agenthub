@@ -264,11 +264,11 @@ export class HealthSweepService {
               .filter((r) => r.kind === 'worker' && r.outcome === 'done')
               .at(-1);
             if (lastWorker) {
-              try {
-                void scheduler.runChecksForTask(task.id, lastWorker.id, true);
-              } catch {
-                // best effort self-repair
-              }
+              void scheduler
+                .runChecksForTask(task.id, lastWorker.id, true)
+                .catch((error) => {
+                  console.error(`[health] self-repair check failed for ${task.id}:`, error);
+                });
             }
 
             emitIssue(
@@ -301,56 +301,61 @@ export class HealthSweepService {
       }
 
       // 3. queued_starved
-      // Task queued > queuedStarvedMin, no pending deps, no waitReason, no future notBefore, project not paused, slot capacity available
-      const queuedTasks = taskRepo.getByStatus('queued');
-      for (const task of queuedTasks) {
-        const statusTime = task.statusChangedAt ? parseDbTime(task.statusChangedAt) : parseDbTime(task.updatedAt);
-        const sinceMinutes = Math.floor(Math.max(0, now - statusTime) / 60_000);
-        if (sinceMinutes < rules.queuedStarvedMin) continue;
-        if (task.waitReason) continue;
-        if (task.notBefore != null && task.notBefore > Math.floor(now / 1000)) continue;
+      // Task queued > queuedStarvedMin, scheduler not paused, no pending deps, no waitReason, no future notBefore, project not paused, slot capacity available
+      if (!scheduler.isPaused?.()) {
+        const queuedTasks = taskRepo.getByStatus('queued');
+        for (const task of queuedTasks) {
+          if (scheduler.isPaused?.()) break;
+          const statusTime = task.statusChangedAt ? parseDbTime(task.statusChangedAt) : parseDbTime(task.updatedAt);
+          const sinceMinutes = Math.floor(Math.max(0, now - statusTime) / 60_000);
+          if (sinceMinutes < rules.queuedStarvedMin) continue;
+          if (task.waitReason) continue;
+          if (task.notBefore != null && task.notBefore > Math.floor(now / 1000)) continue;
 
-        let hasUnfinishedDep = false;
-        if (task.dependsOn) {
-          try {
-            const deps = JSON.parse(task.dependsOn) as string[];
-            for (const depId of deps) {
-              const dep = taskRepo.get(depId);
-              if (!dep || (dep.status !== 'done' && dep.status !== 'pushed')) {
-                hasUnfinishedDep = true;
-                break;
+          let hasUnfinishedDep = false;
+          if (task.dependsOn) {
+            try {
+              const deps = JSON.parse(task.dependsOn) as string[];
+              for (const depId of deps) {
+                const dep = taskRepo.get(depId);
+                if (!dep || (dep.status !== 'done' && dep.status !== 'pushed')) {
+                  hasUnfinishedDep = true;
+                  break;
+                }
               }
+            } catch {
+              // ignore JSON error
             }
-          } catch {
-            // ignore JSON error
           }
+          if (hasUnfinishedDep) continue;
+
+          const project = projectRepo.get(task.projectId);
+          if (!project || project.archivedAt) continue;
+
+          const focus = scheduler.getFocus();
+          if (focus.projectId && focus.projectId !== project.id && focus.pauseRunning) continue;
+
+          if (!scheduler.hasParallelCapacity(project)) continue;
+
+          emitIssue(
+            'queued_starved',
+            task,
+            sinceMinutes,
+            'Task queued lâu dù có slot trống và không có dependency cản trở; gợi ý kiểm tra quota hoặc ép khởi chạy.',
+          );
         }
-        if (hasUnfinishedDep) continue;
-
-        const project = projectRepo.get(task.projectId);
-        if (!project || project.archivedAt) continue;
-
-        const focus = scheduler.getFocus();
-        if (focus.projectId && focus.projectId !== project.id && focus.pauseRunning) continue;
-
-        if (!scheduler.hasParallelCapacity(project)) continue;
-
-        emitIssue(
-          'queued_starved',
-          task,
-          sinceMinutes,
-          'Task queued lâu dù có slot trống và không có dependency cản trở; gợi ý kiểm tra quota hoặc ép khởi chạy.',
-        );
       }
 
       // 4. running_no_progress
-      // Worker running > runningNoProgressMin, no new commits and no changed files in worktree
+      // Worker running > runningNoProgressMin, not paused, no new commits and no changed files in worktree
       const runningTasks = taskRepo.getByStatus('running');
       for (const task of runningTasks) {
         const rt = scheduler.getRunningTask(task.id);
         if (!rt) continue;
+        if (rt.paused) continue;
 
-        const elapsedMs = Math.max(0, now - rt.startTime);
+        const effectiveStartTime = rt.resumedAt ?? rt.startTime;
+        const elapsedMs = Math.max(0, now - effectiveStartTime);
         const runningMinutes = Math.floor(elapsedMs / 60_000);
         if (runningMinutes < rules.runningNoProgressMin) continue;
 
@@ -358,7 +363,7 @@ export class HealthSweepService {
         const progressThreshold = now - progressWindowMs;
 
         // Check recent commits using watchdog data or actual commit time from git
-        let latestCommitTime = rt.startTime;
+        let latestCommitTime = effectiveStartTime;
         if (typeof rt.lastCommitAt === 'number') {
           latestCommitTime = rt.lastCommitAt;
         } else if (typeof rt.noCommitMinutes === 'number') {
@@ -388,12 +393,12 @@ export class HealthSweepService {
             }
             if (stdout) {
               const ts = parseInt(stdout, 10) * 1000;
-              if (!isNaN(ts) && ts >= rt.startTime - 5000) {
+              if (!isNaN(ts) && ts >= effectiveStartTime - 5000) {
                 latestCommitTime = ts;
               }
             }
           } catch {
-            // fallback to rt.startTime
+            // fallback to effectiveStartTime
           }
         }
 

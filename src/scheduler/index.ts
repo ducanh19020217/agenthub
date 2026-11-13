@@ -210,7 +210,7 @@ export class EventBus extends EventEmitter {
   }
 }
 
-interface RunningTask {
+export interface RunningTask {
   runId: string;
   taskId: string;
   pid: number;
@@ -252,6 +252,7 @@ interface RunningTask {
   paused?: boolean;
   pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
   pausedAt?: number | null;
+  resumedAt?: number | null;
   pauseReminded?: boolean;
   referenceSnapshots?: ReferenceSnapshot[];
   adopted?: boolean;
@@ -932,6 +933,7 @@ export class Scheduler {
     rt.paused = false;
     rt.pauseReason = null;
     rt.pausedAt = null;
+    rt.resumedAt = Date.now();
     rt.pauseReminded = false;
     rt.lastActivityAt = Date.now();
     rt.lastOutputAt = Date.now();

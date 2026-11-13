@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { execFileSync, spawn } from 'node:child_process';
-import { loadConfig } from '../src/config.js';
+import { loadConfig, DEFAULT_SCHEDULER_LIMITS, saveConfig } from '../src/config.js';
 import { openDatabase, ProjectRepo, DepartmentRepo, ProfileRepo, QuotaMarkRepo, TaskRepo, RunRepo, EventRepo, ReviewRepo } from '../src/db/index.js';
 import { Scheduler } from '../src/scheduler/index.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
@@ -3271,6 +3271,244 @@ describe('Checking queue lifecycle', () => {
     await scheduler.runChecksForTask('test-project/strict', 'completed-strict');
     expect(run).not.toHaveBeenCalled();
     scheduler.stop();
+  });
+
+  it('worker finishes during drain → drain timeout → check runs and task leaves checking', async () => {
+    addCheckTask('drain-timeout');
+    const scheduler = makeCheckingScheduler();
+    const run = vi.fn(async () => ({ passed: true, failed: [], results: [] }));
+    scheduler.checkRunner = { run };
+
+    vi.useFakeTimers();
+    try {
+      // Model active work so drain doesn't immediately complete before worker finishes
+      (scheduler as unknown as { running: Map<string, unknown> }).running.set('test-project/active-run', { taskId: 'test-project/active-run', startTime: Date.now() });
+
+      scheduler.beginRestartDrain(1, 'timeout drain test');
+      // Worker completes during drain
+      await scheduler.runChecksForTask('test-project/drain-timeout', 'run-drain-timeout');
+
+      // Since drain is active, checks must not run yet
+      expect(run).not.toHaveBeenCalled();
+      expect(taskRepo.get('test-project/drain-timeout')?.status).toBe('checking');
+
+      // Fast forward past drain timeout (1 minute)
+      vi.advanceTimersByTime(60_001);
+      vi.runOnlyPendingTimers();
+
+      expect(scheduler.isDraining()).toBe(false);
+
+      vi.useRealTimers();
+      // Wait for recovered checks to complete
+      await vi.waitFor(() => expect(taskRepo.get('test-project/drain-timeout')?.status).not.toBe('checking'));
+
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(taskRepo.get('test-project/drain-timeout')?.status).toBe('review');
+      expect(eventRepo.getRecent(10).some((e) => e.type === 'hub.restart_timeout')).toBe(true);
+      (scheduler as unknown as { running: Map<string, unknown> }).running.clear();
+    } finally {
+      vi.useRealTimers();
+      scheduler.stop();
+    }
+  });
+
+  it('worker finishes during drain → cancelRestartDrain → check runs and task leaves checking', async () => {
+    addCheckTask('drain-cancel');
+    const scheduler = makeCheckingScheduler();
+    const run = vi.fn(async () => ({ passed: true, failed: [], results: [] }));
+    scheduler.checkRunner = { run };
+
+    (scheduler as unknown as { running: Map<string, unknown> }).running.set('test-project/active-run', { taskId: 'test-project/active-run', startTime: Date.now() });
+
+    scheduler.beginRestartDrain(120, 'cancel drain test');
+    // Worker completes during drain
+    await scheduler.runChecksForTask('test-project/drain-cancel', 'run-drain-cancel');
+
+    // Since drain is active, checks must not run yet
+    expect(run).not.toHaveBeenCalled();
+    expect(taskRepo.get('test-project/drain-cancel')?.status).toBe('checking');
+
+    // Cancel drain
+    scheduler.cancelRestartDrain();
+    expect(scheduler.isDraining()).toBe(false);
+
+    // Wait for recovered checks to complete
+    await vi.waitFor(() => expect(taskRepo.get('test-project/drain-cancel')?.status).not.toBe('checking'));
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(taskRepo.get('test-project/drain-cancel')?.status).toBe('review');
+    expect(eventRepo.getRecent(10).some((e) => e.type === 'hub.restart_cancelled')).toBe(true);
+    (scheduler as unknown as { running: Map<string, unknown> }).running.clear();
+    scheduler.stop();
+  });
+
+  it('safety net catches orphaned checking task and skips fresh checking task or when draining', async () => {
+    addCheckTask('orphan-stuck');
+
+    // Set orphan-stuck to 35 minutes ago
+    const thirtyFiveMinAgo = new Date(Date.now() - 35 * 60_000).toISOString();
+    taskRepo.update('test-project/orphan-stuck', {
+      status: 'checking',
+      statusChangedAt: thirtyFiveMinAgo,
+    });
+
+    const scheduler = makeCheckingScheduler();
+    const run = vi.fn(async () => ({ passed: true, failed: [], results: [] }));
+    scheduler.checkRunner = { run };
+
+    // When draining, safety net must NOT run
+    scheduler.beginRestartDrain(120, 'drain guard');
+    scheduler.recoverStuckCheckingTasks();
+    expect(run).not.toHaveBeenCalled();
+    expect(taskRepo.get('test-project/orphan-stuck')?.status).toBe('checking');
+
+    // Cancel drain
+    scheduler.cancelRestartDrain();
+    // Wait for cancel drain recovery to finish
+    await vi.waitFor(() => expect(taskRepo.get('test-project/orphan-stuck')?.status).toBe('review'));
+    run.mockClear();
+
+    // Now test a newly created orphan alongside a fresh checking task (created just now)
+    addCheckTask('orphan-tick');
+    taskRepo.update('test-project/orphan-tick', {
+      status: 'checking',
+      statusChangedAt: thirtyFiveMinAgo,
+    });
+    addCheckTask('fresh-checking');
+
+    // Run scheduler tick
+    await scheduler.tick();
+
+    await vi.waitFor(() => expect(taskRepo.get('test-project/orphan-tick')?.status).not.toBe('checking'));
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(taskRepo.get('test-project/orphan-tick')?.status).toBe('review');
+    // fresh-checking was not in checking for 30 minutes, so safety net ignored it
+    expect(taskRepo.get('test-project/fresh-checking')?.status).toBe('checking');
+    expect(eventRepo.getRecent(10).some((e) => e.type === 'task.checking_recovered' && e.taskId === 'test-project/orphan-tick')).toBe(true);
+    scheduler.stop();
+  });
+
+  it('does not run duplicate check when check is already active', async () => {
+    addCheckTask('dup-test');
+    const thirtyFiveMinAgo = new Date(Date.now() - 35 * 60_000).toISOString();
+    taskRepo.update('test-project/dup-test', {
+      status: 'checking',
+      statusChangedAt: thirtyFiveMinAgo,
+    });
+
+    const scheduler = makeCheckingScheduler();
+    let releaseCheck!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseCheck = resolve; });
+    let runCount = 0;
+    scheduler.checkRunner = {
+      run: async () => {
+        runCount++;
+        await gate;
+        return { passed: true, failed: [], results: [] };
+      },
+    };
+
+    // Start first check (held by gate)
+    const checkPromise = scheduler.runChecksForTask('test-project/dup-test', 'run-dup-test');
+    await vi.waitFor(() => expect(runCount).toBe(1));
+
+    // While check is active, attempt to run duplicate via tick / recoverStuckCheckingTasks / recoverCheckingTasks
+    await scheduler.tick();
+    scheduler.recoverStuckCheckingTasks();
+    await scheduler.recoverCheckingTasks();
+    const duplicatePromise = scheduler.runChecksForTask('test-project/dup-test', 'run-dup-test');
+
+    // Must still have only 1 run call
+    expect(runCount).toBe(1);
+
+    // Release gate and finish check
+    releaseCheck();
+    await checkPromise;
+    await duplicatePromise;
+
+    expect(taskRepo.get('test-project/dup-test')?.status).toBe('review');
+    expect(runCount).toBe(1);
+    scheduler.stop();
+  });
+
+  it('safety net respects custom maxCheckingMin configuration', async () => {
+    addCheckTask('custom-threshold-stuck');
+    const fifteenMinAgo = new Date(Date.now() - 15 * 60_000).toISOString();
+    taskRepo.update('test-project/custom-threshold-stuck', {
+      status: 'checking',
+      statusChangedAt: fifteenMinAgo,
+    });
+
+    addCheckTask('custom-threshold-fresh');
+    const fiveMinAgo = new Date(Date.now() - 5 * 60_000).toISOString();
+    taskRepo.update('test-project/custom-threshold-fresh', {
+      status: 'checking',
+      statusChangedAt: fiveMinAgo,
+    });
+
+    const scheduler = makeCheckingScheduler();
+    scheduler.config.scheduler.maxCheckingMin = 10;
+    const run = vi.fn(async () => ({ passed: true, failed: [], results: [] }));
+    scheduler.checkRunner = { run };
+
+    scheduler.recoverStuckCheckingTasks();
+
+    await vi.waitFor(() => expect(taskRepo.get('test-project/custom-threshold-stuck')?.status).not.toBe('checking'));
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(taskRepo.get('test-project/custom-threshold-stuck')?.status).toBe('review');
+    expect(taskRepo.get('test-project/custom-threshold-fresh')?.status).toBe('checking');
+
+    const recoveryEvent = eventRepo.getRecent(10).find((e) => e.type === 'task.checking_recovered' && e.taskId === 'test-project/custom-threshold-stuck');
+    expect(recoveryEvent).toBeDefined();
+    const payload = JSON.parse(recoveryEvent?.payload as string);
+    expect(payload.maxCheckingMin).toBe(10);
+    expect(payload.reason).toBe('stuck_checking');
+
+    scheduler.stop();
+  });
+});
+
+describe('Scheduler limits configuration', () => {
+  it('defaults maxCheckingMin to 30 when omitted or invalid', () => {
+    expect(DEFAULT_SCHEDULER_LIMITS.maxCheckingMin).toBe(30);
+
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-cfg-default-'));
+    try {
+      const cfg = loadConfig(testDir);
+      expect(cfg.scheduler.maxCheckingMin).toBe(30);
+      expect(cfg.schedulerLimits.maxCheckingMin).toBe(30);
+
+      fs.writeFileSync(path.join(testDir, 'config.json'), JSON.stringify({
+        scheduler: { maxCheckingMin: -5 },
+      }));
+      const invalidCfg = loadConfig(testDir);
+      expect(invalidCfg.scheduler.maxCheckingMin).toBe(30);
+      expect(invalidCfg.schedulerLimits.maxCheckingMin).toBe(30);
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('loads and persists custom maxCheckingMin in scheduler config', () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-cfg-custom-'));
+    try {
+      fs.writeFileSync(path.join(testDir, 'config.json'), JSON.stringify({
+        scheduler: { maxCheckingMin: 12, maxRunsPerTask: 10 },
+      }));
+      const loaded = loadConfig(testDir);
+      expect(loaded.scheduler.maxCheckingMin).toBe(12);
+      expect(loaded.scheduler.maxRunsPerTask).toBe(10);
+      expect(loaded.schedulerLimits.maxCheckingMin).toBe(12);
+
+      saveConfig(testDir, { scheduler: { maxCheckingMin: 20 } });
+      const reloaded = loadConfig(testDir);
+      expect(reloaded.scheduler.maxCheckingMin).toBe(20);
+      expect(reloaded.scheduler.maxRunsPerTask).toBe(10);
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
   });
 });
 

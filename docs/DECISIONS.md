@@ -392,3 +392,22 @@
      - Định nghĩa tập trạng thái kết thúc (`TERMINAL_STATUSES: ['done', 'merged', 'pushed', 'cancelled', 'failed']`).
      - Với bước cuối của các task thuộc tập trạng thái này: chỉ hiển thị mốc thời gian (`at`), không tính toán hoặc hiển thị thời lượng đang chạy (`currentDurationMs`) và ẩn nhãn "đang ở bước này từ...".
      - Các task đang chạy hoặc chờ tiếp tục hiển thị thời lượng thực tế và nhãn ngữ cảnh theo đúng thiết kế.
+
+## DEC-029: Xử lý task ở trạng thái checking khi drain restart và lưới an toàn phục hồi task mồ côi
+
+- **Bối cảnh**:
+  - Ngày 2026-11-12, khi có yêu cầu drain restart (`POST /api/system/restart {"mode":"when-idle"}`), worker của các task hoàn thành chạy và chuyển task sang trạng thái `checking`. Tuy nhiên `runChecksForTask` lập tức return sớm khi `this.restartState.draining === true` mà không đưa check vào hàng đợi.
+  - Khi drain hết thời gian chờ (`hub.restart_timeout`) hoặc bị huỷ, daemon không thực hiện restart và không ai kích hoạt lại check, dẫn đến task bị kẹt mồ côi ở trạng thái `checking` suốt nhiều giờ.
+- **Quyết định thiết kế**:
+  1. **Hoãn check khi drain (phương án b)**:
+     - So với phương án (a) (vẫn cho check chạy khi drain và tính check vào `waitingFor`), phương án (b) giúp quá trình drain hoàn thành nhanh hơn vì không phải chờ check chạy và không kích hoạt dây chuyền các bước tiếp theo (auto-fix, review, auto-merge) trong lúc đang chuẩn bị hạ tiến trình.
+     - Khi restart daemon thành công, quy trình startup (`recoverOnStartup`) sẽ tự động phát hiện các task `checking` có worker run kết thúc `done` và chạy lại check.
+  2. **Phục hồi check khi drain kết thúc không restart (timeout hoặc cancel)**:
+     - Khi drain kết thúc do timeout (`hub.restart_timeout`) hoặc do người dùng huỷ (`cancelRestartDrain`), `draining` được đặt về `false` và scheduler gọi hàm dùng chung `recoverCheckingTasks()`.
+     - `recoverCheckingTasks()` quét toàn bộ task ở trạng thái `checking`, nếu worker run cuối cùng có outcome `done` và chưa có check nào đang chạy/xếp hàng (`checkingActive`/`checkingQueue`), scheduler sẽ kích hoạt chạy lại `runChecksForTask`.
+     - Tái cấu trúc logic này từ `recoverOnStartup` thành hàm dùng chung để đảm bảo tính nhất quán giữa startup recovery và drain exit recovery.
+  3. **Lưới an toàn định kỳ trong `tick`**:
+     - Bổ sung `recoverStuckCheckingTasks()` trong `tick` của scheduler để định kỳ rà soát các task mồ côi ở trạng thái `checking` quá N phút (mặc định 30 phút, cấu hình qua `scheduler.maxCheckingMin`).
+     - Điều kiện kích hoạt: task không nằm trong `checkingActive`/`checkingQueue`, không có run nào đang chạy (cả in-memory và DB), và worker run cuối có outcome `done`.
+     - Scheduler phát sự kiện `task.checking_recovered` để dễ dàng quan sát/giám sát và gọi lại `runChecksForTask`.
+     - Lưới an toàn hoàn toàn không can thiệp khi scheduler đang ở trạng thái drain (`this.restartState.draining === true`).

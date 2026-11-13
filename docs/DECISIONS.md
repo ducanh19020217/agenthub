@@ -378,7 +378,22 @@
      - Hàm `backfillTaskStatusChangedAt` hỗ trợ đầy đủ các nhánh trạng thái của task (`queued`, `running`, `checking`, `review`, `done`, `pushed`, `failed`, `blocked`, `cancelled`, `waiting_quota`, `paused`, `draft`, cũng như `merged`, `changes_requested`, `publishing`, `auditing`) để ưu tiên lấy timestamp chính xác từ event hoặc review tương ứng, chỉ fallback về `updatedAt` kèm cờ `statusChangedAtEstimated: 1` khi thực sự không có lịch sử.
      - `TaskRepo.updateStatus` và `TaskRepo.update` chỉ cập nhật lại `statusChangedAt` khi trạng thái thực sự thay đổi, tránh làm mới sai mốc thời gian khi chỉ cập nhật các trường phụ (như `waitReason`).
 
-## DEC-028: Xử lý task ở trạng thái checking khi drain restart và lưới an toàn phục hồi task mồ côi
+## DEC-028: Loại bỏ modal số liệu trùng lặp trên Dashboard và hoàn thiện hiển thị timeline cho trạng thái kết thúc
+
+- **Bối cảnh**:
+  - Nhánh `t-status-timestamps` trước đó đã thêm một modal trạng thái dạng popup khi người dùng bấm vào các thẻ số liệu trên `DashboardPage.tsx`, tái sử dụng `FlowTaskList`.
+  - Trên thực tế, modal này trùng lặp với modal chi tiết trạng thái đã có sẵn trên sơ đồ `TaskFlow` tại trang Tasks (`TasksPage.tsx`), gây phình to phạm vi của dashboard mà không nằm trong yêu cầu cốt lõi.
+  - Đồng thời, ở `TaskDetailPage.tsx`, các task ở trạng thái kết thúc (`done`, `merged`, `pushed`, `cancelled`, `failed`) vẫn hiển thị dòng "đang ở bước này từ..." kèm thời lượng tiếp tục chạy vô hạn.
+- **Quyết định**:
+  1. **Bỏ modal số liệu trùng lặp trên Dashboard**:
+     - Hoàn nguyên các thẻ số liệu trên `DashboardPage.tsx` về dạng thẻ hiển thị thuần túy, loại bỏ các state/modal thừa (`selectedStatus`, `Modal`, `FlowTaskList`).
+     - Trang Tasks (`TasksPage.tsx`) và component `TaskFlow` tiếp tục là nơi duy nhất quản lý modal danh sách task theo trạng thái (`FlowTaskList`).
+  2. **Hiển thị mốc thời gian tĩnh cho trạng thái kết thúc trên timeline**:
+     - Định nghĩa tập trạng thái kết thúc (`TERMINAL_STATUSES: ['done', 'merged', 'pushed', 'cancelled', 'failed']`).
+     - Với bước cuối của các task thuộc tập trạng thái này: chỉ hiển thị mốc thời gian (`at`), không tính toán hoặc hiển thị thời lượng đang chạy (`currentDurationMs`) và ẩn nhãn "đang ở bước này từ...".
+     - Các task đang chạy hoặc chờ tiếp tục hiển thị thời lượng thực tế và nhãn ngữ cảnh theo đúng thiết kế.
+
+## DEC-029: Xử lý task ở trạng thái checking khi drain restart và lưới an toàn phục hồi task mồ côi
 
 - **Bối cảnh**:
   - Ngày 2026-11-12, khi có yêu cầu drain restart (`POST /api/system/restart {"mode":"when-idle"}`), worker của các task hoàn thành chạy và chuyển task sang trạng thái `checking`. Tuy nhiên `runChecksForTask` lập tức return sớm khi `this.restartState.draining === true` mà không đưa check vào hàng đợi.
@@ -396,4 +411,3 @@
      - Điều kiện kích hoạt: task không nằm trong `checkingActive`/`checkingQueue`, không có run nào đang chạy (cả in-memory và DB), và worker run cuối có outcome `done`.
      - Scheduler phát sự kiện `task.checking_recovered` để dễ dàng quan sát/giám sát và gọi lại `runChecksForTask`.
      - Lưới an toàn hoàn toàn không can thiệp khi scheduler đang ở trạng thái drain (`this.restartState.draining === true`).
-

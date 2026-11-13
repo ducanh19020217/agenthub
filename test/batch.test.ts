@@ -244,7 +244,15 @@ describe('Batch Planning & Drafts (c-plan-drafts)', () => {
     expect(t2.status).toBe('cancelled');
     const events = ctx.eventRepo.getRecent(100);
     expect(events.filter((event) => event.type === 'batch.discarded')).toHaveLength(1);
-    expect(events.filter((event) => event.type === 'task.cancelled')).toHaveLength(2);
+    const cancelEvents = events.filter((event) => event.type === 'task.cancelled');
+    expect(cancelEvents).toHaveLength(2);
+    expect(JSON.parse(cancelEvents[0].payload!)).toMatchObject({
+      draftDiscard: true,
+      by: 'batch:discard',
+    });
+
+    const timeline = ctx.service.getTaskTimeline('test-proj/disc-1');
+    expect(timeline.some((item) => item.status === 'cancelled')).toBe(true);
   });
 
   it('supports adding, removing, and editing tasks in a draft batch', async () => {

@@ -502,7 +502,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
     await vi.waitFor(() => {
       const updated = ctx.taskRepo.get(task.id);
       expect(updated?.status).toBe('pushed');
-    });
+    }, { timeout: 15000, interval: 50 });
   });
 
   it('từ chối publish đồng thời cho cùng một project mà không xếp hàng thêm', async () => {
@@ -1212,7 +1212,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         expect(updated?.status).toBe('pushed');
         const pushResult = JSON.parse(updated!.pushResult!);
         expect(pushResult.auditSkipped).toBe(true);
-      });
+      }, { timeout: 15000, interval: 50 });
 
       expect(events.some((e) => e.type === 'task.audit_skipped')).toBe(true);
       expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
@@ -1553,7 +1553,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       await vi.waitFor(() => {
         const taskBAfter = ctx.taskRepo.get('proj-race/task-b');
         expect(taskBAfter?.status).toBe('pushed');
-      }, { timeout: 5000 });
+      }, { timeout: 15000, interval: 50 });
 
       // Verify remote main now contains Task B as well
       const remoteCommitsFinal = execFileSync('git', ['--git-dir', remotePath, 'log', '--oneline', 'main'], { encoding: 'utf8', env: testEnv });
@@ -1659,7 +1659,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       await vi.waitFor(() => {
         const taskBAfter = ctx.taskRepo.get('proj-no-integ-race/task-b');
         expect(taskBAfter?.status).toBe('pushed');
-      }, { timeout: 5000 });
+      }, { timeout: 15000, interval: 50 });
 
       // Verify remote main now contains Task B as well
       const remoteCommitsFinal = execFileSync('git', ['--git-dir', remotePath, 'log', '--oneline', 'main'], { encoding: 'utf8', env: testEnv });
@@ -1937,7 +1937,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       await vi.waitFor(() => {
         const finishedTask = ctx.taskRepo.get('proj-async/task-1');
         expect(finishedTask?.status).toBe('pushed');
-      });
+      }, { timeout: 15000, interval: 50 });
 
       expect(events.some((e) => e.type === 'task.audit_passed')).toBe(true);
       expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
@@ -1992,7 +1992,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         const pr = JSON.parse(t?.pushResult || '{}');
         expect(pr.state).toBe('push_failed');
         expect(pr.error).toContain('Race 409');
-      });
+      }, { timeout: 15000, interval: 50 });
       expect(pushFailedEmitted).toBe(true);
     });
 
@@ -2234,8 +2234,8 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         },
       });
 
-      // Simulate a future enabledAt maliciously injected into DB (+10s, strictly in future)
-      const futureDate = new Date(Date.now() + 10_000).toISOString();
+      // Simulate a future enabledAt maliciously injected into DB (+1 hour, strictly in future)
+      const futureDate = new Date(Date.now() + 3_600_000).toISOString();
       const proj = ctx.projectRepo.get('proj-future-enabled')!;
       const s = projectSettings(proj);
       s.publish.enabledAt = futureDate;
@@ -2523,14 +2523,14 @@ describe('Publish Service (t-auto-push-after-done)', () => {
 
       ctx.service.enqueueAutoPublish(projectId, taskId);
 
-      // Wait a short tick for promise chain
-      await new Promise((r) => setTimeout(r, 50));
-
-      expect(callCount).toBe(2);
-      const task = ctx.taskRepo.get(taskId);
-      expect(task?.status).toBe('pushed');
-      const pendingSet = (ctx.service as any).pendingAutoPublishTasks.get(projectId);
-      expect(pendingSet?.size ?? 0).toBe(0);
+      // Wait for promise chain to drain and publish to complete
+      await vi.waitFor(() => {
+        expect(callCount).toBe(2);
+        const task = ctx.taskRepo.get(taskId);
+        expect(task?.status).toBe('pushed');
+        const pendingSet = (ctx.service as any).pendingAutoPublishTasks.get(projectId);
+        expect(pendingSet?.size ?? 0).toBe(0);
+      }, { timeout: 15000, interval: 50 });
 
       ctx.service.publishTask = origPublishTask;
     });

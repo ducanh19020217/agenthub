@@ -139,12 +139,14 @@ export interface SchedulerLimitsConfig {
   maxRunsPerTask: number;
   maxConsecutiveCrashesPerTask: number;
   maxPausedMin?: number;
+  maxCheckingMin?: number;
 }
 
 export const DEFAULT_SCHEDULER_LIMITS: SchedulerLimitsConfig = {
   maxRunsPerTask: 15,
   maxConsecutiveCrashesPerTask: 3,
   maxPausedMin: 30,
+  maxCheckingMin: 30,
 };
 
 export interface ProfileCoolingConfig {
@@ -731,6 +733,14 @@ export function saveConfig(
           integrations: {
             ...((current.integrations as Record<string, unknown>) || {}),
             ...patch.integrations,
+          },
+        }
+      : {}),
+    ...(patch.scheduler && typeof patch.scheduler === 'object'
+      ? {
+          scheduler: {
+            ...((current.scheduler as Record<string, unknown>) || {}),
+            ...patch.scheduler,
           },
         }
       : {}),
@@ -1571,6 +1581,7 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
         maxRunsPerTask: typeof raw.maxRunsPerTask === 'number' && raw.maxRunsPerTask > 0 ? Math.floor(raw.maxRunsPerTask) : DEFAULT_SCHEDULER_LIMITS.maxRunsPerTask,
         maxConsecutiveCrashesPerTask: typeof raw.maxConsecutiveCrashesPerTask === 'number' && raw.maxConsecutiveCrashesPerTask > 0 ? Math.floor(raw.maxConsecutiveCrashesPerTask) : DEFAULT_SCHEDULER_LIMITS.maxConsecutiveCrashesPerTask,
         maxPausedMin: typeof raw.maxPausedMin === 'number' && raw.maxPausedMin > 0 ? Math.floor(raw.maxPausedMin) : DEFAULT_SCHEDULER_LIMITS.maxPausedMin,
+        maxCheckingMin: typeof raw.maxCheckingMin === 'number' && raw.maxCheckingMin > 0 ? Math.floor(raw.maxCheckingMin) : DEFAULT_SCHEDULER_LIMITS.maxCheckingMin,
       };
     })(),
     schedulerLimits: (() => {
@@ -1585,6 +1596,9 @@ export function loadConfig(overrideHome?: string): AgentHubConfig {
         maxPausedMin: typeof raw.maxPausedMin === 'number' && raw.maxPausedMin > 0
           ? Math.floor(raw.maxPausedMin)
           : DEFAULT_SCHEDULER_LIMITS.maxPausedMin,
+        maxCheckingMin: typeof raw.maxCheckingMin === 'number' && raw.maxCheckingMin > 0
+          ? Math.floor(raw.maxCheckingMin)
+          : DEFAULT_SCHEDULER_LIMITS.maxCheckingMin,
       };
     })(),
     profileCooling: (() => {

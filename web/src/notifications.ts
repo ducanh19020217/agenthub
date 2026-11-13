@@ -307,6 +307,7 @@ export function shouldNotifyBrowserEvent(
   if (level === 'off' || !DESKTOP_EVENTS.has(event.type)) return false;
   if (level === 'important' && !IMPORTANT.has(event.type)) return false;
   const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
+  if (event.type === 'task.cancelled' && payload.draftDiscard === true) return false;
   if (event.type === 'merge.conflict') {
     const conflictCount = typeof payload.conflictCount === 'number' ? payload.conflictCount : undefined;
     const isRoutine = (conflictCount === undefined || conflictCount <= 3) && payload.autoRetried !== false;

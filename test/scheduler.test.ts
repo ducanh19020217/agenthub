@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { execFileSync, spawn } from 'node:child_process';
-import { loadConfig } from '../src/config.js';
+import { loadConfig, DEFAULT_SCHEDULER_LIMITS, saveConfig } from '../src/config.js';
 import { openDatabase, ProjectRepo, DepartmentRepo, ProfileRepo, QuotaMarkRepo, TaskRepo, RunRepo, EventRepo, ReviewRepo } from '../src/db/index.js';
 import { Scheduler } from '../src/scheduler/index.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
@@ -1239,8 +1239,8 @@ describe('Codex reviewer failover lifecycle', () => {
     restartedScheduler2.stop();
   });
 
-  it('re-emits task.review_ready on restart for interrupted tasks with autoMerge enabled', () => {
-    const { scheduler } = makeReviewer('reviewer-approved');
+  it('re-emits task.review_ready on restart only when task actually has an approved automated review', () => {
+    const { scheduler, reviewRepo } = makeReviewer('reviewer-approved');
     // Enable autoMerge on the project
     projectRepo.update('test-project', {
       reviewChain: '[]',
@@ -1251,7 +1251,16 @@ describe('Codex reviewer failover lifecycle', () => {
     runRepo.finish('autocheck-run', 'done', undefined, undefined);
     db.prepare("UPDATE runs SET kind = 'worker', outcome = 'done' WHERE id = 'autocheck-run'").run();
 
-    // Clear events table to simulate restart after worker passed checks but before auto-merge finished
+    // Insert an approved automated review
+    reviewRepo.insert({
+      id: 'rev-approved-1',
+      taskId: 'test-project/review',
+      verdict: 'approved',
+      actor: 'codex-reviewer',
+      feedback: 'LGTM',
+    });
+
+    // Clear events table to simulate restart after automated review was approved but before auto-merge finished
     db.prepare('DELETE FROM events').run();
     scheduler.stop();
 
@@ -1260,15 +1269,104 @@ describe('Codex reviewer failover lifecycle', () => {
     (fake as unknown as { id: string }).id = 'codex';
     const restartedScheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
-    const reviewRepo = new ReviewRepo(db);
+    const restartedReviewRepo = new ReviewRepo(db);
     const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
-    restartedScheduler.configureReviewer(reviewRepo, failover);
+    failover.activate(3600);
+    restartedScheduler.configureReviewer(restartedReviewRepo, failover);
     (restartedScheduler as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
 
-    // Verify recoverOnStartup emitted review_ready for the interrupted auto-merge task
+    // Verify recoverOnStartup emitted review_ready for the interrupted auto-merge task with approved review
     const readyEvents = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
     expect(readyEvents).toHaveLength(1);
     expect(readyEvents[0].payload).toContain('"reviewChainComplete":true');
+    restartedScheduler.stop();
+  });
+
+  it('does not emit task.review_ready on restart when task is waiting for codex reviewer; allows scheduler to run reviewer normally', async () => {
+    const { scheduler, failover: initialFailover } = makeReviewer('reviewer-approved');
+    initialFailover.clear();
+    scheduler.stop();
+    projectRepo.update('test-project', {
+      reviewChain: '[]',
+      settings: JSON.stringify({ review: { autoMerge: true } }),
+    });
+    taskRepo.update('test-project/review', { status: 'review', reviewStep: 0, reviewerEscalated: 0 });
+    runRepo.finish('autocheck-run', 'done', undefined, undefined);
+    db.prepare("UPDATE runs SET kind = 'worker', outcome = 'done' WHERE id = 'autocheck-run'").run();
+
+    db.prepare('DELETE FROM reviews').run();
+    db.prepare('DELETE FROM events').run();
+
+    // Restart scheduler
+    const fake = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fake as unknown as { id: string }).id = 'codex';
+    const restartedScheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    const restartedReviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
+    failover.activate(3600);
+    restartedScheduler.configureReviewer(restartedReviewRepo, failover);
+    (restartedScheduler as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    // Must NOT emit review_ready on startup because no approved auto-review exists yet
+    const readyEventsOnStartup = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
+    expect(readyEventsOnStartup).toHaveLength(0);
+    expect(restartedScheduler.getReviewerStatus().running).toEqual([]);
+
+    // On tick, scheduler runs reviewer normally without emitting review_ready
+    restartedScheduler.tick();
+    expect(restartedScheduler.getReviewerStatus().running).toEqual(['test-project/review']);
+
+    await vi.waitFor(() => {
+      expect(restartedReviewRepo.getByTask('test-project/review').at(-1)?.actor).toBe('codex-reviewer');
+    });
+
+    // Reviewer completed and recorded approved review
+    const revs = restartedReviewRepo.getByTask('test-project/review');
+    expect(revs).toHaveLength(1);
+    expect(revs[0].verdict).toBe('approved');
+
+    // Reviewer emit review_ready with reason: review_approved
+    const reviewReadyEvents = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
+    expect(reviewReadyEvents).toHaveLength(1);
+    expect(reviewReadyEvents[0].payload).toContain('review_approved');
+
+    restartedScheduler.stop();
+  });
+
+  it('does not emit task.review_ready on restart when task is escalated', () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    projectRepo.update('test-project', {
+      reviewChain: '[]',
+      settings: JSON.stringify({ review: { autoMerge: true } }),
+    });
+    taskRepo.update('test-project/review', { status: 'review', reviewStep: 0, reviewerEscalated: 1 });
+    runRepo.finish('autocheck-run', 'done', undefined, undefined);
+    db.prepare("UPDATE runs SET kind = 'worker', outcome = 'done' WHERE id = 'autocheck-run'").run();
+
+    db.prepare('DELETE FROM reviews').run();
+    db.prepare('DELETE FROM events').run();
+    scheduler.stop();
+
+    const fake = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fake as unknown as { id: string }).id = 'codex';
+    const restartedScheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
+    const restartedReviewRepo = new ReviewRepo(db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover-restart.json'));
+    failover.activate(3600);
+    restartedScheduler.configureReviewer(restartedReviewRepo, failover);
+    (restartedScheduler as unknown as { adoptRunningRuns: () => void }).adoptRunningRuns();
+
+    const readyEvents = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
+    expect(readyEvents).toHaveLength(0);
+
+    // Also ticks do not run reviewer or emit review_ready
+    restartedScheduler.tick();
+    expect(restartedScheduler.getReviewerStatus().running).toEqual([]);
+    const readyEventsAfterTick = eventRepo.getRecent(50).filter((e) => e.type === 'task.review_ready');
+    expect(readyEventsAfterTick).toHaveLength(0);
+
     restartedScheduler.stop();
   });
 
@@ -3267,6 +3365,244 @@ describe('Checking queue lifecycle', () => {
     await scheduler.runChecksForTask('test-project/strict', 'completed-strict');
     expect(run).not.toHaveBeenCalled();
     scheduler.stop();
+  });
+
+  it('worker finishes during drain → drain timeout → check runs and task leaves checking', async () => {
+    addCheckTask('drain-timeout');
+    const scheduler = makeCheckingScheduler();
+    const run = vi.fn(async () => ({ passed: true, failed: [], results: [] }));
+    scheduler.checkRunner = { run };
+
+    vi.useFakeTimers();
+    try {
+      // Model active work so drain doesn't immediately complete before worker finishes
+      (scheduler as unknown as { running: Map<string, unknown> }).running.set('test-project/active-run', { taskId: 'test-project/active-run', startTime: Date.now() });
+
+      scheduler.beginRestartDrain(1, 'timeout drain test');
+      // Worker completes during drain
+      await scheduler.runChecksForTask('test-project/drain-timeout', 'run-drain-timeout');
+
+      // Since drain is active, checks must not run yet
+      expect(run).not.toHaveBeenCalled();
+      expect(taskRepo.get('test-project/drain-timeout')?.status).toBe('checking');
+
+      // Fast forward past drain timeout (1 minute)
+      vi.advanceTimersByTime(60_001);
+      vi.runOnlyPendingTimers();
+
+      expect(scheduler.isDraining()).toBe(false);
+
+      vi.useRealTimers();
+      // Wait for recovered checks to complete
+      await vi.waitFor(() => expect(taskRepo.get('test-project/drain-timeout')?.status).not.toBe('checking'));
+
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(taskRepo.get('test-project/drain-timeout')?.status).toBe('review');
+      expect(eventRepo.getRecent(10).some((e) => e.type === 'hub.restart_timeout')).toBe(true);
+      (scheduler as unknown as { running: Map<string, unknown> }).running.clear();
+    } finally {
+      vi.useRealTimers();
+      scheduler.stop();
+    }
+  });
+
+  it('worker finishes during drain → cancelRestartDrain → check runs and task leaves checking', async () => {
+    addCheckTask('drain-cancel');
+    const scheduler = makeCheckingScheduler();
+    const run = vi.fn(async () => ({ passed: true, failed: [], results: [] }));
+    scheduler.checkRunner = { run };
+
+    (scheduler as unknown as { running: Map<string, unknown> }).running.set('test-project/active-run', { taskId: 'test-project/active-run', startTime: Date.now() });
+
+    scheduler.beginRestartDrain(120, 'cancel drain test');
+    // Worker completes during drain
+    await scheduler.runChecksForTask('test-project/drain-cancel', 'run-drain-cancel');
+
+    // Since drain is active, checks must not run yet
+    expect(run).not.toHaveBeenCalled();
+    expect(taskRepo.get('test-project/drain-cancel')?.status).toBe('checking');
+
+    // Cancel drain
+    scheduler.cancelRestartDrain();
+    expect(scheduler.isDraining()).toBe(false);
+
+    // Wait for recovered checks to complete
+    await vi.waitFor(() => expect(taskRepo.get('test-project/drain-cancel')?.status).not.toBe('checking'));
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(taskRepo.get('test-project/drain-cancel')?.status).toBe('review');
+    expect(eventRepo.getRecent(10).some((e) => e.type === 'hub.restart_cancelled')).toBe(true);
+    (scheduler as unknown as { running: Map<string, unknown> }).running.clear();
+    scheduler.stop();
+  });
+
+  it('safety net catches orphaned checking task and skips fresh checking task or when draining', async () => {
+    addCheckTask('orphan-stuck');
+
+    // Set orphan-stuck to 35 minutes ago
+    const thirtyFiveMinAgo = new Date(Date.now() - 35 * 60_000).toISOString();
+    taskRepo.update('test-project/orphan-stuck', {
+      status: 'checking',
+      statusChangedAt: thirtyFiveMinAgo,
+    });
+
+    const scheduler = makeCheckingScheduler();
+    const run = vi.fn(async () => ({ passed: true, failed: [], results: [] }));
+    scheduler.checkRunner = { run };
+
+    // When draining, safety net must NOT run
+    scheduler.beginRestartDrain(120, 'drain guard');
+    scheduler.recoverStuckCheckingTasks();
+    expect(run).not.toHaveBeenCalled();
+    expect(taskRepo.get('test-project/orphan-stuck')?.status).toBe('checking');
+
+    // Cancel drain
+    scheduler.cancelRestartDrain();
+    // Wait for cancel drain recovery to finish
+    await vi.waitFor(() => expect(taskRepo.get('test-project/orphan-stuck')?.status).toBe('review'));
+    run.mockClear();
+
+    // Now test a newly created orphan alongside a fresh checking task (created just now)
+    addCheckTask('orphan-tick');
+    taskRepo.update('test-project/orphan-tick', {
+      status: 'checking',
+      statusChangedAt: thirtyFiveMinAgo,
+    });
+    addCheckTask('fresh-checking');
+
+    // Run scheduler tick
+    await scheduler.tick();
+
+    await vi.waitFor(() => expect(taskRepo.get('test-project/orphan-tick')?.status).not.toBe('checking'));
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(taskRepo.get('test-project/orphan-tick')?.status).toBe('review');
+    // fresh-checking was not in checking for 30 minutes, so safety net ignored it
+    expect(taskRepo.get('test-project/fresh-checking')?.status).toBe('checking');
+    expect(eventRepo.getRecent(10).some((e) => e.type === 'task.checking_recovered' && e.taskId === 'test-project/orphan-tick')).toBe(true);
+    scheduler.stop();
+  });
+
+  it('does not run duplicate check when check is already active', async () => {
+    addCheckTask('dup-test');
+    const thirtyFiveMinAgo = new Date(Date.now() - 35 * 60_000).toISOString();
+    taskRepo.update('test-project/dup-test', {
+      status: 'checking',
+      statusChangedAt: thirtyFiveMinAgo,
+    });
+
+    const scheduler = makeCheckingScheduler();
+    let releaseCheck!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseCheck = resolve; });
+    let runCount = 0;
+    scheduler.checkRunner = {
+      run: async () => {
+        runCount++;
+        await gate;
+        return { passed: true, failed: [], results: [] };
+      },
+    };
+
+    // Start first check (held by gate)
+    const checkPromise = scheduler.runChecksForTask('test-project/dup-test', 'run-dup-test');
+    await vi.waitFor(() => expect(runCount).toBe(1));
+
+    // While check is active, attempt to run duplicate via tick / recoverStuckCheckingTasks / recoverCheckingTasks
+    await scheduler.tick();
+    scheduler.recoverStuckCheckingTasks();
+    await scheduler.recoverCheckingTasks();
+    const duplicatePromise = scheduler.runChecksForTask('test-project/dup-test', 'run-dup-test');
+
+    // Must still have only 1 run call
+    expect(runCount).toBe(1);
+
+    // Release gate and finish check
+    releaseCheck();
+    await checkPromise;
+    await duplicatePromise;
+
+    expect(taskRepo.get('test-project/dup-test')?.status).toBe('review');
+    expect(runCount).toBe(1);
+    scheduler.stop();
+  });
+
+  it('safety net respects custom maxCheckingMin configuration', async () => {
+    addCheckTask('custom-threshold-stuck');
+    const fifteenMinAgo = new Date(Date.now() - 15 * 60_000).toISOString();
+    taskRepo.update('test-project/custom-threshold-stuck', {
+      status: 'checking',
+      statusChangedAt: fifteenMinAgo,
+    });
+
+    addCheckTask('custom-threshold-fresh');
+    const fiveMinAgo = new Date(Date.now() - 5 * 60_000).toISOString();
+    taskRepo.update('test-project/custom-threshold-fresh', {
+      status: 'checking',
+      statusChangedAt: fiveMinAgo,
+    });
+
+    const scheduler = makeCheckingScheduler();
+    scheduler.config.scheduler.maxCheckingMin = 10;
+    const run = vi.fn(async () => ({ passed: true, failed: [], results: [] }));
+    scheduler.checkRunner = { run };
+
+    scheduler.recoverStuckCheckingTasks();
+
+    await vi.waitFor(() => expect(taskRepo.get('test-project/custom-threshold-stuck')?.status).not.toBe('checking'));
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(taskRepo.get('test-project/custom-threshold-stuck')?.status).toBe('review');
+    expect(taskRepo.get('test-project/custom-threshold-fresh')?.status).toBe('checking');
+
+    const recoveryEvent = eventRepo.getRecent(10).find((e) => e.type === 'task.checking_recovered' && e.taskId === 'test-project/custom-threshold-stuck');
+    expect(recoveryEvent).toBeDefined();
+    const payload = JSON.parse(recoveryEvent?.payload as string);
+    expect(payload.maxCheckingMin).toBe(10);
+    expect(payload.reason).toBe('stuck_checking');
+
+    scheduler.stop();
+  });
+});
+
+describe('Scheduler limits configuration', () => {
+  it('defaults maxCheckingMin to 30 when omitted or invalid', () => {
+    expect(DEFAULT_SCHEDULER_LIMITS.maxCheckingMin).toBe(30);
+
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-cfg-default-'));
+    try {
+      const cfg = loadConfig(testDir);
+      expect(cfg.scheduler.maxCheckingMin).toBe(30);
+      expect(cfg.schedulerLimits.maxCheckingMin).toBe(30);
+
+      fs.writeFileSync(path.join(testDir, 'config.json'), JSON.stringify({
+        scheduler: { maxCheckingMin: -5 },
+      }));
+      const invalidCfg = loadConfig(testDir);
+      expect(invalidCfg.scheduler.maxCheckingMin).toBe(30);
+      expect(invalidCfg.schedulerLimits.maxCheckingMin).toBe(30);
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('loads and persists custom maxCheckingMin in scheduler config', () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-cfg-custom-'));
+    try {
+      fs.writeFileSync(path.join(testDir, 'config.json'), JSON.stringify({
+        scheduler: { maxCheckingMin: 12, maxRunsPerTask: 10 },
+      }));
+      const loaded = loadConfig(testDir);
+      expect(loaded.scheduler.maxCheckingMin).toBe(12);
+      expect(loaded.scheduler.maxRunsPerTask).toBe(10);
+      expect(loaded.schedulerLimits.maxCheckingMin).toBe(12);
+
+      saveConfig(testDir, { scheduler: { maxCheckingMin: 20 } });
+      const reloaded = loadConfig(testDir);
+      expect(reloaded.scheduler.maxCheckingMin).toBe(20);
+      expect(reloaded.scheduler.maxRunsPerTask).toBe(10);
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -406,6 +406,7 @@ export class BrainRunner {
       return;
     }
     if (type === 'chat.done' || type === 'chat.error') { this.finishChatEvent(type, data); return; }
+    if (type === 'task.cancelled' && data.draftDiscard === true) return;
     if (!this.started || !EVENT_TYPES.has(type)) return;
     if (type === 'brain.profile_transfer') {
       const transfer = data;

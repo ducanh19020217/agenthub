@@ -21,11 +21,13 @@ import {
   RunRow,
   ReviewRepo,
   EventRepo,
+  EventRow,
   TaskNoteRepo,
   TaskNoteRow,
   ProjectRow,
   ProfileRow,
   TaskRow,
+  ReviewRow,
   QuotaMarkRow,
   KnowledgeRepo,
   KnowledgeEntryRow,
@@ -2504,18 +2506,35 @@ export class AppService {
     const project = this.projectRepo.getIncludingArchived(id);
     if (!project) throw new HttpError(404, 'not_found', `Project "${id}" không tồn tại`);
     if (project.archivedAt && this.taskNoteRepo) {
-      for (const note of this.taskNoteRepo.getByProject(id)) {
+      const notes = this.taskNoteRepo.getByProject(id);
+      const archiveNotesByTask = new Map<string, TaskNoteRow>();
+      const archiveNoteIdsToDelete: number[] = [];
+
+      for (const note of notes) {
         if (!note.content.startsWith('project_archive_status:')) continue;
+        archiveNoteIdsToDelete.push(note.id);
+        archiveNotesByTask.set(note.taskId, note);
+      }
+
+      for (const [taskId, note] of archiveNotesByTask) {
+        const task = this.taskRepo.get(taskId);
+        if (!task || task.status !== 'paused') continue;
+
         try {
           const saved = JSON.parse(note.content.slice('project_archive_status:'.length)) as { status?: string; waitReason?: string | null };
           if (saved.status) {
-            this.taskRepo.update(note.taskId, { status: saved.status, waitReason: saved.waitReason as TaskRow['waitReason'] });
+            this.taskRepo.update(taskId, { status: saved.status, waitReason: saved.waitReason as TaskRow['waitReason'] });
             const resumePayload = { reason: 'project_restored', status: saved.status };
-            this.scheduler.getEventBus().emit(`task.${saved.status}`, note.taskId, resumePayload);
+            const eventType = saved.status === 'review' ? 'task.review_ready' : `task.${saved.status}`;
+            this.scheduler.getEventBus().emit(eventType, taskId, resumePayload);
           }
         } catch {
           // Ignore malformed historical notes.
         }
+      }
+
+      for (const noteId of archiveNoteIdsToDelete) {
+        this.taskNoteRepo.delete(noteId);
       }
     }
     this.projectRepo.restore(id);
@@ -4263,7 +4282,8 @@ export class AppService {
       modelWarnings = ['modelChain không phải JSON hợp lệ'];
     }
 
-    const events = (this.eventRepo ? this.eventRepo.getByTask(taskId) : []).map((e) => {
+    const rawEvents = this.eventRepo ? this.eventRepo.getByTask(taskId) : [];
+    const events = rawEvents.map((e) => {
       let parsedPayload: unknown = null;
       if (e.payload) {
         try {
@@ -4383,7 +4403,7 @@ export class AppService {
       sourceRef: task.sourceRef ? JSON.parse(task.sourceRef) : null,
       triage,
       derivedTasks: this.taskRepo.getDerivedFrom(taskId).map((t) => apiTask(t, this.getBlockingDiskForTask(t))),
-      timeline: this.getTaskTimeline(taskId),
+      timeline: this.buildTaskTimeline(task, rawEvents, runs, reviews),
       claudeCost: (() => { const measured = this.claudeSessionRepo?.taskCost(taskId); return measured ? { measured: measured.effectiveTokens > 0, ...measured } : { measured: false, effectiveTokens: 0, sessions: 0 }; })(),
     };
   }
@@ -4398,6 +4418,16 @@ export class AppService {
     const events = this.eventRepo ? this.eventRepo.getByTask(taskId) : [];
     const runs = this.runRepo ? this.runRepo.getByTask(taskId) : [];
     const reviews = this.reviewRepo ? this.reviewRepo.getByTask(taskId) : [];
+
+    return this.buildTaskTimeline(task, events, runs, reviews);
+  }
+
+  buildTaskTimeline(
+    task: TaskRow,
+    events: EventRow[],
+    runs: RunRow[],
+    reviews: ReviewRow[],
+  ): TaskTimelineItem[] {
 
     const candidates: Array<{
       status: string;
@@ -4554,13 +4584,18 @@ export class AppService {
         at,
         estimated: Boolean(task.statusChangedAtEstimated),
       });
-    } else if (deduplicated.at(-1)!.status !== task.status) {
-      const at = toApiTime(task.statusChangedAt ?? task.updatedAt)!;
-      deduplicated.push({
-        status: task.status,
-        at,
-        estimated: Boolean(task.statusChangedAtEstimated),
-      });
+    } else {
+      const lastStatus = deduplicated.at(-1)!.status;
+      const isDoneMatching =
+        task.status === 'done' && (lastStatus === 'done' || lastStatus === 'merged' || lastStatus === 'pushed');
+      if (lastStatus !== task.status && !isDoneMatching) {
+        const at = toApiTime(task.statusChangedAt ?? task.updatedAt)!;
+        deduplicated.push({
+          status: task.status,
+          at,
+          estimated: Boolean(task.statusChangedAtEstimated),
+        });
+      }
     }
 
     // Compute durations
@@ -5183,7 +5218,7 @@ export class AppService {
     for (const task of tasks) {
       if (task.status === 'draft') {
         this.taskRepo.update(task.id, { status: 'cancelled', cancelReason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, cancelledBy: 'batch:discard' });
-        const cancelPayload = { reason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, by: 'batch:discard' };
+        const cancelPayload = { reason: `Đợt "${batch.title || id}" bị bỏ khi còn nháp`, by: 'batch:discard', draftDiscard: true };
         this.scheduler.getEventBus().emit('task.cancelled', task.id, cancelPayload);
       }
     }

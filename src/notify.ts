@@ -190,6 +190,7 @@ export class NotificationService {
     ]).has(type)) return;
 
     const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+    if (type === 'task.cancelled' && p.draftDiscard === true) return;
 
     if (type === 'merge.conflict') {
       const conflictCount = typeof p.conflictCount === 'number' ? p.conflictCount : undefined;

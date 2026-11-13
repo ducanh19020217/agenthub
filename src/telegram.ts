@@ -4101,6 +4101,7 @@ export class TelegramBotService {
     const notifyAllExhausted = notify.quotaAllExhausted !== false;
 
     const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+    if (type === 'task.cancelled' && p.draftDiscard === true) return;
     if (type === 'quota.cleared') {
       this.allQuotaNotified.delete('all');
       if (typeof p.family === 'string') this.allQuotaNotified.delete(p.family);
@@ -4492,6 +4493,7 @@ export class TelegramBotService {
       }
 
       case 'task.cancelled': {
+        if (p.draftDiscard === true) return;
         if (notify.interrupted === false) return;
         const title = this.resolveTaskTitle(taskId, p);
         const reason = typeof p.reason === 'string' && p.reason ? p.reason : (typeof p.message === 'string' && p.message ? p.message : 'Không ghi lý do');

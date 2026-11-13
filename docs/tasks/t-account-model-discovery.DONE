@@ -46,34 +46,40 @@
 
 ## 2. Kết quả kiểm tra & nghiệm thu
 
-- `npm run lint`: Đạt (0 errors, 135 baseline warnings).
-- `npm run typecheck` (`tsc --noEmit`): Đạt (0 errors).
-- `npm --prefix web run typecheck` (`tsc --noEmit`): Đạt (0 errors).
+- `npm run lint`: Đạt (0 errors, 136 baseline warnings).
+- `npm run typecheck` (`tsc --noEmit -p .`): Đạt (0 errors).
+- `npm --prefix web run typecheck` (`tsc --noEmit -p web`): Đạt (0 errors).
 - `npm run build`: Đạt (tsc và copy protocol.md thành công).
-- `npm run build:web`: Đạt (Vite production build thành công trong 4.75s).
-- `npm run test:web`: Đạt 74/74 test files, 692/692 tests passed (100%).
+- `npm run build:web`: Đạt (Vite production build thành công trong 4.91s).
+- `npm run test:web -- --run`: Đạt 74/74 test files, 695/695 tests passed (100%).
   - `web/src/test/settingsSelectInputs.test.tsx`: 47/47 tests passed (thêm kiểm thử cho Claude reviewer select, chat model / fallback model isolation, và DepartmentsPage brain model warning).
   - `web/src/test/taskDetailPage.test.tsx`: 35/35 tests passed (thêm kiểm thử cho ô thêm model trong modal sửa dùng SelectOrCustomInput cho phép nhập custom kèm cảnh báo).
   - `web/src/test/departmentsPage.test.tsx`: 10/10 tests passed.
   - `web/src/test/reviewerFallbackWeb.test.tsx`: 5/5 tests passed.
   - `web/src/test/createTaskPage.test.tsx`: 11/11 tests passed.
   - `web/src/test/chat.test.tsx`: 7/7 tests passed.
-- Backend test (`npm test`): Đạt 140/140 test files, 1,780/1,780 tests passed (100%).
+- Backend test (`npm run test -- --run`): Đạt 145/145 test files, 1,838/1,838 tests passed (100%).
   - `test/api-extra.test.ts`: 45/45 tests passed (thêm kiểm thử PUT /api/config lưu claude-sonnet-5-5, model custom, cho phép chuỗi rỗng và từ chối tên có khoảng trắng).
   - `test/model-discovery.test.ts`: 23/23 tests passed.
-  - `test/publish.test.ts`: 34/34 tests passed.
-  - `test/scheduler.test.ts`: 131/131 tests passed.
+  - `test/publish.test.ts`: 40/40 tests passed.
+  - `test/scheduler.test.ts`: 150/150 tests passed.
   - `test/chat.test.ts`: 46/46 tests passed.
   - `test/migrations-append-only.test.ts`: 1/1 passed.
-- Tổng cộng tests: 2,472/2,472 tests passed (0 failed).
+- Tổng cộng tests: 2,533/2,533 tests passed (0 failed).
 
 ## 3. Việc chưa làm được / Ghi chú thiết kế
 
 - Không có việc tồn đọng.
+- Đã tự động giải quyết xung đột merge lần 1 với base `agenthub/integration`:
+  - `docs/DECISIONS.md`: Bảo toàn DEC-028..DEC-031 từ base và đánh số quyết định của model discovery thành DEC-032.
+  - `src/scheduler/index.ts`: Giữ cả import `isProfileLoggedIn` và `markClaudeProfileAuthExpired`.
+  - `web/src/pages/TaskDetailPage.tsx`: Giữ `TERMINAL_STATUSES` phục vụ timeline của task kết thúc, loại bỏ `VALID_MODELS` cứng để dùng model discovery và `SelectOrCustomInput`.
+  - `test/model-discovery.test.ts`: Bổ sung kiểm tra và cột task counters (`runCount`, `consecutiveCrashes`) trước migration 73 khi replay schema.
 - Tất cả các yêu cầu từ đề bài ban đầu và các phản hồi review P1/P2 qua tất cả các vòng review đều đã được giải quyết trọn vẹn và kiểm tra nghiêm ngặt.
 
 ## 4. Danh sách commits trên nhánh
 
+- `0fc59b6a`: `Merge branch 'agenthub/integration' into agenthub/t-account-model-discovery`
 - `09afc4c6`: `feat(web): use SelectOrCustomInput with unavailable warnings across reviewer, brain, and task selectors`
 - `a9377cd6`: `fix(backend): allow trimmed non-whitespace custom and discovered models in UpdateConfigSchema`
 - `a2503523`: `docs(tasks): update completion report for custom chat models in settings`

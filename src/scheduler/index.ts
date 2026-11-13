@@ -620,8 +620,13 @@ export class Scheduler {
       const waitingFor = this.getRestartState().waitingFor;
       this.restartState = { draining: false, since: null, reason: null, timeoutAt: null };
       this.restartReady = undefined;
+      for (const task of this.taskRepo.getByStatus('queued')) {
+        if (task.waitReason === 'restart') this.taskRepo.update(task.id, { status: 'queued', waitReason: null });
+      }
       this.eventBus.emit('hub.restart_timeout', undefined, { waitingFor });
       this.persistRestartState();
+      void this.recoverCheckingTasks();
+      this.triggerTick();
     }, Math.max(1, timeoutMinutes) * 60_000);
     this.restartTimer.unref?.();
     this.persistRestartState();
@@ -641,7 +646,10 @@ export class Scheduler {
       if (task.waitReason === 'restart') this.taskRepo.update(task.id, { status: 'queued', waitReason: null });
     }
     this.persistRestartState();
-    if (wasDraining) this.eventBus.emit('hub.restart_cancelled');
+    if (wasDraining) {
+      this.eventBus.emit('hub.restart_cancelled');
+      void this.recoverCheckingTasks();
+    }
     this.triggerTick();
     return this.getRestartState();
   }
@@ -1131,14 +1139,7 @@ export class Scheduler {
 
     // Checks interrupted by a restart left tasks 'checking' with nothing running. Re-run them when the
     // task's latest worker run finished cleanly (the only state that could have started checks).
-    for (const task of this.taskRepo.getByStatus('checking')) {
-      if (!this.projectRepo.get(task.projectId)) continue;
-      const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
-      if (!lastWorker || lastWorker.outcome !== 'done') continue;
-      void this.runChecksForTask(task.id, lastWorker.id).catch((error) => {
-        if (!this.stopped) console.error(`[scheduler] re-check after restart failed for ${task.id}:`, error);
-      });
-    }
+    void this.recoverCheckingTasks();
 
     // Recover review tasks interrupted by restart.
     // Tasks waiting for manual approval (autoMerge off, or parked at manual gates)
@@ -1418,21 +1419,35 @@ export class Scheduler {
 
   async recoverCheckingTasks(taskId?: string, runId?: string): Promise<void> {
     if (this.stopped) return;
-    // A checking task is not enough evidence to start checks. The only valid
-    // caller supplies the exact worker run that just finished and was marked
-    // done by recoverFinishedWork(). This prevents stale checking rows from
-    // being re-checked after a restart.
-    if (!taskId || !runId) return;
-    try {
-      const task = this.taskRepo.get(taskId);
-      const run = this.runRepo.get(runId);
-      if (!task || task.status !== 'checking' || run?.taskId !== taskId || run.kind !== 'worker' || run.outcome !== 'done') return;
-      await this.runChecksForTask(taskId, runId, true);
-    } catch (error) {
-      if (!this.stopped) {
-        console.error('[scheduler] recoverCheckingTasks failed:', error);
+    if (this.restartState.draining) return;
+
+    if (taskId && runId) {
+      try {
+        const task = this.taskRepo.get(taskId);
+        const run = this.runRepo.get(runId);
+        if (!task || task.status !== 'checking' || run?.taskId !== taskId || run.kind !== 'worker' || run.outcome !== 'done') return;
+        await this.runChecksForTask(taskId, runId, true);
+      } catch (error) {
+        if (!this.stopped) {
+          console.error('[scheduler] recoverCheckingTasks failed:', error);
+        }
       }
+      return;
     }
+
+    const tasks = this.taskRepo.getByStatus('checking');
+    const promises: Promise<void>[] = [];
+    for (const task of tasks) {
+      if (!this.projectRepo.get(task.projectId)) continue;
+      if (this.checkingActive.has(task.id) || this.checkingQueue.some((entry) => entry.taskId === task.id)) continue;
+      const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
+      if (!lastWorker || lastWorker.outcome !== 'done') continue;
+      const p = this.runChecksForTask(task.id, lastWorker.id).catch((error) => {
+        if (!this.stopped) console.error(`[scheduler] re-check failed for ${task.id}:`, error);
+      });
+      promises.push(p);
+    }
+    await Promise.all(promises);
   }
 
   async runChecksForTask(taskId: string, runId: string, reuseSavedResults = false): Promise<void> {

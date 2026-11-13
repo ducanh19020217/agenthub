@@ -620,13 +620,9 @@ export class Scheduler {
       const waitingFor = this.getRestartState().waitingFor;
       this.restartState = { draining: false, since: null, reason: null, timeoutAt: null };
       this.restartReady = undefined;
-      for (const task of this.taskRepo.getByStatus('queued')) {
-        if (task.waitReason === 'restart') this.taskRepo.update(task.id, { status: 'queued', waitReason: null });
-      }
       this.eventBus.emit('hub.restart_timeout', undefined, { waitingFor });
       this.persistRestartState();
       void this.recoverCheckingTasks();
-      this.triggerTick();
     }, Math.max(1, timeoutMinutes) * 60_000);
     this.restartTimer.unref?.();
     this.persistRestartState();

@@ -315,6 +315,7 @@ export interface RestartState {
 }
 
 const STALL_NOTE = 'Lượt trước bị kẹt khi chờ tác vụ nền. Chạy lệnh trực tiếp với timeout.';
+export const TIMEOUT_RESUME_NOTE = 'Lượt trước bị timeout nhưng đã có tiến độ. Kiểm tra git log/status rồi làm tiếp, không làm lại, và commit thường xuyên.';
 
 export interface SchedulerOptions {
   diskSpace?: (path: string) => DiskSpace;
@@ -4798,10 +4799,77 @@ export class Scheduler {
       const recorded = this.recordCancel(taskId, info);
       this.eventBus.emit('task.cancelled', taskId, { reason: recorded.reason, by: recorded.by, previousStatus: 'running' });
     } else if (outcome === 'timeout') {
-      this.taskRepo.updateStatus(taskId, 'failed');
-      this.eventBus.emit('task.timeout', taskId);
+      const runRow = this.runRepo.get(rt.runId);
+      const parsedRunStartedAt = runRow ? parseDbTime(runRow.startedAt) : NaN;
+      const startedAtMs = !Number.isNaN(parsedRunStartedAt) ? Math.min(parsedRunStartedAt, rt.startTime) : rt.startTime;
+      const progress = task ? this.hasCommitAfter(task, startedAtMs) : false;
+
+      const consecutiveTimeouts = this.getConsecutiveTimeoutCount(taskId);
+      const limits = this.schedulerLimits();
+      const maxTimeoutResumes = limits.maxTimeoutResumes ?? DEFAULT_SCHEDULER_LIMITS.maxTimeoutResumes ?? 2;
+
+      if (progress && consecutiveTimeouts <= maxTimeoutResumes) {
+        const newBody = task
+          ? (task.body && task.body.includes(TIMEOUT_RESUME_NOTE)
+              ? task.body
+              : `${task.body || task.title}\n\n${TIMEOUT_RESUME_NOTE}`)
+          : undefined;
+
+        this.taskRepo.update(taskId, {
+          status: 'queued',
+          resume: 1,
+          notBefore: null,
+          ...(newBody !== undefined ? { body: newBody } : {}),
+        });
+
+        if (task?.worktreePath && fs.existsSync(task.worktreePath)) {
+          const agentHubDir = path.join(task.worktreePath, '.agenthub');
+          const taskMdPath = path.join(agentHubDir, 'task.md');
+          try {
+            if (!fs.existsSync(agentHubDir)) {
+              fs.mkdirSync(agentHubDir, { recursive: true });
+            }
+            const content = fs.existsSync(taskMdPath)
+              ? fs.readFileSync(taskMdPath, 'utf8')
+              : (task.body || task.title);
+            if (!content.includes(TIMEOUT_RESUME_NOTE)) {
+              const separator = content.endsWith('\n') ? '\n' : '\n\n';
+              fs.writeFileSync(taskMdPath, content + separator + TIMEOUT_RESUME_NOTE + '\n', 'utf8');
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        this.eventBus.emit('task.queued', taskId, {
+          reason: 'timeout_resume',
+          attempt: consecutiveTimeouts,
+        });
+      } else {
+        const timeoutResumes = Math.max(0, consecutiveTimeouts - 1);
+        this.taskRepo.updateStatus(taskId, 'failed');
+        this.eventBus.emit('task.failed', taskId, {
+          reason: 'timeout',
+          progress,
+          timeoutResumes,
+        });
+        this.eventBus.emit('task.timeout', taskId);
+      }
     }
     if (!this.stopped) this.triggerTick();
+  }
+
+  private getConsecutiveTimeoutCount(taskId: string): number {
+    const workerRuns = this.runRepo.getByTask(taskId).filter((r) => r.kind === 'worker');
+    let count = 0;
+    for (let i = workerRuns.length - 1; i >= 0; i--) {
+      if (workerRuns[i].outcome === 'timeout') {
+        count++;
+      } else {
+        break;
+      }
+    }
+    return count;
   }
 
   private killProcessGroup(pid: number, signal: NodeJS.Signals = 'SIGKILL'): void {

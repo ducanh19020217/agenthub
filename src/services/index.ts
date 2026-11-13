@@ -876,6 +876,10 @@ export function formatEventSummary(
       if (reason === 'retry') {
         return `${taskLabel} được đưa vào hàng đợi để thử lại`;
       }
+      if (reason === 'timeout_resume') {
+        const attempt = typeof p.attempt === 'number' ? ` (lần ${p.attempt})` : '';
+        return `${taskLabel} được đưa vào hàng đợi để làm tiếp sau khi quá thời gian${attempt}`;
+      }
       return `${taskLabel} được đưa vào hàng đợi`;
     }
 
@@ -897,8 +901,12 @@ export function formatEventSummary(
     case 'task.blocked':
       return `${taskLabel} bị chặn`;
 
-    case 'task.failed':
+    case 'task.failed': {
+      if (p.reason === 'timeout') {
+        return `${taskLabel} thất bại do quá thời gian`;
+      }
       return `${taskLabel} thất bại`;
+    }
 
     case 'task.done':
       return p.reason === 'merged_elsewhere'

@@ -1,0 +1,59 @@
+# Hoàn thành task: t-status-timestamps-fix
+
+## Tóm tắt việc đã làm
+1. **P2a: Sửa bước "done" bị lặp sau "merged" / "pushed"**
+   - Trong `src/services/index.ts` (`buildTaskTimeline`), công nhận `merged` và `pushed` là các bước chuyển tiếp hợp lệ đại diện cho trạng thái `done`, không thêm bước `done` trùng lặp ở cuối với thời lượng 0.
+   - Tính toán thời lượng chuẩn xác giữa các bước: bước `done` có thời lượng từ lúc hoàn thành đến lúc merge/push; bước cuối (`merged` hoặc `pushed`) là terminal không có thời lượng chạy tiếp.
+   - Bổ sung test kiểm thử auto-merge task và task đã push trong `test/timeline.test.ts`.
+
+2. **P2b: Ngăn huỷ batch nháp gây spam Telegram / Notifications / Brain**
+   - Trong `src/services/index.ts` (`discardDraftBatch`), gắn cờ `draftDiscard: true` vào payload của `task.cancelled` khi huỷ các task nháp trong đợt.
+   - Thêm bộ lọc bỏ qua `task.cancelled` có `draftDiscard: true` trong Telegram (`src/telegram.ts`), desktop notifications (`src/notify.ts`), browser notifications (`web/src/notifications.ts`), và brain runner (`src/brain/runner.ts`).
+   - Timeline task vẫn ghi nhận và thể hiện bước `cancelled`.
+   - Bổ sung test trong `test/batch.test.ts`, `test/telegram.test.ts`, và `web/src/test/notifications.test.ts`.
+
+3. **P2c: Task đã kết thúc không còn hiển thị như đang chạy**
+   - Trong `web/src/pages/TaskDetailPage.tsx`, định nghĩa tập trạng thái kết thúc `TERMINAL_STATUSES` (`done`, `merged`, `pushed`, `cancelled`, `failed`).
+   - Với các task ở trạng thái kết thúc, bước cuối trên dòng thời gian chỉ hiển thị mốc thời gian tĩnh (`at`), không tính thời lượng đang chạy (`currentDurationMs = undefined`) và ẩn dòng "đang ở bước này từ...".
+   - Cập nhật và bổ sung test kiểm thử trong `web/src/test/taskTimelineUi.test.tsx`.
+
+4. **P3d: Sửa `restoreProject` phát lại event cũ**
+   - Bổ sung phương thức `TaskNoteRepo.delete(id: number)` trong `src/db/index.ts`.
+   - Trong `src/services/index.ts` (`restoreProject`), chỉ duyệt các task đang `paused`, lấy bản ghi note archive mới nhất theo từng task, ánh xạ trạng thái `review` sang sự kiện chuẩn `task.review_ready` (thay vì `task.review`), và xoá sạch các note `project_archive_status:` đã xử lý để không bao giờ bị phát lại ở các lần lưu trữ/khôi phục tiếp theo.
+   - Bổ sung test kiểm thử trong `test/timeline.test.ts`.
+
+5. **P3e: Khắc phục `getTask` đọc trùng DB**
+   - Tách logic `buildTaskTimeline(task, events, runs, reviews)` trong `src/services/index.ts`.
+   - `getTask` tái sử dụng trực tiếp các bản ghi `task`, `rawEvents`, `runs`, `reviews` đã đọc ở đầu hàm, tránh đọc lặp lại DB qua `getTaskTimeline`.
+
+6. **Ngoài phạm vi: Dọn dẹp modal số liệu trên DashboardPage**
+   - Loại bỏ modal popup trùng lặp và các state thừa (`selectedStatus`, `Modal`, `FlowTaskList`, `StatusBadge`) trên các thẻ số liệu của `web/src/pages/DashboardPage.tsx`. Thao tác xem chi tiết task theo trạng thái tiếp tục do component `TaskFlow` trên `TasksPage.tsx` đảm nhiệm.
+   - Ghi nhận quyết định kiến trúc `DEC-028` vào `docs/DECISIONS.md`.
+
+## Kết quả kiểm tra
+- **Typecheck**:
+  - Root: `npm run typecheck` (`tsc --noEmit`) -> PASS
+  - Web: `npm run --prefix web typecheck` (`tsc --noEmit`) -> PASS
+- **Lint**:
+  - `npm run lint` (`eslint src/ test/`) -> PASS (0 errors, 116 pre-existing warnings in unrelated tests)
+- **Build**:
+  - Root: `npm run build` (`tsc && cp src/protocol.md dist/protocol.md`) -> PASS
+  - Web: `npm run build:web` (`tsc && vite build`) -> PASS (567 kB bundle, gzipped 171 kB)
+- **Test Backend**:
+  - `test/timeline.test.ts`: 7/7 passed
+  - `test/batch.test.ts`: 9/9 passed
+  - `test/status-changed-at.test.ts`: 4/4 passed
+  - `test/telegram.test.ts`: 148/148 passed
+- **Test Web**:
+  - `web/src/test/taskTimelineUi.test.tsx`: 5/5 passed
+  - `web/src/test/notifications.test.ts`: 13/13 passed
+  - Toàn bộ test suite web: 74 test files passed (673/673 passed)
+
+## Việc còn thiếu
+- Không có. Tất cả các mục P2a, P2b, P2c, P3d, P3e và phần ngoài phạm vi đã hoàn thành trọn vẹn theo đúng đề bài.
+
+## Danh sách commit
+- `c4dd3cc0`: `fix(timeline): avoid duplicate done step after merged or pushed and reuse getTask reads`
+- `b4e11c6c`: `fix(notifications): suppress task cancellation alerts when discarding draft batches`
+- `605d837e`: `fix(projects): emit standard events on restore and clean up archive notes`
+- `da59aa11`: `fix(web): suppress running duration on terminal workflow steps and remove redundant dashboard modal`

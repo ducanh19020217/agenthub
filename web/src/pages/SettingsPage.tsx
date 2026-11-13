@@ -1121,6 +1121,16 @@ export const SettingsPage: React.FC = () => {
                           validate={(val) => validateReviewerModelSyntax(val, item.engine, t, knownDiscovered)}
                           placeholder={item.engine === 'codex' ? 'codex:model' : 'sonnet'}
                         />
+                        {unavailableModels.has(item.model) && (
+                          <div
+                            className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                            data-testid="model-unavailable-warning"
+                            title={t('models.unavailableWarning')}
+                          >
+                            <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                            <span>{t('models.unavailableWarning')}</span>
+                          </div>
+                        )}
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
                         <button

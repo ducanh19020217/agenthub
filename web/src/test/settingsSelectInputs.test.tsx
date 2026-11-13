@@ -742,6 +742,10 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       queryClient = new QueryClient({
         defaultOptions: { queries: { retry: false } },
       });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['codex:gpt-5.6-luna', 'sonnet'],
+        configured: ['codex:gpt-5.6-luna', 'sonnet'],
+      });
       vi.spyOn(client, 'getProfiles').mockResolvedValue([
         { name: 'codex-main', engine: 'codex', kind: 'isolated', home: '/home/codex', email: null, enabled: 1 } as any,
         { name: 'claude-main', engine: 'claude', kind: 'isolated', home: '/home/claude', email: null, enabled: 1 } as any,
@@ -782,8 +786,10 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(screen.queryByLabelText(/Ghi đè fallback reviewer/i)).not.toBeInTheDocument();
 
       // Assert that interactive controls are present
-      expect(screen.getAllByText('codex:gpt-5.6-luna').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('claude').length).toBeGreaterThan(0);
+      await waitFor(() => {
+        expect(screen.getAllByText('codex:gpt-5.6-luna').length).toBeGreaterThan(0);
+        expect(screen.getAllByText('claude').length).toBeGreaterThan(0);
+      });
     });
 
     it('saves updated reviewer order and review chain correctly', async () => {
@@ -1051,9 +1057,12 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
 
       // Review step select should display codex:custom-model-dynamic as a known select option, NOT custom input
       const chainBlock = screen.getByTestId('project-review-chain');
+      await waitFor(() => {
+        const stepSelect = within(chainBlock).getByRole('combobox', { name: /^Bước review 1$/i }) as HTMLSelectElement;
+        expect(stepSelect.value).toBe('codex:custom-model-dynamic');
+      });
       const stepSelect = within(chainBlock).getByRole('combobox', { name: /^Bước review 1$/i }) as HTMLSelectElement;
       expect(stepSelect.tagName.toLowerCase()).toBe('select');
-      expect(stepSelect.value).toBe('codex:custom-model-dynamic');
       expect(within(stepSelect).getByRole('option', { name: 'codex:custom-model-dynamic' })).toBeInTheDocument();
       // Ensure hardcoded models like gpt-5.6-turbo/luna are NOT included when not in API or config
       expect(within(stepSelect).queryByRole('option', { name: 'codex:gpt-5.6-turbo' })).not.toBeInTheDocument();
@@ -1282,6 +1291,74 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
 
       const chainBlock = screen.getByTestId('project-review-chain');
       expect(within(chainBlock).queryByText(/gpt-5.6-luna/i)).not.toBeInTheDocument();
+    });
+
+    it('displays warning badge and excludes unavailable configured models from drawer reviewer dropdown', async () => {
+      const projectWithUnavailableModel = {
+        ...mockProject,
+        id: 'p-unavailable',
+        settings: {
+          ...mockProject.settings,
+          review: {
+            order: [{ engine: 'codex', model: 'codex:unavailable-model', profiles: [] }],
+            fallback: { onUnavailable: true, onError: true, onBusyAfterMin: 10 },
+          },
+        },
+        review: {
+          chain: [
+            { reviewer: 'codex:unavailable-model', mode: 'gate' },
+          ],
+          maxRounds: 2,
+        },
+      };
+
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        configured: ['codex:unavailable-model'],
+        models: [
+          { id: 'codex:valid-model', engine: 'codex', profiles: ['p1'], verified: true, available: true },
+          { id: 'codex:unavailable-model', engine: 'codex', profiles: [], verified: false, available: false, warning: 'Không có tài khoản' },
+        ],
+        suggestions: ['codex:valid-model'],
+      });
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <ProjectSettingsDrawer
+                  project={projectWithUnavailableModel}
+                  isOpen={true}
+                  onClose={() => {}}
+                />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      const advancedSummary = screen.getByTestId('advanced-settings-section').querySelector('summary');
+      if (advancedSummary) fireEvent.click(advancedSummary);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('project-review-chain')).toBeInTheDocument();
+        expect(screen.getByTestId('project-reviewer-order')).toBeInTheDocument();
+      });
+
+      // Warning badge is shown in both reviewer-order and review-chain for unavailable-model
+      await waitFor(() => {
+        const orderBlock = screen.getByTestId('project-reviewer-order');
+        expect(within(orderBlock).getByTestId('model-unavailable-warning')).toBeInTheDocument();
+      });
+
+      const chainBlock = screen.getByTestId('project-review-chain');
+      expect(within(chainBlock).getByTestId('model-unavailable-warning')).toBeInTheDocument();
+
+      // Dropdown does NOT propose unavailable model as an available option
+      const orderBlock = screen.getByTestId('project-reviewer-order');
+      const reviewerSelect = within(orderBlock).getByRole('combobox', { name: /^Model reviewer 1$/i }) as HTMLSelectElement;
+      expect(within(reviewerSelect).queryByRole('option', { name: 'codex:unavailable-model' })).not.toBeInTheDocument();
+      expect(within(reviewerSelect).getByRole('option', { name: 'codex:valid-model' })).toBeInTheDocument();
     });
   });
 

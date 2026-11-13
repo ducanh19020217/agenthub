@@ -1367,6 +1367,53 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
       expect(queuedEvents.some((e) => e.id === 'p1/t-stale-run' && e.p?.reason === 'stale_run_sweep')).toBe(true);
     });
 
+    it('khi reviewer run mồ côi với task review, chỉ đánh dấu run crashed và giữ task ở review, không requeue worker', async () => {
+      const now = Date.now();
+      ctx.taskRepo.insert({
+        id: 'p1/t-stale-reviewer-run',
+        projectId: 'p1',
+        title: 'Task stale reviewer run',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-stale-reviewer-run', {
+        status: 'review',
+      });
+
+      // Insert reviewer run with dead pid
+      ctx.runRepo.insert({
+        id: 'run-reviewer-dead',
+        taskId: 'p1/t-stale-reviewer-run',
+        engine: 'codex',
+        model: 'gpt-5.6-luna',
+        profileName: 'prof1',
+        pid: 999999,
+        kind: 'reviewer',
+      });
+
+      const triggerTickSpy = vi.spyOn(ctx.scheduler, 'triggerTick');
+      const queuedEvents: Array<{ id?: string; p?: Record<string, unknown> }> = [];
+      ctx.scheduler.getEventBus().on('task.queued', (id, p) => {
+        queuedEvents.push({ id, p: p as Record<string, unknown> });
+      });
+
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'stale_run' && i.taskId === 'p1/t-stale-reviewer-run')).toBe(true);
+
+      // Verify self-repair: run marked crashed
+      const finishedRun = ctx.runRepo.get('run-reviewer-dead');
+      expect(finishedRun?.outcome).toBe('crashed');
+
+      // Verify task status: MUST STAY at 'review', not requeued to 'queued'
+      const taskAfterSweep = ctx.taskRepo.get('p1/t-stale-reviewer-run');
+      expect(taskAfterSweep?.status).toBe('review');
+
+      // Verify no task.queued event was emitted for this task
+      expect(queuedEvents.some((e) => e.id === 'p1/t-stale-reviewer-run')).toBe(false);
+
+      // Verify scheduler tick was triggered to allow re-dispatching reviewer
+      expect(triggerTickSpy).toHaveBeenCalled();
+    });
+
     it('không báo nhầm khi run đang hoạt động bình thường trong scheduler.running', async () => {
       const now = Date.now();
       ctx.taskRepo.insert({

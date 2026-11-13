@@ -531,11 +531,15 @@ export class HealthSweepService {
         if (shouldEmitWithCooldown(cooldownRepo, run.taskId, 'stale_run', currentStatus, now, cooldownMinutes)) {
           cooldownRepo.set(run.taskId, 'stale_run', new Date(now).toISOString(), currentStatus);
 
-          // Self repair: finish run and requeue task
+          // Self repair: finish run and requeue task if worker
           runRepo.finish(run.id, 'crashed', undefined, 'stale_run_sweep');
-          if (task && !['done', 'pushed', 'cancelled'].includes(task.status)) {
-            taskRepo.update(task.id, { status: 'queued', resume: 1 });
-            eventBus.emit('task.queued', task.id, { reason: 'stale_run_sweep' });
+          if (run.kind === 'worker') {
+            if (task && task.status === 'running') {
+              taskRepo.update(task.id, { status: 'queued', resume: 1 });
+              eventBus.emit('task.queued', task.id, { reason: 'stale_run_sweep' });
+            }
+          } else if (task && task.status === 'review') {
+            scheduler.triggerTick?.();
           }
 
           const evidence = collectEvidence(db, run.taskId, task, runRepo, reviewRepo);
@@ -546,7 +550,12 @@ export class HealthSweepService {
             status: currentStatus,
             sinceMinutes,
             evidence,
-            suggestion: 'Run trong DB bị mồ côi (pid không tồn tại và không nằm trong running); sweep đã đánh dấu crashed và requeue task.',
+            suggestion:
+              run.kind === 'worker' && task?.status === 'running'
+                ? 'Run trong DB bị mồ côi (pid không tồn tại và không nằm trong running); sweep đã đánh dấu crashed và requeue task.'
+                : run.kind !== 'worker' && task?.status === 'review'
+                  ? 'Run reviewer trong DB bị mồ côi (pid không tồn tại và không nằm trong running); sweep đã đánh dấu crashed và giữ task ở review để scheduler dispatch lại reviewer.'
+                  : 'Run trong DB bị mồ côi (pid không tồn tại và không nằm trong running); sweep đã đánh dấu crashed.',
           };
 
           eventBus.emit('task.health_issue', issue.taskId, issue);

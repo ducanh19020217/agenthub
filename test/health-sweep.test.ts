@@ -308,6 +308,166 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
         .run('p1/t-elig-test', 'run-test', 'test', 1, 0, 100, 'pass');
       expect(ctx.scheduler.getCheckResults('p1/t-elig-test').length).toBe(1);
     });
+
+    it('không báo nhầm review_orphan khi task reviewerEscalated nhưng arbiter bị quota/backoff', async () => {
+      const now = Date.now();
+      const past35m = new Date(now - 35 * 60 * 1000).toISOString();
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-review-escalated-quota',
+        projectId: 'p1',
+        title: 'Task review escalated in quota backoff',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-review-escalated-quota', {
+        status: 'review',
+        statusChangedAt: past35m,
+        worktreePath: projectPath,
+        reviewerEscalated: 1,
+        reviewerEscalationReason: 'reviewer_changes_limit',
+      });
+
+      ctx.runRepo.insert({
+        id: 'run-check-esc',
+        taskId: 'p1/t-review-escalated-quota',
+        engine: 'agy',
+        model: 'model',
+        profileName: 'prof1',
+      });
+      ctx.db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('p1/t-review-escalated-quota', 'run-check-esc', 'test', 1, 0, 100, 'pass');
+
+      ctx.eventRepo.insert('review.escalated', 'p1/t-review-escalated-quota', {
+        reason: 'reviewer_changes_limit',
+      });
+      ctx.eventRepo.insert('review.escalated', 'p1/t-review-escalated-quota', {
+        reason: 'reviewer_changes_limit',
+      });
+
+      vi.spyOn(ctx.scheduler, 'canStartEscalationArbiter').mockReturnValue(false);
+
+      const isEligible = ctx.scheduler.isReviewOrphanEligible(ctx.taskRepo.get('p1/t-review-escalated-quota')!);
+      expect(isEligible).toBe(false);
+
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'review_orphan' && i.taskId === 'p1/t-review-escalated-quota')).toBe(false);
+    });
+
+    it('phát hiện đúng review_orphan khi task reviewerEscalated và arbiter có thể chạy', async () => {
+      const now = Date.now();
+      const past35m = new Date(now - 35 * 60 * 1000).toISOString();
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-review-escalated-ready',
+        projectId: 'p1',
+        title: 'Task review escalated arbiter ready',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-review-escalated-ready', {
+        status: 'review',
+        statusChangedAt: past35m,
+        worktreePath: projectPath,
+        reviewerEscalated: 1,
+        reviewerEscalationReason: 'reviewer_changes_limit',
+      });
+
+      ctx.runRepo.insert({
+        id: 'run-check-esc-ready',
+        taskId: 'p1/t-review-escalated-ready',
+        engine: 'agy',
+        model: 'model',
+        profileName: 'prof1',
+      });
+      ctx.db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('p1/t-review-escalated-ready', 'run-check-esc-ready', 'test', 1, 0, 100, 'pass');
+
+      ctx.eventRepo.insert('review.escalated', 'p1/t-review-escalated-ready', {
+        reason: 'reviewer_changes_limit',
+      });
+      ctx.eventRepo.insert('review.escalated', 'p1/t-review-escalated-ready', {
+        reason: 'reviewer_changes_limit',
+      });
+
+      vi.spyOn(ctx.scheduler, 'canStartEscalationArbiter').mockReturnValue(true);
+
+      const isEligible = ctx.scheduler.isReviewOrphanEligible(ctx.taskRepo.get('p1/t-review-escalated-ready')!);
+      expect(isEligible).toBe(true);
+
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'review_orphan' && i.taskId === 'p1/t-review-escalated-ready')).toBe(true);
+    });
+
+    it('không báo nhầm review_orphan khi task reviewerEscalated chờ người duyệt thủ công (không cần arbiter)', async () => {
+      const now = Date.now();
+      const past35m = new Date(now - 35 * 60 * 1000).toISOString();
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-review-escalated-manual',
+        projectId: 'p1',
+        title: 'Task review escalated manual',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-review-escalated-manual', {
+        status: 'review',
+        statusChangedAt: past35m,
+        worktreePath: projectPath,
+        reviewerEscalated: 1,
+        reviewerEscalationReason: 'manual_escalation',
+      });
+
+      ctx.runRepo.insert({
+        id: 'run-check-manual',
+        taskId: 'p1/t-review-escalated-manual',
+        engine: 'agy',
+        model: 'model',
+        profileName: 'prof1',
+      });
+      ctx.db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('p1/t-review-escalated-manual', 'run-check-manual', 'test', 1, 0, 100, 'pass');
+
+      const isEligible = ctx.scheduler.isReviewOrphanEligible(ctx.taskRepo.get('p1/t-review-escalated-manual')!);
+      expect(isEligible).toBe(false);
+
+      const result = await sweepService.runSweep(now);
+      expect(result.issues.some((i) => i.rule === 'review_orphan' && i.taskId === 'p1/t-review-escalated-manual')).toBe(false);
+    });
+
+    it('canStartEscalationArbiter kiểm tra đúng quota và backoff của arbiter profile', () => {
+      ctx.config.reviewer = {
+        ...ctx.config.reviewer,
+        enabled: true,
+        arbiter: { engine: 'codex', model: 'gpt-5.6-luna' },
+      } as unknown as typeof ctx.config.reviewer;
+
+      (ctx.scheduler as unknown as { engines: Map<string, Engine> }).engines.set('codex', fakeEngine);
+      ctx.profileRepo.upsert({
+        name: 'codex-arbiter-1',
+        engine: 'codex',
+        kind: 'isolated',
+        home: path.join(tmpDir, 'agy-homes', 'codex-arbiter-1'),
+        email: 'codex-arbiter@example.com',
+        enabled: 1,
+      });
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-arbiter-test',
+        projectId: 'p1',
+        title: 'Arbiter test',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-arbiter-test', {
+        status: 'review',
+        worktreePath: projectPath,
+      });
+      const task = ctx.taskRepo.get('p1/t-arbiter-test')!;
+
+      // 1. When arbiter is available
+      expect(ctx.scheduler.canStartEscalationArbiter(task)).toBe(true);
+
+      // 2. When arbiter profile is exhausted
+      ctx.quotaMarkRepo.mark('codex-arbiter-1', 'codex', Math.floor(Date.now() / 1000) + 3600, 'exhausted');
+      expect(ctx.scheduler.canStartEscalationArbiter(task)).toBe(false);
+    });
   });
 
   // 3. queued_starved

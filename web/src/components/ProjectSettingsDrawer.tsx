@@ -37,7 +37,6 @@ import {
 import { Link } from 'react-router-dom';
 import {
   DEFAULT_COMMON_BRANCHES,
-  DEFAULT_CLAUDE_MODELS,
   getModelsForProvider,
   validateBranchSyntax,
   validateReviewerModelSyntax,
@@ -515,10 +514,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       .filter((r) => r.engine === 'claude')
       .map((r) => r.model);
 
-    const fallbackDefaults = modelOptions ? [] : DEFAULT_CLAUDE_MODELS;
-
     return getModelsForProvider([
-      ...fallbackDefaults,
       ...fromDiscovered,
       ...fromChat,
       ...fromChatModel,

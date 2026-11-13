@@ -86,8 +86,8 @@ export const DepartmentsPage: React.FC = () => {
       .map((model) => (model.startsWith('codex:') ? model.slice('codex:'.length) : model))
       .filter((model) => DEFAULT_CODEX_MODELS.includes(model) || model.startsWith('gpt-'));
     return {
-      claude: claude.length > 0 ? Array.from(new Set(claude)) : DEFAULT_CLAUDE_MODELS,
-      codex: codex.length > 0 ? Array.from(new Set(codex)) : DEFAULT_CODEX_MODELS,
+      claude: Array.from(new Set(claude)),
+      codex: Array.from(new Set(codex)),
     };
   }, [modelOptions]);
 

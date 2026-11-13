@@ -8,6 +8,8 @@ import { ThemeProvider } from '../context/ThemeContext';
 import { SelectOrCustomInput, SortableModelList } from '../components/ui';
 import { SettingsPage } from '../pages/SettingsPage';
 import { ProjectSettingsDrawer } from '../components/ProjectSettingsDrawer';
+import { DepartmentsPage } from '../pages/DepartmentsPage';
+import { NewSessionModal } from '../components/chat/NewSessionModal';
 import {
   validateModelSyntax,
   validateChatModelSyntax,
@@ -1457,6 +1459,103 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
         expect(within(addChatModelSelect).queryByRole('option', { name: 'opus' })).not.toBeInTheDocument();
         expect(within(addChatModelSelect).queryByRole('option', { name: 'haiku' })).not.toBeInTheDocument();
       }
+    });
+
+    it('DepartmentsPage does not propose DEFAULT_CLAUDE_MODELS or DEFAULT_CODEX_MODELS when modelOptions is empty', async () => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: [],
+        configured: [],
+        models: [],
+      });
+      vi.spyOn(client, 'getDepartments').mockResolvedValue([
+        {
+          id: 'dept-1',
+          name: 'Engineering',
+          priority: 1,
+          maxParallel: 2,
+          claudeDailyTokenBudget: 0,
+          telegramTopicId: null,
+          brainEngine: 'claude',
+          brainModel: 'inherit',
+          brainCodexProfile: null,
+          brainMode: 'auto',
+          brainPermissions: 'trusted',
+          brainDailyTokenBudget: 100,
+          brainMaxTurnsPerHour: 2,
+          profiles: [],
+          projects: [],
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ]);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+      vi.spyOn(client, 'getProjects').mockResolvedValue([]);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <DepartmentsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await screen.findByText('Engineering');
+      fireEvent.click(screen.getByText('Cấu hình Brain'));
+
+      const brainModelSelect = screen.getByLabelText('Model Brain') as HTMLSelectElement;
+      expect(brainModelSelect).toBeInTheDocument();
+      // Should not have opus or haiku from hardcoded defaults
+      expect(within(brainModelSelect).queryByRole('option', { name: 'opus' })).not.toBeInTheDocument();
+      expect(within(brainModelSelect).queryByRole('option', { name: 'haiku' })).not.toBeInTheDocument();
+    });
+
+    it('NewSessionModal uses discovered models from getModelOptions and excludes unverified hardcoded defaults', async () => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['claude-3-5-sonnet'],
+        configured: [],
+        models: [
+          { id: 'claude-3-5-sonnet', engine: 'claude', profiles: ['claude-p1'], verified: true, available: true },
+        ],
+      });
+      vi.spyOn(client, 'getProjects').mockResolvedValue([]);
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        chat: { allowFullMode: false, models: ['opus', 'sonnet', 'haiku'] },
+      } as any);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <NewSessionModal isOpen={true} onClose={vi.fn()} onSubmit={vi.fn()} />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await screen.findByText(/Cuộc trò chuyện mới/i);
+      const modelSelect = screen.getByDisplayValue(/Mặc định của Claude Code/i);
+      expect(modelSelect).toBeInTheDocument();
+
+      // Discovered model must be present once query resolves
+      await waitFor(() => {
+        expect(screen.getByRole('option', { name: 'claude-3-5-sonnet' })).toBeInTheDocument();
+      });
+
+      // Hardcoded defaults opus and haiku must NOT be offered
+      expect(screen.queryByRole('option', { name: 'opus' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('option', { name: 'haiku' })).not.toBeInTheDocument();
     });
   });
 });

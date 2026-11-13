@@ -17,7 +17,7 @@ import {
   normalizeMessagesResponse,
   retryChatLimitNow,
 } from '../api/chat';
-import { getConfig } from '../api/client';
+import { getConfig, getModelOptions } from '../api/client';
 import { subscribeToEvents } from '../api/sse';
 import { ChatMessage, ChatMode, ChatSession, ChatPermissionRequest, UpdateChatSessionInput } from '../types/api';
 import { SessionList } from '../components/chat/SessionList';
@@ -91,6 +91,18 @@ export const ChatPage: React.FC = () => {
   );
   const isSessionsLoading = sessionsQuery.isLoading;
   const { data: systemConfig } = useQuery({ queryKey: ['config'], queryFn: getConfig });
+  const { data: modelOptions } = useQuery({ queryKey: ['model-options'], queryFn: getModelOptions });
+
+  const availableClaudeModels = useMemo(() => {
+    if (modelOptions?.models) {
+      return modelOptions.models
+        .filter((m) => m.engine === 'claude' && m.available)
+        .map((m) => m.id);
+    }
+    return (modelOptions?.suggestions || []).filter(
+      (m) => m.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(m),
+    );
+  }, [modelOptions]);
 
   // Resolve active session
   const activeSession = useMemo(() => {
@@ -99,6 +111,15 @@ export const ChatPage: React.FC = () => {
     }
     return null;
   }, [sessionId, sessions]);
+
+  const chatModelSelectOptions = useMemo(() => {
+    const currentModel = activeSession?.model || systemConfig?.chat?.model || 'sonnet';
+    const list = [...availableClaudeModels];
+    if (currentModel && !list.includes(currentModel)) {
+      list.unshift(currentModel);
+    }
+    return list;
+  }, [availableClaudeModels, activeSession?.model, systemConfig?.chat?.model]);
 
   // Navigate to first session if no sessionId specified
   useEffect(() => {
@@ -671,7 +692,7 @@ export const ChatPage: React.FC = () => {
                   onChange={(event) => updateSessionMutation.mutate({ id: activeSession.id, data: { model: event.target.value } })}
                   className="hidden sm:block max-w-28 text-xs rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-2 py-1.5 text-[var(--t-text)]"
                 >
-                  {(systemConfig?.chat?.models || ['opus', 'sonnet', 'haiku']).map((model) => <option key={model} value={model}>{model}</option>)}
+                  {chatModelSelectOptions.map((model) => <option key={model} value={model}>{model}</option>)}
                 </select>
                 <div className="hidden md:block w-56 lg:w-72">
                   <ContextMeter

@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { getProjects, getConfig, getProfiles } from '../../api/client';
+import { getProjects, getConfig, getProfiles, getModelOptions } from '../../api/client';
 import { ChatMode, Profile } from '../../types/api';
 import { X, ShieldCheck, AlertTriangle, Sparkles } from 'lucide-react';
 import { useLocale } from '../../context/LocaleContext';
@@ -45,6 +45,23 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   const allowFullMode = Boolean(config?.chat?.allowFullMode);
   const { data: profiles = [] } = useQuery({ queryKey: ['profiles'], queryFn: getProfiles, enabled: isOpen });
   const claudeProfiles = profiles.filter((profile: Profile) => profile.engine === 'claude');
+
+  const { data: modelOptions } = useQuery({
+    queryKey: ['model-options'],
+    queryFn: getModelOptions,
+    enabled: isOpen,
+  });
+
+  const availableClaudeModels = useMemo(() => {
+    if (modelOptions?.models) {
+      return modelOptions.models
+        .filter((m) => m.engine === 'claude' && m.available)
+        .map((m) => m.id);
+    }
+    return (modelOptions?.suggestions || []).filter(
+      (m) => m.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(m),
+    );
+  }, [modelOptions]);
 
   useEffect(() => {
     if (isOpen) suggestModalTour('modal-new-session');
@@ -144,7 +161,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
             <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--t-text-2)] mb-1.5">{t('extra.claudeModel')}</label>
             <select value={model} onChange={(e) => setModel(e.target.value)} className="w-full text-sm rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-[var(--t-text)]">
               <option value="">{t('extra.claudeDefault')}</option>
-              {(config?.chat?.models || ['opus', 'sonnet', 'haiku']).map((item) => <option key={item} value={item}>{item}</option>)}
+              {availableClaudeModels.map((item) => <option key={item} value={item}>{item}</option>)}
             </select>
           </div>
 

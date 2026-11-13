@@ -19,7 +19,7 @@ describe('DepartmentsPage', () => {
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     vi.spyOn(client, 'getDepartments').mockResolvedValue([department]);
     vi.spyOn(client, 'getProfiles').mockResolvedValue([{ name: 'worker-1' }] as any);
-    vi.spyOn(client, 'getModelOptions').mockResolvedValue({ suggestions: ['codex:gpt-5.6-luna'], configured: [] });
+    vi.spyOn(client, 'getModelOptions').mockResolvedValue({ suggestions: ['sonnet', 'opus', 'codex:gpt-5.6-luna'], configured: [] });
   });
 
   afterEach(() => vi.restoreAllMocks());

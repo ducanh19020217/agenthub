@@ -805,21 +805,13 @@ export class ChatService {
     if (mode === 'full' && !fullAllowed) {
       throw new HttpError(403, 'forbidden', 'Chế độ full chưa được cho phép trong cấu hình');
     }
-    const model = body.model ?? this.config.chat.model;
-    const allowedModels = new Set(['', ...(this.config.chat.models || ['opus', 'sonnet', 'haiku']), this.config.chat.model]);
-    if (this.profileModelRepo) {
-      const enabledProfiles = this.profileRepo
-        ? new Set(this.profileRepo.getAll().filter((p) => Boolean(p.enabled) && !p.deletedAt && isProfileLoggedIn(p)).map((p) => p.name))
-        : null;
-      const rows = this.profileModelRepo.getAll();
-      for (const row of rows) {
-        if (row.verified && (!enabledProfiles || enabledProfiles.has(row.profileName))) {
-          allowedModels.add(row.modelId);
-        }
-      }
+    const rawModel = body.model !== undefined && body.model !== null ? body.model : (this.config.chat.model ?? '');
+    if (typeof rawModel !== 'string') {
+      throw new HttpError(400, 'bad_request', 'Model chat không hợp lệ');
     }
-    if (!allowedModels.has(model)) {
-      throw new HttpError(400, 'bad_request', 'Model chat phải là mặc định, sonnet hoặc haiku');
+    const model = rawModel.trim();
+    if (/\s/.test(model)) {
+      throw new HttpError(400, 'bad_request', 'Tên model chat không được chứa khoảng trắng');
     }
     return { mode, model };
   }

@@ -1701,5 +1701,56 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(screen.queryByRole('option', { name: 'opus' })).not.toBeInTheDocument();
       expect(screen.queryByRole('option', { name: 'haiku' })).not.toBeInTheDocument();
     });
+
+    it('NewSessionModal allows custom model entry and displays warning for custom model', async () => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['claude-3-5-sonnet'],
+        configured: ['claude-unavailable-model'],
+        models: [
+          { id: 'claude-3-5-sonnet', engine: 'claude', profiles: ['claude-p1'], verified: true, available: true },
+          { id: 'claude-unavailable-model', engine: 'claude', profiles: [], verified: false, available: false, warning: 'Không có tài khoản' },
+        ],
+      });
+      vi.spyOn(client, 'getProjects').mockResolvedValue([]);
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        chat: { allowFullMode: false, models: ['opus', 'sonnet', 'haiku'] },
+      } as any);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+
+      const handleSubmit = vi.fn();
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <NewSessionModal isOpen={true} onClose={vi.fn()} onSubmit={handleSubmit} />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await screen.findByText(/Cuộc trò chuyện mới/i);
+      const modelSelect = screen.getByLabelText(/Model Claude/i) as HTMLSelectElement;
+      expect(modelSelect).toBeInTheDocument();
+
+      // Switch to custom mode
+      fireEvent.change(modelSelect, { target: { value: '__custom__' } });
+
+      const customInput = screen.getByPlaceholderText(/Mặc định của Claude Code/i);
+      expect(customInput).toBeInTheDocument();
+
+      // Enter a custom model
+      fireEvent.change(customInput, { target: { value: 'my-custom-claude-model' } });
+
+      // Custom warning is displayed
+      await waitFor(() => {
+        expect(screen.getByTestId('custom-warning')).toBeInTheDocument();
+      });
+    });
   });
 });

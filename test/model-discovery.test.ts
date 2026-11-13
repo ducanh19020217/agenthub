@@ -891,10 +891,16 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     });
     expect(validated.model).toBe('claude-3-5-sonnet-20241022');
 
-    // Calling with unverified / undiscovered model should throw 400
+    // Calling with custom model should succeed
+    const custom = (ChatService.prototype as any).validateSessionOptions.call(chatService, {
+      model: 'claude-custom-unverified',
+    });
+    expect(custom.model).toBe('claude-custom-unverified');
+
+    // Calling with model containing whitespace should throw 400
     expect(() => {
       (ChatService.prototype as any).validateSessionOptions.call(chatService, {
-        model: 'unknown-undiscovered-model',
+        model: 'invalid model with spaces',
       });
     }).toThrow();
   });

@@ -2,11 +2,12 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getProjects, getConfig, getProfiles, getModelOptions } from '../../api/client';
 import { ChatMode, Profile } from '../../types/api';
-import { X, ShieldCheck, AlertTriangle, Sparkles } from 'lucide-react';
+import { X, ShieldCheck, AlertTriangle, AlertCircle, Sparkles } from 'lucide-react';
 import { useLocale } from '../../context/LocaleContext';
 import { UI_Z_INDEX } from '../ui/layers';
 import { useFocusTrap } from '../ui/useFocusTrap';
 import { useTour } from '../tour/TourContext';
+import { SelectOrCustomInput } from '../ui/SelectOrCustomInput';
 
 interface NewSessionModalProps {
   isOpen: boolean;
@@ -62,6 +63,15 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
       (m) => m.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(m),
     );
   }, [modelOptions]);
+
+  const isModelUnavailable = useMemo(() => {
+    if (!model) return false;
+    if (modelOptions?.models) {
+      const match = modelOptions.models.find((m) => (m.id === model || `claude:${m.id}` === model || m.id === `claude:${model}`) && m.engine === 'claude');
+      if (match) return !match.available;
+    }
+    return false;
+  }, [model, modelOptions]);
 
   useEffect(() => {
     if (isOpen) suggestModalTour('modal-new-session');
@@ -156,13 +166,29 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
             </select>
           </div>
 
-          {/* Mode Selector */}
+          {/* Claude Model Selector */}
           <div>
             <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--t-text-2)] mb-1.5">{t('extra.claudeModel')}</label>
-            <select value={model} onChange={(e) => setModel(e.target.value)} className="w-full text-sm rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-[var(--t-text)]">
-              <option value="">{t('extra.claudeDefault')}</option>
-              {availableClaudeModels.map((item) => <option key={item} value={item}>{item}</option>)}
-            </select>
+            <SelectOrCustomInput
+              value={model}
+              onChange={setModel}
+              options={availableClaudeModels}
+              allowEmpty={true}
+              emptyLabel={t('extra.claudeDefault')}
+              placeholder={t('extra.claudeDefault')}
+              ariaLabel={t('extra.claudeModel')}
+              showCustomWarning={true}
+            />
+            {isModelUnavailable && (
+              <div
+                className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                data-testid="model-unavailable-warning"
+                title={t('models.unavailableWarning')}
+              >
+                <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                <span>{t('models.unavailableWarning')}</span>
+              </div>
+            )}
           </div>
 
           {/* Mode Selector */}

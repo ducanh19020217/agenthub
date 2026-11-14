@@ -211,7 +211,7 @@ export class EventBus extends EventEmitter {
   }
 }
 
-interface RunningTask {
+export interface RunningTask {
   runId: string;
   taskId: string;
   pid: number;
@@ -238,6 +238,7 @@ interface RunningTask {
   // Stall & looping detection
   lastCommitCheckAt?: number;
   lastCommitCount?: number;
+  lastCommitAt?: number;
   lastNoCommitThresholdEmitted?: number;
   noCommitMinutes?: number;
   isLooping?: boolean;
@@ -252,6 +253,7 @@ interface RunningTask {
   paused?: boolean;
   pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
   pausedAt?: number | null;
+  resumedAt?: number | null;
   pauseReminded?: boolean;
   referenceSnapshots?: ReferenceSnapshot[];
   adopted?: boolean;
@@ -622,6 +624,133 @@ export class Scheduler {
 
   isDraining(): boolean { return this.restartState.draining; }
 
+  isStopped(): boolean { return this.stopped; }
+
+  isChecking(taskId: string): boolean {
+    return this.checkingActive.has(taskId) || this.checkingQueue.some((e) => e.taskId === taskId);
+  }
+
+  isRunning(taskId: string): boolean {
+    return this.running.has(taskId);
+  }
+
+  isReviewing(taskId: string): boolean {
+    return this.reviewerRuns.has(taskId);
+  }
+
+  isRunActive(runId: string): boolean {
+    for (const rt of this.running.values()) {
+      if (rt.runId === runId) return true;
+    }
+    for (const rr of this.reviewerRuns.values()) {
+      if (rr.runId === runId) return true;
+    }
+    return false;
+  }
+
+  getRunningTask(taskId: string): RunningTask | undefined {
+    return this.running.get(taskId);
+  }
+
+  reviewerTaskInBackoff(taskId: string, now = Date.now()): boolean {
+    return (this.reviewerTaskBackoffUntil.get(taskId) || 0) > now;
+  }
+
+  setReviewerTaskBackoff(taskId: string, until: number): void {
+    this.reviewerTaskBackoffUntil.set(taskId, until);
+  }
+
+  isReviewOrphanEligible(task: TaskRow, now = Date.now()): boolean {
+    if (this.config.reviewer?.enabled === false) return false;
+    const project = this.projectRepo.get(task.projectId);
+    if (!project) return false;
+    if (!task.worktreePath) return false;
+    if (this.getCheckResults(task.id).length === 0) return false;
+    const focus = this.getFocus();
+    if (focus.projectId && task.projectId !== focus.projectId) return false;
+    if (this.reviewerRuns.has(task.id)) return false;
+    if (this.reviewerTaskInBackoff(task.id, now)) return false;
+
+    if (task.reviewerEscalated) {
+      const last = this.reviewRepo?.getByTask(task.id).at(-1);
+      if (last && isAutoReviewer(last.actor) && last.verdict === 'approved') {
+        // An automated reviewer approved after the escalation: it is resolved.
+        // In this transitional state before the scheduler tick resets escalation,
+        // it is not an orphan waiting for an automated reviewer.
+        return false;
+      }
+      if (!this.needsEscalationArbiter(task)) return false;
+      return this.canStartEscalationArbiter(task);
+    }
+
+    const chain = this.reviewChainForTask(task);
+    const step = chain[task.reviewStep ?? 0];
+    if (chain.length > 0 && !isAutomatedStep(step)) return false;
+    if (chain.length > 0 && step?.reviewer === 'claude') return false;
+    if (chain.length > 0 && (task.reviewStep ?? 0) >= chain.length) return false;
+    if (chain.length === 0) {
+      const snapshot = this.failoverState?.snapshot() || { active: false, step: undefined };
+      if (!snapshot.active || snapshot.step?.type !== 'engine' || snapshot.step.engine !== 'codex') return false;
+    }
+    const defaultReviewer = this.config.reviewer?.order?.[0];
+    const model = reviewerModel(step || { reviewer: defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna', mode: 'gate' }) || (defaultReviewer ? `${defaultReviewer.engine}:${defaultReviewer.model}` : 'codex:gpt-5.6-luna');
+    const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
+    const isPlan = task.slug.endsWith('-plan');
+    const preferDifferentEngine = isPlan ? lastWorker?.engine : undefined;
+    const picked = chain.length > 0
+      ? this.pickChainReviewer(task, step, model, lastWorker?.profileName, true)
+      : this.pickReviewer(task, lastWorker?.model === model ? lastWorker.profileName : undefined, preferDifferentEngine, true);
+    if ('wait' in picked) return false;
+    return true;
+  }
+
+  canStartEscalationArbiter(task: TaskRow): boolean {
+    if (!task.worktreePath) return false;
+    const arbiter = this.config.reviewer?.arbiter || { engine: 'claude' as const, model: 'opus' };
+    if (arbiter.engine === 'claude' && !this.claudeBudgetAvailable(task)) {
+      return false;
+    }
+    const engineKey = arbiter.engine === 'claude' ? CLAUDE_REVIEW_ENGINE_KEY : 'codex';
+    const engine = this.engines.get(engineKey);
+    if (engine) {
+      const preferred = arbiter.engine === 'claude' ? (this.config.reviewer?.claudeProfiles ?? []) : [];
+      const hasCandidate = this.profileRepo.getEnabled().some((p) =>
+        p.engine === arbiter.engine &&
+        (p.authState == null || p.authState === 'ok') &&
+        (preferred.length === 0 || preferred.includes(p.name)) &&
+        !this.quotaService.isExhausted(p.name, arbiter.engine === 'claude' ? 'claude' : 'codex') &&
+        !this.reviewerInBackoff(p.name) &&
+        !this.reviewerRunsForProfile(p.name) &&
+        this.locks.findFreeSlotSync(p) !== null,
+      );
+      if (hasCandidate) return true;
+    }
+
+    const arbiterEngine = this.config.reviewer?.arbiter?.engine ?? 'claude';
+    if (arbiterEngine === 'codex') {
+      const claudeEngine = this.engines.get(CLAUDE_REVIEW_ENGINE_KEY);
+      if (!claudeEngine || !this.claudeBudgetAvailable(task)) return false;
+      return this.profileRepo.getEnabled().some((profile) =>
+        profile.engine === 'claude'
+        && (profile.authState == null || profile.authState === 'ok')
+        && !this.quotaService.isExhausted(profile.name, 'claude')
+        && !this.reviewerInBackoff(profile.name)
+        && !this.reviewerRunsForProfile(profile.name)
+        && this.locks.findFreeSlotSync(profile) !== null,
+      );
+    }
+
+    const codexEngine = this.engines.get('codex');
+    if (!codexEngine) return false;
+    return this.profileRepo.getEnabled().some((profile) =>
+      profile.engine === 'codex'
+      && !this.quotaService.isExhausted(profile.name, 'codex')
+      && !this.reviewerInBackoff(profile.name)
+      && !this.reviewerRunsForProfile(profile.name)
+      && this.locks.findFreeSlotSync(profile) !== null,
+    );
+  }
+
   beginRestartDrain(timeoutMinutes = 120, reason?: string, onReady?: () => void): RestartState {
     const now = Date.now();
     const timeoutAt = now + Math.max(1, timeoutMinutes) * 60_000;
@@ -709,7 +838,7 @@ export class Scheduler {
     };
   }
 
-  private hasParallelCapacity(project: { id: string; maxParallel: number; departmentId?: string }): boolean {
+  hasParallelCapacity(project: { id: string; maxParallel: number; departmentId?: string }): boolean {
     const usage = this.parallelUsage(project);
     if (usage.project >= this.effectiveParallel(project)) return false;
     const department = project.departmentId ? this.departmentRepo?.get(project.departmentId) : undefined;
@@ -833,6 +962,7 @@ export class Scheduler {
     rt.paused = false;
     rt.pauseReason = null;
     rt.pausedAt = null;
+    rt.resumedAt = Date.now();
     rt.pauseReminded = false;
     rt.lastActivityAt = Date.now();
     rt.lastOutputAt = Date.now();
@@ -2145,6 +2275,11 @@ export class Scheduler {
     rt.lastCommitCount = commitCount;
 
     const lastCommitTime = commitCount > 0 ? timestamps[0] : rt.startTime;
+    if (commitCount > 0) {
+      rt.lastCommitAt = timestamps[0];
+    } else {
+      rt.lastCommitAt = undefined;
+    }
     const elapsedMs = Math.max(0, now - lastCommitTime);
     const elapsedMinutes = Math.floor(elapsedMs / (60 * 1000));
 
@@ -2986,7 +3121,7 @@ export class Scheduler {
       const focus = this.getFocus();
       if (focus.projectId && task.projectId !== focus.projectId) continue;
       if (this.reviewerRuns.has(task.id)) continue;
-      if ((this.reviewerTaskBackoffUntil.get(task.id) || 0) > Date.now()) continue;
+      if (this.reviewerTaskInBackoff(task.id)) continue;
       if (task.reviewerEscalated) {
         const last = this.reviewRepo.getByTask(task.id).at(-1);
         if (last && isAutoReviewer(last.actor) && last.verdict === 'approved') {
@@ -3522,7 +3657,7 @@ export class Scheduler {
     const actor: ReviewerActor = engine.id === 'claude' ? 'claude-reviewer' : 'codex-reviewer';
     const profile = this.profileRepo.get(profileName);
     if (!profile || !task.worktreePath || this.reviewerRuns.has(task.id)) return;
-    if ((this.reviewerTaskBackoffUntil.get(task.id) || 0) > Date.now()) return;
+    if (this.reviewerTaskInBackoff(task.id)) return;
     const dirtyPaths = this.reviewerDirtyPaths(task.worktreePath);
     if (dirtyPaths === null || dirtyPaths.length > 0) {
       this.handleDirtyReview(task, dirtyPaths || [], dirtyPaths === null ? 'unable to read git status' : 'uncommitted changes');
@@ -4893,7 +5028,7 @@ export class Scheduler {
     }
   }
 
-  private getProcessStartTime(pid: number): number | null {
+  getProcessStartTime(pid: number): number | null {
     try {
       const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
       const afterComm = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
@@ -4903,8 +5038,8 @@ export class Scheduler {
     }
   }
 
-  private isProcessAlive(pid: number | null, expectedStart?: number | null): boolean {
-    if (!pid) return false;
+  isProcessAlive(pid: number | null, expectedStart?: number | null): boolean {
+    if (!pid || pid <= 0) return false;
     try {
       process.kill(pid, 0);
       if (expectedStart != null) {

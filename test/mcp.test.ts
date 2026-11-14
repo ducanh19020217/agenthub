@@ -1030,5 +1030,108 @@ describe('AgentHub MCP Server Tools', () => {
     const createdParsed = JSON.parse(createRes.content[0].text);
     expect(createdParsed).toEqual(expect.objectContaining({ id: 42, displayId: 'DEMO-42' }));
   });
+
+  describe('hub_health_sweep tool', () => {
+    beforeEach(() => {
+      vi.spyOn(ctx.scheduler, 'isStopped').mockReturnValue(false);
+      vi.spyOn(ctx.scheduler, 'isDraining').mockReturnValue(false);
+    });
+
+    it('returns prompt message when no health sweep has been run', async () => {
+      const res = (await client.callTool({
+        name: 'hub_health_sweep',
+        arguments: {},
+      })) as { content: Array<{ type: string; text: string }>; isError?: boolean };
+
+      expect(res.isError).toBeUndefined();
+      expect(res.content[0].text).toBe(
+        'Chưa có kết quả quét sức khoẻ nào. Gọi lại với { runNow: true } để quét ngay.',
+      );
+    });
+
+    it('triggers sweep via POST when runNow is true and formats clean result', async () => {
+      const res = (await client.callTool({
+        name: 'hub_health_sweep',
+        arguments: { runNow: true },
+      })) as { content: Array<{ type: string; text: string }>; isError?: boolean };
+
+      expect(res.isError).toBeUndefined();
+      expect(res.content[0].text).toContain('Lượt quét sức khoẻ:');
+      expect(res.content[0].text).toContain('Tất cả bình thường, không phát hiện bất thường nào.');
+    });
+
+    it('retrieves cached sweep result via GET when runNow is false', async () => {
+      // First run a sweep to populate lastResult
+      await client.callTool({
+        name: 'hub_health_sweep',
+        arguments: { runNow: true },
+      });
+
+      // Now query via GET (runNow: false)
+      const res = (await client.callTool({
+        name: 'hub_health_sweep',
+        arguments: { runNow: false },
+      })) as { content: Array<{ type: string; text: string }>; isError?: boolean };
+
+      expect(res.isError).toBeUndefined();
+      expect(res.content[0].text).toContain('Lượt quét sức khoẻ:');
+      expect(res.content[0].text).toContain('Tất cả bình thường, không phát hiện bất thường nào.');
+    });
+
+    it('formats detected issues list correctly', async () => {
+      ctx.projectRepo.insert({
+        id: 'p-health-mcp',
+        name: 'Health MCP Project',
+        path: tmpDir,
+        defaultBranch: 'main',
+        envTemplate: null,
+        maxParallel: 1,
+      });
+      ctx.taskRepo.insert({
+        id: 'p-health-mcp/t-churn',
+        projectId: 'p-health-mcp',
+        slug: 't-churn',
+        title: 'Task with churn issue',
+        status: 'queued',
+      });
+      ctx.taskRepo.update('p-health-mcp/t-churn', {
+        runCount: 10,
+      });
+
+      const res = (await client.callTool({
+        name: 'hub_health_sweep',
+        arguments: { runNow: true },
+      })) as { content: Array<{ type: string; text: string }>; isError?: boolean };
+
+      expect(res.isError).toBeUndefined();
+      expect(res.content[0].text).toContain('Phát hiện 1 vấn đề:');
+      expect(res.content[0].text).toContain('- [churn] p-health-mcp/t-churn (queued,');
+      expect(res.content[0].text).toContain('đổi model chain');
+    });
+
+    it('handles daemon down error gracefully when server is unreachable', async () => {
+      const offlineMcpServer = createMcpServer({
+        port: 59999,
+        baseUrl: 'http://127.0.0.1:59999',
+        token,
+      });
+      const [cTrans, sTrans] = InMemoryTransport.createLinkedPair();
+      await offlineMcpServer.connect(sTrans);
+      const offlineClient = new Client({ name: 'c-offline-sweep', version: '1.0' }, { capabilities: {} });
+      await offlineClient.connect(cTrans);
+
+      try {
+        const res = (await offlineClient.callTool({
+          name: 'hub_health_sweep',
+          arguments: {},
+        })) as { content: Array<{ type: string; text: string }>; isError?: boolean };
+
+        expect(res.isError).toBe(true);
+        expect(res.content[0].text).toContain('AgentHub daemon chưa chạy');
+      } finally {
+        await offlineClient.close();
+      }
+    });
+  });
 });
 

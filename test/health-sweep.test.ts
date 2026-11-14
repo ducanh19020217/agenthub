@@ -550,6 +550,90 @@ describe('Health Sweep & Brain Wakeup (t-health-sweep-brain)', () => {
       ctx.quotaMarkRepo.mark('codex-arbiter-1', 'codex', Math.floor(Date.now() / 1000) + 3600, 'exhausted');
       expect(ctx.scheduler.canStartEscalationArbiter(task)).toBe(false);
     });
+
+    it('task review đủ tuổi nhưng đang backoff -> sweep không báo review_orphan; hết backoff -> báo', async () => {
+      const now = Date.now();
+      const past35m = new Date(now - 35 * 60 * 1000).toISOString();
+
+      ctx.taskRepo.insert({
+        id: 'p1/t-review-backoff',
+        projectId: 'p1',
+        title: 'Task review in backoff',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-review-backoff', {
+        status: 'review',
+        statusChangedAt: past35m,
+        worktreePath: projectPath,
+        reviewerEscalated: 1,
+        reviewerEscalationReason: 'reviewer_changes_limit',
+      });
+
+      ctx.runRepo.insert({
+        id: 'run-check-backoff',
+        taskId: 'p1/t-review-backoff',
+        engine: 'agy',
+        model: 'model',
+        profileName: 'prof1',
+      });
+      ctx.db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('p1/t-review-backoff', 'run-check-backoff', 'test', 1, 0, 100, 'pass');
+
+      ctx.eventRepo.insert('review.escalated', 'p1/t-review-backoff', {
+        reason: 'reviewer_changes_limit',
+      });
+      ctx.eventRepo.insert('review.escalated', 'p1/t-review-backoff', {
+        reason: 'reviewer_changes_limit',
+      });
+
+      vi.spyOn(ctx.scheduler, 'canStartEscalationArbiter').mockReturnValue(true);
+
+      // Đặt task-level reviewer backoff tới now + 60s
+      ctx.scheduler.setReviewerTaskBackoff('p1/t-review-backoff', now + 60_000);
+
+      // 1. Khi đang trong backoff: isReviewOrphanEligible = false, sweep không báo issue
+      expect(ctx.scheduler.reviewerTaskInBackoff('p1/t-review-backoff', now)).toBe(true);
+      expect(ctx.scheduler.isReviewOrphanEligible(ctx.taskRepo.get('p1/t-review-backoff')!, now)).toBe(false);
+
+      const resultDuringBackoff = await sweepService.runSweep(now);
+      expect(resultDuringBackoff.issues.some((i) => i.rule === 'review_orphan' && i.taskId === 'p1/t-review-backoff')).toBe(false);
+
+      // 2. Sau khi hết backoff (now + 65s): isReviewOrphanEligible = true, sweep báo review_orphan
+      const later = now + 65_000;
+      expect(ctx.scheduler.reviewerTaskInBackoff('p1/t-review-backoff', later)).toBe(false);
+      expect(ctx.scheduler.isReviewOrphanEligible(ctx.taskRepo.get('p1/t-review-backoff')!, later)).toBe(true);
+
+      const resultAfterBackoff = await sweepService.runSweep(later);
+      expect(resultAfterBackoff.issues.some((i) => i.rule === 'review_orphan' && i.taskId === 'p1/t-review-backoff')).toBe(true);
+    });
+
+    it('isReviewOrphanEligible trả về false cho cả review thường khi task đang trong reviewerTaskBackoff', () => {
+      ctx.taskRepo.insert({
+        id: 'p1/t-review-normal-backoff',
+        projectId: 'p1',
+        title: 'Task normal review in backoff',
+        level: 'easy',
+      });
+      ctx.taskRepo.update('p1/t-review-normal-backoff', {
+        status: 'review',
+        worktreePath: projectPath,
+      });
+
+      ctx.runRepo.insert({
+        id: 'run-check-norm',
+        taskId: 'p1/t-review-normal-backoff',
+        engine: 'agy',
+        model: 'model',
+        profileName: 'prof1',
+      });
+      ctx.db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('p1/t-review-normal-backoff', 'run-check-norm', 'test', 1, 0, 100, 'pass');
+
+      const now = Date.now();
+      ctx.scheduler.setReviewerTaskBackoff('p1/t-review-normal-backoff', now + 30_000);
+      expect(ctx.scheduler.reviewerTaskInBackoff('p1/t-review-normal-backoff', now)).toBe(true);
+      expect(ctx.scheduler.isReviewOrphanEligible(ctx.taskRepo.get('p1/t-review-normal-backoff')!, now)).toBe(false);
+    });
   });
 
   // 3. queued_starved

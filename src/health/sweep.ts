@@ -281,7 +281,7 @@ export class HealthSweepService {
         const sinceMinutes = Math.floor(Math.max(0, now - statusTime) / 60_000);
         if (sinceMinutes >= rules.reviewOrphanMin) {
           if (!task.worktreePath) continue;
-          if (scheduler.isReviewOrphanEligible(task)) {
+          if (scheduler.isReviewOrphanEligible(task, now)) {
             emitIssue(
               'review_orphan',
               task,

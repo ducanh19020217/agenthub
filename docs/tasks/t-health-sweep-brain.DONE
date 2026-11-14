@@ -11,7 +11,7 @@
 3. **Dịch vụ Health Sweep (`src/health/sweep.ts`)**:
    - Triển khai 7 luật phát hiện định kỳ:
      - `checking_orphan`: task `checking` quá 20 phút không có check active/queued và không có run đang chạy. Tự sửa an toàn bằng cách kích hoạt lại check (`runChecksForTask`), bắt và log lỗi async qua `.catch()` tránh unhandled promise rejection.
-     - `review_orphan`: task `review` quá 30 phút, kiểm tra đầy đủ autocheck results và `worktreePath`. Với task đã `reviewerEscalated`, kiểm tra chính xác khả năng dispatch arbiter (`canStartEscalationArbiter`), không rơi xuống reviewer thường; và trả về false khi đã có review tự động duyệt (`approved`) giải quyết leo thang trong trạng thái chuyển tiếp, tránh báo nhầm review_orphan khi task đã được arbiter duyệt.
+     - `review_orphan`: task `review` quá 30 phút, kiểm tra đầy đủ autocheck results và `worktreePath`. Kiểm tra `reviewerTaskInBackoff()` dùng chung giữa `scheduleReviews()` và `isReviewOrphanEligible()`, đảm bảo task đang trong task-level reviewer backoff (kể cả nhánh leo thang arbiter) không bị coi là mồ côi. Với task đã `reviewerEscalated`, kiểm tra chính xác khả năng dispatch arbiter (`canStartEscalationArbiter`), không rơi xuống reviewer thường; và trả về false khi đã có review tự động duyệt (`approved`) giải quyết leo thang trong trạng thái chuyển tiếp, tránh báo nhầm review_orphan khi task đã được arbiter duyệt.
      - `queued_starved`: task `queued` quá 60 phút, kiểm tra `notBefore` chính xác theo epoch seconds, tôn trọng trạng thái pause của scheduler (`scheduler.isPaused()`), không bị chặn bởi dependency, quota waitReason, hay pause focus.
      - `running_no_progress`: worker chạy quá 90 phút mà không có commit hoặc đổi file trong worktree. Bỏ qua các runtime đang pause (`rt.paused`), và tính thời gian tiến độ từ thời điểm resume (`rt.resumedAt`). Đánh giá trong cửa sổ tiến độ `now - runningNoProgressMin * 60_000`, đối chiếu `cachedWorktreeMtime`, mtime `.git/index` (hỗ trợ git worktree pointer file), `lastCommitAt`, và dữ liệu `noCommitMinutes`. Không dùng `lastCommitCheckAt` làm bằng chứng tiến độ; fallback lấy thời điểm commit thực tế từ git log worktree hoặc `effectiveStartTime`.
      - `churn`: worker runs >= 8 hoặc `review.escalated` >= 2.
@@ -38,24 +38,27 @@
 6. **Điều chỉnh theo kết quả Audit & Review trước khi publish**:
    - Revert toàn bộ các thay đổi giao diện ngoài phạm vi của `TaskFlow.tsx`, `index.css`, và `taskFlow.test.tsx` khớp hoàn toàn với nhánh `main`, đảm bảo `git diff main...HEAD -- web/src/components/TaskFlow.tsx web/src/index.css web/src/test/taskFlow.test.tsx` hoàn toàn rỗng.
    - Sửa `isReviewOrphanEligible()` trong `src/scheduler/index.ts` để trả về `false` khi `task.reviewerEscalated` đã được review tự động duyệt (`approved`), tránh rơi xuống logic chọn reviewer thường và gây báo `review_orphan` giả trong trạng thái chuyển tiếp.
+   - Thêm kiểm tra `reviewerTaskBackoffUntil` thông qua helper `reviewerTaskInBackoff()` dùng chung giữa `scheduleReviews()`, `startReview()`, và `isReviewOrphanEligible()`, đảm bảo task đang trong task-level reviewer backoff (kể cả nhánh leo thang arbiter) không bị báo `review_orphan` giả.
 
 ## Kết quả kiểm tra
-- `npm run typecheck`: 0 lỗi (`tsc --noEmit` thành công).
 - `npm run lint`: 0 lỗi (`eslint src/ test/` thành công, 115 warnings có sẵn từ baseline).
+- `npm run typecheck`: 0 lỗi (`tsc --noEmit` thành công).
+- `npm run test`: 145/145 test files passed, 1877/1877 tests passed.
+- `npm run test:web`: 74/74 test files passed, 675/675 tests passed.
 - `npm run build`: 0 lỗi (`tsc && cp src/protocol.md dist/protocol.md` thành công).
-- Web:
-  - `cd web && npm run typecheck`: 0 lỗi (`tsc --noEmit` thành công).
-  - `cd web && npx vitest run src/test/taskFlow.test.tsx`: 18/18 tests passed.
+- `npm run build:web`: 0 lỗi (`tsc && vite build` thành công).
 - Backend Test suites:
-  - `test/health-sweep.test.ts`: 50/50 tests passed (bao gồm ca kiểm thử 2 run stale cùng lúc trên 1 task và ca không báo nhầm review_orphan khi task reviewerEscalated đã được review tự động duyệt).
+  - `test/health-sweep.test.ts`: 52/52 tests passed (bao gồm ca kiểm thử task review đủ tuổi nhưng đang backoff -> sweep không báo review_orphan; hết backoff -> báo, và ca kiểm thử 2 run stale cùng lúc).
   - `test/scheduler.test.ts`: 150/150 tests passed.
   - `test/cli.test.ts`: 22/22 tests passed (bao gồm 6 tests cho `cmdHealthSweep`).
   - `test/mcp.test.ts`: 30/30 tests passed (bao gồm 5 tests cho `hub_health_sweep`).
 
 ## Việc còn thiếu
-- Không có. Toàn bộ yêu cầu và phản hồi review / prepublish audit (revert TaskFlow out-of-scope diff, review_orphan approved escalation transition safety, tách self-repair khỏi cooldown trong `stale_run`, reviewer stale run self-repair, unassigned PID grace period, xác thực PID reuse bằng scheduler.isProcessAlive với pidStart, bảo vệ timer runSweep và try/catch parse JSON trong failover_churn, scheduler/task pause handling, self-repair rejection safety, notBefore epoch seconds, autochecks/worktreePath cho review_orphan, escalation arbiter eligibility, CLI/MCP test coverage, running_no_progress time-window, và fallback commit thực tế) đã được hoàn thiện và xác minh đầy đủ.
+- Không có. Toàn bộ yêu cầu và phản hồi review / prepublish audit (task-level reviewer backoff eligibility check, revert TaskFlow out-of-scope diff, review_orphan approved escalation transition safety, tách self-repair khỏi cooldown trong `stale_run`, reviewer stale run self-repair, unassigned PID grace period, xác thực PID reuse bằng scheduler.isProcessAlive với pidStart, bảo vệ timer runSweep và try/catch parse JSON trong failover_churn, scheduler/task pause handling, self-repair rejection safety, notBefore epoch seconds, autochecks/worktreePath cho review_orphan, escalation arbiter eligibility, CLI/MCP test coverage, running_no_progress time-window, và fallback commit thực tế) đã được hoàn thiện và xác minh đầy đủ.
 
 ## Danh sách commit
+- `b3cd1d89 fix(scheduler): ignore tasks in reviewerTaskBackoff from review_orphan eligibility`
+- `3613760a docs(tasks): update completion report with final TaskFlow revert commit`
 - `f7d9c0ba revert(web): revert out-of-scope TaskFlow diagram layout changes to match main`
 - `ef91ea92 docs(tasks): update completion report with audit findings resolution`
 - `1306e106 fix(scheduler): return false in isReviewOrphanEligible when auto-reviewer approved escalated task`

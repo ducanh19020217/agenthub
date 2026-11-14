@@ -36,7 +36,7 @@
    - Ghi nhận quyết định kiến trúc DEC-032 trong `docs/DECISIONS.md`.
 
 6. **Điều chỉnh theo kết quả Audit & Review trước khi publish**:
-   - Revert các thay đổi giao diện ngoài phạm vi của `TaskFlow.tsx`, `index.css`, và `taskFlow.test.tsx` để đồng nhất với baseline nhánh `agenthub/integration`, đảm bảo diff không lệch phạm vi.
+   - Revert toàn bộ các thay đổi giao diện ngoài phạm vi của `TaskFlow.tsx`, `index.css`, và `taskFlow.test.tsx` khớp hoàn toàn với nhánh `main`, đảm bảo `git diff main...HEAD -- web/src/components/TaskFlow.tsx web/src/index.css web/src/test/taskFlow.test.tsx` hoàn toàn rỗng.
    - Sửa `isReviewOrphanEligible()` trong `src/scheduler/index.ts` để trả về `false` khi `task.reviewerEscalated` đã được review tự động duyệt (`approved`), tránh rơi xuống logic chọn reviewer thường và gây báo `review_orphan` giả trong trạng thái chuyển tiếp.
 
 ## Kết quả kiểm tra
@@ -56,6 +56,8 @@
 - Không có. Toàn bộ yêu cầu và phản hồi review / prepublish audit (revert TaskFlow out-of-scope diff, review_orphan approved escalation transition safety, tách self-repair khỏi cooldown trong `stale_run`, reviewer stale run self-repair, unassigned PID grace period, xác thực PID reuse bằng scheduler.isProcessAlive với pidStart, bảo vệ timer runSweep và try/catch parse JSON trong failover_churn, scheduler/task pause handling, self-repair rejection safety, notBefore epoch seconds, autochecks/worktreePath cho review_orphan, escalation arbiter eligibility, CLI/MCP test coverage, running_no_progress time-window, và fallback commit thực tế) đã được hoàn thiện và xác minh đầy đủ.
 
 ## Danh sách commit
+- `f7d9c0ba revert(web): revert out-of-scope TaskFlow diagram layout changes to match main`
+- `ef91ea92 docs(tasks): update completion report with audit findings resolution`
 - `1306e106 fix(scheduler): return false in isReviewOrphanEligible when auto-reviewer approved escalated task`
 - `ea3b7778 revert(web): revert out-of-scope TaskFlow diagram layout changes`
 - `cadf0191 docs(tasks): update completion report with stale run self-repair decoupling`

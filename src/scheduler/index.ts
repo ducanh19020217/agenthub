@@ -652,7 +652,15 @@ export class Scheduler {
     return this.running.get(taskId);
   }
 
-  isReviewOrphanEligible(task: TaskRow): boolean {
+  reviewerTaskInBackoff(taskId: string, now = Date.now()): boolean {
+    return (this.reviewerTaskBackoffUntil.get(taskId) || 0) > now;
+  }
+
+  setReviewerTaskBackoff(taskId: string, until: number): void {
+    this.reviewerTaskBackoffUntil.set(taskId, until);
+  }
+
+  isReviewOrphanEligible(task: TaskRow, now = Date.now()): boolean {
     if (this.config.reviewer?.enabled === false) return false;
     const project = this.projectRepo.get(task.projectId);
     if (!project) return false;
@@ -661,15 +669,18 @@ export class Scheduler {
     const focus = this.getFocus();
     if (focus.projectId && task.projectId !== focus.projectId) return false;
     if (this.reviewerRuns.has(task.id)) return false;
+    if (this.reviewerTaskInBackoff(task.id, now)) return false;
 
     if (task.reviewerEscalated) {
       const last = this.reviewRepo?.getByTask(task.id).at(-1);
       if (last && isAutoReviewer(last.actor) && last.verdict === 'approved') {
         // An automated reviewer approved after the escalation: it is resolved.
-      } else {
-        if (!this.needsEscalationArbiter(task)) return false;
-        return this.canStartEscalationArbiter(task);
+        // In this transitional state before the scheduler tick resets escalation,
+        // it is not an orphan waiting for an automated reviewer.
+        return false;
       }
+      if (!this.needsEscalationArbiter(task)) return false;
+      return this.canStartEscalationArbiter(task);
     }
 
     const chain = this.reviewChainForTask(task);
@@ -3110,7 +3121,7 @@ export class Scheduler {
       const focus = this.getFocus();
       if (focus.projectId && task.projectId !== focus.projectId) continue;
       if (this.reviewerRuns.has(task.id)) continue;
-      if ((this.reviewerTaskBackoffUntil.get(task.id) || 0) > Date.now()) continue;
+      if (this.reviewerTaskInBackoff(task.id)) continue;
       if (task.reviewerEscalated) {
         const last = this.reviewRepo.getByTask(task.id).at(-1);
         if (last && isAutoReviewer(last.actor) && last.verdict === 'approved') {
@@ -3646,7 +3657,7 @@ export class Scheduler {
     const actor: ReviewerActor = engine.id === 'claude' ? 'claude-reviewer' : 'codex-reviewer';
     const profile = this.profileRepo.get(profileName);
     if (!profile || !task.worktreePath || this.reviewerRuns.has(task.id)) return;
-    if ((this.reviewerTaskBackoffUntil.get(task.id) || 0) > Date.now()) return;
+    if (this.reviewerTaskInBackoff(task.id)) return;
     const dirtyPaths = this.reviewerDirtyPaths(task.worktreePath);
     if (dirtyPaths === null || dirtyPaths.length > 0) {
       this.handleDirtyReview(task, dirtyPaths || [], dirtyPaths === null ? 'unable to read git status' : 'uncommitted changes');

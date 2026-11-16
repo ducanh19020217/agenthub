@@ -1136,6 +1136,9 @@ export interface DiscoveredModelApiItem {
   available: boolean;
   configured?: boolean;
   warning?: string | null;
+  runVerified?: boolean;
+  unavailable?: boolean;
+  unavailableReason?: string | null;
 }
 
 export interface ModelOptionsResponse {
@@ -7045,12 +7048,13 @@ export class AppService {
     // 1. Collect verified models from enabled and logged-in profiles that actually have discovery records
     // (Also collect Claude aliases sonnet/opus/haiku for logged-in Claude profiles even when unverified)
     for (const profile of enabledProfiles) {
-      if (!isProfileLoggedIn(profile)) continue;
       if (!this.profileModelRepo) continue;
       const rows = this.profileModelRepo.getForProfile(profile.name);
+      if (!isProfileLoggedIn(profile) && !rows.some((row) => row.unavailableAt)) continue;
       for (const r of rows) {
         const isClaudeAlias = r.engine === 'claude' && ['sonnet', 'opus', 'haiku'].includes(r.modelId);
-        if (!r.verified && !isClaudeAlias) continue;
+        const isUnavailable = Boolean(r.unavailableAt);
+        if (!r.verified && !isClaudeAlias && !isUnavailable && !r.runVerified) continue;
         const modelId = r.engine === 'codex' && !r.modelId.startsWith('codex:')
           ? `codex:${r.modelId}`
           : r.modelId;
@@ -7064,7 +7068,12 @@ export class AppService {
             existing.verified = true;
             existing.warning = null;
           }
-          existing.available = true;
+          existing.runVerified = Boolean(existing.runVerified || r.runVerified);
+          if (!existing.runVerified && !existing.unavailable && !r.verified) existing.warning = 'Chưa xác minh qua model catalog';
+          if (r.unavailableReason) existing.unavailableReason = r.unavailableReason;
+          existing.available = existing.available || !isUnavailable;
+          existing.unavailable = Boolean(existing.unavailable && isUnavailable);
+          if (!isUnavailable) existing.unavailable = false;
         } else {
           modelMap.set(key, {
             id: modelId,
@@ -7072,9 +7081,12 @@ export class AppService {
             name: r.modelName || modelId,
             profiles: [profile.name],
             verified: Boolean(r.verified),
-            available: true,
+            available: !isUnavailable,
             configured: false,
-            warning: r.verified ? null : 'Chưa xác minh qua model catalog',
+            warning: isUnavailable ? 'Không dùng được với tài khoản' : r.verified || r.runVerified ? null : 'Chưa xác minh qua model catalog',
+            runVerified: Boolean(r.runVerified),
+            unavailable: isUnavailable,
+            unavailableReason: r.unavailableReason,
           });
         }
       }
@@ -7277,7 +7289,9 @@ export class AppService {
         existing.configured = true;
         if (existing.profiles.length === 0) {
           existing.available = false;
-          existing.warning = 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp';
+          existing.warning = existing.unavailable
+            ? 'Không dùng được với tài khoản'
+            : 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp';
         }
       }
     }
@@ -7311,6 +7325,24 @@ export class AppService {
 
   updateConfig(raw: unknown) {
     const parsed = UpdateConfigSchema.parse(raw);
+    const requestedChains = [
+      ...(parsed.modelChainHard || []),
+      ...(parsed.modelChainEasy || []),
+    ];
+    if (this.profileModelRepo && requestedChains.length > 0) {
+      const enabledProfiles = this.profileRepo.getAll().filter((p) => Boolean(p.enabled) && !p.deletedAt);
+      for (const model of requestedChains) {
+        const engine = model.startsWith('codex:') ? 'codex' : 'agy';
+        const candidates = enabledProfiles.filter((p) => p.engine === engine);
+        if (candidates.length === 0) continue;
+        const normalized = engine === 'codex' && !model.startsWith('codex:') ? `codex:${model}` : model;
+        const rejectedEverywhere = candidates.every((profile) => this.profileModelRepo!.getForProfile(profile.name)
+          .some((row) => row.modelId === normalized && row.engine === engine && Boolean(row.unavailableAt)));
+        if (rejectedEverywhere) {
+          throw new HttpError(400, 'model_unavailable', `Model "${model}" bị mọi tài khoản từ chối; hãy chọn model khác trong chuỗi.`);
+        }
+      }
+    }
 
     // Apply in-memory
     updateConfigInMemory(this.config, parsed);

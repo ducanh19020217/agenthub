@@ -1052,6 +1052,9 @@ export interface DiscoveredModel {
   available: boolean;
   configured?: boolean;
   warning?: string | null;
+  runVerified?: boolean;
+  unavailable?: boolean;
+  unavailableReason?: string | null;
 }
 
 export interface ModelOptions {

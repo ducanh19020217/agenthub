@@ -57,6 +57,8 @@ export interface GroupedModelOption {
   verified?: boolean;
   available?: boolean;
   warning?: string | null;
+  runVerified?: boolean;
+  unavailable?: boolean;
 }
 
 export function formatDiscoveredModelOptions(
@@ -99,6 +101,9 @@ export function formatDiscoveredModelOptions(
     } else if (!m.available) {
       label = `${baseName} (⚠️ ${t ? t('models.unavailableWarning') : 'Unavailable'})`;
     }
+    if (m.available && m.runVerified === false) {
+      label = `${label} (⚠️ ${t ? 'Chưa xác minh chạy được' : 'Not verified to run'})`;
+    }
 
     return {
       value: m.id,
@@ -109,6 +114,8 @@ export function formatDiscoveredModelOptions(
       verified: m.verified,
       available: m.available,
       warning: m.warning,
+      runVerified: m.runVerified,
+      unavailable: m.unavailable,
     };
   });
 }

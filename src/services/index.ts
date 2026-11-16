@@ -1183,11 +1183,14 @@ export class AppService {
     this.claudeAuthRecoveryTimer.unref?.();
     this.chatService?.eventBus.on('brain.profiles_synced', this.profileSyncHandler);
     const onGitStateChanged = () => clearGitCheckCache();
-    this.scheduler.getEventBus().on('task.merged', onGitStateChanged);
-    this.scheduler.getEventBus().on('task.pushed', onGitStateChanged);
-    this.scheduler.getEventBus().on('task.push_failed', onGitStateChanged);
-    this.scheduler.getEventBus().on('merge.conflict', onGitStateChanged);
-    this.scheduler.getEventBus().on('merge.failed', onGitStateChanged);
+    const eventBus = this.scheduler?.getEventBus?.();
+    if (eventBus) {
+      eventBus.on('task.merged', onGitStateChanged);
+      eventBus.on('task.pushed', onGitStateChanged);
+      eventBus.on('task.push_failed', onGitStateChanged);
+      eventBus.on('merge.conflict', onGitStateChanged);
+      eventBus.on('merge.failed', onGitStateChanged);
+    }
   }
 
   /** Backfill the legacy merge column for projects registered before automatic mapping existed. */

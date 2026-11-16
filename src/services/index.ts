@@ -5845,7 +5845,7 @@ export class AppService {
     } catch (error) {
       this.failedAutoMerges.add(taskId);
       skip('merge_failed', this.scheduler.getCheckResults(taskId));
-      const isConflict = (error instanceof HttpError && (error.error === 'conflict' || error.statusCode === 409)) ||
+      const isConflict = (error instanceof HttpError && error.error === 'conflict') ||
         (error instanceof MergeError && error.error === 'conflict') ||
         (error instanceof Error && /conflict/i.test(error.message));
       const isEnvironment = (error instanceof HttpError && (error.error === 'environment_error' || error.statusCode === 503)) ||
@@ -5981,7 +5981,7 @@ export class AppService {
         (isMergeError && error.environment);
 
       const isConflict = !isConfig && !isEnv && (
-        (isHttpError && (error.error === 'conflict' || error.statusCode === 409)) ||
+        (isHttpError && error.error === 'conflict') ||
         (isMergeError && error.error === 'conflict') ||
         (!isMergeError && !isHttpError && error instanceof Error && /xung đột|conflict/i.test(error.message))
       );

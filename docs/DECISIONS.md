@@ -517,7 +517,7 @@
 - **Quyết định thiết kế**:
   1. **Trạng thái dẫn xuất (Derived Status) ở tầng Service, không đổi schema DB**:
      - Không thêm giá trị mới vào `tasks.status` trong SQLite để tránh phải rebuild bảng hay migration dữ liệu phức tạp.
-     - `merge_failed`: Task không ở trạng thái kết thúc khác (`pushed`, `cancelled`, `failed`), có lần merge thất bại gần nhất (sự kiện `merge.conflict`, `merge.failed`, hoặc `review.auto_merge_skipped` với `merge_failed`), chưa có sự kiện `task.merged` sau đó, và nhánh task thực sự chưa được merge vào nhánh integration/target (xác minh qua `git merge-base --is-ancestor`).
+     - `merge_failed`: Task không ở trạng thái kết thúc khác (`pushed`, `cancelled`, `failed`), có lần merge thất bại gần nhất (sự kiện `merge.conflict`, `merge.failed`, hoặc `review.auto_merge_skipped` với `merge_failed`), chưa có sự kiện `task.merged` sau đó, và nhánh task thực sự chưa được merge vào nhánh integration (khi bật integration) hoặc nhánh đích thực tế (`task.baseRef || project.defaultBranch`, khi không dùng integration) (xác minh qua `git merge-base --is-ancestor`).
      - `push_failed`: Task `done` có `pushResult` lỗi gần nhất hoặc sự kiện `task.push_failed`, chưa có sự kiện `task.pushed` hay `pushedAt`, và commit của task chưa có trên nhánh đích (cả local và remote qua `git merge-base --is-ancestor`).
      - Tự động xóa trạng thái dẫn xuất ngay khi merge hoặc push thành công sau đó.
   2. **Tối ưu hóa và cache gọi Git (Zero git overhead cho luồng chuẩn)**:
@@ -527,7 +527,7 @@
   3. **API hỗ trợ thao tác và phân trang**:
      - `GET /api/tasks`: Hỗ trợ filter `?derived=merge_failed|push_failed` (và tương thích `?status=merge_failed|push_failed`).
      - `GET /api/tasks/:id`: Trả thêm trường `deliveryIssue: { kind, error, failedAt, files? }`.
-     - `POST /api/tasks/:id/merge/retry`: Chạy lại luồng auto-merge hiện có (`mergeTaskIntoBase`). Nếu thành công trả 200 kèm `mergeCommit`; nếu còn xung đột trả 409 Conflict kèm danh sách `files`. Hỗ trợ body `{ assignWorker: true }` để chuyển task về `queued`, bổ sung ghi chú danh sách file xung đột vào body để worker giải quyết.
+     - `POST /api/tasks/:id/merge/retry`: Chạy lại luồng auto-merge hiện có (`mergeTaskIntoBase`). Nếu thành công trả 200 kèm `mergeCommit`; nếu còn xung đột trả 409 Conflict kèm danh sách `files`. Nếu lỗi kiểm tra sau merge hoặc lỗi khác (như `MergeError` 422 `unprocessable_entity`, 503 `environment_error`, hoặc `HttpError` 409 có error code không phải conflict), giữ nguyên mã và semantics lỗi gốc mà không biến thành conflict hay trả danh sách file. Hỗ trợ body `{ assignWorker: true }` để chuyển task về `queued`, bổ sung ghi chú danh sách file xung đột vào body để worker giải quyết.
   4. **Hiển thị trực quan trên TaskFlow và TaskDetailPage**:
      - Bổ sung 2 node ở hàng nhánh lỗi (row 2): "Merge lỗi" (dưới cột done) và "Push lỗi" (dưới cột pushed) với mũi tên kết nối và nhãn "xung đột" / "push lỗi".
      - Màu cảnh báo nổi bật theo token CSS (`--t-crit`) khi số lượng > 0.

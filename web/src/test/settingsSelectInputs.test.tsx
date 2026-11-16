@@ -84,6 +84,35 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
   });
 
   describe('1. SelectOrCustomInput Component', () => {
+    it('labels rejected models, warns for unverified models, and excludes rejected models from first-choice options', () => {
+      const rejected = {
+        id: 'codex:gpt-rejected',
+        engine: 'codex' as const,
+        profiles: ['codex-main'],
+        verified: false,
+        available: true,
+        unavailable: true,
+        unavailableReason: 'provider_rejected',
+      };
+      const unverified = {
+        id: 'codex:gpt-unverified',
+        engine: 'codex' as const,
+        profiles: ['codex-main'],
+        verified: true,
+        available: true,
+        runVerified: false,
+      };
+
+      const translate = (key: string) => key === 'models.unavailableAccountWarning'
+        ? 'Not usable with this account'
+        : key === 'models.unverifiedRunWarning' ? 'Not verified to run' : key;
+      const all = formatDiscoveredModelOptions([rejected, unverified], translate);
+      expect(all[0].label).toContain('Not usable with this account');
+      expect(all[1].label).toContain('Not verified to run');
+      expect(formatDiscoveredModelOptions([rejected, unverified], translate, 'codex', true).map((option) => option.value))
+        .toEqual(['codex:gpt-unverified']);
+    });
+
     it('renders preset options and allows selecting a standard model', () => {
       render(
         <LocaleProvider initialLocale="vi">
@@ -249,6 +278,27 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
   });
 
   describe('2. SortableModelList Component', () => {
+    it('marks a rejected saved chain entry in red while offering only usable entries for insertion', () => {
+      render(
+        <LocaleProvider initialLocale="vi">
+          <SortableModelList
+            title="Model Chain"
+            models={['codex:gpt-rejected']}
+            onChange={() => {}}
+            availableOptions={[{ value: 'codex:gpt-usable', label: 'codex:gpt-usable' }]}
+            unavailableModels={new Set(['codex:gpt-rejected'])}
+            dataTestId="rejected-chain"
+          />
+        </LocaleProvider>,
+      );
+
+      expect(screen.getByTestId('rejected-chain')).toHaveAttribute('data-testid', 'rejected-chain');
+      expect(screen.getByTestId('model-unavailable-warning')).toBeInTheDocument();
+      const addSelect = within(screen.getByTestId('rejected-chain')).getByRole('combobox', { name: /Thêm model vào chuỗi/i });
+      expect(within(addSelect).queryByRole('option', { name: 'codex:gpt-rejected' })).not.toBeInTheDocument();
+      expect(within(addSelect).getByRole('option', { name: 'codex:gpt-usable' })).toBeInTheDocument();
+    });
+
     it('moves items up and down with buttons and updates order', () => {
       render(
         <LocaleProvider initialLocale="vi">

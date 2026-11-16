@@ -2673,5 +2673,296 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(remoteLog).toContain('feat: task b initial');
       expect(remoteLog).not.toContain('feat: task b late commit after merge');
     });
+
+    describe('Audit diff base and range fix (DEC-034 / t-audit-diff-base-fix)', () => {
+      it('tái hiện sự cố ui-dashboard: task A đã push lên remote, task B merge master ngược chiều rồi merge vào master 2 lần -> diff audit không chứa file của A và chứa trọn vẹn cả 2 lần merge của B', async () => {
+        const { getTaskDiff, findForwardMergeCommitsForTask, findMergeCommitForTask } = await import('../src/publish.js');
+        const remotePath = path.join(tmpDir, 'remote-ui-dashboard.git');
+        initBareRemote(remotePath);
+
+        const repoPath = path.join(tmpDir, 'local-ui-dashboard');
+        initGitRepoWithRemote(repoPath, remotePath, 'master');
+
+        // 1. Task A (approvals): ~1800 dòng, đã push lên remote origin/master
+        fs.writeFileSync(
+          path.join(repoPath, 'approvals.txt'),
+          Array.from({ length: 1800 }, (_, i) => `approvals rule row ${i + 1}`).join('\n') + '\n',
+        );
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat(approvals): add story points approvals page (~1800 lines)'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['push', 'origin', 'master'], { cwd: repoPath, env: testEnv });
+        const remoteShaWithA = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // 2. Nhánh task B (agenthub/ui-dashboard) rẽ nhánh từ commit trước khi có task A
+        const initialCommit = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD~1'], { encoding: 'utf8', env: testEnv }).trim();
+        execFileSync('git', ['checkout', '-b', 'agenthub/ui-dashboard', initialCommit], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'dashboard-1.ts'), 'export const dashboardPart1 = "v1";\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat(dashboard): part 1'], { cwd: repoPath, env: testEnv });
+
+        // Merge ngược chiều: master (đã có task A) vào nhánh agenthub/ui-dashboard
+        execFileSync('git', ['merge', '--no-ff', 'master', '-m', "Merge branch 'master' into agenthub/ui-dashboard"], { cwd: repoPath, env: testEnv });
+        const reverseMergeSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Thêm thay đổi part 2 trên nhánh task B
+        fs.writeFileSync(path.join(repoPath, 'dashboard-2.ts'), 'export const dashboardPart2 = "v2";\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat(dashboard): part 2'], { cwd: repoPath, env: testEnv });
+
+        // Lần merge 1 vào master:
+        execFileSync('git', ['checkout', 'master'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--no-ff', 'agenthub/ui-dashboard', '-m', "Merge branch 'agenthub/ui-dashboard' into master"], { cwd: repoPath, env: testEnv });
+        const fwdMerge1Sha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Thêm thay đổi part 3 trên nhánh task B
+        execFileSync('git', ['checkout', 'agenthub/ui-dashboard'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'dashboard-3.ts'), 'export const dashboardPart3 = "v3";\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat(dashboard): part 3'], { cwd: repoPath, env: testEnv });
+        const taskBTipSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Lần merge 2 vào master:
+        execFileSync('git', ['checkout', 'master'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--no-ff', 'agenthub/ui-dashboard', '-m', "Merge branch 'agenthub/ui-dashboard' into master"], { cwd: repoPath, env: testEnv });
+        const fwdMerge2Sha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Tạo project không dùng integration (như dev-insight-rust)
+        ctx.service.createProject({
+          id: 'proj-ui-dashboard',
+          name: 'Project Dev Insight Rust',
+          path: repoPath,
+          defaultBranch: 'master',
+          settings: {
+            integration: { enabled: false },
+            publish: {
+              enabled: true,
+              remote: 'origin',
+              branch: 'master',
+              audit: { enabled: true, maxFixRounds: 2 },
+            },
+          },
+        });
+
+        const taskRow: any = {
+          id: 'proj-ui-dashboard/ui-dashboard',
+          projectId: 'proj-ui-dashboard',
+          slug: 'ui-dashboard',
+          title: 'UI Dashboard',
+          status: 'done',
+          branch: 'agenthub/ui-dashboard',
+          baseRef: 'master',
+        };
+        ctx.taskRepo.insert(taskRow);
+
+        // Kiểm tra phát hiện merge commits: không bao giờ chọn reverseMergeSha, tìm đúng [fwd2, fwd1]
+        const fwdMerges = await findForwardMergeCommitsForTask(repoPath, taskRow, ['master'], testEnv);
+        expect(fwdMerges).toEqual([fwdMerge2Sha, fwdMerge1Sha]);
+        expect(fwdMerges).not.toContain(reverseMergeSha);
+
+        const latestMerge = await findMergeCommitForTask(repoPath, taskRow, ['master'], testEnv);
+        expect(latestMerge).toBe(fwdMerge2Sha);
+
+        // Kiểm tra getTaskDiff:
+        const taskDiffRes = await getTaskDiff(
+          repoPath,
+          taskRow,
+          'agenthub/ui-dashboard',
+          'master',
+          remoteShaWithA,
+          testEnv,
+          null,
+          fwdMerge2Sha,
+        );
+
+        // Diff KHÔNG chứa file của task A (approvals.txt)
+        expect(taskDiffRes.diff).not.toContain('approvals rule row');
+        expect(taskDiffRes.changedFiles).not.toContain('approvals.txt');
+
+        // Diff CHỨA mọi thay đổi của B ở cả 2 lần merge (dashboard-1, dashboard-2, dashboard-3)
+        expect(taskDiffRes.changedFiles).toEqual(
+          expect.arrayContaining(['dashboard-1.ts', 'dashboard-2.ts', 'dashboard-3.ts']),
+        );
+        expect(taskDiffRes.diff).toContain('dashboardPart1');
+        expect(taskDiffRes.diff).toContain('dashboardPart2');
+        expect(taskDiffRes.diff).toContain('dashboardPart3');
+        expect(taskDiffRes.auditRange).toBe(`${remoteShaWithA}..${taskBTipSha}`);
+
+        // Bắt event audit để kiểm tra auditRange
+        const events: Array<{ type: string; payload: any }> = [];
+        ctx.scheduler.getEventBus().on('task.audit_started', (_id, p) => events.push({ type: 'task.audit_started', payload: p }));
+        ctx.scheduler.getEventBus().on('task.audit_passed', (_id, p) => events.push({ type: 'task.audit_passed', payload: p }));
+
+        process.env.FAKE_MODE = 'audit-pass';
+        const publishRes = await ctx.service.publishTask('proj-ui-dashboard/ui-dashboard');
+
+        expect(publishRes.ok).toBe(true);
+        expect((publishRes as any).auditPassed).toBe(true);
+        expect((publishRes as any).auditRange).toBe(`${remoteShaWithA}..${taskBTipSha}`);
+
+        const auditStarted = events.find((e) => e.type === 'task.audit_started');
+        expect(auditStarted?.payload?.auditRange).toBe(`${remoteShaWithA}..${taskBTipSha}`);
+
+        const auditPassed = events.find((e) => e.type === 'task.audit_passed');
+        expect(auditPassed?.payload?.auditRange).toBe(`${remoteShaWithA}..${taskBTipSha}`);
+
+        const updatedTask = ctx.taskRepo.get('proj-ui-dashboard/ui-dashboard');
+        expect(updatedTask?.status).toBe('pushed');
+        const pr = JSON.parse(updatedTask!.pushResult!);
+        expect(pr.auditRange).toBe(`${remoteShaWithA}..${taskBTipSha}`);
+      });
+
+      it('project dùng integration (agenthub): task có reverse merge và 2 lần merge vào integration -> diff chuẩn, bao trọn cả 2 lần merge và loại trừ task khác', async () => {
+        const { getTaskDiff } = await import('../src/publish.js');
+        const remotePath = path.join(tmpDir, 'remote-integ-multi-merge.git');
+        initBareRemote(remotePath);
+
+        const repoPath = path.join(tmpDir, 'local-integ-multi-merge');
+        initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+        execFileSync('git', ['checkout', '-b', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+
+        // Task 1: đã merge vào integration
+        execFileSync('git', ['checkout', '-b', 'agenthub/task-other'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'other.txt'), 'other content\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: other task'], { cwd: repoPath, env: testEnv });
+
+        execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--no-ff', 'agenthub/task-other', '-m', "Merge branch 'agenthub/task-other' into agenthub/integration"], { cwd: repoPath, env: testEnv });
+        const integBeforeTaskMain = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Task Main (agenthub/task-main): merge 1
+        execFileSync('git', ['checkout', '-b', 'agenthub/task-main'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'main-step-1.txt'), 'step 1\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: step 1'], { cwd: repoPath, env: testEnv });
+
+        // Reverse merge integration into agenthub/task-main
+        execFileSync('git', ['merge', '--no-ff', 'agenthub/integration', '-m', "Merge branch 'agenthub/integration' into agenthub/task-main"], { cwd: repoPath, env: testEnv });
+
+        fs.writeFileSync(path.join(repoPath, 'main-step-2.txt'), 'step 2\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: step 2'], { cwd: repoPath, env: testEnv });
+
+        execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--no-ff', 'agenthub/task-main', '-m', "Merge branch 'agenthub/task-main' into agenthub/integration"], { cwd: repoPath, env: testEnv });
+
+        // Thêm commit và merge 2
+        execFileSync('git', ['checkout', 'agenthub/task-main'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'main-step-3.txt'), 'step 3\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: step 3'], { cwd: repoPath, env: testEnv });
+        const taskMainTip = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--no-ff', 'agenthub/task-main', '-m', "Merge branch 'agenthub/task-main' into agenthub/integration"], { cwd: repoPath, env: testEnv });
+        const integSnapshot = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Checkout main để giải phóng agenthub/integration trước khi createProject (tránh xung đột worktree)
+        execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+
+        ctx.service.createProject({
+          id: 'proj-integ-audit',
+          name: 'Project Integ Audit',
+          path: repoPath,
+          defaultBranch: 'main',
+          settings: {
+            integration: { enabled: true, branch: 'agenthub/integration' },
+            publish: {
+              enabled: true,
+              remote: 'origin',
+              branch: 'main',
+              audit: { enabled: true },
+            },
+          },
+        });
+
+        const taskRow: any = {
+          id: 'proj-integ-audit/task-main',
+          projectId: 'proj-integ-audit',
+          slug: 'task-main',
+          title: 'Task Main',
+          status: 'done',
+          branch: 'agenthub/task-main',
+          baseRef: 'main',
+        };
+        ctx.taskRepo.insert(taskRow);
+
+        const diffRes = await getTaskDiff(
+          repoPath,
+          taskRow,
+          'agenthub/integration',
+          'main',
+          'main',
+          testEnv,
+          integSnapshot,
+        );
+
+        // Không chứa file other.txt từ task khác
+        expect(diffRes.diff).not.toContain('other content');
+        expect(diffRes.changedFiles).not.toContain('other.txt');
+
+        // Chứa đủ 3 step của task-main
+        expect(diffRes.changedFiles).toEqual(
+          expect.arrayContaining(['main-step-1.txt', 'main-step-2.txt', 'main-step-3.txt']),
+        );
+        expect(diffRes.diff).toContain('step 1');
+        expect(diffRes.diff).toContain('step 2');
+        expect(diffRes.diff).toContain('step 3');
+        expect(diffRes.auditRange).toBe(`${integBeforeTaskMain}..${taskMainTip}`);
+
+        process.env.FAKE_MODE = 'audit-pass';
+        const pubRes = await ctx.service.publishTask('proj-integ-audit/task-main');
+        expect(pubRes.ok).toBe(true);
+        expect((pubRes as any).auditRange).toBe(`${integBeforeTaskMain}..${taskMainTip}`);
+      });
+
+      it('task có 1 merge thường: hành vi diff và commitSha giữ nguyên, bổ sung auditRange chính xác', async () => {
+        const { getTaskDiff } = await import('../src/publish.js');
+        const remotePath = path.join(tmpDir, 'remote-single-merge.git');
+        initBareRemote(remotePath);
+
+        const repoPath = path.join(tmpDir, 'local-single-merge');
+        initGitRepoWithRemote(repoPath, remotePath, 'main');
+        const baseMainSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        execFileSync('git', ['checkout', '-b', 'agenthub/single-task'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'single.txt'), 'single content\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: single feature'], { cwd: repoPath, env: testEnv });
+        const singleTipSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--no-ff', 'agenthub/single-task', '-m', "Merge branch 'agenthub/single-task' into main"], { cwd: repoPath, env: testEnv });
+        const mergeSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        const taskRow: any = {
+          id: 'proj-single/single-task',
+          projectId: 'proj-single',
+          slug: 'single-task',
+          title: 'Single Task',
+          status: 'done',
+          branch: 'agenthub/single-task',
+          baseRef: 'main',
+        };
+
+        const diffRes = await getTaskDiff(
+          repoPath,
+          taskRow,
+          'agenthub/single-task',
+          'main',
+          baseMainSha,
+          testEnv,
+          null,
+          mergeSha,
+        );
+
+        expect(diffRes.commitSha).toBe(mergeSha);
+        expect(diffRes.branchSha).toBe(singleTipSha);
+        expect(diffRes.changedFiles).toEqual(['single.txt']);
+        expect(diffRes.diff).toContain('single content');
+        expect(diffRes.auditRange).toBe(`${baseMainSha}..${singleTipSha}`);
+      });
+    });
   });
 });

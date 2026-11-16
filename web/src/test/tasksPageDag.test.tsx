@@ -158,9 +158,10 @@ describe('TasksPage - DAG View and Filters', () => {
     const statusSelect = screen.getByLabelText('Lọc theo trạng thái');
     fireEvent.change(statusSelect, { target: { value: 'queued' } });
 
-    // Now only task-2 is shown
-    expect(screen.queryByTestId('dag-node-p1~t1')).not.toBeInTheDocument();
+    // The queued match keeps its running prerequisite as dependency context.
+    expect(screen.getByTestId('dag-node-p1~t1')).toBeInTheDocument();
     expect(screen.getByTestId('dag-node-p1~t2')).toBeInTheDocument();
+    expect(screen.getByTestId('dag-edge-p1~t1-p1~t2')).toBeInTheDocument();
 
     // Reset status filter to 'all'
     fireEvent.change(statusSelect, { target: { value: 'all' } });

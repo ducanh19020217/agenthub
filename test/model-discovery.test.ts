@@ -409,6 +409,18 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
       rawDb.exec(MIGRATIONS[i]);
     }
     rawDb.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '76')").run();
+    rawDb.exec(`
+      CREATE TABLE IF NOT EXISTS profile_models (
+        profileName TEXT NOT NULL,
+        modelId TEXT NOT NULL,
+        modelName TEXT,
+        engine TEXT NOT NULL,
+        verified INTEGER NOT NULL DEFAULT 1,
+        fetchedAt INTEGER NOT NULL,
+        PRIMARY KEY (profileName, modelId),
+        FOREIGN KEY (profileName) REFERENCES profiles(name) ON DELETE CASCADE
+      );
+    `);
     rawDb.prepare("INSERT INTO profiles (name, engine, kind, home, email, enabled, accountType, createdAt) VALUES ('prof-m76', 'agy', 'isolated', '/tmp/p', 'm76@example.com', 1, 'personal', '2026-01-01')").run();
     rawDb.prepare("INSERT INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt) VALUES ('prof-m76', 'shared-model', 'Model 1', 'agy', 1, 1000)").run();
     rawDb.close();

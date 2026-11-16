@@ -808,7 +808,7 @@ em,
 
 .flow-edge-animated {
   animation: flow-edge-flow 1.2s linear infinite;
-  stroke: var(--t-accent) !important;
+  stroke: var(--t-text-2) !important;
   stroke-opacity: 0.9 !important;
 }
 

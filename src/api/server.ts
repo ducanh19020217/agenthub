@@ -141,6 +141,12 @@ export async function createServer(
   fastify.get('/api/status', async () => {
     return service.getStatus();
   });
+  fastify.get('/api/health/sweep', async () => {
+    return service.getHealthSweepStatus();
+  });
+  fastify.post('/api/health/sweep', async () => {
+    return service.runHealthSweep();
+  });
   // --- Setup wizard / MCP configuration API ---
   fastify.get('/api/setup/effective-config/:id', async (req) => service.getSetupTools().effectiveConfig((req.params as { id: string }).id));
   fastify.get('/api/setup/presets', async () => service.getSetupTools().presets());

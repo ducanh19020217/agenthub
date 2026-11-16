@@ -352,6 +352,59 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     },
   );
 
+  // hub_health_sweep
+  server.tool(
+    'hub_health_sweep',
+    'Quét sức khoẻ định kỳ hoặc xem kết quả quét gần nhất của hệ thống',
+    {
+      runNow: z.boolean().optional().describe('Quét ngay lập tức (true) hoặc chỉ lấy kết quả gần nhất (false, mặc định)'),
+    },
+    async (args) => {
+      try {
+        const method = args.runNow ? 'POST' : 'GET';
+        const data = await callApi<{
+          timestamp: string | null;
+          issues: Array<{
+            rule: string;
+            taskId: string;
+            projectId: string;
+            status: string;
+            sinceMinutes: number;
+            suggestion: string;
+          }>;
+        }>(method, '/api/health/sweep');
+
+        if (!data.timestamp) {
+          return {
+            content: [{
+              type: 'text',
+              text: 'Chưa có kết quả quét sức khoẻ nào. Gọi lại với { runNow: true } để quét ngay.',
+            }],
+          };
+        }
+
+        const lines: string[] = [`Lượt quét sức khoẻ: ${data.timestamp}`];
+        if (data.issues.length === 0) {
+          lines.push('Tất cả bình thường, không phát hiện bất thường nào.');
+        } else {
+          lines.push(`Phát hiện ${data.issues.length} vấn đề:`);
+          for (const issue of data.issues) {
+            lines.push(`- [${issue.rule}] ${issue.taskId} (${issue.status}, ${issue.sinceMinutes}m): ${issue.suggestion}`);
+          }
+        }
+
+        return {
+          content: [{
+            type: 'text',
+            text: lines.join('\n'),
+          }],
+        };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
   // hub_brain
   server.tool(
     'hub_brain',

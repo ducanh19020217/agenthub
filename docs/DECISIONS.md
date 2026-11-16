@@ -448,7 +448,45 @@
   2. **Bảo toàn hành vi cho các luồng khác**:
      - Giữ nguyên toàn bộ hành vi khi task bị cancel, stall, hoặc quota; không thay đổi logic xử lý reviewer timeout.
 
-## DEC-032: Khám phá model theo từng tài khoản (profile) và bảo vệ an toàn thông tin đăng nhập
+## DEC-032: Lượt quét sức khoẻ định kỳ (Health Sweep) và đánh thức Brain
+
+- **Bối cảnh**:
+  - Brain trước đây chỉ thức dậy theo sự kiện đột xuất từ daemon.
+  - Watchdog chỉ bắt worker im lặng log, còn `task.no_commit`/`task.looping` chỉ gửi thông báo Telegram mà không đánh thức Brain.
+  - Các sự cố task kẹt mồ côi (như `checking` mồ côi không có process chạy, `review` mồ côi khi auto-review bật nhưng không có reviewer, `queued_starved` có slot nhưng không chạy, `running_no_progress`, worker loop/churn nhiều lượt, quota failover dồn dập, `stale_run` DB chưa kết thúc nhưng tiến trình đã chết) không có cơ chế phát hiện tự động để kích hoạt Brain can thiệp.
+- **Quyết định thiết kế**:
+  1. **Dịch vụ Health Sweep định kỳ (`src/health/sweep.ts`)**:
+     - Chạy định kỳ `healthSweep.intervalMinutes` (mặc định 10 phút) dưới dạng deterministic code (không gọi LLM tốn token/quota).
+     - Không chạy khi daemon đang drain restart hoặc scheduler đã dừng (`isDraining()` hoặc `isStopped()`).
+     - Triển khai 7 luật phát hiện với ngưỡng cấu hình linh hoạt trong `config.healthSweep.rules`:
+       - `checking_orphan`: checking > 20 phút không có check active/queued và không có run đang chạy.
+       - `review_orphan`: review > 30 phút, đủ điều kiện auto-review nhưng không có reviewer chạy và không bị chặn bởi quota hay backoff. Với task đã leo thang (`reviewerEscalated`), đối chiếu chính xác khả năng chạy của arbiter (`canStartEscalationArbiter`) thay vì rơi xuống reviewer thông thường, và trả về false khi đã có review tự động duyệt (`approved`) giải quyết leo thang trong trạng thái chuyển tiếp, tránh báo nhầm khi arbiter đang bị quota/backoff hợp lệ hoặc task đã được duyệt.
+       - `queued_starved`: queued > 60 phút, không chờ quota, không có dependency chưa xong, không có notBefore tương lai, project còn slot song song.
+       - `running_no_progress`: worker chạy > 90 phút không có commit mới và không đổi file trong worktree. Coi là có tiến độ khi lần thay đổi gần nhất (max của `cachedWorktreeMtime`, mtime `.git/index` kể cả git worktree, và thời điểm commit thực tế) nằm trong cửa sổ `now - runningNoProgressMin * 60_000`. Không dùng `lastCommitCheckAt` làm bằng chứng có commit vì đó chỉ là thời điểm watchdog kiểm tra, tránh bỏ sót worker bị treo khi `runningNoProgressMin` nhỏ hơn `stall.noCommitMin` của watchdog. Fallback lấy commit thực tế từ `rt.lastCommitAt`, git log worktree hoặc mặc định là `rt.startTime`.
+       - `churn`: worker runs >= 8 hoặc review.escalated >= 2 lần.
+       - `failover_churn`: failover / quota_retry >= 4 lần trong 2 giờ.
+       - `stale_run`: run DB có `outcome IS NULL` nhưng PID không còn sống và không có trong memory.
+  2. **Tự sửa an toàn (Self-repair) cho lỗi trạng thái nội bộ**:
+     - `checking_orphan`: Tự động gọi lại `scheduler.runChecksForTask(...)` để chạy lại kiểm tra.
+     - `stale_run`: Đánh dấu run là `crashed`, tự động đưa task trở lại `queued` với `resume = 1`.
+     - Vẫn phát event `task.health_issue` kèm chi tiết tự sửa để Brain và người dùng nắm thông tin.
+     - Các luật khác chỉ phát cảnh báo để Brain quyết định, không tự ý can thiệp sai luồng.
+  3. **Chống spam cảnh báo bằng Cooldown bảng SQLite (Migration 76)**:
+     - Tạo bảng `health_issue_cooldowns (taskId, rule, lastEmittedAt, taskStatus)`.
+     - Cooldown mặc định 120 phút. Nếu trạng thái task thay đổi rồi lại vi phạm, cooldown được bỏ qua để kịp thời báo cáo tình trạng mới.
+     - Cooldown được lưu bền vững qua các lần khởi động lại daemon.
+  4. **Đánh thức Brain theo lô (Single Turn Batching) và hướng dẫn hành động**:
+     - Đưa `task.health_issue` vào `DEFAULT_BRAIN_WAKEUP_EVENTS`.
+     - Phân loại `churn`, `queued_starved`, `review_orphan` vào nhóm sự kiện ưu tiên (`isPriorityEvent`).
+     - Gom toàn bộ issue trong cùng một lượt sweep thành 1 lượt chạy duy nhất của Brain (`debounceMs`), tránh spam N lượt Brain.
+     - Cung cấp prompt hướng dẫn cụ thể các thao tác Brain được phép làm bằng công cụ sẵn có: retry, cancel, ghi chú/chỉ dẫn cho task, đổi chuỗi model, tách task, hoặc thông báo qua `brain.notify`.
+  5. **Quan sát và tích hợp**:
+     - Telegram: Thông báo gọn gàng gộp trong một tin nhắn mỗi lượt sweep, tôn trọng cài đặt thông báo (`telegram.notify.healthIssue`).
+     - HTTP API: `GET /api/health/sweep` xem kết quả quét gần nhất, `POST /api/health/sweep` kích hoạt quét tức thì.
+     - CLI & MCP: `agenthub health [--run]` và MCP tool `hub_health_sweep`.
+     - Logic an toàn cho `checking` mồ côi được tích hợp hoàn toàn trong sweep, không chạy song song trùng lặp.
+
+## DEC-033: Khám phá model theo từng tài khoản (profile) và bảo vệ an toàn thông tin đăng nhập
 
 - **Bối cảnh**:
   - Danh sách model trước đây bị hardcode hoặc suy luận tĩnh chung chung, không phản ánh các model thực tế mà từng tài khoản/hồ sơ (`profile`) của agy, codex và claude có quyền truy cập.
@@ -462,7 +500,7 @@
      - Tuân thủ tuyệt đối quy tắc bảo mật: Không in, lưu trữ hay phát tán token/keyring trong log, database hay API payload. Chỉ lưu model ID và metadata vào bảng `profile_models`.
      - Tuyệt đối không chạy agy/codex thật hoặc thực hiện network call trong môi trường test: Khi `process.env.VITEST` bật mà không truyền mock/options cụ thể, các hàm discovery tự động fallback về danh sách model mặc định, đảm bảo suite test chạy nhanh, cô lập và an toàn tuyệt đối.
   3. **Lưu trữ và làm mới (Cache & Refresh)**:
-     - Thêm bảng `profile_models` (migration 76) liên kết `(profile_id, engine, model_id)`.
+     - Thêm bảng `profile_models` (migration 77) liên kết `(profile_id, engine, model_id)`.
      - `ModelDiscoveryService` lưu cache vào database, tự động khám phá định kỳ khi daemon/usage service khởi động hoặc theo chu kỳ quét quota.
      - Thêm endpoint `POST /api/models/refresh` cho phép người dùng chủ động làm mới danh sách model từ Web dashboard.
      - API `GET /api/models` trả về danh sách model tổng hợp kèm danh sách profile hỗ trợ (`supportedProfiles`).
@@ -470,4 +508,3 @@
      - `SelectOrCustomInput`: Hỗ trợ `<optgroup>` theo engine, hiển thị cảnh báo `customWarning` bằng token màu theme `text-[var(--t-warn)]` khi người dùng nhập model lạ.
      - `SortableModelList`: Cảnh báo và đánh dấu viền đỏ cho các model trong cấu hình không còn khả dụng trên bất kỳ tài khoản kích hoạt nào.
      - `SettingsPage`: Nút "Làm mới danh sách model" với animation xoay, tooltip hiển thị số tài khoản hỗ trợ từng model.
-

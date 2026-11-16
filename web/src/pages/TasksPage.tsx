@@ -22,6 +22,20 @@ import { formatDateTime, formatStatusTimeLabel } from '../lib/time';
 type TasksViewMode = 'kanban' | 'flow' | 'dag' | 'list' | 'project';
 /** View mở mặc định khi vào trang Task (không có ?view= trên URL). */
 export const DEFAULT_TASKS_VIEW: TasksViewMode = 'flow';
+const TASKS_VIEW_STORAGE_KEY = 'agenthub:tasks:view';
+const TASKS_VIEW_MODES: TasksViewMode[] = ['kanban', 'flow', 'project', 'list', 'dag'];
+
+function parseTasksView(value: string | null | undefined): TasksViewMode | null {
+  return value && TASKS_VIEW_MODES.includes(value as TasksViewMode) ? value as TasksViewMode : null;
+}
+
+function readSavedTasksView(): TasksViewMode | null {
+  try {
+    return parseTasksView(window.localStorage.getItem(TASKS_VIEW_STORAGE_KEY));
+  } catch {
+    return null;
+  }
+}
 
 export interface KanbanColumnProps {
   statusKey: (typeof KANBAN_STATUSES)[number];
@@ -341,7 +355,15 @@ export const TasksPage: React.FC = () => {
   const { t, locale } = useLocale();
   const navigate = useNavigate();
   const [urlParams, setUrlParams] = useSearchParams();
-  const [viewMode, setViewMode] = useState<TasksViewMode>((urlParams.get('view') as TasksViewMode) || DEFAULT_TASKS_VIEW);
+  const [viewMode, setViewModeState] = useState<TasksViewMode>(() => parseTasksView(urlParams.get('view')) || readSavedTasksView() || DEFAULT_TASKS_VIEW);
+  const setViewMode = (next: TasksViewMode) => {
+    setViewModeState(next);
+    try {
+      window.localStorage.setItem(TASKS_VIEW_STORAGE_KEY, next);
+    } catch {
+      // View selection still works when storage is unavailable.
+    }
+  };
   const [selectedProject, setSelectedProject] = useState<string>(urlParams.get('project') || 'all');
   const [selectedStatus, setSelectedStatus] = useState<string>(urlParams.get('status') || 'all');
   const [doneFilter, setDoneFilter] = useState<'active_chains' | '1d' | '3d' | '7d' | '30d' | 'all'>('active_chains');
@@ -386,13 +408,20 @@ export const TasksPage: React.FC = () => {
     refetchInterval: 5000,
     placeholderData: keepPreviousData,
   });
-  const { data: taskGraph, isLoading: isGraphLoading } = useQuery({
+  const { data: taskGraph, isLoading: isGraphLoading, isError: isGraphError, refetch: refetchTaskGraph } = useQuery({
     queryKey: ['tasks-graph', selectedProject, doneFilter],
-    queryFn: () => getTaskGraph({ project: selectedProject, includeDone: doneFilter === 'all' }),
+    queryFn: () => getTaskGraph({ project: selectedProject, includeDone: doneFilter }),
     enabled: viewMode === 'dag',
     refetchInterval: 5000,
     placeholderData: keepPreviousData,
   });
+  useEffect(() => {
+    const urlView = parseTasksView(urlParams.get('view'));
+    const nextView = urlView || readSavedTasksView() || DEFAULT_TASKS_VIEW;
+    if (nextView !== viewMode) setViewModeState(nextView);
+  // Search params also change for filters; keep view state aligned with browser back/forward.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlParams]);
   const initialFilters = useRef(true);
   useEffect(() => {
     if (data?.nextCursor) setCursors((current) => ({ ...current, [page]: data.nextCursor || undefined }));
@@ -401,7 +430,7 @@ export const TasksPage: React.FC = () => {
     const next = new URLSearchParams(urlParams);
     const values: Record<string, string> = { project: selectedProject, status: selectedStatus, search, page: String(page), pageSize: String(pageSize), view: viewMode, sort: sortKey, order: sortDirection };
     for (const [key, value] of Object.entries(values)) {
-      if (value && value !== 'all' && value !== '1' && !(key === 'pageSize' && value === '20') && !(key === 'view' && value === DEFAULT_TASKS_VIEW)) next.set(key, value);
+      if (value && value !== 'all' && value !== '1' && !(key === 'pageSize' && value === '20') && !(key === 'view' && value === (readSavedTasksView() || DEFAULT_TASKS_VIEW))) next.set(key, value);
       else next.delete(key);
     }
     if (next.toString() !== urlParams.toString()) setUrlParams(next, { replace: true });
@@ -434,9 +463,11 @@ export const TasksPage: React.FC = () => {
     return filterTasksForDag(tasks, {
       project: selectedProject,
       status: selectedStatus,
+      search,
       doneFilter,
     });
   }, [tasks, search, selectedProject, selectedStatus, doneFilter]);
+  const dagHadTasksBeforeFilters = graphTasks.length > 0;
 
   return (
     <div className="space-y-6" data-tour="task-lifecycle">
@@ -458,7 +489,7 @@ export const TasksPage: React.FC = () => {
         </section>
       )}
       {/* Top Bar: Filter & New Task Button */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4" data-tour="task-filters">
+      <div className="flex flex-col items-stretch gap-4" data-tour="task-filters">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-[var(--t-text)]">
             {t('tasks.title')}
@@ -466,16 +497,16 @@ export const TasksPage: React.FC = () => {
           <p className="text-sm text-[var(--t-text-2)]">{t('tasks.subtitle')}</p>
         </div>
 
-        <div className="flex items-center gap-3 flex-wrap sm:flex-nowrap">
+        <div className="flex w-full min-w-0 items-center gap-3 flex-wrap" data-testid="tasks-toolbar">
           {/* View Mode Toggle: Kanban <-> Sơ đồ (DAG) */}
-          <div className="flex items-center bg-[var(--t-surface)] border border-[var(--t-border)] rounded-lg p-0.5 shadow-xs" data-tour="task-views">
+          <div className="flex shrink-0 max-w-full items-center overflow-x-auto whitespace-nowrap bg-[var(--t-surface)] border border-[var(--t-border)] rounded-lg p-0.5 shadow-xs" data-tour="task-views" data-testid="task-views">
             <button
               type="button"
               onClick={() => setViewMode('kanban')}
               data-testid="view-toggle-kanban"
               aria-label={t('dag.toggleKanban')}
               title={t('dag.toggleKanban')}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium cursor-pointer transition-colors ${
+              className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-2.5 py-1 rounded text-xs font-medium cursor-pointer transition-colors ${
                 viewMode === 'kanban'
                   ? 'bg-[var(--t-accent)] text-[var(--t-on-accent)] shadow-xs font-semibold'
                   : 'text-[var(--t-text-2)] hover:text-[var(--t-text)]'
@@ -484,11 +515,11 @@ export const TasksPage: React.FC = () => {
               <LayoutGrid className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">{t('dag.toggleKanban')}</span>
             </button>
-            <button type="button" onClick={() => setViewMode('flow')} data-testid="view-toggle-flow" aria-label={t('tasks.flowView')} title={t('tasks.flowView')} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium cursor-pointer transition-colors ${viewMode === 'flow' ? 'bg-[var(--t-accent)] text-[var(--t-on-accent)] shadow-xs font-semibold' : 'text-[var(--t-text-2)] hover:text-[var(--t-text)]'}`}>
+            <button type="button" onClick={() => setViewMode('flow')} data-testid="view-toggle-flow" aria-label={t('tasks.flowView')} title={t('tasks.flowView')} className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-2.5 py-1 rounded text-xs font-medium cursor-pointer transition-colors ${viewMode === 'flow' ? 'bg-[var(--t-accent)] text-[var(--t-on-accent)] shadow-xs font-semibold' : 'text-[var(--t-text-2)] hover:text-[var(--t-text)]'}`}>
               <Workflow className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">{t('tasks.flowView')}</span>
             </button>
-            <button type="button" onClick={() => setViewMode('project')} data-testid="view-toggle-project" aria-label={t('tasks.projectView')} title={t('tasks.projectView')} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium cursor-pointer transition-colors ${viewMode === 'project' ? 'bg-[var(--t-accent)] text-[var(--t-on-accent)] shadow-xs font-semibold' : 'text-[var(--t-text-2)] hover:text-[var(--t-text)]'}`}>
+            <button type="button" onClick={() => setViewMode('project')} data-testid="view-toggle-project" aria-label={t('tasks.projectView')} title={t('tasks.projectView')} className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-2.5 py-1 rounded text-xs font-medium cursor-pointer transition-colors ${viewMode === 'project' ? 'bg-[var(--t-accent)] text-[var(--t-on-accent)] shadow-xs font-semibold' : 'text-[var(--t-text-2)] hover:text-[var(--t-text)]'}`}>
               <FolderKanban className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">{t('tasks.projectView')}</span>
             </button>
@@ -498,7 +529,7 @@ export const TasksPage: React.FC = () => {
               data-testid="view-toggle-list"
               aria-label={t('tasks.listView')}
               title={t('tasks.listView')}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium cursor-pointer transition-colors ${viewMode === 'list' ? 'bg-[var(--t-accent)] text-[var(--t-on-accent)] shadow-xs font-semibold' : 'text-[var(--t-text-2)] hover:text-[var(--t-text)]'}`}
+              className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-2.5 py-1 rounded text-xs font-medium cursor-pointer transition-colors ${viewMode === 'list' ? 'bg-[var(--t-accent)] text-[var(--t-on-accent)] shadow-xs font-semibold' : 'text-[var(--t-text-2)] hover:text-[var(--t-text)]'}`}
             >
               <List className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">{t('tasks.listView')}</span>
@@ -509,7 +540,7 @@ export const TasksPage: React.FC = () => {
               data-testid="view-toggle-dag"
               aria-label={t('dag.toggleDag')}
               title={t('dag.toggleDag')}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium cursor-pointer transition-colors ${
+              className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-2.5 py-1 rounded text-xs font-medium cursor-pointer transition-colors ${
                 viewMode === 'dag'
                   ? 'bg-[var(--t-accent)] text-[var(--t-on-accent)] shadow-xs font-semibold'
                   : 'text-[var(--t-text-2)] hover:text-[var(--t-text)]'
@@ -521,19 +552,19 @@ export const TasksPage: React.FC = () => {
           </div>
 
           {/* Quick Filter (Slug / Title) */}
-          <div className="flex items-center gap-2 bg-[var(--t-surface)] border border-[var(--t-border)] rounded-lg px-3 py-1.5 shadow-xs">
+          <div data-testid="tasks-search-container" className="flex min-w-0 basis-40 max-w-64 flex-1 items-center gap-2 bg-[var(--t-surface)] border border-[var(--t-border)] rounded-lg px-3 py-1.5 shadow-xs">
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder={t('tasks.filterQuick')}
               aria-label={t('tasks.filterQuick')}
-              className="text-xs font-medium bg-transparent border-none text-[var(--t-text)] placeholder-[var(--t-text-3)] focus:outline-none w-36 sm:w-48"
+              className="w-full min-w-0 text-xs font-medium bg-transparent border-none text-[var(--t-text)] placeholder-[var(--t-text-3)] focus:outline-none"
             />
           </div>
 
           {/* Project Filter */}
-          <div className="flex items-center gap-2 bg-[var(--t-surface)] border border-[var(--t-border)] rounded-lg px-3 py-1.5 shadow-xs">
+          <div className="flex shrink-0 items-center gap-2 bg-[var(--t-surface)] border border-[var(--t-border)] rounded-lg px-3 py-1.5 shadow-xs">
             <Filter className="w-4 h-4 text-[var(--t-text-2)]" />
             <select
               value={selectedProject}
@@ -560,7 +591,7 @@ export const TasksPage: React.FC = () => {
           {viewMode !== 'kanban' && viewMode !== 'flow' && viewMode !== 'project' && (
             <>
               {/* Status Filter */}
-              <div className="flex items-center gap-2 bg-[var(--t-surface)] border border-[var(--t-border)] rounded-lg px-3 py-1.5 shadow-xs">
+              <div className="flex shrink-0 items-center gap-2 bg-[var(--t-surface)] border border-[var(--t-border)] rounded-lg px-3 py-1.5 shadow-xs">
                 <select
                   value={selectedStatus}
                   onChange={(e) => setSelectedStatus(e.target.value)}
@@ -583,7 +614,7 @@ export const TasksPage: React.FC = () => {
               </div>
 
               {/* Done tasks filter */}
-              <div className="flex items-center gap-2 bg-[var(--t-surface)] border border-[var(--t-border)] rounded-lg px-3 py-1.5 shadow-xs">
+              <div className="flex shrink-0 items-center gap-2 bg-[var(--t-surface)] border border-[var(--t-border)] rounded-lg px-3 py-1.5 shadow-xs">
                 <select
                   value={doneFilter}
                   onChange={(e) => setDoneFilter(e.target.value as any)}
@@ -686,13 +717,28 @@ export const TasksPage: React.FC = () => {
           sortDirection={sortDirection}
           onSortChange={(key, direction) => { setSortKey(key as typeof sortKey); setSortDirection(direction); setPage(1); setCursors({}); }}
         />
-      ) : viewMode === 'dag' && isGraphLoading ? (
+      ) : viewMode === 'dag' && isGraphLoading && !taskGraph ? (
         <div className="flex items-center justify-center min-h-[40vh]">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[var(--t-accent)]" />
         </div>
       ) : viewMode === 'dag' ? (
         <div data-testid="dag-view-wrapper" className="pb-8">
-          <TaskDag tasks={dagTasks} />
+          {isGraphError && !taskGraph ? (
+            <div data-testid="task-dag-error" role="alert" className="flex min-h-[420px] flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-[var(--t-border)] bg-[var(--t-surface)] p-8 text-center text-sm text-[var(--t-text-2)]">
+              <p>{t('dag.loadError')}</p>
+              <button type="button" onClick={() => void refetchTaskGraph()} className="rounded-lg border border-[var(--t-border)] px-3 py-1.5 font-medium text-[var(--t-accent)] hover:bg-[var(--t-surface-2)]">{t('common.retry')}</button>
+            </div>
+          ) : dagTasks.length === 0 && dagHadTasksBeforeFilters ? (
+            <div data-testid="task-dag-empty-filtered" className="flex min-h-[420px] flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-[var(--t-border)] bg-[var(--t-surface)] p-8 text-center text-sm text-[var(--t-text-3)]">
+              <p>{t('dag.emptyFiltered')}</p>
+              <button type="button" onClick={() => { setSelectedProject('all'); setSelectedStatus('all'); setSearch(''); setDoneFilter('active_chains'); }} className="rounded-lg border border-[var(--t-border)] px-3 py-1.5 font-medium text-[var(--t-accent)] hover:bg-[var(--t-surface-2)]">{t('dag.clearFilters')}</button>
+            </div>
+          ) : (
+            <>
+              {isGraphError && taskGraph && <div data-testid="task-dag-error" role="alert" className="mb-3 flex items-center justify-between rounded-lg border border-[var(--t-border)] p-3 text-sm text-[var(--t-text-2)]"><span>{t('dag.refreshError')}</span><button type="button" onClick={() => void refetchTaskGraph()} className="font-medium text-[var(--t-accent)]">{t('common.retry')}</button></div>}
+              <TaskDag tasks={dagTasks} />
+            </>
+          )}
         </div>
       ) : (
         /* Kanban Board Grid */

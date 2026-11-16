@@ -1108,24 +1108,29 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN statusChangedAtEstimated INTEGER NOT NULL DEFAULT 0;
   CREATE INDEX IF NOT EXISTS idx_tasks_status_changed ON tasks(status, statusChangedAt);
   `,
-  // Migration 76: discovered models per profile
+  // Migration 76: health issue cooldowns table
   `
-  CREATE TABLE IF NOT EXISTS profile_models (
+  CREATE TABLE IF NOT EXISTS health_issue_cooldowns (
+    taskId TEXT NOT NULL,
+    rule TEXT NOT NULL,
+    lastEmittedAt TEXT NOT NULL,
+    taskStatus TEXT NOT NULL,
+    PRIMARY KEY (taskId, rule)
+  );
+  `,
+  // Migration 77: discovered models per profile (support initial creation or upgrade from legacy schema)
+  `
+  CREATE TABLE IF NOT EXISTS profile_models_new (
     profileName TEXT NOT NULL,
     modelId TEXT NOT NULL,
     modelName TEXT,
     engine TEXT NOT NULL,
     verified INTEGER NOT NULL DEFAULT 1,
     fetchedAt INTEGER NOT NULL,
-    PRIMARY KEY (profileName, modelId),
+    PRIMARY KEY (profileName, engine, modelId),
     FOREIGN KEY (profileName) REFERENCES profiles(name) ON DELETE CASCADE
   );
-  CREATE INDEX IF NOT EXISTS idx_profile_models_engine ON profile_models(engine);
-  CREATE INDEX IF NOT EXISTS idx_profile_models_profile ON profile_models(profileName);
-  `,
-  // Migration 77: expand profile_models primary key to (profileName, engine, modelId)
-  `
-  CREATE TABLE IF NOT EXISTS profile_models_new (
+  CREATE TABLE IF NOT EXISTS profile_models (
     profileName TEXT NOT NULL,
     modelId TEXT NOT NULL,
     modelName TEXT,
@@ -4084,4 +4089,45 @@ export class TimesheetDayOverrideRepo {
     return this.get(sourceId, date)!;
   }
 }
+
+export interface HealthIssueCooldownRow {
+  taskId: string;
+  rule: string;
+  lastEmittedAt: string;
+  taskStatus: string;
+}
+
+export class HealthIssueCooldownRepo {
+  constructor(private db: Database.Database) {}
+
+  get(taskId: string, rule: string): HealthIssueCooldownRow | undefined {
+    return this.db
+      .prepare('SELECT taskId, rule, lastEmittedAt, taskStatus FROM health_issue_cooldowns WHERE taskId = ? AND rule = ?')
+      .get(taskId, rule) as HealthIssueCooldownRow | undefined;
+  }
+
+  set(taskId: string, rule: string, lastEmittedAt: string, taskStatus: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO health_issue_cooldowns (taskId, rule, lastEmittedAt, taskStatus) VALUES (?, ?, ?, ?)
+         ON CONFLICT(taskId, rule) DO UPDATE SET lastEmittedAt = excluded.lastEmittedAt, taskStatus = excluded.taskStatus`,
+      )
+      .run(taskId, rule, lastEmittedAt, taskStatus);
+  }
+
+  delete(taskId: string, rule?: string): void {
+    if (rule) {
+      this.db.prepare('DELETE FROM health_issue_cooldowns WHERE taskId = ? AND rule = ?').run(taskId, rule);
+    } else {
+      this.db.prepare('DELETE FROM health_issue_cooldowns WHERE taskId = ?').run(taskId);
+    }
+  }
+
+  list(): HealthIssueCooldownRow[] {
+    return this.db
+      .prepare('SELECT taskId, rule, lastEmittedAt, taskStatus FROM health_issue_cooldowns')
+      .all() as HealthIssueCooldownRow[];
+  }
+}
+
 

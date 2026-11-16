@@ -129,12 +129,6 @@ export function handleRunOutput(
     }
   }
 
-  if (taskId && chunk && queryClient) {
-    queryClient.setQueryData<string>(['taskLog', taskId], (prev = '') => (prev ? prev + chunk : chunk));
-    const altTaskId = taskId.includes('/') ? taskId.replace('/', '~') : taskId.replace('~', '/');
-    queryClient.setQueryData<string>(['taskLog', altTaskId], (prev = '') => (prev ? prev + chunk : chunk));
-  }
-
   if (taskId && chunk) {
     for (const listener of runOutputListeners) {
       try {

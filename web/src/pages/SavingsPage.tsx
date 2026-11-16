@@ -391,7 +391,7 @@ export const SavingsPage: React.FC = () => {
                       >
                         <td className="px-6 py-3.5 whitespace-nowrap">
                           <Link
-                            to={`/tasks/${encodeURIComponent(task.taskId)}`}
+                            to={`/tasks/${encodeURIComponent(task.taskId.replace('/', '~'))}`}
                             className="font-medium hover:text-[var(--t-info)] flex items-center gap-1 group"
                           >
                             <span>{task.title || task.slug}</span>

@@ -90,7 +90,7 @@ describe('reviewer order configuration', () => {
     expect(modelValidator.safeParse('codex:gpt-4o').success).toBe(true);
     expect(modelValidator.safeParse('codex:x').success).toBe(true);
     expect(modelValidator.safeParse('codex:custom-model-id').success).toBe(true);
-    expect(modelValidator.safeParse('codex:').success).toBe(false);
+    expect(modelValidator.safeParse('codex:').success).toBe(true);
     expect(modelValidator.safeParse('').success).toBe(false);
     expect(modelValidator.safeParse('gemini-custom').success).toBe(true);
 

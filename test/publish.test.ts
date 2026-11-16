@@ -2821,7 +2821,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
 
         execFileSync('git', ['checkout', '-b', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
 
-        // Task 1: đã merge vào integration
+        // Task 1: đã merge vào integration và đã push lên remote main (mốc remote trước khi publish task-main)
         execFileSync('git', ['checkout', '-b', 'agenthub/task-other'], { cwd: repoPath, env: testEnv });
         fs.writeFileSync(path.join(repoPath, 'other.txt'), 'other content\n');
         execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
@@ -2829,9 +2829,19 @@ describe('Publish Service (t-auto-push-after-done)', () => {
 
         execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
         execFileSync('git', ['merge', '--no-ff', 'agenthub/task-other', '-m', "Merge branch 'agenthub/task-other' into agenthub/integration"], { cwd: repoPath, env: testEnv });
-        const integBeforeTaskMain = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Merge agenthub/integration (đã có task-other) vào main và push lên remote main để thiết lập remote base trước publish
+        execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--no-ff', 'agenthub/integration', '-m', "Merge branch 'agenthub/integration' into main"], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['push', 'origin', 'main'], { cwd: repoPath, env: testEnv });
+        const remoteShaWithOther = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Đồng bộ main (đã push remote) vào integration
+        execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--ff-only', 'main'], { cwd: repoPath, env: testEnv });
 
         // Task Main (agenthub/task-main): merge 1
+        execFileSync('git', ['checkout', 'agenthub/integration'], { cwd: repoPath, env: testEnv });
         execFileSync('git', ['checkout', '-b', 'agenthub/task-main'], { cwd: repoPath, env: testEnv });
         fs.writeFileSync(path.join(repoPath, 'main-step-1.txt'), 'step 1\n');
         execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
@@ -2898,7 +2908,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
           integSnapshot,
         );
 
-        // Không chứa file other.txt từ task khác
+        // Không chứa file other.txt từ task khác (vì đã có trên remote main)
         expect(diffRes.diff).not.toContain('other content');
         expect(diffRes.changedFiles).not.toContain('other.txt');
 
@@ -2909,12 +2919,12 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         expect(diffRes.diff).toContain('step 1');
         expect(diffRes.diff).toContain('step 2');
         expect(diffRes.diff).toContain('step 3');
-        expect(diffRes.auditRange).toBe(`${integBeforeTaskMain}..${taskMainTip}`);
+        expect(diffRes.auditRange).toBe(`${remoteShaWithOther}..${taskMainTip}`);
 
         process.env.FAKE_MODE = 'audit-pass';
         const pubRes = await ctx.service.publishTask('proj-integ-audit/task-main');
         expect(pubRes.ok).toBe(true);
-        expect((pubRes as any).auditRange).toBe(`${integBeforeTaskMain}..${taskMainTip}`);
+        expect((pubRes as any).auditRange).toBe(`${remoteShaWithOther}..${taskMainTip}`);
       });
 
       it('task có 1 merge thường: hành vi diff và commitSha giữ nguyên, bổ sung auditRange chính xác', async () => {
@@ -3009,6 +3019,61 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         // Phải tìm đúng forward merge và loại trừ reverse merge dù subject lừa đảo
         expect(merges).toContain(forwardMergeSha);
         expect(merges).not.toContain(customReverseMergeSha);
+      });
+
+      it('loại trừ reverse merge có message tùy biến khi nhánh task không còn tồn tại cục bộ (hasBranch === false)', async () => {
+        const { findForwardMergeCommitsForTask } = await import('../src/publish.js');
+        const repoPath = path.join(tmpDir, 'local-deleted-rev-merge');
+        fs.mkdirSync(repoPath, { recursive: true });
+        execFileSync('git', ['init', '-b', 'master'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['config', 'user.name', 'Tester'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['config', 'user.email', 'tester@example.com'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'README.md'), '# Base\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'chore: initial'], { cwd: repoPath, env: testEnv });
+
+        // Tạo nhánh task
+        execFileSync('git', ['checkout', '-b', 'agenthub/deleted-rev'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'task.txt'), 'task content\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: task work'], { cwd: repoPath, env: testEnv });
+
+        // Master có commit mới
+        execFileSync('git', ['checkout', 'master'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'master.txt'), 'master content\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: master work'], { cwd: repoPath, env: testEnv });
+
+        // Reverse merge master vào task branch với subject tùy biến / lừa đảo (không chứa "into agenthub/deleted-rev")
+        execFileSync('git', ['checkout', 'agenthub/deleted-rev'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--no-ff', 'master', '-m', "Merge branch 'agenthub/deleted-rev'"], { cwd: repoPath, env: testEnv });
+        const customReverseMergeSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Forward merge task vào master
+        execFileSync('git', ['checkout', 'master'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--no-ff', 'agenthub/deleted-rev', '-m', "Merge branch 'agenthub/deleted-rev' into master"], { cwd: repoPath, env: testEnv });
+        const forwardMergeSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Xóa hoàn toàn nhánh task cục bộ để hasBranch === false
+        execFileSync('git', ['branch', '-D', 'agenthub/deleted-rev'], { cwd: repoPath, env: testEnv });
+
+        const taskRow: any = {
+          id: 'proj/deleted-rev',
+          projectId: 'proj',
+          slug: 'deleted-rev',
+          title: 'Deleted Rev Task',
+          branch: 'agenthub/deleted-rev',
+          baseRef: 'master',
+        };
+
+        const merges = await findForwardMergeCommitsForTask(repoPath, taskRow, ['master'], testEnv);
+        // Khi hasBranch === false, vẫn phải loại trừ reverse merge và nhận diện đúng forward merge
+        expect(merges).toContain(forwardMergeSha);
+        expect(merges).not.toContain(customReverseMergeSha);
+
+        // Nếu candidateBranches trỏ trực tiếp vào commit reverse merge, phải fail closed
+        const revMerges = await findForwardMergeCommitsForTask(repoPath, taskRow, [customReverseMergeSha], testEnv);
+        expect(revMerges).toEqual([]);
       });
 
       it('luôn dùng remote base (baseRef) làm mốc gốc ngay cả khi remote và earliestMergeP1 diverge', async () => {

@@ -86,7 +86,7 @@ import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
 import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
 import { computeDeliveryIssue, clearGitCheckCache, clearGitCheckCacheForTask, extractConflictFiles, type DeliveryIssue } from './delivery-issues.js';
-import { computeTaskAudit, getDerivedAuditStatus, type TaskAuditInfo } from './audit-status.js';
+import { computeTaskAudit, type TaskAuditInfo } from './audit-status.js';
 import { publishTask as executePublishTask, isProjectPublishing, onProjectPublishLockReleased, type PublishResult } from '../publish.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';

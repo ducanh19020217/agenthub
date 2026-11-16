@@ -520,16 +520,18 @@
     4. Ngoài ra, việc dùng `--reverse` chỉ lấy merge commit đầu tiên khiến các lần merge tiếp theo (khi task được merge vào target/integration nhiều lần) bị bỏ sót khỏi diff audit.
 - **Quyết định thiết kế**:
   1. **Loại trừ tuyệt đối Reverse Merge**:
-     - Loại bỏ các nhánh trùng với nhánh task (`taskBranch`, `refs/heads/${taskBranch}`) khỏi danh sách tìm kiếm candidate branches của nhánh đích.
+     - Loại bỏ các nhánh trùng với nhánh task (`taskBranch`, `refs/heads/${taskBranch}`, SHA của task branch) khỏi danh sách tìm kiếm candidate branches của nhánh đích.
      - Kiểm tra tiêu đề commit bằng regex: loại bỏ bất kỳ commit nào có dạng `into ... <taskBranch>`.
-     - Chỉ chấp nhận forward merge: commit message có dạng `Merge branch '<taskBranch>'` hoặc parent 2 (`p2`) thuộc nhánh task / là tổ tiên của task tip.
+     - Kiểm tra cấu trúc parent và ancestry nghiêm ngặt: parent đầu (`p1`) không bao giờ được phép thuộc nhánh task (loại bỏ nếu `p1 === branchSha`, `isAncestor(branchRef, p1)`, hoặc `isAncestor(p1, branchRef) && !isAncestor(p1, p2)`). Cơ chế này ngăn chặn tuyệt đối việc reverse merge bị chọn nhầm dù commit message có tùy biến hoặc giả mạo dạng forward merge.
+     - Chỉ chấp nhận forward merge: commit message có dạng `Merge branch '<taskBranch>'` và parent 2 (`p2`) thuộc nhánh task / là tổ tiên của task tip.
   2. **Hỗ trợ đầy đủ nhiều lần merge vào integration / target branch**:
      - Bổ sung hàm `findForwardMergeCommitsForTask` trả về toàn bộ danh sách commit forward merge của task trên `--first-parent` của candidate branch (sắp xếp từ mới nhất đến cũ nhất).
      - Khi tính diff (`getTaskDiff`):
        - Tip của task lấy từ parent 2 của merge commit mới nhất (`latestMerge^2`).
-       - Mốc base lấy từ parent 1 của merge commit sớm nhất (`earliestMerge^1`) hoặc `auditBaseRef` / `prevRemoteSha` nếu có.
+       - Mốc base: với project không dùng integration (hoặc merge trực tiếp vào target branch), mốc gốc bắt buộc là remote base (`baseRef` / `auditBaseRef` / `prevRemoteSha`) ngay cả khi remote và local diverge. Với project dùng integration (`sourceBranch !== targetBranch`), mốc gốc của từng task trên integration branch là `earliestMerge^1` để bảo đảm cô lập task và không kéo thay đổi chưa push của các task khác trên integration branch vào audit.
        - Dải diff audit được tính qua `mb = git merge-base(baseCommit, taskTip)` và diff theo dải `mb..taskTip`.
        - Cơ chế này bao trọn toàn bộ các commit của task qua tất cả các lần merge, đồng thời tự động loại trừ mọi thay đổi đã có sẵn trên remote hoặc nhánh đích.
+       - Khi merge commit có diff hợp lệ rỗng, giữ nguyên range đã xác định (`auditRange = mb..taskTip`, `diff = ""`, `changedFiles = []`) và tuyệt đối không rơi xuống snapshot fallback để tránh kéo diff không thuộc task vào audit.
   3. **Ghi nhận `auditRange` vào `pushResult` và các sự kiện audit**:
      - Mở rộng interface `PublishSuccessResult` và `PublishFailedResult` bổ sung trường `auditRange?: string` (định dạng `base..tip`).
      - Ghi nhận `auditRange` vào `pushResult` (trạng thái `pushed`, `audit_failed`, `push_failed`).

@@ -257,6 +257,24 @@ async function isAncestor(repoPath: string, commit: string, base: string, env: N
 }
 
 /**
+ * Checks if a commit is in the first-parent lineage of a base ref.
+ */
+async function isFirstParentAncestor(
+  repoPath: string,
+  commit: string,
+  base: string,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  try {
+    const list = await runGit(['-C', repoPath, 'rev-list', '--first-parent', base], repoPath, env);
+    const hashes = new Set(list.split('\n').map((h) => h.trim()).filter(Boolean));
+    return hashes.has(commit);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Find the merge commit that merged a task's branch into the integration or target branch.
  */
 export async function findForwardMergeCommitsForTask(
@@ -266,14 +284,37 @@ export async function findForwardMergeCommitsForTask(
   env: NodeJS.ProcessEnv,
 ): Promise<string[]> {
   const taskBranch = task.branch || `agenthub/${task.slug}`;
-  const branchRef = `refs/heads/${taskBranch}`;
-  const hasBranch = await refExists(repoPath, branchRef, env);
+  let branchRef = `refs/heads/${taskBranch}`;
+  let hasBranch = await refExists(repoPath, branchRef, env);
   let branchSha: string | null = null;
   if (hasBranch) {
     try {
       branchSha = (await runGit(['-C', repoPath, 'rev-parse', branchRef], repoPath, env)).trim();
     } catch {
       branchSha = null;
+      hasBranch = false;
+    }
+  }
+
+  if (!hasBranch) {
+    const candidateTaskRefs = [
+      `refs/remotes/origin/${taskBranch}`,
+      `origin/${taskBranch}`,
+      task.sourceRef,
+      task.branch,
+      taskBranch,
+    ].filter(Boolean) as string[];
+    for (const refName of candidateTaskRefs) {
+      if (await refExists(repoPath, refName, env)) {
+        try {
+          branchSha = (await runGit(['-C', repoPath, 'rev-parse', refName], repoPath, env)).trim();
+          branchRef = refName;
+          hasBranch = true;
+          break;
+        } catch {
+          // ignore
+        }
+      }
     }
   }
 
@@ -339,6 +380,28 @@ export async function findForwardMergeCommitsForTask(
   const forwardMerges: string[] = [];
   const seenMerges = new Set<string>();
 
+  const destRefs: string[] = [];
+  if (task.baseRef) {
+    if (await refExists(repoPath, `refs/heads/${task.baseRef}`, env)) {
+      destRefs.push(`refs/heads/${task.baseRef}`);
+    } else if (await refExists(repoPath, task.baseRef, env)) {
+      destRefs.push(task.baseRef);
+    }
+  }
+  for (const b of candidateBranches) {
+    if (b && b !== taskBranch && b !== task.branch && b !== branchRef) {
+      const isSha = /^[0-9a-f]{40}$/i.test(b);
+      if (!isSha) {
+        if (await refExists(repoPath, `refs/heads/${b}`, env)) {
+          const refName = `refs/heads/${b}`;
+          if (!destRefs.includes(refName)) destRefs.push(refName);
+        } else if (await refExists(repoPath, b, env)) {
+          if (!destRefs.includes(b)) destRefs.push(b);
+        }
+      }
+    }
+  }
+
   for (const searchRef of validRefs) {
     try {
       const logOut = await runGit(
@@ -375,6 +438,28 @@ export async function findForwardMergeCommitsForTask(
           } catch {
             isP1OnTask = false;
           }
+        } else {
+          // When task branch does not exist locally, recover structural parent check from commit data:
+          // In a reverse merge (target merged into task), p2 is on the destination/target branch first-parent
+          // lineage while p1 is on the task branch.
+          try {
+            let p2OnDest = false;
+            let p1OnDest = false;
+            const targetRefs = destRefs.filter((d) => d !== hash && d !== p1 && d !== p2);
+            for (const d of targetRefs) {
+              if (await isFirstParentAncestor(repoPath, p2, d, env)) {
+                p2OnDest = true;
+              }
+              if (await isFirstParentAncestor(repoPath, p1, d, env)) {
+                p1OnDest = true;
+              }
+            }
+            if (p2OnDest && !p1OnDest) {
+              isP1OnTask = true;
+            }
+          } catch {
+            isP1OnTask = false;
+          }
         }
 
         if (isP1OnTask) {
@@ -394,9 +479,44 @@ export async function findForwardMergeCommitsForTask(
           } catch {
             isP2OnTask = false;
           }
+        } else {
+          // Task branch ref doesn't exist locally: verify ancestry / parent structure from commit data.
+          // In a forward merge:
+          // 1. p1 must be on destination (targetRefs) first-parent lineage.
+          // 2. p2 must NOT be an ancestor of p1 (feature commits).
+          // 3. Commits in p1..p2 or commit subject must match the task.
+          try {
+            const targetRefs = destRefs.filter((d) => d !== hash && d !== p1 && d !== p2);
+            let p1OnDest = false;
+            for (const d of targetRefs) {
+              if (await isFirstParentAncestor(repoPath, p1, d, env)) {
+                p1OnDest = true;
+                break;
+              }
+            }
+            const p2IsAncestorOfP1 = await isAncestor(repoPath, p2, p1, env);
+            if (p1OnDest && !p2IsAncestorOfP1) {
+              const taskLog = await runGit(
+                ['-C', repoPath, 'log', '--format=%s%b', `${p1}..${p2}`],
+                repoPath,
+                env,
+              );
+              const lowerLog = taskLog.toLowerCase();
+              const taskPatterns = patterns.map((p) => p.toLowerCase());
+              const matchesTask =
+                taskPatterns.some((pat) => lowerLog.includes(pat)) ||
+                (task.title ? lowerLog.includes(task.title.toLowerCase()) : false) ||
+                isMsgForward;
+              if (matchesTask) {
+                isP2OnTask = true;
+              }
+            }
+          } catch {
+            isP2OnTask = false;
+          }
         }
 
-        const isForward = isMsgForward && (isP2OnTask || !hasBranch);
+        const isForward = isMsgForward && isP2OnTask;
 
         if (isForward && !seenMerges.has(hash)) {
           seenMerges.add(hash);
@@ -527,23 +647,19 @@ export async function getTaskDiff(
       }
 
       // Base commit:
-      // If task was merged directly into targetBranch (or sourceBranch === targetBranch / no integration branch),
-      // the base is the remote base (baseRef / prevRemoteSha), regardless of whether earliestMergeP1 and baseRef diverged.
-      // If task was merged into an intermediate sourceBranch (e.g. integration branch where sourceBranch !== targetBranch),
-      // each task's base on the integration branch is earliestMergeP1 (the destination state before this task merged),
-      // ensuring proper task isolation without pulling in other unpushed tasks on the integration branch.
-      const isIntegrationProject = Boolean(
-        sourceBranch &&
-        targetBranch &&
-        sourceBranch !== targetBranch &&
-        sourceBranch !== taskBranch &&
-        sourceBranch !== task.branch
-      );
-
+      // Always prioritize remote base (baseRef / prevRemoteSha / origin/<target>) before publish.
+      // If baseRef is an ancestor of earliestMergeP1 (e.g. an earlier unpushed task already merged on destination branch),
+      // earliestMergeP1 isolates this task and does not include earlier tasks.
+      // If baseRef and earliestMergeP1 diverged or baseRef is ahead, use baseRef.
       let baseCommit = earliestMergeP1;
-      if (!isIntegrationProject && baseRef && (await refExists(repoPath, baseRef, env))) {
+      if (baseRef && (await refExists(repoPath, baseRef, env))) {
         try {
-          baseCommit = (await runGit(['-C', repoPath, 'rev-parse', baseRef], repoPath, env)).trim();
+          const baseRefSha = (await runGit(['-C', repoPath, 'rev-parse', baseRef], repoPath, env)).trim();
+          if (await isAncestor(repoPath, baseRefSha, earliestMergeP1, env)) {
+            baseCommit = earliestMergeP1;
+          } else {
+            baseCommit = baseRefSha;
+          }
         } catch {
           baseCommit = earliestMergeP1;
         }

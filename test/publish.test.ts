@@ -3269,7 +3269,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       });
 
       it('loại trừ merge commit khi xác minh ancestry thất bại (fail-closed)', async () => {
-        const { isAncestor, findForwardMergeCommitsForTask } = await import('../src/publish.js');
+        const { isAncestor, isFirstParentAncestor, findForwardMergeCommitsForTask } = await import('../src/publish.js');
         const repoPath = path.join(tmpDir, 'local-fail-closed-ancestry');
         fs.mkdirSync(repoPath, { recursive: true });
         execFileSync('git', ['init', '-b', 'master'], { cwd: repoPath, env: testEnv });
@@ -3293,7 +3293,15 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         // - Lỗi git fatal / ref không tồn tại: ném lỗi (không quy thành false)
         await expect(isAncestor(repoPath, 'nonexistent_commit_hash_1234567890', secondSha, testEnv)).rejects.toThrow();
 
-        // 2. Tạo một merge commit hợp lệ
+        // 2. Kiểm tra isFirstParentAncestor:
+        // - Đúng trong chuỗi first-parent: true
+        expect(await isFirstParentAncestor(repoPath, initialSha, secondSha, testEnv)).toBe(true);
+        // - Không nằm trong chuỗi first-parent: false
+        expect(await isFirstParentAncestor(repoPath, secondSha, initialSha, testEnv)).toBe(false);
+        // - Lỗi git fatal / ref không tồn tại: ném lỗi (fail-closed, không nuốt lỗi trả false)
+        await expect(isFirstParentAncestor(repoPath, initialSha, 'nonexistent_ref_1234567890', testEnv)).rejects.toThrow();
+
+        // 3. Tạo một merge commit hợp lệ
         execFileSync('git', ['checkout', '-b', 'agenthub/fail-closed-task'], { cwd: repoPath, env: testEnv });
         fs.writeFileSync(path.join(repoPath, 'task-fc.txt'), 'fc\n');
         execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
@@ -3315,7 +3323,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         const normalMerges = await findForwardMergeCommitsForTask(repoPath, taskRow, ['master'], testEnv);
         expect(normalMerges.length).toBe(1);
 
-        // 3. Khi task branch trỏ tới ref/SHA không hợp lệ dẫn tới ancestry verification thất bại:
+        // 4. Khi task branch trỏ tới ref/SHA không hợp lệ dẫn tới ancestry verification thất bại:
         // findForwardMergeCommitsForTask bắt buộc fail-closed và trả về rỗng, không chấp nhận merge
         const invalidTaskRow: any = {
           ...taskRow,
@@ -3323,6 +3331,64 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         };
         const invalidMerges = await findForwardMergeCommitsForTask(repoPath, invalidTaskRow, ['master'], testEnv);
         expect(invalidMerges).toEqual([]);
+
+        // 5. Khi nhánh task đã bị xoá (hasBranch === false) và baseRef trỏ tới ref không hợp lệ,
+        // không thể xác minh cấu trúc ancestry -> fail-closed và trả về rỗng
+        execFileSync('git', ['branch', '-D', 'agenthub/fail-closed-task'], { cwd: repoPath, env: testEnv });
+        const deletedTaskRowWithBadBase = {
+          ...taskRow,
+          baseRef: 'nonexistent-base-ref-12345',
+        };
+        const badBaseMerges = await findForwardMergeCommitsForTask(repoPath, deletedTaskRowWithBadBase, [], testEnv);
+        expect(badBaseMerges).toEqual([]);
+      });
+
+      it('khi forward merge tồn tại nhưng remote base không resolve được, getTaskDiff fail-closed ném lỗi chứ không dùng earliestMergeP1', async () => {
+        const { getTaskDiff } = await import('../src/publish.js');
+        const repoPath = path.join(tmpDir, 'local-unresolvable-remote-base');
+        fs.mkdirSync(repoPath, { recursive: true });
+        execFileSync('git', ['init', '-b', 'master'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['config', 'user.name', 'Tester'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['config', 'user.email', 'tester@example.com'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'README.md'), '# Base\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'chore: initial'], { cwd: repoPath, env: testEnv });
+
+        // Tạo nhánh task
+        execFileSync('git', ['checkout', '-b', 'agenthub/unres-task'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'unres.txt'), 'unres content\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: unres work'], { cwd: repoPath, env: testEnv });
+
+        // Merge task vào master
+        execFileSync('git', ['checkout', 'master'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--no-ff', 'agenthub/unres-task', '-m', "Merge branch 'agenthub/unres-task' into master"], { cwd: repoPath, env: testEnv });
+        const mergeSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        const taskRow = {
+          id: 'proj/unres-task',
+          projectId: 'proj',
+          slug: 'unres-task',
+          title: 'Unresolvable Remote Base Task',
+          status: 'done',
+          branch: 'agenthub/unres-task',
+          baseRef: 'nonexistent-remote-base',
+        } as unknown as Parameters<typeof getTaskDiff>[1];
+
+        // Khi baseRef không tồn tại và không có remote tracking ref nào, getTaskDiff bắt buộc ném lỗi fail-closed,
+        // tuyệt đối không dùng earliestMergeP1 hay fallback sang snapshot diff.
+        await expect(
+          getTaskDiff(
+            repoPath,
+            taskRow,
+            'agenthub/unres-task',
+            'nonexistent-target-branch',
+            'nonexistent-base-ref',
+            testEnv,
+            null,
+            mergeSha,
+          ),
+        ).rejects.toThrow(/Failed to resolve remote base commit/);
       });
     });
   });

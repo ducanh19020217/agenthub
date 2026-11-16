@@ -44,25 +44,33 @@
    - Preset và quick-fix không còn chèn `codex:gpt-5.6-luna` khi không có tài khoản Codex khả dụng.
    - Giữ nguyên toàn bộ tính năng và mã nguồn mới từ nhánh `main`: `health_issue_cooldowns` (migration 76), Health Sweep service (DEC-032), tailPrefixOverlap log streaming trên `TaskDetailPage`, timeout resume, và timeline streaming.
 
+6. **Xử lý các phát hiện Audit trước khi Publish**:
+   - **Codex model key normalization (`src/services/index.ts`)**: Chuẩn hóa khóa model discovery và configured bằng hàm `getModelKey(engine, model)` nhất quán. Khóa Codex luôn dùng dạng `codex:<id>` mà không bị nhân đôi tiền tố thành `codex:codex:<id>`; các model Codex được cấu hình dù có hay không có tiền tố `codex:` đều khớp chính xác với bản ghi discovery của profile và không tạo bản ghi cảnh báo không khả dụng giả.
+   - **Claude fallback restriction (`src/scheduler/index.ts`)**: Loại bỏ điều kiện tiền tố tự do `raw.startsWith('claude-')` trong `Scheduler.profileHasModel()`. Khi profile Claude chưa có bản ghi cache discovery, chỉ chấp nhận các model/alias fallback hợp lệ đã định nghĩa (`['sonnet', 'opus', 'haiku']` hoặc `claude:sonnet`, `claude:opus`, `claude:haiku`), ngăn ngừa việc xếp task hoặc gán task vào profile Claude cho các model chưa được xác minh.
+   - Bổ sung unit test trong `test/model-discovery.test.ts` kiểm thử đầy đủ hành vi loại bỏ `codex:codex:` và từ chối các chuỗi `claude-*` không xác định khi chưa có discovery cache.
+
 ## 2. Kết quả kiểm tra & nghiệm thu
 
-- `npm run lint`: Đạt (0 errors, 150 warnings).
+- `npm run lint`: Đạt (0 errors, 157 warnings).
 - `npm run typecheck` (`tsc --noEmit -p .`): Đạt (0 errors).
 - `npm --prefix web run typecheck` (`tsc --noEmit -p web`): Đạt (0 errors).
 - `npm run build`: Đạt (tsc và copy protocol.md thành công).
-- `npm run build:web`: Đạt (Vite production build thành công trong 5.86s).
+- `npm run build:web`: Đạt (Vite production build thành công trong 5.47s).
 - `npm run test:web`: Đạt 75/75 test files, 707/707 tests passed (100%).
-- `npm test`: Đạt 148/148 test files, 1905/1905 tests passed (100%).
+- `npm test`: Đạt 148/148 test files, 1907/1907 tests passed (100%).
 - `test/migrations-append-only.test.ts`: Đạt (1/1 tests passed, hash lock khớp 78 migration).
-- `test/model-discovery.test.ts`: Đạt (24/24 tests passed).
+- `test/model-discovery.test.ts`: Đạt (26/26 tests passed).
 
 ## 3. Việc chưa làm được
-Không có. Toàn bộ các yêu cầu chức năng và các điểm phản hồi từ các vòng review (P1/P2) đã được giải quyết triệt để.
+Không có. Toàn bộ các yêu cầu chức năng, các điểm phản hồi từ các vòng review (P1/P2) và audit gate trước publish đã được giải quyết triệt để.
 
 ## 4. Danh sách commit tiêu biểu
+- `57c56957` fix(scheduler): restrict claude fallback in profileHasModel to defined models
+- `a6842316` fix(models): normalize codex model keys in getModelOptions to prevent false warnings
+- `bc9b9c1f` docs(tasks): update completion report with merge resolution and full test results
 - `c2466548` Merge branch 'main' into agenthub/t-account-model-discovery
 - `639b1bfb` test(review): update project-settings test to assert rejection of whitespace models in reviewer order
-- `06ad2cfd feat(models): include project-level configured models and set configured flag in getModelOptions
+- `06ad2cfd` feat(models): include project-level configured models and set configured flag in getModelOptions
 - `2b44bb30 fix(web): exclude unavailable models from reviewer options and add unavailable warnings
 - `fe40319c feat(models): support custom reviewer and arbiter models with live warning
 - `0fc59b6a Merge branch 'agenthub/integration' into agenthub/t-account-model-discovery

@@ -16,6 +16,8 @@ import {
   Play,
   Rocket,
   ScanEye,
+  ShieldAlert,
+  ShieldCheck,
   Zap,
   type LucideIcon,
 } from 'lucide-react';
@@ -31,11 +33,11 @@ import { formatDateTime, formatStatusTimeLabel } from '../lib/time';
 
 /** Sơ đồ quy trình: mỗi node là một trạng thái task, bấm vào để xem danh sách task. */
 
-export type FlowStatus = TaskStatus | 'merge_failed' | 'push_failed';
+export type FlowStatus = TaskStatus | 'merge_failed' | 'push_failed' | 'auditing' | 'audit_failed';
 
 export const FLOW_ACTIVE_REFETCH_INTERVAL = 5_000;
 export const FLOW_IDLE_REFETCH_INTERVAL = 30_000;
-export const ACTIVE_STATUSES: readonly TaskStatus[] = ['running', 'checking', 'review'] as const;
+export const ACTIVE_STATUSES: readonly (TaskStatus | FlowStatus)[] = ['running', 'checking', 'review', 'auditing'] as const;
 
 export function getFlowRefetchInterval(activeCount: number): number {
   return activeCount > 0 ? FLOW_ACTIVE_REFETCH_INTERVAL : FLOW_IDLE_REFETCH_INTERVAL;
@@ -53,9 +55,11 @@ const STATUS_ICON: Record<FlowStatus, LucideIcon> = {
   blocked: OctagonAlert,
   failed: CircleX,
   done: CircleCheck,
+  auditing: ShieldCheck,
   pushed: Rocket,
   cancelled: CircleX,
   merge_failed: GitMerge,
+  audit_failed: ShieldAlert,
   push_failed: CloudOff,
 };
 
@@ -67,29 +71,33 @@ interface FlowNodeDef {
 }
 
 const NODE_DEFS: FlowNodeDef[] = [
-  // Hàng chính (row 1): 7 cột
+  // Hàng chính (row 1): 8 cột
   { status: 'draft', col: 0, row: 1, gridClass: 'col-start-1 row-start-1' },
   { status: 'queued', col: 1, row: 1, gridClass: 'col-start-2 row-start-1' },
   { status: 'running', col: 2, row: 1, gridClass: 'col-start-3 row-start-1' },
   { status: 'checking', col: 3, row: 1, gridClass: 'col-start-4 row-start-1' },
   { status: 'review', col: 4, row: 1, gridClass: 'col-start-5 row-start-1' },
   { status: 'done', col: 5, row: 1, gridClass: 'col-start-6 row-start-1' },
-  { status: 'pushed', col: 6, row: 1, gridClass: 'col-start-7 row-start-1' },
-  // Hàng nhánh lỗi (row 2): dưới running, checking, review, done, pushed
+  { status: 'auditing', col: 6, row: 1, gridClass: 'col-start-7 row-start-1' },
+  { status: 'pushed', col: 7, row: 1, gridClass: 'col-start-8 row-start-1' },
+  // Hàng nhánh lỗi (row 2): dưới running, checking, review, done, auditing, pushed
   { status: 'waiting_quota', col: 2, row: 2, gridClass: 'col-start-3 row-start-2' },
   { status: 'failed', col: 3, row: 2, gridClass: 'col-start-4 row-start-2' },
   { status: 'blocked', col: 4, row: 2, gridClass: 'col-start-5 row-start-2' },
   { status: 'merge_failed', col: 5, row: 2, gridClass: 'col-start-6 row-start-2' },
-  { status: 'push_failed', col: 6, row: 2, gridClass: 'col-start-7 row-start-2' },
+  { status: 'audit_failed', col: 6, row: 2, gridClass: 'col-start-7 row-start-2' },
+  { status: 'push_failed', col: 7, row: 2, gridClass: 'col-start-8 row-start-2' },
 ];
 
 export const FLOW_STATUSES: readonly FlowStatus[] = NODE_DEFS.map((node) => node.status);
 export const MAX_RUNNING_PREVIEW = 3;
 
 const statusColor = (status: FlowStatus) =>
-  status === 'merge_failed' || status === 'push_failed'
+  status === 'merge_failed' || status === 'push_failed' || status === 'audit_failed'
     ? 'var(--t-crit)'
-    : `var(--status-${status}-color, var(--t-accent))`;
+    : status === 'auditing'
+      ? 'var(--status-auditing-color, var(--t-accent))'
+      : `var(--status-${status}-color, var(--t-accent))`;
 const taskHref = (task: Task) => `/tasks/${encodeURIComponent(task.id.replace('/', '~'))}`;
 
 interface NodeRect {
@@ -101,8 +109,8 @@ interface NodeRect {
 
 const getFallbackBox = (status: FlowStatus): NodeRect => {
   const def = NODE_DEFS.find((n) => n.status === status) || NODE_DEFS[0];
-  const colW = 160;
-  const gapX = 32;
+  const colW = 150;
+  const gapX = 28;
   const x = 24 + def.col * (colW + gapX);
   const y = def.row === 1 ? 52 : 240;
   return { x, y, w: colW, h: 88 };
@@ -125,7 +133,7 @@ export function useStatusTotal(
     return getFlowRefetchInterval(count);
   };
 
-  const isDerived = status === 'merge_failed' || status === 'push_failed';
+  const isDerived = status === 'merge_failed' || status === 'push_failed' || status === 'auditing' || status === 'audit_failed';
 
   return useQuery({
     // Đặt dưới 'tasks-kanban' để SSE làm mới cùng lúc với Kanban.
@@ -153,20 +161,29 @@ const FlowNodeCard: React.FC<{
   onOpen: (status: FlowStatus) => void;
   total?: number;
   isLoading?: boolean;
+  isDisabled?: boolean;
   refetchInterval?: number;
   registerRef: (status: FlowStatus, el: HTMLDivElement | null) => void;
-}> = ({ node, project, search, onOpen, total: propTotal, isLoading: propIsLoading, refetchInterval, registerRef }) => {
+}> = ({ node, project, search, onOpen, total: propTotal, isLoading: propIsLoading, isDisabled, refetchInterval, registerRef }) => {
   const { t } = useLocale();
   const query = useStatusTotal(project, node.status, search, refetchInterval);
-  const total = propTotal !== undefined ? propTotal : (query.data?.total ?? 0);
-  const isLoading = propIsLoading !== undefined ? propIsLoading : query.isLoading;
+  const total = isDisabled ? 0 : (propTotal !== undefined ? propTotal : (query.data?.total ?? 0));
+  const isLoading = isDisabled ? false : (propIsLoading !== undefined ? propIsLoading : query.isLoading);
   const color = statusColor(node.status);
   const label = t(`status.${node.status}`);
   const hasTasks = total > 0;
-  const isNodeActive = (node.status === 'running' || node.status === 'checking' || node.status === 'review') && hasTasks;
-  const isIssueNode = node.status === 'merge_failed' || node.status === 'push_failed';
+  const isNodeActive = !isDisabled && (node.status === 'running' || node.status === 'checking' || node.status === 'review' || node.status === 'auditing') && hasTasks;
+  const isIssueNode = node.status === 'merge_failed' || node.status === 'push_failed' || node.status === 'audit_failed';
   const Icon = STATUS_ICON[node.status];
-  const open = () => onOpen(node.status);
+  const open = () => {
+    if (!isDisabled) onOpen(node.status);
+  };
+
+  const nodeTooltip = isDisabled
+    ? t('tasks.flow.auditDisabledTooltip')
+    : node.status === 'auditing'
+      ? t('tasks.flow.tooltipAuditing')
+      : undefined;
 
   // Count bounce effect on change between fetches
   const isInitialLoadRef = useRef(true);
@@ -174,7 +191,7 @@ const FlowNodeCard: React.FC<{
   const [isBouncing, setIsBouncing] = useState(false);
 
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || isDisabled) return;
 
     if (isInitialLoadRef.current) {
       isInitialLoadRef.current = false;
@@ -189,7 +206,7 @@ const FlowNodeCard: React.FC<{
       return () => clearTimeout(timer);
     }
     prevTotalRef.current = total;
-  }, [total, isLoading]);
+  }, [total, isLoading, isDisabled]);
 
   // Details of running tasks inside the 'running' node
   const isRunning = node.status === 'running';
@@ -216,11 +233,13 @@ const FlowNodeCard: React.FC<{
     <div
       ref={(el) => registerRef(node.status, el)}
       role="button"
-      tabIndex={0}
+      tabIndex={isDisabled ? -1 : 0}
       data-testid={`flow-node-${node.status}`}
       data-count={isLoading ? '' : String(total)}
       data-active={isNodeActive ? 'true' : undefined}
+      data-disabled={isDisabled ? 'true' : undefined}
       aria-label={t('tasks.flow.nodeAria', { status: label, count: String(total) })}
+      title={nodeTooltip || label}
       onClick={open}
       onKeyDown={(event) => {
         if (event.target !== event.currentTarget) return;
@@ -240,14 +259,16 @@ const FlowNodeCard: React.FC<{
               : 'var(--t-border)',
         backgroundColor: `color-mix(in srgb, ${color} ${hasTasks ? (isIssueNode ? 14 : 12) : 4}%, var(--t-surface-2))`,
       } as React.CSSProperties}
-      className={`group relative flex flex-col justify-between self-start rounded-2xl border p-3.5 transition-all duration-150 outline-hidden select-none cursor-pointer focus-visible:ring-2 focus-visible:ring-[var(--t-accent)] ${
-        isNodeActive
-          ? 'flow-node-pulse border-2 shadow-sm'
-          : isIssueNode && hasTasks
-            ? 'border-2 border-[var(--t-crit)] shadow-md ring-1 ring-[color-mix(in_srgb,var(--t-crit)_35%,transparent)]'
-            : hasTasks
-              ? 'border-2 hover:border-[var(--t-accent)] shadow-xs'
-              : 'hover:border-[var(--t-border-hover)]'
+      className={`group relative flex flex-col justify-between self-start rounded-2xl border p-3.5 transition-all duration-150 outline-hidden select-none ${
+        isDisabled
+          ? 'opacity-60 cursor-not-allowed border-[var(--t-border)]'
+          : isNodeActive
+            ? 'flow-node-pulse border-2 shadow-sm cursor-pointer focus-visible:ring-2 focus-visible:ring-[var(--t-accent)]'
+            : isIssueNode && hasTasks
+              ? 'border-2 border-[var(--t-crit)] shadow-md ring-1 ring-[color-mix(in_srgb,var(--t-crit)_35%,transparent)] cursor-pointer focus-visible:ring-2 focus-visible:ring-[var(--t-accent)]'
+              : hasTasks
+                ? 'border-2 hover:border-[var(--t-accent)] shadow-xs cursor-pointer focus-visible:ring-2 focus-visible:ring-[var(--t-accent)]'
+                : 'hover:border-[var(--t-border-hover)] cursor-pointer focus-visible:ring-2 focus-visible:ring-[var(--t-accent)]'
       } ${node.gridClass}`}
       data-has-issues={isIssueNode && hasTasks ? 'true' : undefined}
     >
@@ -272,11 +293,20 @@ const FlowNodeCard: React.FC<{
         <div className="min-w-0 flex-1">
           <div
             className="truncate text-[15px] font-semibold flex items-center justify-between"
-            style={{ color: hasTasks ? 'var(--t-text)' : 'var(--t-text-2)' }}
-            title={label}
+            style={{ color: isDisabled ? 'var(--t-text-3)' : (hasTasks ? 'var(--t-text)' : 'var(--t-text-2)') }}
+            title={nodeTooltip || label}
           >
             <span className="truncate">{label}</span>
-            {isIssueNode && hasTasks && (
+            {isDisabled && (
+              <span
+                data-testid="badge-audit-disabled"
+                className="ml-1 shrink-0 rounded-full bg-[var(--t-surface-3)] px-1.5 py-0.2 text-[10px] font-medium text-[var(--t-text-3)]"
+                title={t('tasks.flow.auditDisabledTooltip')}
+              >
+                {t('tasks.flow.auditDisabled')}
+              </span>
+            )}
+            {!isDisabled && isIssueNode && hasTasks && (
               <span
                 data-testid={`badge-${node.status}`}
                 className="ml-1 shrink-0 rounded-full bg-[color-mix(in_srgb,var(--t-crit)_18%,transparent)] px-1.5 py-0.2 text-[10px] font-bold text-[var(--t-crit)]"
@@ -381,34 +411,38 @@ const FlowEdges: React.FC<{
   const { t } = useLocale();
 
   const isStatusActive = (s: FlowStatus) =>
-    (s === 'running' || s === 'checking' || s === 'review') && (counts[s] ?? 0) > 0;
+    (s === 'running' || s === 'checking' || s === 'review' || s === 'auditing') && (counts[s] ?? 0) > 0;
 
-  const main: Array<[TaskStatus, TaskStatus]> = [
+  const main: Array<[FlowStatus, FlowStatus]> = [
     ['draft', 'queued'],
     ['queued', 'running'],
     ['running', 'checking'],
     ['checking', 'review'],
     ['review', 'done'],
-    ['done', 'pushed'],
+    ['done', 'auditing'],
+    ['auditing', 'pushed'],
   ];
 
-  const down: Array<{ from: TaskStatus; to: FlowStatus; label: string }> = [
+  const down: Array<{ from: FlowStatus; to: FlowStatus; label: string }> = [
     { from: 'running', to: 'waiting_quota', label: t('tasks.flow.edgeQuota') },
     { from: 'checking', to: 'failed', label: t('tasks.flow.edgeFailed') },
     { from: 'review', to: 'blocked', label: t('tasks.flow.edgeBlocked') },
     { from: 'done', to: 'merge_failed', label: t('tasks.flow.edgeConflict') },
+    { from: 'auditing', to: 'audit_failed', label: t('tasks.flow.edgeAuditFailed') },
   ];
 
   const bWaiting = getNodeBox('waiting_quota');
   const bFailed = getNodeBox('failed');
   const bBlocked = getNodeBox('blocked');
   const bMerge = getNodeBox('merge_failed');
+  const bAuditFailed = getNodeBox('audit_failed');
   const bPush = getNodeBox('push_failed');
   const maxBottom = Math.max(
     bWaiting.y + bWaiting.h,
     bFailed.y + bFailed.h,
     bBlocked.y + bBlocked.h,
     bMerge.y + bMerge.h,
+    bAuditFailed.y + bAuditFailed.h,
     bPush.y + bPush.h,
   );
   const laneY = maxBottom + 28;
@@ -423,6 +457,7 @@ const FlowEdges: React.FC<{
     (counts.failed ?? 0) > 0 ||
     (counts.blocked ?? 0) > 0 ||
     (counts.merge_failed ?? 0) > 0 ||
+    (counts.audit_failed ?? 0) > 0 ||
     (counts.push_failed ?? 0) > 0;
   const reworkAnimated = (counts.review ?? 0) > 0;
 
@@ -434,9 +469,9 @@ const FlowEdges: React.FC<{
   const reworkEndY = bRunning.y - 8;
   const reworkArchY = Math.min(bReview.y, bRunning.y) - 38;
 
-  const bDone = getNodeBox('done');
-  const pushStartX = bDone.x + bDone.w - 18;
-  const pushStartY = bDone.y + bDone.h;
+  const bAuditing = getNodeBox('auditing');
+  const pushStartX = bAuditing.x + bAuditing.w - 18;
+  const pushStartY = bAuditing.y + bAuditing.h;
   const pushEndX = bPush.x + bPush.w / 2 - 28;
   const pushEndY = bPush.y;
   const pushAnimated = (counts.push_failed ?? 0) > 0;
@@ -451,7 +486,8 @@ const FlowEdges: React.FC<{
         const endX = bTo.x - 6;
         const midY = bFrom.y + 28; // Align horizontally with icon center
         const animated = isStatusActive(from) || isStatusActive(to);
-        const isDoneToPushed = from === 'done' && to === 'pushed';
+        const isDoneToAuditing = from === 'done' && to === 'auditing';
+        const isAuditingToPushed = from === 'auditing' && to === 'pushed';
 
         return (
           <g key={`${from}-${to}`}>
@@ -459,7 +495,26 @@ const FlowEdges: React.FC<{
               d={`M ${startX} ${midY} L ${endX} ${midY}`}
               animated={animated}
             />
-            {isDoneToPushed && (
+            {isDoneToAuditing && (
+              <text
+                data-testid="flow-audit-label"
+                data-placement="above-node"
+                x={(startX + endX) / 2}
+                y={Math.min(bFrom.y, bTo.y) - 10}
+                fontSize={11.5}
+                textAnchor="middle"
+                className="select-none fill-[var(--t-text-3)] font-medium"
+                style={{
+                  paintOrder: 'stroke fill',
+                  stroke: 'var(--t-surface)',
+                  strokeWidth: 3,
+                  strokeLinejoin: 'round',
+                }}
+              >
+                {t('tasks.flow.edgeAudit')}
+              </text>
+            )}
+            {isAuditingToPushed && (
               <text
                 data-testid="flow-merge-label"
                 data-placement="above-node"
@@ -505,9 +560,9 @@ const FlowEdges: React.FC<{
         );
       })}
 
-      {/* 2b. Downward curve from done to push_failed */}
+      {/* 2b. Downward curve from auditing to push_failed */}
       <Edge
-        key="done-push_failed"
+        key="auditing-push_failed"
         d={`M ${pushStartX} ${pushStartY} C ${pushStartX} ${(pushStartY + pushEndY) / 2}, ${pushEndX} ${(pushStartY + pushEndY) / 2}, ${pushEndX} ${pushEndY}`}
         label={t('tasks.flow.edgePushFailed')}
         lx={(pushStartX + pushEndX) / 2}
@@ -518,7 +573,7 @@ const FlowEdges: React.FC<{
       />
 
       {/* 3. Drop lines to bottom return lane */}
-      {(['waiting_quota', 'failed', 'blocked', 'merge_failed', 'push_failed'] as FlowStatus[]).map((status) => {
+      {(['waiting_quota', 'failed', 'blocked', 'merge_failed', 'audit_failed', 'push_failed'] as FlowStatus[]).map((status) => {
         const b = getNodeBox(status);
         const dropX = b.x + b.w / 2 + 24;
         const dropStartY = b.y + b.h + 2;
@@ -568,7 +623,8 @@ export const FlowTaskList: React.FC<{ status: FlowStatus; project?: string; sear
   const queryClient = useQueryClient();
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
   const pageSize = 20;
-  const isIssueView = status === 'merge_failed' || status === 'push_failed';
+  const isIssueView = status === 'merge_failed' || status === 'push_failed' || status === 'audit_failed';
+  const isAuditView = status === 'auditing' || status === 'audit_failed';
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['tasks-kanban', 'flow-list', project, status, search],
@@ -576,7 +632,7 @@ export const FlowTaskList: React.FC<{ status: FlowStatus; project?: string; sear
       getTasksPage({
         project,
         status,
-        derived: isIssueView ? status : undefined,
+        derived: isIssueView || isAuditView ? status : undefined,
         search,
         limit: pageSize,
         sort: 'statusChangedAt',
@@ -600,7 +656,7 @@ export const FlowTaskList: React.FC<{ status: FlowStatus; project?: string; sear
       const next = await getTasksPage({
         project,
         status,
-        derived: isIssueView ? status : undefined,
+        derived: isIssueView || isAuditView ? status : undefined,
         search,
         limit: pageSize,
         cursor,
@@ -663,6 +719,42 @@ export const FlowTaskList: React.FC<{ status: FlowStatus; project?: string; sear
     }
   };
 
+  const handleRetryPublish = async (task: Task) => {
+    if (!window.confirm(t('taskDetail.confirmRetryPublishAudit', { slug: task.slug }))) return;
+    setActionInProgress(task.id);
+    try {
+      await publishTask(task.id);
+      pushToast({ kind: 'success', title: t('tasks.flow.publishRetrySuccess') });
+      queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
+      queryClient.invalidateQueries({ queryKey: ['status'] });
+      queryClient.invalidateQueries({ queryKey: ['task', task.id] });
+      refetch();
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      pushToast({ kind: 'error', title: t('tasks.flow.publishRetryFailed', { error: msg }) });
+    } finally {
+      setActionInProgress(null);
+    }
+  };
+
+  const handleBypassAudit = async (task: Task) => {
+    if (!window.confirm(t('tasks.flow.confirmBypassAudit', { slug: task.slug }))) return;
+    setActionInProgress(task.id);
+    try {
+      await publishTask(task.id, { skipAudit: true });
+      pushToast({ kind: 'success', title: t('tasks.flow.bypassSuccess') });
+      queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
+      queryClient.invalidateQueries({ queryKey: ['status'] });
+      queryClient.invalidateQueries({ queryKey: ['task', task.id] });
+      refetch();
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      pushToast({ kind: 'error', title: t('tasks.flow.bypassFailed', { error: msg }) });
+    } finally {
+      setActionInProgress(null);
+    }
+  };
+
   if (isLoading) return <p className="py-8 text-center text-sm text-[var(--t-text-3)]">{t('pagination.loading')}</p>;
   if (isError) return <p role="alert" className="py-8 text-center text-sm text-[var(--t-crit)]">{t('tasks.flow.loadError')}</p>;
   if (items.length === 0) {
@@ -674,6 +766,144 @@ export const FlowTaskList: React.FC<{ status: FlowStatus; project?: string; sear
     <div className="space-y-3">
       <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3" data-testid="flow-task-list">
         {items.map((task) => {
+          if (status === 'audit_failed') {
+            const audit = task.audit;
+            const round = audit?.rounds || 1;
+            const maxRounds = audit?.maxRounds || 3;
+            const isBlocked = audit?.substate === 'blocked';
+            const findings = audit?.findings || [];
+            const severityCounts = findings.reduce(
+              (counts, finding) => {
+                if (finding.severity === 'P0') counts.p0 += 1;
+                if (finding.severity === 'P1') counts.p1 += 1;
+                if (finding.severity === 'P2') counts.p2 += 1;
+                return counts;
+              },
+              { p0: 0, p1: 0, p2: 0 },
+            );
+            const isActing = actionInProgress === task.id;
+
+            return (
+              <li key={task.id} className="col-span-full">
+                <div
+                  className="flex flex-col gap-3 rounded-xl border border-[var(--t-border)] bg-[var(--t-surface-2)] p-4 transition-colors hover:border-[var(--t-accent)]"
+                  style={{ borderLeft: '4px solid var(--t-crit)' }}
+                  data-testid={`issue-row-${task.slug}`}
+                >
+                  {/* Top row: Title/slug + ProjectTag + round + substate */}
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <Link
+                        to={taskHref(task)}
+                        className="group inline-flex items-center gap-1.5 font-semibold text-sm text-[var(--t-text)] hover:text-[var(--t-accent)] hover:underline"
+                      >
+                        <span className="font-mono text-xs text-[var(--t-text-2)]">{task.slug}</span>
+                        <span className="text-[var(--t-text-3)]">·</span>
+                        <span className="truncate">{task.title}</span>
+                        <ArrowUpRight className="h-3.5 w-3.5 shrink-0 text-[var(--t-text-3)] group-hover:text-[var(--t-accent)]" />
+                      </Link>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <ProjectTag projectId={task.projectId} />
+                      <span
+                        data-testid="audit-round-badge"
+                        className="font-mono text-xs font-semibold px-2 py-0.5 rounded bg-[var(--t-surface)] border border-[var(--t-border)] text-[var(--t-text-2)]"
+                      >
+                        {t('tasks.flow.auditRound', { round, maxRounds })}
+                      </span>
+                      <span
+                        data-testid="audit-substate-badge"
+                        className={`rounded-full px-2 py-0.5 text-xs font-bold ${
+                          isBlocked
+                            ? 'bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)]'
+                            : 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)]'
+                        }`}
+                      >
+                        {isBlocked ? t('tasks.flow.auditBlocked') : t('tasks.flow.returnedToWorker')}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Summary */}
+                  {audit?.summary && (
+                    <div
+                      data-testid="audit-summary"
+                      className="rounded-lg bg-[var(--t-surface)] border border-[var(--t-border)] p-2.5 text-xs text-[var(--t-text)] whitespace-pre-wrap"
+                    >
+                      {audit.summary}
+                    </div>
+                  )}
+
+                  {/* Findings */}
+                  {findings.length > 0 && (
+                    <div className="space-y-1.5" data-testid="audit-findings-list">
+                      <div className="text-xs font-semibold text-[var(--t-text-3)]">
+                        {t('tasks.flow.findingsCount', { count: String(findings.length) })}
+                        <span className="ml-2 font-mono font-normal" data-testid="audit-finding-severity-counts">
+                          {t('tasks.flow.findingSeverityCounts', {
+                            p0: String(severityCounts.p0),
+                            p1: String(severityCounts.p1),
+                            p2: String(severityCounts.p2),
+                          })}
+                        </span>
+                      </div>
+                      <div className="space-y-1">
+                        {findings.map((f, idx) => (
+                          <div
+                            key={idx}
+                            data-testid={`finding-item-${idx}`}
+                            className="flex flex-wrap items-center gap-2 rounded bg-[var(--t-surface)] border border-[var(--t-border)] px-2.5 py-1.5 text-xs"
+                          >
+                            <span
+                              data-testid="finding-severity"
+                              className={`rounded px-1.5 py-0.2 font-mono text-[10px] font-bold ${
+                                f.severity === 'P0' || f.severity === 'P1'
+                                  ? 'bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)]'
+                                  : f.severity === 'P2'
+                                    ? 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)]'
+                                    : 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
+                              }`}
+                            >
+                              {f.severity}
+                            </span>
+                            <span className="font-semibold text-[var(--t-text-2)]">{f.kind}</span>
+                            <span className="font-mono text-[var(--t-text-3)]">{f.file}:{f.line}</span>
+                            <span className="text-[var(--t-text)] min-w-0 flex-1 truncate" title={f.detail}>{f.detail}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Action buttons */}
+                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-[var(--t-border)]">
+                    <button
+                      type="button"
+                      data-testid="btn-retry-publish"
+                      onClick={() => handleRetryPublish(task)}
+                      disabled={isActing}
+                      className="rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] px-3 py-1.5 text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                    >
+                      {t('tasks.flow.btnRetryPublish')}
+                    </button>
+                    {isBlocked && (
+                      <button
+                        type="button"
+                        data-testid="btn-bypass-audit"
+                        onClick={() => handleBypassAudit(task)}
+                        disabled={isActing}
+                        className="rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] hover:bg-[var(--t-surface-2)] text-[var(--t-crit)] px-3 py-1.5 text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                      >
+                        {t('tasks.flow.btnBypassAudit')}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </li>
+            );
+          }
+
           const isIssue = isIssueView || Boolean(task.deliveryIssue);
           const issueKind = task.deliveryIssue?.kind || (status === 'push_failed' ? 'push_failed' : 'merge_failed');
           const failedAt = task.deliveryIssue?.failedAt || task.statusChangedAt || task.updatedAt;
@@ -785,6 +1015,8 @@ export const FlowTaskList: React.FC<{ status: FlowStatus; project?: string; sear
             );
           }
 
+          const isAuditingTask = status === 'auditing';
+
           return (
             <li key={task.id}>
               <Link
@@ -794,7 +1026,14 @@ export const FlowTaskList: React.FC<{ status: FlowStatus; project?: string; sear
               >
                 <div className="flex items-start justify-between gap-2">
                   <span className="truncate font-mono text-xs text-[var(--t-text-2)]">{task.slug}</span>
-                  <ArrowUpRight className="h-3.5 w-3.5 shrink-0 text-[var(--t-text-3)] group-hover:text-[var(--t-accent)]" />
+                  <div className="flex items-center gap-1">
+                    {isAuditingTask && (
+                      <span className="font-mono text-[11px] font-semibold text-[var(--t-text-3)]">
+                        {t('tasks.flow.auditRound', { round: task.audit?.rounds || 1, maxRounds: task.audit?.maxRounds || 3 })}
+                      </span>
+                    )}
+                    <ArrowUpRight className="h-3.5 w-3.5 shrink-0 text-[var(--t-text-3)] group-hover:text-[var(--t-accent)]" />
+                  </div>
                 </div>
                 <div className="mt-1 line-clamp-2 text-sm font-semibold text-[var(--t-text)]">{task.title}</div>
                 <div className="mt-auto flex items-center justify-between gap-2 pt-3 text-xs">
@@ -806,7 +1045,7 @@ export const FlowTaskList: React.FC<{ status: FlowStatus; project?: string; sear
                         title={`${formatDateTime(task.statusChangedAt, locale)}${task.statusChangedAtEstimated ? ` (${t('taskDetail.stepEstimated')})` : ''}`}
                         data-testid="task-status-time"
                       >
-                        {formatStatusTimeLabel(task.status, task.statusChangedAt, locale, undefined, t, task.statusChangedAtEstimated)}
+                        {formatStatusTimeLabel(isAuditingTask ? 'auditing' : task.status, task.statusChangedAt, locale, undefined, t, task.statusChangedAtEstimated)}
                       </span>
                     )}
                   </div>
@@ -846,17 +1085,29 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
   const qChecking = useStatusTotal(project, 'checking', search);
   const qReview = useStatusTotal(project, 'review', search);
   const qDone = useStatusTotal(project, 'done', search);
+  const qAuditing = useStatusTotal(project, 'auditing', search);
   const qPushed = useStatusTotal(project, 'pushed', search);
   const qWaitingQuota = useStatusTotal(project, 'waiting_quota', search);
   const qFailed = useStatusTotal(project, 'failed', search);
   const qBlocked = useStatusTotal(project, 'blocked', search);
   const qMergeFailed = useStatusTotal(project, 'merge_failed', search);
+  const qAuditFailed = useStatusTotal(project, 'audit_failed', search);
   const qPushFailed = useStatusTotal(project, 'push_failed', search);
+
+  const { data: projects = [] } = useQuery({
+    queryKey: ['projects'],
+    queryFn: getProjects,
+  });
+
+  const currentProject = projects.find((p) => p.id === project);
+  const isAuditDisabled = Boolean(project && currentProject?.settings?.publish?.audit?.enabled === false);
 
   const runningCount = qRunning.data?.total ?? 0;
   const checkingCount = qChecking.data?.total ?? 0;
   const reviewCount = qReview.data?.total ?? 0;
-  const activeCount = runningCount + checkingCount + reviewCount;
+  const auditingCount = isAuditDisabled ? 0 : (qAuditing.data?.total ?? 0);
+  const auditFailedCount = isAuditDisabled ? 0 : (qAuditFailed.data?.total ?? 0);
+  const activeCount = runningCount + checkingCount + reviewCount + auditingCount;
   const refetchInterval = getFlowRefetchInterval(activeCount);
 
   const counts: Record<FlowStatus, number> = {
@@ -866,11 +1117,13 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
     checking: checkingCount,
     review: reviewCount,
     done: qDone.data?.total ?? 0,
+    auditing: auditingCount,
     pushed: qPushed.data?.total ?? 0,
     waiting_quota: qWaitingQuota.data?.total ?? 0,
     failed: qFailed.data?.total ?? 0,
     blocked: qBlocked.data?.total ?? 0,
     merge_failed: qMergeFailed.data?.total ?? 0,
+    audit_failed: auditFailedCount,
     push_failed: qPushFailed.data?.total ?? 0,
     cancelled: 0,
   };
@@ -882,11 +1135,13 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
     checking: qChecking.isLoading,
     review: qReview.isLoading,
     done: qDone.isLoading,
+    auditing: isAuditDisabled ? false : qAuditing.isLoading,
     pushed: qPushed.isLoading,
     waiting_quota: qWaitingQuota.isLoading,
     failed: qFailed.isLoading,
     blocked: qBlocked.isLoading,
     merge_failed: qMergeFailed.isLoading,
+    audit_failed: isAuditDisabled ? false : qAuditFailed.isLoading,
     push_failed: qPushFailed.isLoading,
     cancelled: false,
   };
@@ -1005,7 +1260,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
       >
         <div
           ref={boardRef}
-          className="relative min-w-[1240px] min-h-[max(480px,calc(100vh-280px))]"
+          className="relative min-w-[1360px] min-h-[max(480px,calc(100vh-280px))]"
           role="group"
           aria-label={t('tasks.flow.ariaLabel')}
         >
@@ -1031,7 +1286,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
           </svg>
 
           {/* HTML / CSS Grid for nodes */}
-          <div className="relative z-1 grid min-h-[max(480px,calc(100vh-280px))] grid-cols-[repeat(7,minmax(150px,1fr))] content-between gap-x-6 gap-y-16 lg:gap-x-8 lg:gap-y-20 pt-12 pb-16">
+          <div className="relative z-1 grid min-h-[max(480px,calc(100vh-280px))] grid-cols-[repeat(8,minmax(140px,1fr))] content-between gap-x-6 gap-y-16 lg:gap-x-8 lg:gap-y-20 pt-12 pb-16">
             {NODE_DEFS.map((def) => (
               <FlowNodeCard
                 key={def.status}
@@ -1040,6 +1295,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
                 search={search}
                 total={counts[def.status]}
                 isLoading={loading[def.status]}
+                isDisabled={(def.status === 'auditing' || def.status === 'audit_failed') && isAuditDisabled}
                 refetchInterval={refetchInterval}
                 onOpen={setOpenStatus}
                 registerRef={registerRef}

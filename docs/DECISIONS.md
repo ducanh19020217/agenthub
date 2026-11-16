@@ -534,7 +534,45 @@
      - Modal danh sách (`FlowTaskList`) hiển thị danh sách task có delivery issue kèm các nút thao tác (Merge lại, Push lại, Giao worker xử lý) với confirm và toast thông báo kết quả.
      - `TaskDetailPage`: Hiển thị banner cảnh báo lỗi giao hàng kèm các nút xử lý, và bước lỗi trên timeline với mốc thời gian.
 
-## DEC-035: Xác định diff audit trước khi publish theo mốc remote và hỗ trợ nhiều lần merge
+## DEC-035: Hiển thị bước AI Audit trên sơ đồ quy trình TaskFlow và trang chi tiết task
+
+- **Bối cảnh**:
+  - Tính năng Pre-publish Audit Gate (DEC-023) đã hoạt động ở backend (`src/publish.ts`), thực hiện kiểm tra git diff, changed files và báo cáo DONE trước khi push.
+  - Tuy nhiên, trên sơ đồ Quy trình (`TaskFlow.tsx`), bước này hoàn toàn vô hình: task đi thẳng từ "Hoàn thành" sang "Đã đẩy". Người dùng không biết AI đã kiểm tra hay chưa, kết quả ra sao, task nào đang audit hay bị lỗi audit chặn lại.
+  - Cần hiển thị rõ ràng trên sơ đồ TaskFlow, hỗ trợ modal danh sách, trang chi tiết task có thẻ AI Audit đầy đủ (findings, lịch sử các vòng, chạy lại hoặc bỏ qua chặn), và timeline hiển thị các mốc audit.
+- **Quyết định thiết kế**:
+  1. **Trạng thái dẫn xuất (Derived Status) ở tầng Service, không sửa đổi schema DB `tasks.status`**:
+     - Không thêm giá trị mới vào cột `tasks.status` SQLite để giữ toàn vẹn ràng buộc schema và tương thích ngược.
+     - `auditing`: Task đang trong quá trình audit trước publish (`tasks.pushResult.state === 'auditing'` hoặc event `task.auditing`/`task.audit_started` chưa có sự kiện kết thúc hay trạng thái terminal sau đó).
+     - `audit_failed`: Lần audit gần nhất không đạt. Phân biệt:
+       - `returned_to_worker`: Đang trả worker sửa lỗi audit (`pushResult.auditFixRounds` hợp lệ, task ở các trạng thái `queued`/`running`/`checking`/`review`), hiển thị kèm vòng hiện tại trên tổng số vòng tối đa (`rounds`/`maxRounds`).
+       - `blocked`: Bị chặn không thể tự động trả worker (vượt quá số vòng sửa tối đa `exceededMaxRounds`, hoặc bị chặn gián tiếp bởi task khác do `blockedByTaskId`/`blockedByTask`, hoặc lỗi thực thi audit không có finding P1/P2).
+     - `audit_passed`: Lần audit gần nhất đạt (dùng cho timeline, chi tiết task và tính năng thống kê).
+     - `audit_skipped`: Publish được chỉ định bỏ qua audit (`options.skipAudit = true` hoặc event `task.audit_skipped`).
+     - Khi project tắt audit (`publish.audit.enabled = false`), các node audit trên sơ đồ TaskFlow được làm mờ/hiển thị trạng thái tắt và không tính đếm số lượng task.
+  2. **API Backend**:
+     - `GET /api/tasks`: Hỗ trợ lọc theo `?derived=auditing|audit_failed` (và tương thích `?status=auditing|audit_failed`).
+     - `GET /api/status`: Bổ sung đếm `auditing` và `audit_failed` trong trường thống kê `byStatus` (`tasks`).
+     - `GET /api/tasks/:id`: Trả thêm trường `audit: { state, substate, rounds, maxRounds, summary, findings, startedAt, finishedAt, model, engine, history }`. Dữ liệu findings và summary được lấy từ `pushResult` và các event lưu trữ, tuyệt đối không gọi lại AI.
+     - `getTaskTimeline` / `buildTaskTimeline`: Bổ sung các bước audit (`auditing`, `audit_passed`, `audit_failed` kèm số vòng `round`) vào timeline của task. Tái dựng lịch sử các vòng audit từ `events`, `reviews` và `pushResult`.
+  3. **Frontend Web UI & UX**:
+     - Thêm ô **"AI Audit"** ở hàng chính (row 1, col 7/8 giữa "Hoàn thành" và "Đã đẩy") với icon khiên bảo vệ, tooltip giải thích mục đích rà git diff, hiệu ứng `flow-node-pulse` khi có task đang audit.
+     - Thêm ô **"Audit không đạt"** ở hàng nhánh lỗi (row 2, dưới ô "AI Audit"), đếm `audit_failed`. Phân biệt trực quan giữa "đang trả worker sửa" và "bị chặn".
+     - Sắp xếp lưới 8 cột cân đối (`grid-cols-[repeat(8,minmax(140px,1fr))]`), kết nối các mũi tên luồng (done → auditing → pushed, auditing → audit_failed, audit_failed → queued "trả worker sửa") đồng bộ và chống vỡ layout trên màn hình nhỏ.
+     - Modal danh sách (`FlowTaskList`): Mở khi bấm vào ô audit, hiển thị danh sách task audit kèm trạng thái, số vòng, summary rút gọn và số lượng finding theo mức độ nghiêm trọng (P0/P1/P2/P3).
+     - `TaskDetailPage`: Thêm thẻ **"AI Audit"** hiển thị chi tiết trạng thái, summary, danh sách findings (severity, kind, file:line, detail), lịch sử các vòng audit, nút "Chạy lại publish" và nút "Bỏ qua chặn" (với task bị chặn, gọi `publishTask(id, { skipAudit: true })`).
+     - Cập nhật workflow timeline hiển thị các bước "AI Audit bắt đầu", "Audit đạt" và "Audit không đạt (vòng n)".
+     - Hỗ trợ đa ngôn ngữ (i18n tiếng Việt và tiếng Anh) đầy đủ.
+
+## DEC-036: Duyệt thủ công thắng kết quả reviewer tự động về muộn
+
+- **Bối cảnh**: Ngày 2026-11-16, `agenthub/t-account-model-discovery` được người dùng approve thủ công (merge=true). Trong lúc daemon đang merge, task vẫn ở `review`. Reviewer tự động đang chạy kết thúc một giây sau với `changes_requested`. Daemon tính đó là vòng thứ 3 và chuyển task sang `blocked`, dù code đã merge vào integration.
+- **Quyết định**:
+  1. `finishReview` bỏ qua kết quả reviewer nếu task không còn ở `review` hoặc đang merge (`mergingTasks`). Run được đóng là `cancelled` và phát event `review.stale_ignored`. Kết quả này không đổi trạng thái và không tăng `reviewerChangesRequested`.
+  2. Khi có review thủ công (`by` không phải reviewer tự động), `AppService.reviewTask` gọi `Scheduler.supersedeReviewerRun` để dừng reviewer đang chạy, rồi phát event `review.superseded`.
+  3. Người dùng được approve một task `blocked` vì reviewer hết vòng (`reviewerEscalated` và `reviewerEscalationReason = reviewer_changes_limit`). Task được đưa lại `review` (event `review.reopened`) rồi đi luồng approve → merge → publish như bình thường. Reviewer tự động không được dùng đường này. Không thêm endpoint mới; dùng lại `POST /api/tasks/:id/review` và MCP `hub_review`.
+
+## DEC-037: Xác định diff audit trước khi publish theo mốc remote và hỗ trợ nhiều lần merge
 
 - **Bối cảnh**:
   - Ghi nhận sự cố tại repo `dev-insight-rust` (task `ui-dashboard`): pre-publish audit thất bại do diff bị phình to 1867 dòng ngoài phạm vi (chứa toàn bộ code của task approvals đã push lên remote trước đó).

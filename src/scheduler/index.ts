@@ -544,7 +544,15 @@ export class Scheduler {
       const rows = this.profileModelRepo.getForProfile(profileName);
       if (rows.length > 0) {
         if (!isProfileLoggedIn(profile)) return false;
-        return rows.some((r) => r.modelId === model && Boolean(r.verified));
+        // Discovery stores Claude ids bare ("opus") and Codex ids prefixed ("codex:gpt-…"),
+        // while callers (e.g. reviewer selection) may pass "claude:opus" or a bare Codex id.
+        const normalize = (id: string): string => {
+          if (profile.engine === 'claude') return id.startsWith('claude:') ? id.slice('claude:'.length) : id;
+          if (profile.engine === 'codex') return id.startsWith('codex:') ? id : `codex:${id}`;
+          return id;
+        };
+        const wanted = normalize(model);
+        return rows.some((r) => normalize(r.modelId) === wanted && Boolean(r.verified));
       }
     }
 
@@ -557,7 +565,7 @@ export class Scheduler {
     }
     if (profile.engine === 'claude') {
       const raw = model.startsWith('claude:') ? model.slice('claude:'.length) : model;
-      return ['sonnet', 'opus', 'haiku'].includes(raw) || raw.startsWith('claude-');
+      return ['sonnet', 'opus', 'haiku'].includes(raw);
     }
     return false;
   }
@@ -3960,6 +3968,18 @@ export class Scheduler {
     }
 
     const task = this.taskRepo.get(taskId);
+    // The task may have been reviewed by a human (or merged) while this reviewer was running.
+    // A late verdict must not override that decision.
+    if (!task || task.status !== 'review' || this.mergingTasks.has(taskId)) {
+      this.runRepo.finish(runId, 'cancelled', undefined, 'stale reviewer result');
+      this.eventBus.emit('review.stale_ignored', taskId, {
+        actor: active.actor,
+        runId,
+        status: task?.status ?? null,
+        merging: this.mergingTasks.has(taskId),
+      });
+      return;
+    }
     const checks = this.getCheckResults(taskId);
     if (checks.length === 0) {
       this.runRepo.finish(runId, 'done', undefined, 'reviewer had no persisted autocheck results');
@@ -4808,6 +4828,43 @@ export class Scheduler {
     return project.defaultBranch;
   }
 
+  /** Kill the automated reviewer process of a task (if any) and forget it. Returns the run id it killed. */
+  private killReviewerRun(taskId: string): string | null {
+    const reviewerRun = this.reviewerRuns.get(taskId);
+    if (!reviewerRun) return null;
+    clearTimeout(reviewerRun.timeout);
+    if (reviewerRun.exitTimeout) clearTimeout(reviewerRun.exitTimeout);
+    if (reviewerRun.pid) {
+      try {
+        process.kill(-reviewerRun.pid, 'SIGKILL');
+      } catch {
+        try {
+          process.kill(reviewerRun.pid, 'SIGKILL');
+        } catch {
+          // ignore
+        }
+      }
+    }
+    if (reviewerRun.lockFile) {
+      this.locks.release(reviewerRun.profileName, reviewerRun.lockFile);
+    }
+    this.locks.invalidate(reviewerRun.profileName);
+    this.reviewerRuns.delete(taskId);
+    return reviewerRun.runId;
+  }
+
+  /**
+   * A human review supersedes any automated reviewer still running for the task:
+   * stop it so its late verdict cannot override the manual decision.
+   */
+  supersedeReviewerRun(taskId: string, by?: string): void {
+    const actor = this.reviewerRuns.get(taskId)?.actor;
+    const runId = this.killReviewerRun(taskId);
+    if (!runId) return;
+    this.runRepo.finish(runId, 'cancelled', undefined, 'superseded by manual review');
+    this.eventBus.emit('review.superseded', taskId, { actor: actor ?? null, runId, by: by ?? null });
+  }
+
   /**
    * Cancel a running or pending/idle task
    */
@@ -4820,27 +4877,7 @@ export class Scheduler {
       const task = this.taskRepo.get(taskId);
       if (task?.status === 'done' || task?.status === 'pushed' || task?.status === 'cancelled') return;
 
-      const reviewerRun = this.reviewerRuns.get(taskId);
-      if (reviewerRun) {
-        clearTimeout(reviewerRun.timeout);
-        if (reviewerRun.exitTimeout) clearTimeout(reviewerRun.exitTimeout);
-        if (reviewerRun.pid) {
-          try {
-            process.kill(-reviewerRun.pid, 'SIGKILL');
-          } catch {
-            try {
-              process.kill(reviewerRun.pid, 'SIGKILL');
-            } catch {
-              // ignore
-            }
-          }
-        }
-        if (reviewerRun.lockFile) {
-          this.locks.release(reviewerRun.profileName, reviewerRun.lockFile);
-        }
-        this.locks.invalidate(reviewerRun.profileName);
-        this.reviewerRuns.delete(taskId);
-      }
+      this.killReviewerRun(taskId);
       this.reviewNotified.delete(taskId);
       this.reviewWaitingNotified.delete(taskId);
       this.reviewerFallbackNotified.delete(taskId);

@@ -86,6 +86,7 @@ import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
 import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
 import { computeDeliveryIssue, clearGitCheckCache, clearGitCheckCacheForTask, extractConflictFiles, type DeliveryIssue } from './delivery-issues.js';
+import { computeTaskAudit, type TaskAuditInfo } from './audit-status.js';
 import { publishTask as executePublishTask, isProjectPublishing, onProjectPublishLockReleased, type PublishResult } from '../publish.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
@@ -198,6 +199,7 @@ export interface TaskTimelineItem {
   durationMs?: number;
   runId?: string | null;
   actor?: string | null;
+  round?: number;
   estimated?: boolean;
 }
 
@@ -1139,6 +1141,16 @@ export interface ModelOptionsResponse {
   configured: string[];
 }
 
+function getModelKey(engine: 'agy' | 'codex' | 'claude' | string, model: string): string {
+  if (engine === 'codex') {
+    return model.startsWith('codex:') ? model : `codex:${model}`;
+  }
+  if (engine === 'claude' && model.startsWith('claude:')) {
+    return `claude:${model.slice('claude:'.length)}`;
+  }
+  return `${engine}:${model}`;
+}
+
 export class AppService {
   private restartHandler?: () => void;
   private userShutdownRequested = false;
@@ -1724,6 +1736,8 @@ export class AppService {
       focusWaiting: 0,
       merge_failed: 0,
       push_failed: 0,
+      auditing: 0,
+      audit_failed: 0,
     };
 
     const tasksByProject: Record<string, Record<string, number>> = {};
@@ -1775,6 +1789,11 @@ export class AppService {
         const issue = computeDeliveryIssue(t, events, project);
         if (issue) {
           byStatus[issue.kind] = (byStatus[issue.kind] || 0) + 1;
+        }
+        const reviews = this.reviewRepo ? this.reviewRepo.getByTask(t.id) : [];
+        const audit = computeTaskAudit(t, events, project, reviews);
+        if (audit && (audit.state === 'auditing' || audit.state === 'audit_failed')) {
+          byStatus[audit.state] = (byStatus[audit.state] || 0) + 1;
         }
       }
     }
@@ -4246,10 +4265,13 @@ export class AppService {
         } catch { /* ignore malformed legacy event */ }
       }
       const taskEvents = this.eventRepo ? this.eventRepo.getByTask(task.id) : [];
+      const reviews = this.reviewRepo ? this.reviewRepo.getByTask(task.id) : [];
       const deliveryIssue = computeDeliveryIssue(task, taskEvents, project);
+      const audit = computeTaskAudit(task, taskEvents, project, reviews);
       return {
         ...apiTask(task, blockingDisk),
         deliveryIssue,
+        audit,
         externalUrl: this.openProjectTicketUrl(task),
         blockingDisk,
         reviewChain,
@@ -4283,26 +4305,46 @@ export class AppService {
   }
 
   listTasks(filter?: { project?: string; status?: string; derived?: string }): TaskRow[] {
-    const derived = filter?.derived || (filter?.status === 'merge_failed' || filter?.status === 'push_failed' ? filter.status : undefined);
-    const statusFilter = (filter?.status === 'merge_failed' || filter?.status === 'push_failed') ? undefined : filter?.status;
+    const isDerivedStatus = filter?.status === 'merge_failed' || filter?.status === 'push_failed' || filter?.status === 'auditing' || filter?.status === 'audit_failed';
+    const derived = filter?.derived || (isDerivedStatus ? filter.status : undefined);
+    const statusFilter = isDerivedStatus ? undefined : filter?.status;
     let tasks = this.decorateTriageTasks(this.decorateTasks(this.taskRepo.list({ project: filter?.project, status: statusFilter })));
     if (derived) {
-      tasks = tasks.filter((t) => (t as unknown as { deliveryIssue?: DeliveryIssue }).deliveryIssue?.kind === derived);
+      tasks = tasks.filter((t) => {
+        const item = t as unknown as { deliveryIssue?: DeliveryIssue; audit?: TaskAuditInfo };
+        if (derived === 'merge_failed' || derived === 'push_failed') {
+          return item.deliveryIssue?.kind === derived;
+        }
+        if (derived === 'auditing' || derived === 'audit_failed') {
+          return item.audit?.state === derived;
+        }
+        return false;
+      });
     }
     return tasks;
   }
 
   listTasksPage(filter?: { project?: string; status?: string; derived?: string; search?: string; limit?: string | number; cursor?: string; offset?: string | number; sort?: string; order?: string }): PageResult<TaskRow> {
-    const derived = filter?.derived || (filter?.status === 'merge_failed' || filter?.status === 'push_failed' ? filter.status : undefined);
+    const isDerivedStatus = filter?.status === 'merge_failed' || filter?.status === 'push_failed' || filter?.status === 'auditing' || filter?.status === 'audit_failed';
+    const derived = filter?.derived || (isDerivedStatus ? filter.status : undefined);
     if (!derived) {
       const page = this.taskRepo.page(filter);
       return { ...page, items: this.decorateTriageTasks(this.decorateTasks(page.items)) };
     }
 
-    // For derived delivery issue queries (merge_failed | push_failed), retrieve candidate tasks and filter
+    // For derived queries (merge_failed | push_failed | auditing | audit_failed), retrieve candidate tasks and filter
     const candidateTasks = this.taskRepo.list({ project: filter?.project });
     const decorated = this.decorateTriageTasks(this.decorateTasks(candidateTasks));
-    let matching = decorated.filter((t) => (t as unknown as { deliveryIssue?: DeliveryIssue }).deliveryIssue?.kind === derived);
+    let matching = decorated.filter((t) => {
+      const item = t as unknown as { deliveryIssue?: DeliveryIssue; audit?: TaskAuditInfo };
+      if (derived === 'merge_failed' || derived === 'push_failed') {
+        return item.deliveryIssue?.kind === derived;
+      }
+      if (derived === 'auditing' || derived === 'audit_failed') {
+        return item.audit?.state === derived;
+      }
+      return false;
+    });
 
     if (filter?.search?.trim()) {
       const term = filter.search.trim().toLowerCase();
@@ -4501,9 +4543,11 @@ export class AppService {
     const skippedEvent = events.filter((event) => event.type === 'review.auto_merge_skipped').at(-1);
     const skippedPayload = skippedEvent?.payload && typeof skippedEvent.payload === 'object' ? skippedEvent.payload as { reason?: unknown; checks?: unknown; retried?: unknown } : undefined;
     const deliveryIssue = computeDeliveryIssue(task, rawEvents, project);
+    const audit = computeTaskAudit(task, rawEvents, project, reviews);
     return {
       ...apiTask(task, blockingDisk),
       deliveryIssue,
+      audit,
       externalUrl: this.openProjectTicketUrl(task),
       blockingDisk,
       reviewer,
@@ -4590,6 +4634,7 @@ export class AppService {
       at: string;
       runId?: string | null;
       actor?: string | null;
+      round?: number;
       estimated?: boolean;
     }> = [];
 
@@ -4649,7 +4694,41 @@ export class AppService {
           candidates.push({ status: 'publishing', at });
           break;
         case 'task.auditing':
-          candidates.push({ status: 'auditing', at });
+        case 'task.audit_started':
+          // The publish API and the publish worker both emit these two event
+          // names for the same audit round. Keep one start marker until a
+          // verdict arrives, even when another status (for example
+          // `publishing`) is interleaved between the duplicate events.
+          {
+            const lastAuditMarker = [...candidates].reverse().find((candidate) =>
+              candidate.status === 'auditing' ||
+              candidate.status === 'audit_passed' ||
+              candidate.status === 'audit_failed'
+            );
+            if (lastAuditMarker?.status !== 'auditing') {
+              candidates.push({ status: 'auditing', at });
+            }
+          }
+          break;
+        case 'task.audit_passed':
+          candidates.push({
+            status: 'audit_passed',
+            at,
+            actor: typeof payload?.engine === 'string' ? payload.engine : undefined,
+          });
+          break;
+        case 'task.audit_failed':
+          candidates.push({
+            status: 'audit_failed',
+            at,
+            actor: typeof payload?.engine === 'string' ? payload.engine : undefined,
+            round: typeof payload?.auditFixRounds === 'number'
+              ? payload.auditFixRounds
+              : (typeof payload?.round === 'number' ? payload.round : undefined),
+          });
+          break;
+        case 'task.audit_skipped':
+          candidates.push({ status: 'audit_skipped', at });
           break;
         case 'task.pushed':
           candidates.push({ status: 'pushed', at });
@@ -4729,12 +4808,24 @@ export class AppService {
       }
     }
 
-    if (task.pushResult && !candidates.some((c) => c.status === 'push_failed')) {
+    if (task.pushResult) {
       try {
         const pr = typeof task.pushResult === 'string' ? JSON.parse(task.pushResult) : task.pushResult;
-        if (pr && typeof pr === 'object' && (pr.state === 'push_failed' || (pr.error && !task.pushedAt))) {
-          const at = toApiTime(pr.failedAt || task.updatedAt || task.createdAt);
-          if (at) candidates.push({ status: 'push_failed', at });
+        if (pr && typeof pr === 'object') {
+          if (pr.state === 'push_failed' || (pr.error && !task.pushedAt)) {
+            const at = toApiTime(pr.failedAt || task.updatedAt || task.createdAt);
+            if (at && !candidates.some((c) => c.status === 'push_failed')) candidates.push({ status: 'push_failed', at });
+          }
+          if (pr.state === 'auditing' && !candidates.some((c) => c.status === 'auditing')) {
+            const at = toApiTime(pr.startedAt || task.updatedAt || task.createdAt);
+            if (at) candidates.push({ status: 'auditing', at });
+          } else if (pr.auditFailed && !candidates.some((c) => c.status === 'audit_failed')) {
+            const at = toApiTime(pr.failedAt || task.updatedAt || task.createdAt);
+            if (at) candidates.push({ status: 'audit_failed', at, round: typeof pr.auditFixRounds === 'number' ? pr.auditFixRounds : undefined });
+          } else if (pr.auditPassed && !candidates.some((c) => c.status === 'audit_passed')) {
+            const at = toApiTime(task.pushedAt || task.updatedAt || task.createdAt);
+            if (at) candidates.push({ status: 'audit_passed', at });
+          }
         }
       } catch {
         // ignore
@@ -4753,6 +4844,7 @@ export class AppService {
       } else {
         if (!last.runId && item.runId) last.runId = item.runId;
         if (!last.actor && item.actor) last.actor = item.actor;
+        if (!last.round && item.round) last.round = item.round;
       }
     }
 
@@ -4767,8 +4859,8 @@ export class AppService {
     } else {
       const lastStatus = deduplicated.at(-1)!.status;
       const isDoneMatching =
-        task.status === 'done' && (lastStatus === 'done' || lastStatus === 'merged' || lastStatus === 'pushed' || lastStatus === 'push_failed' || lastStatus === 'merge_failed');
-      if (lastStatus !== task.status && !isDoneMatching && lastStatus !== 'merge_failed' && lastStatus !== 'push_failed') {
+        task.status === 'done' && (lastStatus === 'done' || lastStatus === 'merged' || lastStatus === 'pushed' || lastStatus === 'push_failed' || lastStatus === 'merge_failed' || lastStatus === 'auditing' || lastStatus === 'audit_passed' || lastStatus === 'audit_failed');
+      if (lastStatus !== task.status && !isDoneMatching && lastStatus !== 'merge_failed' && lastStatus !== 'push_failed' && lastStatus !== 'audit_failed' && lastStatus !== 'auditing') {
         const at = toApiTime(task.statusChangedAt ?? task.updatedAt)!;
         deduplicated.push({
           status: task.status,
@@ -4798,6 +4890,7 @@ export class AppService {
         ...(durationMs !== undefined ? { durationMs } : {}),
         ...(curr.runId ? { runId: curr.runId } : {}),
         ...(curr.actor ? { actor: curr.actor } : {}),
+        ...(curr.round !== undefined ? { round: curr.round } : {}),
         ...(curr.estimated ? { estimated: true } : {}),
       });
     }
@@ -5622,16 +5715,30 @@ export class AppService {
     if (!task) {
       throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
     }
-    if (task.status !== 'review') {
+    const parsed = ReviewTaskSchema.parse(raw);
+    const manualReview = !isAutoReviewer(parsed.by);
+    // A human may approve a task that the automated reviewers blocked after
+    // exhausting their review rounds; it re-enters review so the normal
+    // approve → merge → publish path applies.
+    const reopenEscalated = manualReview
+      && parsed.verdict === 'approved'
+      && task.status === 'blocked'
+      && Boolean(task.reviewerEscalated)
+      && task.reviewerEscalationReason === 'reviewer_changes_limit';
+    if (task.status !== 'review' && !reopenEscalated) {
       throw new HttpError(400, 'bad_request', `Task "${taskId}" không ở trạng thái review (hiện tại: ${task.status})`);
     }
-
-    const parsed = ReviewTaskSchema.parse(raw);
     if (this.reviewingTasks.has(taskId)) {
       throw new HttpError(409, 'conflict', 'Task đang được duyệt');
     }
     this.reviewingTasks.add(taskId);
     try {
+    if (reopenEscalated) {
+      this.taskRepo.updateStatus(taskId, 'review');
+      this.scheduler.getEventBus().emit('review.reopened', taskId, { from: 'blocked', by: parsed.by ?? null });
+    }
+    // Stop any automated reviewer still running so its late verdict cannot override this decision.
+    if (manualReview) this.scheduler.supersedeReviewerRun(taskId, parsed.by);
 
     let mergeResult: { mergeCommit: string; checks: string[] } | undefined;
     const isPlan = task.slug.endsWith('-plan');
@@ -6930,7 +7037,10 @@ export class AppService {
       const rows = this.profileModelRepo.getForProfile(profile.name);
       for (const r of rows) {
         if (!r.verified) continue; // Only verified models are considered available on the account
-        const key = `${r.engine}:${r.modelId}`;
+        const modelId = r.engine === 'codex' && !r.modelId.startsWith('codex:')
+          ? `codex:${r.modelId}`
+          : r.modelId;
+        const key = getModelKey(r.engine, modelId);
         const existing = modelMap.get(key);
         if (existing) {
           if (!existing.profiles.includes(profile.name)) {
@@ -6940,9 +7050,9 @@ export class AppService {
           existing.available = true;
         } else {
           modelMap.set(key, {
-            id: r.modelId,
+            id: modelId,
             engine: r.engine as 'agy' | 'codex' | 'claude',
-            name: r.modelName || r.modelId,
+            name: r.modelName || modelId,
             profiles: [profile.name],
             verified: true,
             available: true,
@@ -6962,10 +7072,13 @@ export class AppService {
       if (!hasVerifiedForEngine) {
         const defaults = getDefaultModelsForEngine(engine);
         for (const item of defaults) {
-          const key = `${item.engine}:${item.id}`;
+          const modelId = item.engine === 'codex' && !item.id.startsWith('codex:')
+            ? `codex:${item.id}`
+            : item.id;
+          const key = getModelKey(item.engine, modelId);
           if (!modelMap.has(key)) {
             modelMap.set(key, {
-              id: item.id,
+              id: modelId,
               engine: item.engine,
               name: item.name,
               profiles: [],
@@ -7104,9 +7217,7 @@ export class AppService {
       }
     }
 
-    const configuredModels = [...new Set(configuredItems.map((item) => item.model))];
-
-    for (const item of configuredItems) {
+    const normalizedConfiguredItems = configuredItems.map((item) => {
       let engine: 'agy' | 'codex' | 'claude' = item.engine || 'agy';
       if (!item.engine) {
         if (item.model.startsWith('codex:') || (item.model.startsWith('gpt-') && !item.model.startsWith('gpt-oss-'))) {
@@ -7115,7 +7226,7 @@ export class AppService {
           engine = 'claude';
         } else {
           for (const eng of ['agy', 'codex', 'claude'] as const) {
-            const entry = modelMap.get(`${eng}:${item.model}`);
+            const entry = modelMap.get(getModelKey(eng, item.model));
             if (entry && entry.available) {
               engine = eng;
               break;
@@ -7123,13 +7234,21 @@ export class AppService {
           }
         }
       }
+      const model = engine === 'codex'
+        ? (item.model.startsWith('codex:') ? item.model : `codex:${item.model}`)
+        : (engine === 'claude' && item.model.startsWith('claude:') ? item.model.slice('claude:'.length) : item.model);
+      return { model, engine };
+    });
 
-      const key = `${engine}:${item.model}`;
+    const configuredModels = [...new Set(normalizedConfiguredItems.map((item) => item.model))];
+
+    for (const item of normalizedConfiguredItems) {
+      const key = getModelKey(item.engine, item.model);
       const existing = modelMap.get(key);
       if (!existing) {
         modelMap.set(key, {
           id: item.model,
-          engine,
+          engine: item.engine,
           name: item.model,
           profiles: [],
           verified: false,

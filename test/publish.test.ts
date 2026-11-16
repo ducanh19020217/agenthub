@@ -2674,7 +2674,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(remoteLog).not.toContain('feat: task b late commit after merge');
     });
 
-    describe('Audit diff base and range fix (DEC-035 / t-audit-diff-base-fix)', () => {
+    describe('Audit diff base and range fix (DEC-037 / t-audit-diff-base-fix)', () => {
       it('tái hiện sự cố ui-dashboard: task A đã push lên remote, task B merge master ngược chiều rồi merge vào master 2 lần -> diff audit không chứa file của A và chứa trọn vẹn cả 2 lần merge của B', async () => {
         const { getTaskDiff, findForwardMergeCommitsForTask, findMergeCommitForTask } = await import('../src/publish.js');
         const remotePath = path.join(tmpDir, 'remote-ui-dashboard.git');

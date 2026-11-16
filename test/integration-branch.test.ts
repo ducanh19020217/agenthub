@@ -926,6 +926,46 @@ describe('Integration branch and cross-project dependencies', () => {
     expect(fs.existsSync(path.join(intPath, 'uncommitted.txt'))).toBe(true);
   });
 
+  it('a human can approve a task the automated reviewers blocked after exhausting review rounds', async () => {
+    const repo = path.join(tmpDir, 'reopen-repo');
+    initGitRepo(repo, 'main');
+    ctx.service.createProject({
+      id: 'reopen-proj',
+      name: 'Reopen Project',
+      path: repo,
+      defaultBranch: 'main',
+      settings: { integration: { enabled: true, branch: 'agenthub/integration' } },
+      merge: { enabled: true, worktrees: {}, checks: ['node -e "process.exit(0)"'], timeoutSec: 30 },
+    });
+    const intPath = path.join(tmpDir, 'integration', 'reopen-proj');
+    ctx.service.createTask({ project: 'reopen-proj', slug: 'feat', title: 'Feat', body: 'Do it', level: 'easy', start: true });
+    ctx.scheduler.tick();
+    const task = ctx.taskRepo.get('reopen-proj/feat')!;
+    fs.writeFileSync(path.join(task.worktreePath!, 'feat.txt'), 'feature\n');
+    execFileSync('git', ['-C', task.worktreePath!, 'add', '.'], { encoding: 'utf8' });
+    execFileSync('git', ['-C', task.worktreePath!, 'commit', '-m', 'feat: add feat'], { encoding: 'utf8' });
+
+    // Blocked for a reason other than exhausted review rounds: still rejected.
+    ctx.taskRepo.update('reopen-proj/feat', { status: 'blocked' });
+    await expect(ctx.service.reviewTask('reopen-proj/feat', { verdict: 'approved', feedback: 'ok', merge: true }))
+      .rejects.toThrow(/không ở trạng thái review/);
+
+    ctx.taskRepo.update('reopen-proj/feat', {
+      status: 'blocked',
+      reviewerEscalated: 1,
+      reviewerEscalationReason: 'reviewer_changes_limit',
+    });
+    // Automated reviewers cannot use this path.
+    await expect(ctx.service.reviewTask('reopen-proj/feat', { verdict: 'approved', by: 'codex-reviewer', feedback: 'ok', merge: true }))
+      .rejects.toThrow(/không ở trạng thái review/);
+
+    await ctx.service.reviewTask('reopen-proj/feat', { verdict: 'approved', feedback: 'Human override', merge: true });
+    const after = ctx.taskRepo.get('reopen-proj/feat')!;
+    expect(after.status).toBe('done');
+    expect(after.reviewerEscalated).toBeFalsy();
+    expect(fs.existsSync(path.join(intPath, 'feat.txt'))).toBe(true);
+  });
+
   it('switches a clean integration worktree to a changed configured branch and rejects a dirty one', () => {
     const repo = path.join(tmpDir, 'switch-repo');
     initGitRepo(repo, 'main');

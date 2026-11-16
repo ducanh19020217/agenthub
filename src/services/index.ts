@@ -1700,8 +1700,6 @@ export class AppService {
         failed: 0,
         cancelled: 0,
         waiting_quota: 0,
-        merge_failed: 0,
-        push_failed: 0,
       };
     }
 
@@ -1727,8 +1725,6 @@ export class AppService {
           failed: 0,
           cancelled: 0,
           waiting_quota: 0,
-          merge_failed: 0,
-          push_failed: 0,
         };
       }
       tasksByProject[t.projectId][t.status] = (tasksByProject[t.projectId][t.status] || 0) + 1;
@@ -1739,7 +1735,6 @@ export class AppService {
         const issue = computeDeliveryIssue(t, events, project);
         if (issue) {
           byStatus[issue.kind] = (byStatus[issue.kind] || 0) + 1;
-          tasksByProject[t.projectId][issue.kind] = (tasksByProject[t.projectId][issue.kind] || 0) + 1;
         }
       }
     }

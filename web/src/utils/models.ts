@@ -93,7 +93,12 @@ export function formatDiscoveredModelOptions(
     const group = engineLabels[m.engine] || m.engine;
     const baseName = m.name && m.name !== m.id ? `${m.name} (${m.id})` : m.id;
     let label = baseName;
-    if (m.profiles && m.profiles.length > 0) {
+    if (m.unavailable) {
+      const unavailableLabel = t?.('models.unavailableAccountWarning');
+      label = `${baseName} (⚠️ ${unavailableLabel && unavailableLabel !== 'models.unavailableAccountWarning'
+        ? unavailableLabel
+        : t?.('models.unavailableWarning') || 'Not usable with this account'})`;
+    } else if (m.profiles && m.profiles.length > 0) {
       const countStr = t
         ? t('models.accountCount', { count: m.profiles.length })
         : `${m.profiles.length} account(s)`;
@@ -102,7 +107,7 @@ export function formatDiscoveredModelOptions(
       label = `${baseName} (⚠️ ${t ? t('models.unavailableWarning') : 'Unavailable'})`;
     }
     if (m.available && m.runVerified === false) {
-      label = `${label} (⚠️ ${t ? 'Chưa xác minh chạy được' : 'Not verified to run'})`;
+      label = `${label} (⚠️ ${t ? t('models.unverifiedRunWarning') : 'Not verified to run'})`;
     }
 
     return {

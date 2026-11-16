@@ -2042,6 +2042,8 @@ export const en: typeof vi = {
     refreshed: 'Model list refreshed',
     accountCount: '{count} account(s)',
     unavailableWarning: 'Configured model is no longer available on any active account',
+    unavailableAccountWarning: 'Not usable with this account',
+    unverifiedRunWarning: 'Not verified to run',
     customWarning: 'Custom model is not verified by any active account',
     engineAgy: 'Antigravity (agy)',
     engineCodex: 'Codex',

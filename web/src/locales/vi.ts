@@ -2071,6 +2071,8 @@ export const vi = {
     refreshed: 'Đã làm mới danh sách model',
     accountCount: '{count} tài khoản',
     unavailableWarning: 'Model đang cấu hình không còn khả dụng trên tài khoản nào',
+    unavailableAccountWarning: 'Không dùng được với tài khoản',
+    unverifiedRunWarning: 'Chưa xác minh chạy được',
     customWarning: 'Model tùy chỉnh chưa được xác minh bởi tài khoản nào',
     engineAgy: 'Antigravity (agy)',
     engineCodex: 'Codex',

@@ -2397,7 +2397,11 @@ export class ProfileModelRepo {
   }
 
   markRunVerified(profileName: string, modelId: string, engine: string, at = Math.floor(Date.now() / 1000)): void {
-    const result = this.db.prepare('UPDATE profile_models SET runVerified = 1, fetchedAt = ? WHERE profileName = ? AND engine = ? AND modelId = ?')
+    const result = this.db.prepare(`
+      UPDATE profile_models
+      SET runVerified = 1, unavailableReason = NULL, unavailableAt = NULL, fetchedAt = ?
+      WHERE profileName = ? AND engine = ? AND modelId = ?
+    `)
       .run(at, profileName, engine, modelId);
     if (result.changes === 0) {
       this.db.prepare('INSERT INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt, runVerified) VALUES (?, ?, ?, ?, 1, ?, 1)')

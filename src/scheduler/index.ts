@@ -569,6 +569,7 @@ export class Scheduler {
         };
         const wanted = normalize(model);
         const isClaudeAlias = profile.engine === 'claude' && ['sonnet', 'opus', 'haiku'].includes(wanted);
+        if (rows.some((r) => normalize(r.modelId) === wanted && Boolean(r.unavailableAt))) return false;
         if (rows.some((r) => normalize(r.modelId) === wanted && (Boolean(r.verified) || isClaudeAlias))) return true;
         // Discovery is additive: fall through to the statically known models below.
       }

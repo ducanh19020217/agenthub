@@ -279,6 +279,24 @@
   --status-push_failed-border: color-mix(in srgb, var(--t-crit) 25%, transparent);
   --status-push_failed-dot: var(--t-crit);
 
+  --status-auditing-color: #0891b2;
+  --status-auditing-bg: color-mix(in srgb, #0891b2 15%, transparent);
+  --status-auditing-text: #0891b2;
+  --status-auditing-border: color-mix(in srgb, #0891b2 25%, transparent);
+  --status-auditing-dot: #0891b2;
+
+  --status-audit_passed-color: var(--t-ok);
+  --status-audit_passed-bg: color-mix(in srgb, var(--t-ok) 15%, transparent);
+  --status-audit_passed-text: var(--t-ok);
+  --status-audit_passed-border: color-mix(in srgb, var(--t-ok) 25%, transparent);
+  --status-audit_passed-dot: var(--t-ok);
+
+  --status-audit_failed-color: var(--t-crit);
+  --status-audit_failed-bg: color-mix(in srgb, var(--t-crit) 15%, transparent);
+  --status-audit_failed-text: var(--t-crit);
+  --status-audit_failed-border: color-mix(in srgb, var(--t-crit) 25%, transparent);
+  --status-audit_failed-dot: var(--t-crit);
+
   /* Wait Reason Tokens (Light) */
   --wait-disk-color: #ea580c;
   --wait-disk-bg: color-mix(in srgb, #ea580c 12%, transparent);
@@ -501,6 +519,24 @@
   --status-push_failed-text: var(--t-crit);
   --status-push_failed-border: color-mix(in srgb, var(--t-crit) 25%, transparent);
   --status-push_failed-dot: var(--t-crit);
+
+  --status-auditing-color: #22d3ee;
+  --status-auditing-bg: color-mix(in srgb, #22d3ee 15%, transparent);
+  --status-auditing-text: #22d3ee;
+  --status-auditing-border: color-mix(in srgb, #22d3ee 25%, transparent);
+  --status-auditing-dot: #22d3ee;
+
+  --status-audit_passed-color: var(--t-ok);
+  --status-audit_passed-bg: color-mix(in srgb, var(--t-ok) 15%, transparent);
+  --status-audit_passed-text: var(--t-ok);
+  --status-audit_passed-border: color-mix(in srgb, var(--t-ok) 25%, transparent);
+  --status-audit_passed-dot: var(--t-ok);
+
+  --status-audit_failed-color: var(--t-crit);
+  --status-audit_failed-bg: color-mix(in srgb, var(--t-crit) 15%, transparent);
+  --status-audit_failed-text: var(--t-crit);
+  --status-audit_failed-border: color-mix(in srgb, var(--t-crit) 25%, transparent);
+  --status-audit_failed-dot: var(--t-crit);
 
   /* Wait Reason Tokens (Dark) */
   --wait-disk-color: #f97316;
@@ -869,6 +905,25 @@ em,
   justify-content: center;
   transform-origin: center;
   animation: flow-icon-review 2.4s ease-in-out infinite;
+}
+
+.flow-icon-auditing {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transform-origin: center;
+  animation: flow-icon-auditing 2s ease-in-out infinite;
+}
+
+@keyframes flow-icon-auditing {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.85;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

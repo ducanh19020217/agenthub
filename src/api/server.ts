@@ -665,7 +665,7 @@ export async function createServer(
 
   // --- Tasks API ---
   fastify.get('/api/tasks', async (req: FastifyRequest) => {
-    const query = req.query as { project?: string; status?: string; search?: string; q?: string; limit?: string; cursor?: string; offset?: string; sort?: string; order?: string };
+    const query = req.query as { project?: string; status?: string; derived?: string; search?: string; q?: string; limit?: string; cursor?: string; offset?: string; sort?: string; order?: string };
     if (query.cursor && !decodeCursor(query.cursor)) {
       throw new HttpError(400, 'bad_request', 'Invalid pagination cursor');
     }

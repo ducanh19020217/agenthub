@@ -388,7 +388,44 @@ export interface TaskTimelineItem {
   durationMs?: number;
   runId?: string | null;
   actor?: string | null;
+  round?: number;
   estimated?: boolean;
+}
+
+export interface TaskAuditFinding {
+  severity: 'P1' | 'P2' | 'P3' | string;
+  kind: string;
+  file: string;
+  line: number;
+  detail: string;
+}
+
+export interface TaskAuditRoundHistory {
+  round: number;
+  state: 'auditing' | 'audit_passed' | 'audit_failed' | 'audit_skipped';
+  substate?: 'returned_to_worker' | 'blocked';
+  summary?: string | null;
+  findings?: TaskAuditFinding[];
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  model?: string | null;
+  engine?: string | null;
+}
+
+export interface TaskAuditInfo {
+  state: 'auditing' | 'audit_failed' | 'audit_passed' | 'audit_skipped';
+  substate?: 'returned_to_worker' | 'blocked';
+  rounds: number;
+  maxRounds: number;
+  summary?: string | null;
+  findings: TaskAuditFinding[];
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  model?: string | null;
+  engine?: string | null;
+  blockedByTaskId?: string | null;
+  blockedByTask?: string | null;
+  history?: TaskAuditRoundHistory[];
 }
 
 export interface DeliveryIssue {
@@ -443,6 +480,7 @@ export interface Task {
   statusChangedAtEstimated?: boolean;
   timeline?: TaskTimelineItem[];
   deliveryIssue?: DeliveryIssue | null;
+  audit?: TaskAuditInfo | null;
   pushedAt?: string | null;
   pushResult?: string | null | {
     remote?: string;

@@ -17,22 +17,77 @@ interface CacheEntry {
 }
 
 const gitCheckCache = new Map<string, CacheEntry>();
+const taskKeyMap = new Map<string, Set<string>>();
 
-export function clearGitCheckCache(identifier?: string): void {
+function recordTaskKey(taskId: string, key: string): void {
+  let keys = taskKeyMap.get(taskId);
+  if (!keys) {
+    if (taskKeyMap.size > 2000) {
+      const first = taskKeyMap.keys().next().value;
+      if (first) taskKeyMap.delete(first);
+    }
+    keys = new Set();
+    taskKeyMap.set(taskId, keys);
+  }
+  keys.add(key);
+}
+
+export function clearGitCheckCache(identifier?: string | { repoPath?: string; ref?: string; taskId?: string }): void {
   if (!identifier) {
     gitCheckCache.clear();
+    taskKeyMap.clear();
     return;
   }
+  if (typeof identifier === 'string') {
+    const taskKeys = taskKeyMap.get(identifier);
+    if (taskKeys) {
+      for (const k of taskKeys) {
+        gitCheckCache.delete(k);
+      }
+      taskKeyMap.delete(identifier);
+    }
+    for (const key of gitCheckCache.keys()) {
+      if (key.includes(identifier)) {
+        gitCheckCache.delete(key);
+      }
+    }
+    return;
+  }
+  const { repoPath, ref, taskId } = identifier;
+  if (taskId && taskKeyMap.has(taskId)) {
+    const taskKeys = taskKeyMap.get(taskId)!;
+    for (const k of taskKeys) {
+      gitCheckCache.delete(k);
+    }
+    taskKeyMap.delete(taskId);
+  }
   for (const key of gitCheckCache.keys()) {
-    if (key.includes(identifier)) {
+    if ((repoPath && key.includes(repoPath)) || (ref && key.includes(ref))) {
       gitCheckCache.delete(key);
     }
   }
 }
 
-export function isGitAncestor(repoPath: string, commitOrBranch: string, targetBranch: string): boolean {
+export function clearGitCheckCacheForTask(task: TaskRow, project?: ProjectRow | null): void {
+  clearGitCheckCache(task.id);
+  if (task.branch) clearGitCheckCache(task.branch);
+  if (task.slug) {
+    clearGitCheckCache(task.slug);
+    clearGitCheckCache(`agenthub/${task.slug}`);
+  }
+  if (project?.path) {
+    const resolved = resolveTaskGitRef(task, project.path);
+    if (resolved) clearGitCheckCache(resolved);
+    clearGitCheckCache(project.path);
+  }
+}
+
+export function isGitAncestor(repoPath: string, commitOrBranch: string, targetBranch: string, taskId?: string): boolean {
   if (!repoPath || !fs.existsSync(repoPath)) return false;
   const key = `ancestor:${repoPath}:${commitOrBranch}:${targetBranch}`;
+  if (taskId) {
+    recordTaskKey(taskId, key);
+  }
   const now = Date.now();
   const cached = gitCheckCache.get(key);
   if (cached && cached.expiresAt > now) {
@@ -59,14 +114,21 @@ export function isGitAncestor(repoPath: string, commitOrBranch: string, targetBr
     result = false;
   }
 
+  if (gitCheckCache.size > 5000) {
+    const first = gitCheckCache.keys().next().value;
+    if (first) gitCheckCache.delete(first);
+  }
   const ttl = result ? 3600_000 : 15_000;
   gitCheckCache.set(key, { result, expiresAt: now + ttl });
   return result;
 }
 
-export function isGitPushed(repoPath: string, commitOrBranch: string, targetBranch: string): boolean {
+export function isGitPushed(repoPath: string, commitOrBranch: string, targetBranch: string, taskId?: string): boolean {
   if (!repoPath || !fs.existsSync(repoPath)) return false;
   const key = `pushed:${repoPath}:${commitOrBranch}:${targetBranch}`;
+  if (taskId) {
+    recordTaskKey(taskId, key);
+  }
   const now = Date.now();
   const cached = gitCheckCache.get(key);
   if (cached && cached.expiresAt > now) {
@@ -76,7 +138,7 @@ export function isGitPushed(repoPath: string, commitOrBranch: string, targetBran
   let result = false;
   try {
     const localBranch = targetBranch.replace(/^origin\//, '');
-    const isLocal = isGitAncestor(repoPath, commitOrBranch, localBranch);
+    const isLocal = isGitAncestor(repoPath, commitOrBranch, localBranch, taskId);
     if (isLocal) {
       result = true;
     } else {
@@ -95,13 +157,17 @@ export function isGitPushed(repoPath: string, commitOrBranch: string, targetBran
       }
 
       if (hasRemote) {
-        result = isGitAncestor(repoPath, commitOrBranch, remoteRef);
+        result = isGitAncestor(repoPath, commitOrBranch, remoteRef, taskId);
       }
     }
   } catch {
     result = false;
   }
 
+  if (gitCheckCache.size > 5000) {
+    const first = gitCheckCache.keys().next().value;
+    if (first) gitCheckCache.delete(first);
+  }
   const ttl = result ? 3600_000 : 15_000;
   gitCheckCache.set(key, { result, expiresAt: now + ttl });
   return result;
@@ -220,7 +286,7 @@ export function computeDeliveryIssue(
         const targetBranch = settings.publish?.branch || project.defaultBranch || 'main';
         const taskRef = resolveTaskGitRef(task, project.path);
         if (taskRef) {
-          alreadyOnTarget = isPushed(project.path, taskRef, targetBranch);
+          alreadyOnTarget = isPushed(project.path, taskRef, targetBranch, task.id);
         }
       }
 
@@ -291,7 +357,7 @@ export function computeDeliveryIssue(
         const taskRef = resolveTaskGitRef(task, project.path);
         if (taskRef) {
           for (const target of new Set(candidates)) {
-            if (isAncestor(project.path, taskRef, target)) {
+            if (isAncestor(project.path, taskRef, target, task.id)) {
               alreadyMerged = true;
               break;
             }

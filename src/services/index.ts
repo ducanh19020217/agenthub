@@ -83,7 +83,7 @@ import { decodeCursor, encodeCursor, parsePageSize, type PageResult } from '../p
 import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
 import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
-import { computeDeliveryIssue, clearGitCheckCache, extractConflictFiles, type DeliveryIssue } from './delivery-issues.js';
+import { computeDeliveryIssue, clearGitCheckCache, clearGitCheckCacheForTask, extractConflictFiles, type DeliveryIssue } from './delivery-issues.js';
 import { publishTask as executePublishTask, isProjectPublishing, onProjectPublishLockReleased, type PublishResult } from '../publish.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
@@ -1182,6 +1182,12 @@ export class AppService {
     this.claudeAuthRecoveryTimer = setInterval(() => void this.recheckExpiredClaudeProfiles(), 5 * 60_000);
     this.claudeAuthRecoveryTimer.unref?.();
     this.chatService?.eventBus.on('brain.profiles_synced', this.profileSyncHandler);
+    const onGitStateChanged = () => clearGitCheckCache();
+    this.scheduler.getEventBus().on('task.merged', onGitStateChanged);
+    this.scheduler.getEventBus().on('task.pushed', onGitStateChanged);
+    this.scheduler.getEventBus().on('task.push_failed', onGitStateChanged);
+    this.scheduler.getEventBus().on('merge.conflict', onGitStateChanged);
+    this.scheduler.getEventBus().on('merge.failed', onGitStateChanged);
   }
 
   /** Backfill the legacy merge column for projects registered before automatic mapping existed. */
@@ -5906,13 +5912,17 @@ export class AppService {
         files,
       });
 
-      clearGitCheckCache(taskId);
+      clearGitCheckCacheForTask(task, project);
+      if (project.path) clearGitCheckCache(project.path);
+      clearGitCheckCache();
       return { ok: true, status: 'queued', assignedWorker: true, files };
     }
 
     // Merge lại
     this.failedAutoMerges.delete(taskId);
-    clearGitCheckCache(taskId);
+    clearGitCheckCacheForTask(task, project);
+    if (project.path) clearGitCheckCache(project.path);
+    clearGitCheckCache();
     this.scheduler.setTaskMerging(taskId, true);
     let mergeResult: { mergeCommit: string; checks: string[] };
 
@@ -5952,7 +5962,9 @@ export class AppService {
       this.taskRepo.update(taskId, { status: 'done' });
     }
     this.failedAutoMerges.delete(taskId);
-    clearGitCheckCache(taskId);
+    clearGitCheckCacheForTask(task, project);
+    if (project.path) clearGitCheckCache(project.path);
+    clearGitCheckCache();
 
     this.exportKnowledgeFile(task.projectId);
     this.scheduler.getEventBus().emit('task.merged', taskId, mergeResult);
@@ -6289,6 +6301,15 @@ export class AppService {
 
   async publishTask(idParam: string, options?: { manual?: boolean; skipAudit?: boolean }): Promise<PublishResult> {
     const taskId = toTaskId(idParam);
+    const task = this.taskRepo.get(taskId);
+    const project = task ? this.projectRepo.get(task.projectId) : undefined;
+    if (task) {
+      clearGitCheckCacheForTask(task, project);
+    }
+    if (project?.path) {
+      clearGitCheckCache(project.path);
+    }
+    clearGitCheckCache();
     return executePublishTask(
       taskId,
       {

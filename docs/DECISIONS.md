@@ -499,7 +499,8 @@
      - Tự động xóa trạng thái dẫn xuất ngay khi merge hoặc push thành công sau đó.
   2. **Tối ưu hóa và cache gọi Git (Zero git overhead cho luồng chuẩn)**:
      - 99% task không có sự kiện lỗi merge hay push sẽ không bao giờ gọi lệnh git.
-     - Với các task ứng viên, kết quả kiểm tra `isAncestor` được cache trong bộ nhớ với TTL ngắn (15s); nếu git xác nhận đã là ancestor (đã gộp tay), kết quả được cache dài hạn. Cache tự động invalidate khi có sự kiện merge/push/publish mới.
+     - Với các task ứng viên, kết quả kiểm tra `isAncestor` được cache trong bộ nhớ với TTL ngắn (15s); nếu git xác nhận đã là ancestor (đã gộp tay), kết quả được cache dài hạn (1h).
+     - Cache tự động bị xóa (invalidation) theo repo/ref cụ thể, theo taskId (thông qua bảng ánh xạ `taskKeyMap`), và xóa toàn bộ khi có sự kiện merge/push/publish mới (`task.merged`, `task.pushed`, `task.push_failed`, `merge.conflict`, `merge.failed`) hoặc khi gọi retry/publish, đảm bảo trạng thái dẫn xuất luôn cập nhật tức thì.
   3. **API hỗ trợ thao tác và phân trang**:
      - `GET /api/tasks`: Hỗ trợ filter `?derived=merge_failed|push_failed` (và tương thích `?status=merge_failed|push_failed`).
      - `GET /api/tasks/:id`: Trả thêm trường `deliveryIssue: { kind, error, failedAt, files? }`.

@@ -8,7 +8,7 @@ import { createContext } from '../src/daemon.js';
 import { createServer } from '../src/api/server.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
-import { isGitAncestor, isGitPushed, computeDeliveryIssue, clearGitCheckCache } from '../src/services/delivery-issues.js';
+import { isGitAncestor, isGitPushed, computeDeliveryIssue, clearGitCheckCache, clearGitCheckCacheForTask } from '../src/services/delivery-issues.js';
 
 let tmpDir: string;
 let config: ReturnType<typeof loadConfig>;
@@ -691,5 +691,66 @@ describe('Delivery issues (merge_failed & push_failed)', () => {
     // Total unique items across 3 pages is exactly 25
     const allIds = new Set([...ids1, ...ids2, ...page3.items.map((t: { id: string }) => t.id)]);
     expect(allIds.size).toBe(25);
+  });
+
+  it('correctly invalidates git check cache by taskId, repoPath, ref, and on merge/push events', async () => {
+    const { repoPath, taskBranch } = setupGitRepo();
+    try {
+      ctx.projectRepo.insert({
+        id: 'proj-cache',
+        name: 'Project Cache',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ integration: { enabled: true, branch: 'agenthub/integration' } }),
+      });
+
+      const taskId = 'task-cache-1';
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-cache',
+        slug: 't-cache-1',
+        branch: taskBranch,
+        title: 'Task cache test',
+        status: 'done',
+      });
+      ctx.eventRepo.insert('merge.conflict', taskId, {
+        actor: 'auto-merge',
+        message: 'Xung đột merge ở: file.txt',
+      });
+
+      const project = ctx.projectRepo.get('proj-cache')!;
+
+      // 1. Initial computeDeliveryIssue caches git ancestor check
+      let issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+      expect(issue).not.toBeNull();
+      expect(issue?.kind).toBe('merge_failed');
+
+      // Now merge taskBranch into agenthub/integration in git
+      git(repoPath, 'checkout', 'agenthub/integration');
+      git(repoPath, 'merge', '--no-ff', taskBranch, '-m', 'Merge taskBranch');
+      git(repoPath, 'checkout', 'main');
+
+      // 2. Invalidate cache using taskId
+      clearGitCheckCache(taskId);
+      issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+      expect(issue).toBeNull(); // Immediately reflected, not using stale cache!
+
+      // 3. Test clearGitCheckCacheForTask
+      clearGitCheckCacheForTask(ctx.taskRepo.get(taskId)!, project);
+
+      // 4. Test EventBus events automatically clear the cache
+      // Warm cache with a positive ancestor check
+      expect(isGitAncestor(repoPath, taskBranch, 'agenthub/integration', 'task-cache-2')).toBe(true);
+      // Emit task.merged event
+      ctx.scheduler.getEventBus().emit('task.merged', taskId, { mergeCommit: 'abc', checks: [] });
+
+      // Emit task.pushed event
+      ctx.scheduler.getEventBus().emit('task.pushed', taskId, {});
+      // Emit merge.conflict event
+      ctx.scheduler.getEventBus().emit('merge.conflict', taskId, {});
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
   });
 });

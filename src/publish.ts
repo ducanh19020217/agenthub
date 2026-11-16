@@ -268,20 +268,62 @@ export async function findForwardMergeCommitsForTask(
   const taskBranch = task.branch || `agenthub/${task.slug}`;
   const branchRef = `refs/heads/${taskBranch}`;
   const hasBranch = await refExists(repoPath, branchRef, env);
+  let branchSha: string | null = null;
+  if (hasBranch) {
+    try {
+      branchSha = (await runGit(['-C', repoPath, 'rev-parse', branchRef], repoPath, env)).trim();
+    } catch {
+      branchSha = null;
+    }
+  }
 
   const validRefs: string[] = [];
   for (const b of candidateBranches) {
     if (!b) continue;
     if (b === taskBranch || b === task.branch || b === branchRef) continue;
+    if (branchSha && b === branchSha) continue;
     const bRef = `refs/heads/${b}`;
     if (await refExists(repoPath, bRef, env)) {
-      if (bRef !== branchRef && !validRefs.includes(bRef)) validRefs.push(bRef);
+      if (bRef !== branchRef && !validRefs.includes(bRef)) {
+        if (!branchSha) {
+          validRefs.push(bRef);
+        } else {
+          try {
+            const resolved = (await runGit(['-C', repoPath, 'rev-parse', bRef], repoPath, env)).trim();
+            if (resolved !== branchSha) validRefs.push(bRef);
+          } catch {
+            validRefs.push(bRef);
+          }
+        }
+      }
     } else if (await refExists(repoPath, b, env)) {
-      if (b !== branchRef && !validRefs.includes(b)) validRefs.push(b);
+      if (b !== branchRef && !validRefs.includes(b)) {
+        if (!branchSha) {
+          validRefs.push(b);
+        } else {
+          try {
+            const resolved = (await runGit(['-C', repoPath, 'rev-parse', b], repoPath, env)).trim();
+            if (resolved !== branchSha) validRefs.push(b);
+          } catch {
+            validRefs.push(b);
+          }
+        }
+      }
     }
   }
   if (validRefs.length === 0 && (await refExists(repoPath, 'HEAD', env))) {
-    validRefs.push('HEAD');
+    let headIsTask = false;
+    if (branchSha) {
+      try {
+        const headSha = (await runGit(['-C', repoPath, 'rev-parse', 'HEAD'], repoPath, env)).trim();
+        if (headSha === branchSha) headIsTask = true;
+      } catch {
+        // ignore
+      }
+    }
+    if (!headIsTask) {
+      validRefs.push('HEAD');
+    }
   }
 
   const patterns = [taskBranch, task.slug].filter(Boolean) as string[];
@@ -313,17 +355,42 @@ export async function findForwardMergeCommitsForTask(
         const [p1, p2] = parents.split(/\s+/).filter(Boolean);
         if (!p1 || !p2) continue;
 
-        // 1. Reverse merge check:
+        // 1. Reverse merge check by commit subject:
         if (reverseRegexes.some((re) => re.test(subject))) {
           continue;
         }
 
-        // 2. Forward merge check:
+        // 2. Structural parent/ancestry check: p1 must NOT be on the task branch
+        let isP1OnTask = false;
+        if (hasBranch && branchSha) {
+          try {
+            if (p1 === branchSha || (await isAncestor(repoPath, branchRef, p1, env))) {
+              isP1OnTask = true;
+            } else if (
+              (await isAncestor(repoPath, p1, branchRef, env)) &&
+              !(await isAncestor(repoPath, p1, p2, env))
+            ) {
+              isP1OnTask = true;
+            }
+          } catch {
+            isP1OnTask = false;
+          }
+        }
+
+        if (isP1OnTask) {
+          // Parent 1 is on the task branch -> reverse merge, never use as audit source
+          continue;
+        }
+
+        // 3. Forward merge check:
         const isMsgForward = forwardRegexes.some((re) => re.test(subject));
         let isP2OnTask = false;
-        if (hasBranch) {
+        if (hasBranch && branchSha) {
           try {
-            isP2OnTask = await isAncestor(repoPath, p2, branchRef, env);
+            isP2OnTask =
+              p2 === branchSha ||
+              (await isAncestor(repoPath, p2, branchRef, env)) ||
+              (await isAncestor(repoPath, branchRef, p2, env));
           } catch {
             isP2OnTask = false;
           }
@@ -405,11 +472,26 @@ export async function getTaskDiff(
   const taskBranch = task.branch || `agenthub/${task.slug}`;
   const branchRef = `refs/heads/${taskBranch}`;
   const branchExists = await refExists(repoPath, branchRef, env);
+  let branchShaValue: string | null = null;
+  if (branchExists) {
+    try {
+      branchShaValue = (await runGit(['-C', repoPath, 'rev-parse', branchRef], repoPath, env)).trim();
+    } catch {
+      branchShaValue = null;
+    }
+  }
 
   // 1. Prioritize forward merge commit(s) on snapshot of sourceSha/sourceBranch or targetSha/targetBranch
   const candidateBranches: string[] = [];
   for (const b of [sourceSha || sourceBranch, targetSha || targetBranch]) {
-    if (b && b !== taskBranch && b !== task.branch && b !== branchRef && !candidateBranches.includes(b)) {
+    if (
+      b &&
+      b !== taskBranch &&
+      b !== task.branch &&
+      b !== branchRef &&
+      b !== branchShaValue &&
+      !candidateBranches.includes(b)
+    ) {
       candidateBranches.push(b);
     }
   }
@@ -420,6 +502,8 @@ export async function getTaskDiff(
     candidateBranches,
     env,
   );
+
+  let usedMergeDiff = false;
 
   if (forwardMerges.length > 0) {
     try {
@@ -442,17 +526,26 @@ export async function getTaskDiff(
         earliestMergeP1 = earliestMerge;
       }
 
-      // Base commit: destination branch before the task's first merge,
-      // or baseRef (remoteBase) if baseRef exists and is ahead of earliestMergeP1
+      // Base commit:
+      // If task was merged directly into targetBranch (or sourceBranch === targetBranch / no integration branch),
+      // the base is the remote base (baseRef / prevRemoteSha), regardless of whether earliestMergeP1 and baseRef diverged.
+      // If task was merged into an intermediate sourceBranch (e.g. integration branch where sourceBranch !== targetBranch),
+      // each task's base on the integration branch is earliestMergeP1 (the destination state before this task merged),
+      // ensuring proper task isolation without pulling in other unpushed tasks on the integration branch.
+      const isIntegrationProject = Boolean(
+        sourceBranch &&
+        targetBranch &&
+        sourceBranch !== targetBranch &&
+        sourceBranch !== taskBranch &&
+        sourceBranch !== task.branch
+      );
+
       let baseCommit = earliestMergeP1;
-      if (baseRef && (await refExists(repoPath, baseRef, env))) {
+      if (!isIntegrationProject && baseRef && (await refExists(repoPath, baseRef, env))) {
         try {
-          const baseRefSha = (await runGit(['-C', repoPath, 'rev-parse', baseRef], repoPath, env)).trim();
-          if (await isAncestor(repoPath, earliestMergeP1, baseRefSha, env)) {
-            baseCommit = baseRefSha;
-          }
+          baseCommit = (await runGit(['-C', repoPath, 'rev-parse', baseRef], repoPath, env)).trim();
         } catch {
-          // ignore
+          baseCommit = earliestMergeP1;
         }
       }
 
@@ -467,13 +560,14 @@ export async function getTaskDiff(
       diff = await runGit(['-C', repoPath, 'diff', auditRange], repoPath, env);
       const filesOut = await runGit(['-C', repoPath, 'diff', '--name-only', auditRange], repoPath, env);
       changedFiles = filesOut.split('\n').map((s) => s.trim()).filter(Boolean);
+      usedMergeDiff = true;
     } catch {
-      // ignore
+      usedMergeDiff = false;
     }
   }
 
-  // 2. If no merge commit or diff empty, use snapshot commit or branch
-  if (!diff) {
+  // 2. If no forward merge commit was found, use snapshot commit or branch
+  if (!usedMergeDiff) {
     let taskSnapshotCommit: string | null = null;
     if (sourceSha && (taskBranch === sourceBranch || !task.branch)) {
       taskSnapshotCommit = sourceSha;
@@ -553,7 +647,7 @@ export async function getTaskDiff(
     }
   }
 
-  if (!diff && task.diffStat) {
+  if (!usedMergeDiff && !diff && task.diffStat) {
     diff = task.diffStat;
   }
 

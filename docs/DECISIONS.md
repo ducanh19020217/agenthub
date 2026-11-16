@@ -508,3 +508,29 @@
      - `SelectOrCustomInput`: Hỗ trợ `<optgroup>` theo engine, hiển thị cảnh báo `customWarning` bằng token màu theme `text-[var(--t-warn)]` khi người dùng nhập model lạ.
      - `SortableModelList`: Cảnh báo và đánh dấu viền đỏ cho các model trong cấu hình không còn khả dụng trên bất kỳ tài khoản kích hoạt nào.
      - `SettingsPage`: Nút "Làm mới danh sách model" với animation xoay, tooltip hiển thị số tài khoản hỗ trợ từng model.
+
+## DEC-034: Xác định diff audit trước khi publish theo mốc remote và hỗ trợ nhiều lần merge
+
+- **Bối cảnh**:
+  - Ghi nhận sự cố tại repo `dev-insight-rust` (task `ui-dashboard`): pre-publish audit thất bại do diff bị phình to 1867 dòng ngoài phạm vi (chứa toàn bộ code của task approvals đã push lên remote trước đó).
+  - Nguyên nhân gốc rễ:
+    1. Khi project không dùng nhánh tích hợp (`integration.enabled = false`), `sourceBranch` trùng với nhánh task `agenthub/ui-dashboard`. Task branch này trước đó đã reverse merge `master` (`Merge branch 'master' into agenthub/ui-dashboard`).
+    2. `findMergeCommitForTask` tìm kiếm merge commit trên danh sách `candidateBranches: [sourceSha || sourceBranch, targetSha || targetBranch]`. Vì tìm trên `sourceBranch` trước, nó phát hiện commit reverse merge `master` vào `ui-dashboard`.
+    3. Lệnh `git diff merge^1 merge` so sánh nhánh task trước và sau khi reverse merge `master`, khiến diff audit chứa toàn bộ lịch sử commit của `master` thay vì code của task.
+    4. Ngoài ra, việc dùng `--reverse` chỉ lấy merge commit đầu tiên khiến các lần merge tiếp theo (khi task được merge vào target/integration nhiều lần) bị bỏ sót khỏi diff audit.
+- **Quyết định thiết kế**:
+  1. **Loại trừ tuyệt đối Reverse Merge**:
+     - Loại bỏ các nhánh trùng với nhánh task (`taskBranch`, `refs/heads/${taskBranch}`) khỏi danh sách tìm kiếm candidate branches của nhánh đích.
+     - Kiểm tra tiêu đề commit bằng regex: loại bỏ bất kỳ commit nào có dạng `into ... <taskBranch>`.
+     - Chỉ chấp nhận forward merge: commit message có dạng `Merge branch '<taskBranch>'` hoặc parent 2 (`p2`) thuộc nhánh task / là tổ tiên của task tip.
+  2. **Hỗ trợ đầy đủ nhiều lần merge vào integration / target branch**:
+     - Bổ sung hàm `findForwardMergeCommitsForTask` trả về toàn bộ danh sách commit forward merge của task trên `--first-parent` của candidate branch (sắp xếp từ mới nhất đến cũ nhất).
+     - Khi tính diff (`getTaskDiff`):
+       - Tip của task lấy từ parent 2 của merge commit mới nhất (`latestMerge^2`).
+       - Mốc base lấy từ parent 1 của merge commit sớm nhất (`earliestMerge^1`) hoặc `auditBaseRef` / `prevRemoteSha` nếu có.
+       - Dải diff audit được tính qua `mb = git merge-base(baseCommit, taskTip)` và diff theo dải `mb..taskTip`.
+       - Cơ chế này bao trọn toàn bộ các commit của task qua tất cả các lần merge, đồng thời tự động loại trừ mọi thay đổi đã có sẵn trên remote hoặc nhánh đích.
+  3. **Ghi nhận `auditRange` vào `pushResult` và các sự kiện audit**:
+     - Mở rộng interface `PublishSuccessResult` và `PublishFailedResult` bổ sung trường `auditRange?: string` (định dạng `base..tip`).
+     - Ghi nhận `auditRange` vào `pushResult` (trạng thái `pushed`, `audit_failed`, `push_failed`).
+     - Truyền `auditRange` vào payload các sự kiện: `task.auditing`, `task.audit_started`, `task.audit_passed`, `task.audit_failed`, `task.pushed`.

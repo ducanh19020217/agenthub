@@ -1531,14 +1531,10 @@ export async function publishTask(
       sourceSha = await runGit(['-C', repoPath, 'rev-parse', sourceRef], repoPath, env);
     }
 
-    const defaultBranch = currentProject.defaultBranch || 'main';
-    const defaultRemoteRef = `refs/remotes/${remote}/${defaultBranch}`;
-    let auditBaseRef = prevRemoteSha || remoteRef;
-    if (!prevRemoteSha && !(await refExists(repoPath, remoteRef, env))) {
-      if (await refExists(repoPath, defaultRemoteRef, env)) {
-        auditBaseRef = defaultRemoteRef;
-      }
-    }
+    // The audit base must be the remote state of the branch being published.
+    // A different remote branch (including the project's default branch) is not
+    // a valid substitute when the target branch has no remote tip yet.
+    const auditBaseRef = prevRemoteSha || remoteRef;
 
     // --- Pre-Publish Audit Gate ---
     const isSkipAudit = isManual && Boolean(options?.skipAudit);

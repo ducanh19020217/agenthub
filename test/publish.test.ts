@@ -1666,7 +1666,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(remoteCommitsFinal).toContain('feat: task B');
     });
 
-    it('cả nhánh đích local lẫn remote đều không tồn tại: chỉ push đúng snapshot sourceSha đã audit, commit thêm sau không bị kéo theo', async () => {
+    it('fail-closed khi cả nhánh đích local lẫn remote đều không tồn tại', async () => {
       const remotePath = path.join(tmpDir, 'remote-no-target-branch.git');
       initBareRemote(remotePath);
 
@@ -1720,15 +1720,13 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       });
 
       const res = await ctx.service.publishTask('proj-no-target/task-init');
-      expect(res.ok).toBe(true);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.error).toMatch(/Failed to resolve remote base commit/);
+      }
 
       const updated = ctx.taskRepo.get('proj-no-target/task-init');
-      expect(updated?.status).toBe('pushed');
-
-      // Verify remote production received ONLY the audited snapshot, not the late commit
-      const remoteCommits = execFileSync('git', ['--git-dir', remotePath, 'log', '--oneline', 'production'], { encoding: 'utf8', env: testEnv });
-      expect(remoteCommits).toContain('feat: initial audited code');
-      expect(remoteCommits).not.toContain('feat: late change after snapshot');
+      expect(updated?.pushResult).toContain('Failed to resolve remote base commit');
     });
 
     it('chế độ không integration: task đã thực sự nằm trong commit đã push và đã audit được đánh dấu pushed', async () => {

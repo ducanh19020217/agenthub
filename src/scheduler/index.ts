@@ -553,11 +553,12 @@ export class Scheduler {
         };
         const wanted = normalize(model);
         const isClaudeAlias = profile.engine === 'claude' && ['sonnet', 'opus', 'haiku'].includes(wanted);
-        return rows.some((r) => normalize(r.modelId) === wanted && (Boolean(r.verified) || isClaudeAlias));
+        if (rows.some((r) => normalize(r.modelId) === wanted && (Boolean(r.verified) || isClaudeAlias))) return true;
+        // Discovery is additive: fall through to the statically known models below.
       }
     }
 
-    // Fallback if no discovery has been recorded for this profile yet:
+    // Statically known models (also the fallback when no discovery has been recorded yet):
     if (profile.engine === 'agy') {
       return KNOWN_AGY_MODELS.has(model);
     }
@@ -3969,6 +3970,18 @@ export class Scheduler {
     }
 
     const task = this.taskRepo.get(taskId);
+    // The task may have been reviewed by a human (or merged) while this reviewer was running.
+    // A late verdict must not override that decision.
+    if (!task || task.status !== 'review' || this.mergingTasks.has(taskId)) {
+      this.runRepo.finish(runId, 'cancelled', undefined, 'stale reviewer result');
+      this.eventBus.emit('review.stale_ignored', taskId, {
+        actor: active.actor,
+        runId,
+        status: task?.status ?? null,
+        merging: this.mergingTasks.has(taskId),
+      });
+      return;
+    }
     const checks = this.getCheckResults(taskId);
     if (checks.length === 0) {
       this.runRepo.finish(runId, 'done', undefined, 'reviewer had no persisted autocheck results');
@@ -4354,6 +4367,10 @@ export class Scheduler {
     );
     return chain.filter((model) => {
       if (isKnownModel(model, knownDiscovered.size > 0 ? knownDiscovered : undefined)) return true;
+      // Discovery only adds models. A Codex account's models_cache.json can list variant slugs
+      // (e.g. gpt-5.6-luna-wm) without the canonical id the CLI accepts, so statically known
+      // models must never be dropped because discovery did not list them.
+      if (isKnownModel(model)) return true;
       if (hasUndiscoveredCodex && (KNOWN_CODEX_MODELS.has(model) || KNOWN_CODEX_MODELS.has(`codex:${model}`))) return true;
       const key = `${task.id}:${model}`;
       if (!this.notifiedSkippedModels.has(key)) {
@@ -4827,6 +4844,43 @@ export class Scheduler {
     return project.defaultBranch;
   }
 
+  /** Kill the automated reviewer process of a task (if any) and forget it. Returns the run id it killed. */
+  private killReviewerRun(taskId: string): string | null {
+    const reviewerRun = this.reviewerRuns.get(taskId);
+    if (!reviewerRun) return null;
+    clearTimeout(reviewerRun.timeout);
+    if (reviewerRun.exitTimeout) clearTimeout(reviewerRun.exitTimeout);
+    if (reviewerRun.pid) {
+      try {
+        process.kill(-reviewerRun.pid, 'SIGKILL');
+      } catch {
+        try {
+          process.kill(reviewerRun.pid, 'SIGKILL');
+        } catch {
+          // ignore
+        }
+      }
+    }
+    if (reviewerRun.lockFile) {
+      this.locks.release(reviewerRun.profileName, reviewerRun.lockFile);
+    }
+    this.locks.invalidate(reviewerRun.profileName);
+    this.reviewerRuns.delete(taskId);
+    return reviewerRun.runId;
+  }
+
+  /**
+   * A human review supersedes any automated reviewer still running for the task:
+   * stop it so its late verdict cannot override the manual decision.
+   */
+  supersedeReviewerRun(taskId: string, by?: string): void {
+    const actor = this.reviewerRuns.get(taskId)?.actor;
+    const runId = this.killReviewerRun(taskId);
+    if (!runId) return;
+    this.runRepo.finish(runId, 'cancelled', undefined, 'superseded by manual review');
+    this.eventBus.emit('review.superseded', taskId, { actor: actor ?? null, runId, by: by ?? null });
+  }
+
   /**
    * Cancel a running or pending/idle task
    */
@@ -4839,27 +4893,7 @@ export class Scheduler {
       const task = this.taskRepo.get(taskId);
       if (task?.status === 'done' || task?.status === 'pushed' || task?.status === 'cancelled') return;
 
-      const reviewerRun = this.reviewerRuns.get(taskId);
-      if (reviewerRun) {
-        clearTimeout(reviewerRun.timeout);
-        if (reviewerRun.exitTimeout) clearTimeout(reviewerRun.exitTimeout);
-        if (reviewerRun.pid) {
-          try {
-            process.kill(-reviewerRun.pid, 'SIGKILL');
-          } catch {
-            try {
-              process.kill(reviewerRun.pid, 'SIGKILL');
-            } catch {
-              // ignore
-            }
-          }
-        }
-        if (reviewerRun.lockFile) {
-          this.locks.release(reviewerRun.profileName, reviewerRun.lockFile);
-        }
-        this.locks.invalidate(reviewerRun.profileName);
-        this.reviewerRuns.delete(taskId);
-      }
+      this.killReviewerRun(taskId);
       this.reviewNotified.delete(taskId);
       this.reviewWaitingNotified.delete(taskId);
       this.reviewerFallbackNotified.delete(taskId);

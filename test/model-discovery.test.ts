@@ -787,7 +787,32 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     // Reviewer selection passes normalizeReviewerModel('claude', 'opus') === 'claude:opus'
     expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-discovered', 'claude:opus')).toBe(true);
     expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-discovered', 'opus')).toBe(true);
-    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-discovered', 'claude:sonnet')).toBe(false);
+    // Discovery is additive: built-in aliases stay usable, unknown models do not.
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-discovered', 'claude:sonnet')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-discovered', 'claude:claude-fake-model')).toBe(false);
+  });
+
+  it('keeps statically known Codex models usable when discovery only lists variant slugs', () => {
+    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-variant-'));
+    fs.writeFileSync(path.join(codexHome, 'auth.json'), '{}');
+    profileRepo.upsert({
+      name: 'codex-variants',
+      engine: 'codex',
+      kind: 'isolated',
+      home: codexHome,
+      email: 'variants@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    // Real models_cache.json seen on 2026-11-16: only "-wm" variants, no canonical gpt-5.6-luna.
+    profileModelRepo.setForProfile('codex-variants', [
+      { modelId: 'codex:gpt-5.6-luna-wm', modelName: 'GPT-5.6 Luna WM', engine: 'codex', verified: true },
+      { modelId: 'codex:gpt-6', modelName: 'GPT-6', engine: 'codex', verified: true },
+    ]);
+    const scheduler = { profileRepo, profileModelRepo };
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'codex-variants', 'codex:gpt-5.6-luna')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'codex-variants', 'codex:gpt-6')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'codex-variants', 'codex:gpt-fake')).toBe(false);
   });
 
   it('Scheduler.profileHasModel matches unverified Claude aliases when discovery rows have verified: false', () => {

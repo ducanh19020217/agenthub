@@ -1264,5 +1264,222 @@ describe('TaskDetailPage', () => {
     // Custom model is added to chain
     expect(screen.getByTestId('model-item-0')).toHaveTextContent('custom-unverified-model');
   });
+
+  it('35. Task với deliveryIssue (merge_failed): hiển thị banner, nút Merge lại, Giao worker xử lý, và bước timeline', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      deliveryIssue: {
+        kind: 'merge_failed',
+        error: 'CONFLICT: Merge conflict in docs/DECISIONS.md',
+        failedAt: '2026-11-13T10:00:00Z',
+        files: ['docs/DECISIONS.md'],
+      },
+    });
+
+    const retrySpy = vi.spyOn(client, 'retryTaskMerge').mockResolvedValue({ ok: true });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+
+    const banner = await screen.findByTestId('delivery-issue-banner');
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveTextContent('Merge vào nhánh đích bị xung đột');
+    expect(within(banner).getByTestId('banner-delivery-error')).toHaveTextContent('CONFLICT: Merge conflict in docs/DECISIONS.md');
+    expect(within(banner).getByTestId('banner-conflict-files')).toHaveTextContent('docs/DECISIONS.md');
+
+    // Click Merge lại
+    const retryBtn = within(banner).getByTestId('banner-btn-retry-merge');
+    fireEvent.click(retryBtn);
+    expect(retrySpy).toHaveBeenCalledWith('proj-1~t1', { assignWorker: false });
+
+    await waitFor(() => expect(retryBtn).not.toBeDisabled());
+
+    // Click Giao worker xử lý
+    const assignBtn = within(banner).getByTestId('banner-btn-assign-worker');
+    fireEvent.click(assignBtn);
+    expect(retrySpy).toHaveBeenCalledWith('proj-1~t1', { assignWorker: true });
+
+    // Workflow timeline has merge_failed step
+    const timeline = await screen.findByTestId('workflow-timeline');
+    expect(timeline).toBeInTheDocument();
+    const mergeFailedStep = timeline.querySelector('[data-status="merge_failed"]');
+    expect(mergeFailedStep).toBeInTheDocument();
+    expect(mergeFailedStep).toHaveTextContent('Merge lỗi');
+  });
+
+  it('36. Task với deliveryIssue (push_failed): hiển thị banner và nút Push lại, và bước timeline', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      deliveryIssue: {
+        kind: 'push_failed',
+        error: 'remote rejected: protected branch hook failed',
+        failedAt: '2026-11-13T10:05:00Z',
+      },
+    });
+
+    const publishSpy = vi.spyOn(client, 'publishTask').mockResolvedValue({ ok: true, started: true });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+
+    const banner = await screen.findByTestId('delivery-issue-banner');
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveTextContent('Đẩy lên git thất bại');
+    expect(within(banner).getByTestId('banner-delivery-error')).toHaveTextContent('remote rejected: protected branch hook failed');
+
+    // Click Push lại
+    const pushBtn = within(banner).getByTestId('banner-btn-retry-push');
+    fireEvent.click(pushBtn);
+    expect(publishSpy).toHaveBeenCalledWith('proj-1~t1');
+
+    // Workflow timeline has push_failed step
+    const timeline = await screen.findByTestId('workflow-timeline');
+    expect(timeline).toBeInTheDocument();
+    const pushFailedStep = timeline.querySelector('[data-status="push_failed"]');
+    expect(pushFailedStep).toBeInTheDocument();
+    expect(pushFailedStep).toHaveTextContent('Push lỗi');
+  });
+
+  it('37. Task with audit info renders ai-audit-card, metadata, findings and history', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      audit: {
+        state: 'audit_passed',
+        rounds: 2,
+        maxRounds: 3,
+        summary: 'Audit passed cleanly on second round',
+        findings: [
+          { severity: 'P2', kind: 'style', file: 'src/app.ts', line: 12, detail: 'Minor lint formatting' },
+        ],
+        model: 'gemini-3.8-flash-high',
+        engine: 'agy',
+        startedAt: '2026-11-13T10:00:00Z',
+        finishedAt: '2026-11-13T10:02:00Z',
+        history: [
+          {
+            round: 1,
+            state: 'audit_failed',
+            substate: 'returned_to_worker',
+            summary: 'Round 1 failed due to formatting',
+            findings: [{ severity: 'P2', kind: 'style', file: 'src/app.ts', line: 12, detail: 'Minor lint formatting' }],
+            model: 'gemini-3.8-flash-high',
+            finishedAt: '2026-11-13T10:01:00Z',
+          },
+          {
+            round: 2,
+            state: 'audit_passed',
+            summary: 'Round 2 passed',
+            findings: [],
+            model: 'gemini-3.8-flash-high',
+            finishedAt: '2026-11-13T10:02:00Z',
+          },
+        ],
+      },
+    });
+
+    const publishSpy = vi.spyOn(client, 'publishTask').mockResolvedValue({ ok: true, started: true });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    renderPage();
+
+    const auditCard = await screen.findByTestId('ai-audit-card');
+    expect(auditCard).toBeInTheDocument();
+    expect(auditCard).toHaveTextContent('AI Audit trước khi publish');
+    expect(auditCard).toHaveTextContent('Audit đạt');
+    expect(auditCard).toHaveTextContent('2 / 3');
+    expect(auditCard).toHaveTextContent('gemini-3.8-flash-high');
+    expect(within(auditCard).getByTestId('ai-audit-summary')).toHaveTextContent('Audit passed cleanly on second round');
+
+    // Findings table
+    const findingsSection = within(auditCard).getByTestId('ai-audit-findings');
+    expect(findingsSection).toHaveTextContent('P2');
+    expect(findingsSection).toHaveTextContent('src/app.ts:12');
+    expect(findingsSection).toHaveTextContent('Minor lint formatting');
+
+    // History section
+    const historySection = within(auditCard).getByTestId('ai-audit-history');
+    expect(within(historySection).getByTestId('audit-history-round-1')).toBeInTheDocument();
+    expect(within(historySection).getByTestId('audit-history-round-2')).toBeInTheDocument();
+
+    // Click Chạy lại publish
+    const retryBtn = within(auditCard).getByTestId('btn-retry-publish-audit');
+    await act(async () => {
+      fireEvent.click(retryBtn);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(publishSpy).toHaveBeenCalledWith('proj-1~t1'));
+  });
+
+  it('38. Task with audit_failed and blocked substate renders bypass button and triggers publish with skipAudit', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      audit: {
+        state: 'audit_failed',
+        substate: 'blocked',
+        rounds: 3,
+        maxRounds: 3,
+        summary: 'Exceeded max audit rounds, task is blocked',
+        findings: [
+          { severity: 'P1', kind: 'bug', file: 'src/logic.ts', line: 99, detail: 'Null pointer exception' },
+        ],
+        model: 'claude-sonnet-4-6',
+        engine: 'claude',
+      },
+    });
+
+    const publishSpy = vi.spyOn(client, 'publishTask').mockResolvedValue({ ok: true, started: true });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    renderPage();
+
+    const auditCard = await screen.findByTestId('ai-audit-card');
+    expect(auditCard).toBeInTheDocument();
+    expect(within(auditCard).getByTestId('audit-substate-badge')).toHaveTextContent('Bị chặn');
+
+    const bypassBtn = within(auditCard).getByTestId('btn-bypass-audit');
+    expect(bypassBtn).toHaveTextContent('Bỏ qua chặn và đẩy git');
+    await act(async () => {
+      fireEvent.click(bypassBtn);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(publishSpy).toHaveBeenCalledWith('proj-1~t1', { skipAudit: true }));
+  });
+
+  it('39. Workflow timeline renders AI audit steps and round badges', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      timeline: [
+        { status: 'draft', at: '2026-11-13T09:00:00Z' },
+        { status: 'running', at: '2026-11-13T09:05:00Z', durationMs: 600000 },
+        { status: 'done', at: '2026-11-13T09:15:00Z' },
+        { status: 'auditing', at: '2026-11-13T09:16:00Z', round: 1 },
+        { status: 'audit_failed', at: '2026-11-13T09:18:00Z', round: 1 },
+        { status: 'audit_passed', at: '2026-11-13T09:25:00Z' },
+      ],
+    });
+
+    renderPage();
+
+    const timeline = await screen.findByTestId('workflow-timeline');
+    expect(timeline).toBeInTheDocument();
+
+    const auditingStep = timeline.querySelector('[data-status="auditing"]');
+    expect(auditingStep).toHaveTextContent('AI Audit bắt đầu');
+
+    const auditFailedStep = timeline.querySelector('[data-status="audit_failed"]');
+    expect(auditFailedStep).toHaveTextContent('Audit không đạt (vòng 1)');
+
+    const auditPassedStep = timeline.querySelector('[data-status="audit_passed"]');
+    expect(auditPassedStep).toHaveTextContent('Audit đạt');
+  });
 });
 

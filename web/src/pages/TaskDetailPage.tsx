@@ -26,9 +26,10 @@ import {
   resumeTask,
   splitTask,
   publishTask,
+  retryTaskMerge,
   getProject,
 } from '../api/client';
-import { TaskLevel, EventItem, TaskTimelineItem, TaskStatus } from '../types/api';
+import { TaskLevel, EventItem, TaskTimelineItem, TaskStatus, TaskAuditFinding, TaskAuditInfo } from '../types/api';
 import { subscribeToRunOutput, subscribeToEvents } from '../api/sse';
 import { formatDateTime, formatIsoTitle, parseApiTime, formatShortContextualTime, formatDuration } from '../lib/time';
 import { CheckResults } from '../components/CheckResults';
@@ -66,9 +67,13 @@ import {
   ExternalLink,
   GitFork,
   UploadCloud,
+  UserCheck,
+  ShieldAlert,
+  ShieldCheck,
 } from 'lucide-react';
+import { useToasts, ToastViewport } from '../components/ui/Toast';
 
-const TERMINAL_STATUSES = new Set<string>(['done', 'merged', 'pushed', 'cancelled', 'failed']);
+const TERMINAL_STATUSES = new Set<string>(['done', 'merged', 'pushed', 'cancelled', 'failed', 'merge_failed', 'push_failed']);
 function tailPrefixOverlap(snapshot: string, stream: string): number {
   const length = Math.min(snapshot.length, stream.length);
   if (length === 0) return 0;
@@ -121,6 +126,57 @@ export const TaskDetailPage: React.FC = () => {
   const [selectedModelToAdd, setSelectedModelToAdd] = useState('');
   const [editError, setEditError] = useState<string | null>(null);
   const [retryWithDifferentModel, setRetryWithDifferentModel] = useState(false);
+  const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
+  const [deliveryActionLoading, setDeliveryActionLoading] = useState(false);
+
+  const handleDeliveryRetryMerge = async (assignWorker = false) => {
+    if (!task) return;
+    const confirmMsg = assignWorker
+      ? t('taskDetail.confirmAssignWorker')
+      : t('taskDetail.confirmRetryMerge');
+    if (!window.confirm(confirmMsg)) return;
+
+    setDeliveryActionLoading(true);
+    try {
+      await retryTaskMerge(task.id, { assignWorker });
+      if (assignWorker) {
+        pushToast({ kind: 'success', title: t('taskDetail.assignWorkerSuccess') });
+      } else {
+        pushToast({ kind: 'success', title: t('taskDetail.mergeRetrySuccess') });
+      }
+      queryClient.invalidateQueries({ queryKey: ['task', id] });
+      queryClient.invalidateQueries({ queryKey: ['status'] });
+      queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (assignWorker) {
+        pushToast({ kind: 'error', title: t('taskDetail.assignWorkerFailed', { error: msg }) });
+      } else {
+        pushToast({ kind: 'error', title: t('taskDetail.mergeRetryFailed', { error: msg }) });
+      }
+    } finally {
+      setDeliveryActionLoading(false);
+    }
+  };
+
+  const handleDeliveryRetryPush = async () => {
+    if (!task) return;
+    if (!window.confirm(t('taskDetail.confirmRetryPush'))) return;
+
+    setDeliveryActionLoading(true);
+    try {
+      await publishTask(task.id);
+      pushToast({ kind: 'success', title: t('taskDetail.publishRetrySuccess') });
+      queryClient.invalidateQueries({ queryKey: ['task', id] });
+      queryClient.invalidateQueries({ queryKey: ['status'] });
+      queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      pushToast({ kind: 'error', title: t('taskDetail.publishRetryFailed', { error: msg }) });
+    } finally {
+      setDeliveryActionLoading(false);
+    }
+  };
 
   // Live log state
   const liveLogSegments = useRef<Array<{ sequence: number; taskId: string; text: string }>>([]);
@@ -188,9 +244,11 @@ export const TaskDetailPage: React.FC = () => {
   });
 
   const workflowTimelineItems: TaskTimelineItem[] = useMemo(() => {
-    if (task?.timeline && task.timeline.length > 0) return task.timeline;
-    if (task) {
-      return [
+    let items: TaskTimelineItem[] = [];
+    if (task?.timeline && task.timeline.length > 0) {
+      items = [...task.timeline];
+    } else if (task) {
+      items = [
         {
           status: task.status,
           at: task.statusChangedAt || task.updatedAt || task.createdAt,
@@ -198,7 +256,14 @@ export const TaskDetailPage: React.FC = () => {
         },
       ];
     }
-    return [];
+    if (task?.deliveryIssue && !items.some((it) => it.status === task.deliveryIssue!.kind)) {
+      items.push({
+        status: task.deliveryIssue.kind,
+        at: task.deliveryIssue.failedAt,
+        estimated: false,
+      });
+    }
+    return items;
   }, [task]);
 
   const emptyLogMessage = React.useMemo(() => {
@@ -267,6 +332,32 @@ export const TaskDetailPage: React.FC = () => {
       return null;
     }
   }, [task?.pushResult]);
+
+  const auditInfo: TaskAuditInfo | null = useMemo(() => {
+    if (task?.audit) return task.audit;
+    if (parsedPushResult?.auditPassed || parsedPushResult?.auditFailed || parsedPushResult?.findings || parsedPushResult?.auditSkipped || parsedPushResult?.state === 'auditing') {
+      return {
+        state: (parsedPushResult?.auditPassed
+          ? 'audit_passed'
+          : parsedPushResult?.auditFailed
+            ? 'audit_failed'
+            : parsedPushResult?.auditSkipped
+              ? 'audit_skipped'
+              : 'auditing') as 'auditing' | 'audit_passed' | 'audit_failed' | 'audit_skipped',
+        rounds: parsedPushResult?.round || 1,
+        maxRounds: parsedPushResult?.maxRounds || 3,
+        summary: parsedPushResult?.summary || null,
+        findings: (parsedPushResult?.findings || []) as TaskAuditFinding[],
+        startedAt: parsedPushResult?.auditStartedAt || null,
+        finishedAt: parsedPushResult?.auditFinishedAt || null,
+        model: parsedPushResult?.model || null,
+        engine: parsedPushResult?.engine || null,
+      };
+    }
+    return null;
+  }, [task?.audit, parsedPushResult]);
+
+  const showAuditCard = Boolean(auditInfo);
 
   const { data: projectNotes = [], refetch: refetchNotes } = useQuery({
     queryKey: ['projectNotes', task?.projectId],
@@ -495,7 +586,19 @@ export const TaskDetailPage: React.FC = () => {
     },
   });
 
-  const isPublishing = publishMutation.isPending || parsedPushResult?.state === 'auditing' || parsedPushResult?.state === 'pushing';
+  const isPublishing = publishMutation.isPending || parsedPushResult?.state === 'auditing' || parsedPushResult?.state === 'pushing' || task?.audit?.state === 'auditing';
+
+  const handleRetryPublishAudit = () => {
+    if (window.confirm(t('taskDetail.confirmRetryPublishAudit'))) {
+      publishMutation.mutate();
+    }
+  };
+
+  const handleBypassAudit = () => {
+    if (window.confirm(t('taskDetail.confirmBypassAudit'))) {
+      publishMutation.mutate({ skipAudit: true });
+    }
+  };
 
   const rerunChecksMutation = useMutation({
     mutationFn: () => rerunChecks(id),
@@ -1042,6 +1145,98 @@ export const TaskDetailPage: React.FC = () => {
         </div>
       </div>
 
+      {task.deliveryIssue && (
+        <section
+          data-testid="delivery-issue-banner"
+          className="rounded-xl border border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_8%,transparent)] p-5 space-y-3 shadow-xs"
+        >
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-[var(--t-crit)] shrink-0" />
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-[var(--t-crit)]">
+                {task.deliveryIssue.kind === 'merge_failed'
+                  ? t('taskDetail.mergeFailedTitle')
+                  : t('taskDetail.pushFailedTitle')}
+              </h2>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {task.deliveryIssue.kind === 'merge_failed' && (
+                <>
+                  <button
+                    type="button"
+                    data-testid="banner-btn-retry-merge"
+                    onClick={() => handleDeliveryRetryMerge(false)}
+                    disabled={deliveryActionLoading}
+                    className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>{t('taskDetail.btnRetryMerge')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="banner-btn-assign-worker"
+                    onClick={() => handleDeliveryRetryMerge(true)}
+                    disabled={deliveryActionLoading}
+                    className="px-3 py-1.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] hover:bg-[var(--t-surface-2)] text-[var(--t-text)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                  >
+                    <UserCheck className="w-3.5 h-3.5" />
+                    <span>{t('taskDetail.btnAssignWorker')}</span>
+                  </button>
+                </>
+              )}
+              {task.deliveryIssue.kind === 'push_failed' && (
+                <button
+                  type="button"
+                  data-testid="banner-btn-retry-push"
+                  onClick={handleDeliveryRetryPush}
+                  disabled={deliveryActionLoading}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                >
+                  <UploadCloud className="w-3.5 h-3.5" />
+                  <span>{t('taskDetail.btnRetryPush')}</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-1.5 text-xs text-[var(--t-text-2)]">
+            <div className="flex items-baseline gap-2">
+              <span className="font-semibold text-[var(--t-text)]">{t('taskDetail.failedAt')}:</span>
+              <span
+                data-testid="banner-delivery-failed-at"
+                className="font-mono"
+                title={formatIsoTitle(task.deliveryIssue.failedAt)}
+              >
+                {formatDateTime(task.deliveryIssue.failedAt, locale)}
+              </span>
+            </div>
+            {task.deliveryIssue.error && (
+              <div
+                data-testid="banner-delivery-error"
+                className="rounded-lg bg-[var(--t-surface)] border border-[var(--t-border)] p-2.5 font-mono text-[11px] text-[var(--t-text)] whitespace-pre-wrap max-h-36 overflow-y-auto"
+              >
+                {task.deliveryIssue.error}
+              </div>
+            )}
+            {task.deliveryIssue.files && task.deliveryIssue.files.length > 0 && (
+              <div className="space-y-1 pt-1" data-testid="banner-conflict-files">
+                <span className="font-semibold text-[var(--t-text)]">{t('taskDetail.conflictFiles')}:</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {task.deliveryIssue.files.map((file) => (
+                    <span
+                      key={file}
+                      className="font-mono text-[11px] rounded bg-[color-mix(in_srgb,var(--t-crit)_12%,transparent)] border border-[color-mix(in_srgb,var(--t-crit)_25%,transparent)] px-2 py-0.5 text-[var(--t-crit)]"
+                    >
+                      {file}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
       {task.status === 'cancelled' && (
         <section data-testid="task-cancelled-banner" className="rounded-xl border border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_8%,transparent)] p-4 text-sm space-y-1">
           <div className="font-semibold text-[var(--t-text)] inline-flex items-center gap-1.5"><XCircle className="w-4 h-4 text-[var(--t-crit)]" />{t('taskDetail.cancelledTitle')}</div>
@@ -1063,6 +1258,199 @@ export const TaskDetailPage: React.FC = () => {
           </ul>
         </div>
       ) : null}
+
+      {/* Khối AI Audit */}
+      {showAuditCard && auditInfo && (
+        <section
+          data-testid="ai-audit-card"
+          className="bg-[var(--t-surface)] rounded-xl border border-[var(--t-border)] p-5 shadow-xs space-y-4"
+        >
+          {/* Header */}
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              {auditInfo.state === 'audit_failed' ? (
+                <ShieldAlert className="w-5 h-5 text-[var(--t-crit)] shrink-0" />
+              ) : (
+                <ShieldCheck className="w-5 h-5 text-[var(--status-auditing-color)] shrink-0" />
+              )}
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-[var(--t-text-3)]">
+                {t('taskDetail.aiAuditTitle')}
+              </h2>
+              <StatusBadge status={auditInfo.state} round={auditInfo.rounds} size="sm" />
+              {auditInfo.state === 'audit_failed' && auditInfo.substate && (
+                <span
+                  data-testid="audit-substate-badge"
+                  className={`rounded-full px-2 py-0.5 text-xs font-bold ${
+                    auditInfo.substate === 'blocked'
+                      ? 'bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)]'
+                      : 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)]'
+                  }`}
+                >
+                  {auditInfo.substate === 'blocked' ? t('taskDetail.auditBlocked') : t('taskDetail.auditReturnedToWorker')}
+                </span>
+              )}
+            </div>
+
+            {/* Quick Actions */}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                data-testid="btn-retry-publish-audit"
+                onClick={handleRetryPublishAudit}
+                disabled={isPublishing}
+                className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>{isPublishing ? t('taskDetail.publishing') : t('taskDetail.btnRetryPublishAudit')}</span>
+              </button>
+              {auditInfo.state === 'audit_failed' && auditInfo.substate === 'blocked' && (
+                <button
+                  type="button"
+                  data-testid="btn-bypass-audit"
+                  onClick={handleBypassAudit}
+                  disabled={isPublishing}
+                  className="px-3 py-1.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] hover:bg-[var(--t-surface-3)] text-[var(--t-crit)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                >
+                  <span>{t('taskDetail.btnBypassAudit')}</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Description */}
+          <p className="text-xs text-[var(--t-text-3)]">{t('taskDetail.aiAuditDesc')}</p>
+
+          {/* Metadata Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+              <span className="text-[var(--t-text-3)] block">{t('taskDetail.auditRounds')}</span>
+              <span className="font-mono font-medium text-[var(--t-text)]">
+                {auditInfo.rounds} / {auditInfo.maxRounds}
+              </span>
+            </div>
+            <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+              <span className="text-[var(--t-text-3)] block">{t('taskDetail.auditModel')}</span>
+              <span className="font-mono font-medium text-[var(--t-text)]">
+                {auditInfo.model || '—'}
+              </span>
+            </div>
+            <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+              <span className="text-[var(--t-text-3)] block">{t('taskDetail.auditStartedAt')}</span>
+              <span className="font-medium text-[var(--t-text)]" title={formatIsoTitle(auditInfo.startedAt)}>
+                {auditInfo.startedAt ? formatDateTime(auditInfo.startedAt, locale) : '—'}
+              </span>
+            </div>
+            <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+              <span className="text-[var(--t-text-3)] block">{t('taskDetail.auditFinishedAt')}</span>
+              <span className="font-medium text-[var(--t-text)]" title={formatIsoTitle(auditInfo.finishedAt)}>
+                {auditInfo.finishedAt ? formatDateTime(auditInfo.finishedAt, locale) : '—'}
+              </span>
+            </div>
+          </div>
+
+          {/* Summary */}
+          {auditInfo.summary && (
+            <div className="space-y-1">
+              <span className="text-xs font-semibold text-[var(--t-text-3)] uppercase tracking-wider">{t('taskDetail.auditSummary')}</span>
+              <div
+                data-testid="ai-audit-summary"
+                className="rounded-lg bg-[var(--t-surface-2)] border border-[var(--t-border)] p-3 text-xs text-[var(--t-text)] whitespace-pre-wrap leading-relaxed"
+              >
+                {auditInfo.summary}
+              </div>
+            </div>
+          )}
+
+          {/* Findings */}
+          <div data-testid="ai-audit-findings" className="space-y-2">
+            <span className="text-xs font-semibold text-[var(--t-text-3)] uppercase tracking-wider">
+              {t('taskDetail.auditFindings', { count: auditInfo.findings?.length || 0 })}
+            </span>
+            {(!auditInfo.findings || auditInfo.findings.length === 0) ? (
+              <p className="text-xs text-[var(--t-text-3)] italic rounded-lg bg-[var(--t-surface-2)] p-3 border border-[var(--t-border)]">
+                {t('taskDetail.noAuditFindings')}
+              </p>
+            ) : (
+              <div className="overflow-x-auto rounded-lg border border-[var(--t-border)]">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-[var(--t-surface-2)] text-[var(--t-text-3)] border-b border-[var(--t-border)] font-semibold">
+                    <tr>
+                      <th className="py-2 px-3">{t('taskDetail.findingSeverity')}</th>
+                      <th className="py-2 px-3">{t('taskDetail.findingKind')}</th>
+                      <th className="py-2 px-3">{t('taskDetail.findingLocation')}</th>
+                      <th className="py-2 px-3">{t('taskDetail.findingDetail')}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--t-border)]">
+                    {auditInfo.findings.map((f, i) => (
+                      <tr key={i} data-testid={`audit-finding-row-${i}`} className="hover:bg-[var(--t-surface-2)]">
+                        <td className="py-2 px-3 shrink-0">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
+                            f.severity === 'P0' || f.severity === 'P1'
+                              ? 'bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)]'
+                              : f.severity === 'P2'
+                                ? 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)]'
+                                : 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
+                          }`}>
+                            {f.severity}
+                          </span>
+                        </td>
+                        <td className="py-2 px-3 font-semibold text-[var(--t-text-2)]">{f.kind}</td>
+                        <td className="py-2 px-3 font-mono text-[var(--t-accent)]">{f.file}:{f.line}</td>
+                        <td className="py-2 px-3 text-[var(--t-text)]">{f.detail}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Round History */}
+          {auditInfo.history && auditInfo.history.length > 1 && (
+            <div data-testid="ai-audit-history" className="space-y-2 pt-2 border-t border-[var(--t-border)]">
+              <span className="text-xs font-semibold text-[var(--t-text-3)] uppercase tracking-wider">
+                {t('taskDetail.auditHistory')}
+              </span>
+              <div className="space-y-2">
+                {auditInfo.history.map((h, i) => (
+                  <div key={i} data-testid={`audit-history-round-${h.round}`} className="p-3 rounded-lg bg-[var(--t-surface-2)] border border-[var(--t-border)] text-xs space-y-1.5">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-[var(--t-text)]">
+                          {t('taskDetail.roundNumber', { round: h.round })}
+                        </span>
+                        <StatusBadge status={h.state} round={h.round} size="sm" />
+                        {h.substate && (
+                          <span className={`rounded-full px-1.5 py-0.2 text-[10px] font-bold ${
+                            h.substate === 'blocked'
+                              ? 'bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)]'
+                              : 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)]'
+                          }`}>
+                            {h.substate === 'blocked' ? t('taskDetail.auditBlocked') : t('taskDetail.auditReturnedToWorker')}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 text-[var(--t-text-3)] font-mono text-[11px]">
+                        {h.model && <span>{h.model}</span>}
+                        {h.finishedAt && <span>{formatDateTime(h.finishedAt, locale)}</span>}
+                      </div>
+                    </div>
+                    {h.summary && (
+                      <p className="text-[var(--t-text-2)] whitespace-pre-wrap">{h.summary}</p>
+                    )}
+                    {h.findings && h.findings.length > 0 && (
+                      <div className="text-[11px] text-[var(--t-crit)] font-medium">
+                        {t('tasks.flow.findingsCount', { count: String(h.findings.length) })}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       {/* Khối Đẩy lên git */}
       {(task.status === 'pushed' || parsedPushResult || (task.status === 'done' && project?.settings?.publish?.enabled)) && (
@@ -1287,7 +1675,12 @@ export const TaskDetailPage: React.FC = () => {
                 />
 
                 <div className="flex items-center gap-2 flex-wrap">
-                  <StatusBadge status={statusKey} size="sm" />
+                  <StatusBadge
+                    status={statusKey}
+                    round={item.round}
+                    label={item.status === 'auditing' ? t('status.audit_started') : undefined}
+                    size="sm"
+                  />
 
                   {item.at && (
                     <span
@@ -2094,6 +2487,7 @@ export const TaskDetailPage: React.FC = () => {
           </div>
         </div>
       )}
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} closeLabel={t('common.close')} />
     </div>
   );
 };

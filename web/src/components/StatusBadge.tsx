@@ -4,7 +4,7 @@ import { TaskStatus, WaitReason, HubStatus, BlockingDiskInfo } from '../types/ap
 import { useLocale } from '../context/LocaleContext';
 import { formatReason } from '../utils/events';
 
-export type ExtendedTaskStatus = TaskStatus | 'checking';
+export type ExtendedTaskStatus = TaskStatus | 'checking' | 'merge_failed' | 'push_failed' | 'auditing' | 'audit_passed' | 'audit_failed' | 'audit_skipped' | string;
 
 export interface StatusBadgeProps {
   status: ExtendedTaskStatus;
@@ -17,6 +17,8 @@ export interface StatusBadgeProps {
   projectId?: string;
   className?: string;
   size?: 'sm' | 'md' | 'lg';
+  round?: number;
+  label?: string;
 }
 
 export const StatusBadge: React.FC<StatusBadgeProps> = ({
@@ -30,12 +32,18 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
   projectId,
   className = '',
   size = 'md',
+  round,
+  label: propLabel,
 }) => {
   const { t, locale } = useLocale();
   const queryClient = React.useContext(QueryClientContext);
   const cachedStatus = queryClient?.getQueryData<HubStatus>(['status']);
 
-  let label = t(`status.${status}`);
+  let label = propLabel || (
+    status === 'audit_failed'
+      ? (round ? t('status.audit_failed_round', { round }) : t('status.audit_failed'))
+      : t(`status.${status}`)
+  );
   let tooltip = blockingDisk?.path || diskPath;
   if (waitReason) {
     if (waitReason === 'disk') {
@@ -104,7 +112,7 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
     }
   }
 
-  const isPulse = status === 'running' || status === 'checking';
+  const isPulse = status === 'running' || status === 'checking' || status === 'auditing';
   const isWaitingWithReason = Boolean(waitReason);
 
   const bgStyle = isWaitingWithReason

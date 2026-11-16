@@ -201,6 +201,8 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(validateModelSyntax('gpt-custom', (k) => k)).toBeNull();
       expect(validateModelSyntax('claude:custom', (k) => k)).toBeNull();
       expect(validateModelSyntax('custom model', (k) => k)).toBe('settings.invalidModelSyntax');
+      expect(validateModelSyntax(' custom-model', (k) => k)).toBe('settings.invalidModelSyntax');
+      expect(validateModelSyntax('custom-model ', (k) => k)).toBe('settings.invalidModelSyntax');
     });
 
     it('validates chat model syntax consistently with chat.model enum', () => {

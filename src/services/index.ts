@@ -320,10 +320,10 @@ export const VALID_AGY_MODELS = new Set([
   'gpt-oss-120b-medium',
 ]);
 
-export const modelValidator = z.string().trim().min(1, 'Model không được để trống').refine(
-  (m) => !/\s/.test(m),
-  { message: 'Model không được chứa khoảng trắng' },
-);
+export const modelValidator = z
+  .string()
+  .min(1, 'Model không được để trống')
+  .refine((m) => !/\s/.test(m), { message: 'Model không được chứa khoảng trắng' });
 
 export const reviewerModelValidator = z
   .string()
@@ -333,7 +333,10 @@ export const reviewerModelValidator = z
     (m) => isValidReviewerModel('codex', m) || isValidReviewerModel('claude', m),
     { message: 'Model của reviewer phải theo cú pháp engine codex hoặc claude hợp lệ' },
   );
-const taskModelValidator = z.string().trim().min(1, 'Model không được để trống');
+const taskModelValidator = z
+  .string()
+  .min(1, 'Model không được để trống')
+  .refine((m) => !/\s/.test(m), { message: 'Model không được chứa khoảng trắng' });
 
 export const ProjectHooksSchema = z.object({
   onWorktreeRemoved: z.array(z.string()).optional(),

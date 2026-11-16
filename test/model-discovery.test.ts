@@ -334,6 +334,8 @@ describe('Engine Model Discovery with Fixtures', () => {
     expect(modelValidator.safeParse('vendor-model-2026').success).toBe(true);
     expect(modelValidator.safeParse('codex:vendor-model-2026').success).toBe(true);
     expect(modelValidator.safeParse('vendor model').success).toBe(false);
+    expect(modelValidator.safeParse(' vendor-model-2026').success).toBe(false);
+    expect(modelValidator.safeParse('vendor-model-2026 ').success).toBe(false);
     expect(modelValidator.safeParse('   ').success).toBe(false);
   });
 });

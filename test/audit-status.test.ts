@@ -255,6 +255,32 @@ describe('Audit Status Service & API (DEC-035)', () => {
       expect(getDerivedAuditStatus(task, events, baseProject)).toBe('audit_skipped');
     });
 
+    it('7b. Bỏ qua audit vẫn giữ trạng thái sau khi push thành công', () => {
+      const task = {
+        ...makeTask('done', { auditSkipped: true }),
+        pushedAt: '2026-11-16T10:01:00.000Z',
+      };
+      const events: EventRow[] = [
+        {
+          id: 1,
+          taskId: 'p1/t1',
+          type: 'task.audit_skipped',
+          payload: JSON.stringify({ manual: true }),
+          ts: '2026-11-16T10:00:00.000Z',
+        },
+        {
+          id: 2,
+          taskId: 'p1/t1',
+          type: 'task.pushed',
+          payload: JSON.stringify({}),
+          ts: '2026-11-16T10:01:00.000Z',
+        },
+      ];
+
+      expect(computeTaskAudit(task, events, baseProject)?.state).toBe('audit_skipped');
+      expect(getDerivedAuditStatus(task, events, baseProject)).toBe('audit_skipped');
+    });
+
     it('8. Project tắt audit (publish.audit.enabled = false): returns null, không đếm', () => {
       const projectDisabled: ProjectRow = {
         ...baseProject,
@@ -433,6 +459,37 @@ describe('Audit Status Service & API (DEC-035)', () => {
       const failedStep = timeline.find((item: { status: string }) => item.status === 'audit_failed');
       expect(failedStep).toBeDefined();
       expect(failedStep.round).toBe(1);
+    });
+
+    it('deduplicates duplicate audit start events from API and publish worker', async () => {
+      const taskId = 'task-audit-duplicate-start';
+      ctx.projectRepo.insert({
+        id: 'proj-audit-duplicate',
+        name: 'Project Audit Duplicate',
+        path: path.join(tmpDir, 'repo-duplicate'),
+        defaultBranch: 'main',
+        maxParallel: 1,
+      });
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-audit-duplicate',
+        slug: 'duplicate-start',
+        title: 'Duplicate audit start',
+        status: 'done',
+      });
+
+      ctx.eventRepo.insert('task.auditing', taskId, {});
+      ctx.eventRepo.insert('task.publishing', taskId, {});
+      ctx.eventRepo.insert('task.audit_started', taskId, {});
+      ctx.eventRepo.insert('task.audit_passed', taskId, {});
+
+      const res = await server.inject({
+        method: 'GET',
+        url: `/api/tasks/${taskId}/timeline`,
+        headers: authHeaders(),
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().filter((item: { status: string }) => item.status === 'auditing')).toHaveLength(1);
     });
 
     it('filters tasks via GET /api/tasks?derived=auditing and GET /api/tasks?derived=audit_failed and counts in GET /api/status', async () => {

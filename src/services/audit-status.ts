@@ -128,10 +128,6 @@ export function computeTaskAudit(
   const isTerminalCancelledOrFailed = task.status === 'cancelled' || task.status === 'failed';
   const isPushed = task.status === 'pushed' || Boolean(task.pushedAt);
 
-  // Check if push succeeded after audit
-  const lastPushedEvent = auditEvents.filter((e) => e.type === 'task.pushed').at(-1);
-  const lastPushTs = lastPushedEvent ? new Date(lastPushedEvent.ts).getTime() : (task.pushedAt ? new Date(task.pushedAt).getTime() : 0);
-
   // Check if actively auditing
   const prIsAuditing = pr?.state === 'auditing';
   const lastIsAuditStarted = lastAuditEvent && (lastAuditEvent.type === 'task.auditing' || lastAuditEvent.type === 'task.audit_started');
@@ -160,10 +156,10 @@ export function computeTaskAudit(
   // Check skipped
   if (!state) {
     if (pr?.auditSkipped === true || (lastAuditEvent && lastAuditEvent.type === 'task.audit_skipped')) {
-      const skippedTs = lastAuditEvent && lastAuditEvent.type === 'task.audit_skipped' ? new Date(lastAuditEvent.ts).getTime() : 0;
-      if (lastPushTs === 0 || skippedTs >= lastPushTs) {
-        state = 'audit_skipped';
-      }
+      // `task.audit_skipped` is emitted before the successful push. The
+      // pushResult flag is the durable verdict and must not be invalidated by
+      // the later `task.pushed` event.
+      state = 'audit_skipped';
     }
   }
 

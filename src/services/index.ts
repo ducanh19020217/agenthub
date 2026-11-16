@@ -4685,7 +4685,20 @@ export class AppService {
           break;
         case 'task.auditing':
         case 'task.audit_started':
-          candidates.push({ status: 'auditing', at });
+          // The publish API and the publish worker both emit these two event
+          // names for the same audit round. Keep one start marker until a
+          // verdict arrives, even when another status (for example
+          // `publishing`) is interleaved between the duplicate events.
+          {
+            const lastAuditMarker = [...candidates].reverse().find((candidate) =>
+              candidate.status === 'auditing' ||
+              candidate.status === 'audit_passed' ||
+              candidate.status === 'audit_failed'
+            );
+            if (lastAuditMarker?.status !== 'auditing') {
+              candidates.push({ status: 'auditing', at });
+            }
+          }
           break;
         case 'task.audit_passed':
           candidates.push({

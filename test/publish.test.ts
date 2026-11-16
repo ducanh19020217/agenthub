@@ -1263,13 +1263,12 @@ describe('Publish Service (t-auto-push-after-done)', () => {
 
       process.env.FAKE_MODE = 'audit-pass';
       const res = await ctx.service.publishTask('proj-deleted-branch/task-del');
-      expect(res.ok).toBe(true);
+      expect(res.ok).toBe(false);
+      expect((res as any).error).toMatch(/publish snapshot|audit/i);
 
-      // Verify that audit result was cached under the merge commit SHA!
+      // A deleted task branch cannot be inferred from the merge message alone.
       const { getCachedAuditPass } = await import('../src/pre-publish-audit.js');
-      const cached = getCachedAuditPass('proj-deleted-branch/task-del', mergeCommitSha);
-      expect(cached).toBeDefined();
-      expect(cached?.verdict).toBe('pass');
+      expect(getCachedAuditPass('proj-deleted-branch/task-del', mergeCommitSha)).toBeUndefined();
     });
 
     it('independent audit fix rounds: task with prior reviewer changes still gets audit fix chances', async () => {
@@ -2404,13 +2403,13 @@ describe('Publish Service (t-auto-push-after-done)', () => {
 
       process.env.FAKE_MODE = 'audit-pass';
       const res = await ctx.service.publishTask('proj-no-branch/task-root-nobranch');
-      expect(res.ok).toBe(true);
+      expect(res.ok).toBe(false);
+      expect((res as any).error).toMatch(/publish snapshot|audit/i);
 
       const updated = ctx.taskRepo.get('proj-no-branch/task-root-nobranch');
-      expect(updated?.status).toBe('pushed');
+      expect(updated?.status).toBe('done');
       const pr = JSON.parse(updated!.pushResult!);
-      expect(pr.state).toBe('pushed');
-      expect(pr.auditPassed).toBe(true);
+      expect(pr.state).toBe('push_failed');
     });
 
     it('task có nhánh nhưng chưa được merge vào sourceSha -> báo lỗi push_failed thay vì trả ok im lặng', async () => {

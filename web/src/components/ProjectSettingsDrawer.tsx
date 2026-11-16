@@ -37,7 +37,6 @@ import {
 import { Link } from 'react-router-dom';
 import {
   DEFAULT_COMMON_BRANCHES,
-  DEFAULT_CLAUDE_MODELS,
   getModelsForProvider,
   validateBranchSyntax,
   validateReviewerModelSyntax,
@@ -460,103 +459,119 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const [hasReviewChainOverride, setHasReviewChainOverride] = useState<boolean>(false);
 
   const availableCodexReviewerModels = useMemo(() => {
-    const fromApi = modelOptions?.suggestions || [];
-    const fromConfigured = modelOptions?.configured || [];
-    const fromConfigOrder = (config?.reviewer?.order || [])
-      .filter((r) => r.engine === 'codex')
-      .map((r) => r.model);
-    const fromConfigReviewer = config?.reviewer?.model ? [config.reviewer.model] : [];
-    const fromConfigArbiter = config?.reviewer?.arbiter?.engine === 'codex' && config.reviewer.arbiter.model
-      ? [config.reviewer.arbiter.model]
-      : [];
-    const fromChains = [
-      ...(config?.modelChainHard || []),
-      ...(config?.modelChainEasy || []),
-    ];
-    const fromCurrentOrder = reviewerOrder
-      .filter((r) => r.engine === 'codex')
-      .map((r) => r.model);
-    const fromProjectOrder = (project?.settings?.review?.order || [])
-      .filter((r) => r.engine === 'codex')
-      .map((r) => r.model);
-
-    return getModelsForProvider([
-        ...fromApi,
-        ...fromConfigured,
-        ...fromConfigOrder,
-        ...fromConfigReviewer,
-        ...fromConfigArbiter,
-        ...fromChains,
-        ...fromCurrentOrder,
-        ...fromProjectOrder,
-      ], 'codex');
-  }, [modelOptions, config, reviewerOrder, project]);
+    if (modelOptions?.models) {
+      return getModelsForProvider(
+        modelOptions.models.filter((m) => m.engine === 'codex' && m.available).map((m) => m.id),
+        'codex',
+      );
+    }
+    const fromApi = (modelOptions?.suggestions || []).filter(
+      (m) => m.startsWith('codex:') || (m.startsWith('gpt-') && !m.startsWith('gpt-oss-')),
+    );
+    return getModelsForProvider(fromApi, 'codex');
+  }, [modelOptions]);
 
   const availableClaudeReviewerModels = useMemo(() => {
-    const fromChat = config?.chat?.models || [];
-    const fromChatModel = config?.chat?.model ? [config.chat.model] : [];
-    const fromClaudeModel = config?.reviewer?.claudeModel ? [config.reviewer.claudeModel] : [];
-    const fromConfigOrder = (config?.reviewer?.order || [])
-      .filter((r) => r.engine === 'claude')
-      .map((r) => r.model);
-    const fromConfigArbiter = config?.reviewer?.arbiter?.engine === 'claude' && config.reviewer.arbiter.model
-      ? [config.reviewer.arbiter.model]
-      : [];
-    const fromApi = modelOptions?.suggestions || [];
-    const fromConfigured = modelOptions?.configured || [];
-    const fromCurrentOrder = reviewerOrder
-      .filter((r) => r.engine === 'claude')
-      .map((r) => r.model);
-    const fromProjectOrder = (project?.settings?.review?.order || [])
-      .filter((r) => r.engine === 'claude')
-      .map((r) => r.model);
-
-    return getModelsForProvider([
-        ...DEFAULT_CLAUDE_MODELS,
-        ...fromChat,
-        ...fromChatModel,
-        ...fromClaudeModel,
-        ...fromConfigOrder,
-        ...fromConfigArbiter,
-        ...fromApi,
-        ...fromConfigured,
-        ...fromCurrentOrder,
-        ...fromProjectOrder,
-      ], 'claude');
-  }, [modelOptions, config, reviewerOrder, project]);
+    if (modelOptions?.models) {
+      return getModelsForProvider(
+        modelOptions.models.filter((m) => m.engine === 'claude' && m.available).map((m) => m.id),
+        'claude',
+      );
+    }
+    const fromApi = (modelOptions?.suggestions || []).filter(
+      (m) => m.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(m),
+    );
+    return getModelsForProvider(fromApi, 'claude');
+  }, [modelOptions]);
 
   const availableReviewChainReviewers = useMemo(() => {
     const codexModels = availableCodexReviewerModels.map((m) =>
       m.startsWith('codex:') ? m : `codex:${m}`,
     );
-    const fromCurrentChain = reviewChain.chain.map((s) => s.reviewer);
-    let fromProjectChain: string[] = [];
-    if (project?.review) {
-      if (typeof project.review === 'object' && Array.isArray((project.review as any).chain)) {
-        fromProjectChain = (project.review as any).chain.map((s: any) => s.reviewer).filter(Boolean);
-      } else if (typeof project.review === 'string') {
-        try {
-          const parsed = JSON.parse(project.review);
-          if (Array.isArray(parsed?.chain)) {
-            fromProjectChain = parsed.chain.map((s: any) => s.reviewer).filter(Boolean);
+    const hasClaude = availableClaudeReviewerModels.length > 0 || !modelOptions?.models;
+    return Array.from(
+      new Set([
+        ...(hasClaude ? ['claude'] : []),
+        ...codexModels,
+      ]),
+    ).filter(Boolean);
+  }, [availableCodexReviewerModels, availableClaudeReviewerModels, modelOptions]);
+
+  const allDiscoveredReviewerModels = useMemo(() => {
+    const list: string[] = [];
+    if (modelOptions?.models) {
+      for (const m of modelOptions.models) {
+        list.push(m.id);
+      }
+    }
+    if (modelOptions?.suggestions) {
+      list.push(...modelOptions.suggestions);
+    }
+    return list;
+  }, [modelOptions]);
+
+  const unavailableModels = useMemo(() => {
+    const set = new Set<string>();
+    if (modelOptions?.models) {
+      for (const m of modelOptions.models) {
+        if (!m.available) {
+          set.add(m.id);
+          set.add(`${m.engine}:${m.id}`);
+          if (m.id.startsWith(`${m.engine}:`)) {
+            set.add(m.id.slice(m.engine.length + 1));
           }
-        } catch {
-          // ignore
         }
       }
     }
-    const chainReviewers = getModelsForProvider(
-      [...fromCurrentChain, ...fromProjectChain],
-      'codex',
-    ).map((model) => (model.startsWith('codex:') ? model : `codex:${model}`));
-    return Array.from(
-      new Set([
-        'claude',
-        ...codexModels,
-        ...chainReviewers,
-      ]),
-    ).filter(Boolean);
-  }, [availableCodexReviewerModels, reviewChain.chain, project]);
+    return set;
+  }, [modelOptions]);
+
+  const isReviewerModelUnavailable = (model: string, engine: 'codex' | 'claude') => {
+    if (!model) return false;
+    if (unavailableModels.has(model)) return true;
+    const clean = model.replace(/^(codex|claude):/, '');
+    if (unavailableModels.has(clean)) return true;
+    if (unavailableModels.has(`${engine}:${clean}`)) return true;
+
+    if (modelOptions?.models && modelOptions.models.length > 0) {
+      const availableList = engine === 'codex' ? availableCodexReviewerModels : availableClaudeReviewerModels;
+      const isAvailable = availableList.some((opt) => opt === model || opt === clean || opt === `${engine}:${clean}`);
+      if (!isAvailable) return true;
+    }
+    return false;
+  };
+
+  const isReviewChainStepUnavailable = (reviewer: string) => {
+    if (!reviewer) return false;
+    if (reviewer === 'claude') {
+      return Boolean(modelOptions?.models && modelOptions.models.length > 0 && availableClaudeReviewerModels.length === 0);
+    }
+    return isReviewerModelUnavailable(reviewer, 'codex');
+  };
+
+  const knownReviewerValidatorModels = useMemo(() => {
+    return new Set([
+      ...availableCodexReviewerModels,
+      ...availableClaudeReviewerModels,
+      ...availableReviewChainReviewers,
+      ...allDiscoveredReviewerModels,
+      ...(config?.modelChainHard || []),
+      ...(config?.modelChainEasy || []),
+      ...(config?.reviewer?.order || []).map((r) => r.model),
+      ...(project?.settings?.review?.order || []).map((r: any) => r.model),
+      ...reviewerOrder.map((r) => r.model),
+      ...reviewChain.chain.map((s) => s.reviewer),
+    ]);
+  }, [
+    availableCodexReviewerModels,
+    availableClaudeReviewerModels,
+    availableReviewChainReviewers,
+    allDiscoveredReviewerModels,
+    config,
+    project,
+    reviewerOrder,
+    reviewChain.chain,
+  ]);
 
   const [checksError, setChecksError] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
@@ -778,20 +793,22 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       if (preset === 'safe') {
         updateReviewChainState({ chain: [], maxRounds: 2 }, true);
       } else if (preset === 'balanced') {
-        const codexModel = availableCodexReviewerModels[0] || 'codex:gpt-5.6-luna';
-        const cleanCodex = codexModel.startsWith('codex:') ? codexModel : `codex:${codexModel}`;
+        const codexModel = availableCodexReviewerModels[0];
+        const cleanCodex = codexModel ? (codexModel.startsWith('codex:') ? codexModel : `codex:${codexModel}`) : null;
         updateReviewChainState({
           chain: [
-            { reviewer: cleanCodex, mode: 'gate' },
-            { reviewer: 'claude', mode: 'final' },
+            ...(cleanCodex ? [{ reviewer: cleanCodex, mode: 'gate' as const }] : []),
+            { reviewer: 'claude', mode: 'final' as const },
           ],
           maxRounds: 2,
         }, true);
       } else if (preset === 'auto') {
-        const codexModel = availableCodexReviewerModels[0] || 'codex:gpt-5.6-luna';
-        const cleanCodex = codexModel.startsWith('codex:') ? codexModel : `codex:${codexModel}`;
+        const codexModel = availableCodexReviewerModels[0];
+        const cleanCodex = codexModel ? (codexModel.startsWith('codex:') ? codexModel : `codex:${codexModel}`) : null;
         updateReviewChainState({
-          chain: [{ reviewer: cleanCodex, mode: 'final' }],
+          chain: cleanCodex
+            ? [{ reviewer: cleanCodex, mode: 'final' as const }]
+            : [{ reviewer: 'claude', mode: 'final' as const }],
           maxRounds: 3,
         }, true);
       }
@@ -817,7 +834,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   };
 
   const quickFixChain = () => {
-    const codexModel = availableCodexReviewerModels[0] || 'codex:gpt-5.6-luna';
+    const codexModel = availableCodexReviewerModels[0];
+    if (!codexModel) return;
     const cleanCodex = codexModel.startsWith('codex:') ? codexModel : `codex:${codexModel}`;
     if (reviewChain.chain.length === 0) {
       updateReviewChainState({ ...reviewChain, chain: [{ reviewer: cleanCodex, mode: 'final' }] }, true);
@@ -1888,7 +1906,8 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                       variant="ghost"
                       data-testid="automerge-fix-chain"
                       onClick={quickFixChain}
-                      className="text-xs text-[var(--t-accent)] h-6 px-2"
+                      disabled={availableCodexReviewerModels.length === 0}
+                      className="text-xs text-[var(--t-accent)] h-6 px-2 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {t('projects.autoMergeFixBtn')}
                     </Button>
@@ -3760,9 +3779,20 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                                   updateReviewerOrderState(next, true);
                                 }}
                                 options={engineModelOptions}
-                                validate={(val) => validateReviewerModelSyntax(val, item.engine, t)}
+                                validate={(val) => validateReviewerModelSyntax(val, item.engine, t, knownReviewerValidatorModels)}
                                 placeholder={item.engine === 'codex' ? 'codex:model' : 'sonnet'}
+                                showCustomWarning={true}
                               />
+                              {isReviewerModelUnavailable(item.model, item.engine) && (
+                                <div
+                                  className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                                  data-testid="model-unavailable-warning"
+                                  title={t('models.unavailableWarning')}
+                                >
+                                  <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                                  <span>{t('models.unavailableWarning')}</span>
+                                </div>
+                              )}
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
                               <button
@@ -4042,10 +4072,21 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                               updateReviewChainState({ ...reviewChain, chain: nextChain }, true);
                             }}
                             options={availableReviewChainReviewers}
-                            validate={(val) => validateReviewChainReviewerSyntax(val, t)}
+                            validate={(val) => validateReviewChainReviewerSyntax(val, t, knownReviewerValidatorModels)}
                             ariaLabel={`${t('settings.reviewStep')} ${index + 1}`}
                             placeholder={t('settings.reviewerPlaceholder')}
+                            showCustomWarning={true}
                           />
+                          {isReviewChainStepUnavailable(step.reviewer) && (
+                            <div
+                              className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                              data-testid="model-unavailable-warning"
+                              title={t('models.unavailableWarning')}
+                            >
+                              <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                              <span>{t('models.unavailableWarning')}</span>
+                            </div>
+                          )}
                         </div>
                         <select
                           aria-label={`${t('settings.stepMode')} ${index + 1}`}

@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import Markdown from 'react-markdown';
 import { createTask, getProjects, getTasks, getConfig, getModelOptions, getOpenProjectSources } from '../api/client';
 import { TaskLevel } from '../types/api';
-import { ArrowLeft, Eye, Edit3, Plus } from 'lucide-react';
+import { ArrowLeft, Eye, Edit3, Plus, AlertCircle } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
 import { useTour } from '../components/tour/TourContext';
 
@@ -47,9 +47,29 @@ export const CreateTaskPage: React.FC = () => {
   const selectedProject = projects.find((project) => project.id === projectId);
   const openProject = selectedProject?.settings?.openproject;
   const openProjectSource = openProject?.sourceId ? openProjectSources.find((source) => source.id === openProject.sourceId) : undefined;
-  const modelSuggestions = modelOptions?.suggestions?.length
-    ? modelOptions.suggestions
-    : [...new Set([...(config?.modelChainHard || []), ...(config?.modelChainEasy || [])])];
+  const modelSuggestions = React.useMemo(() => {
+    if (modelOptions?.models) {
+      return modelOptions.models.filter((m) => m.available).map((m) => m.id);
+    }
+    return modelOptions?.suggestions?.length ? modelOptions.suggestions : [];
+  }, [modelOptions]);
+
+  const unavailableModels = React.useMemo(() => {
+    const set = new Set<string>();
+    if (modelOptions?.models) {
+      for (const m of modelOptions.models) {
+        if (!m.available) set.add(m.id);
+      }
+    }
+    return set;
+  }, [modelOptions]);
+
+  const unavailableConfiguredModels = React.useMemo(() => {
+    const configuredList = modelChain.length > 0
+      ? modelChain
+      : (level === 'hard' ? config?.modelChainHard : config?.modelChainEasy) || [];
+    return configuredList.filter((m) => unavailableModels.has(m));
+  }, [modelChain, level, config, unavailableModels]);
 
   // Set default project when loaded
   React.useEffect(() => {
@@ -266,6 +286,15 @@ export const CreateTaskPage: React.FC = () => {
             />
             <datalist id="create-task-model-suggestions">{modelSuggestions.map((model) => <option key={model} value={model} />)}</datalist>
             <p className="text-[11px] text-[var(--t-text-3)] mt-1">{t('createTask.modelChainHint')}</p>
+            {unavailableConfiguredModels.length > 0 && (
+              <div
+                className="mt-1.5 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                data-testid="model-unavailable-warning"
+              >
+                <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                <span>{t('models.unavailableWarning')} ({unavailableConfiguredModels.join(', ')})</span>
+              </div>
+            )}
           </div>
 
           {/* Dependencies (dependsOn) */}

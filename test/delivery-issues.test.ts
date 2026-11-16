@@ -1,0 +1,1021 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { loadConfig } from '../src/config.js';
+import { createContext } from '../src/daemon.js';
+import { createServer } from '../src/api/server.js';
+import { getOrCreateToken } from '../src/auth.js';
+import { FakeEngine, Engine } from '../src/engines/index.js';
+import { HttpError } from '../src/errors.js';
+import * as mergeModule from '../src/merge.js';
+import { isGitAncestor, isGitPushed, computeDeliveryIssue, clearGitCheckCache, clearGitCheckCacheForTask } from '../src/services/delivery-issues.js';
+
+let tmpDir: string;
+let config: ReturnType<typeof loadConfig>;
+let ctx: ReturnType<typeof createContext>;
+let server: ReturnType<typeof createServer>;
+let token: string;
+let fakeEngine: FakeEngine;
+
+function authHeaders() {
+  return {
+    host: '127.0.0.1:7791',
+    authorization: `Bearer ${token}`,
+  };
+}
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+}
+
+function setupGitRepo(): { repoPath: string; taskBranch: string } {
+  const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-git-repo-'));
+  git(repoPath, 'init');
+  git(repoPath, 'checkout', '-b', 'main');
+  git(repoPath, 'config', 'user.email', 'test@example.com');
+  git(repoPath, 'config', 'user.name', 'AgentHub Test');
+  fs.writeFileSync(path.join(repoPath, 'file.txt'), 'line 1\n');
+  git(repoPath, 'add', 'file.txt');
+  git(repoPath, 'commit', '-m', 'Initial commit');
+
+  // Create integration branch
+  git(repoPath, 'branch', 'agenthub/integration');
+
+  // Create task branch
+  const taskBranch = 'agenthub/t-test-1';
+  git(repoPath, 'checkout', '-b', taskBranch);
+  fs.writeFileSync(path.join(repoPath, 'file.txt'), 'line 1\nline 2 task\n');
+  git(repoPath, 'add', 'file.txt');
+  git(repoPath, 'commit', '-m', 'Task commit');
+
+  git(repoPath, 'checkout', 'main');
+  return { repoPath, taskBranch };
+}
+
+function setupGitRepoWithRemote(): { repoPath: string; taskBranch: string; taskCommit: string } {
+  const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-remote-'));
+  git(repoPath, 'init');
+  git(repoPath, 'checkout', '-b', 'main');
+  git(repoPath, 'config', 'user.email', 'test@example.com');
+  git(repoPath, 'config', 'user.name', 'AgentHub Test');
+  fs.writeFileSync(path.join(repoPath, 'file.txt'), 'initial\n');
+  git(repoPath, 'add', 'file.txt');
+  git(repoPath, 'commit', '-m', 'Initial commit');
+  const initialCommit = git(repoPath, 'rev-parse', 'HEAD');
+
+  const taskBranch = 'agenthub/t-remote-1';
+  git(repoPath, 'checkout', '-b', taskBranch);
+  fs.writeFileSync(path.join(repoPath, 'file.txt'), 'initial\ntask update\n');
+  git(repoPath, 'add', 'file.txt');
+  git(repoPath, 'commit', '-m', 'Task update');
+  const taskCommit = git(repoPath, 'rev-parse', 'HEAD');
+
+  // Set remote ref refs/remotes/origin/main to taskCommit directly without requiring git push
+  git(repoPath, 'update-ref', 'refs/remotes/origin/main', taskCommit);
+
+  // Keep local main at initial commit (behind remote origin/main)
+  git(repoPath, 'checkout', 'main');
+  git(repoPath, 'reset', '--hard', initialCommit);
+
+  return { repoPath, taskBranch, taskCommit };
+}
+
+describe('Delivery issues (merge_failed & push_failed)', () => {
+  beforeEach(async () => {
+    clearGitCheckCache();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-delivery-test-'));
+    const agyHomesDir = path.join(tmpDir, 'agy-homes');
+    fs.mkdirSync(agyHomesDir, { recursive: true });
+
+    process.env.AGENTHUB_HOME = tmpDir;
+    process.env.AGENTHUB_AGY_HOMES = agyHomesDir;
+
+    config = loadConfig(tmpDir);
+    config.agyHomesDir = agyHomesDir;
+    config.port = 7791;
+    token = getOrCreateToken(config.tokenPath);
+
+    fakeEngine = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    const engines = new Map<string, Engine>([['agy', fakeEngine]]);
+
+    ctx = createContext(config, engines);
+    ctx.scheduler.stop();
+    server = await createServer(ctx.service, config);
+    await server.ready();
+  });
+
+  afterEach(async () => {
+    clearGitCheckCache();
+    await server.close();
+    ctx.db.close();
+    if (tmpDir && fs.existsSync(tmpDir)) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('detects merge_failed derived status and returns it in GET /api/tasks and GET /api/tasks/:id', async () => {
+    ctx.projectRepo.insert({
+      id: 'proj1',
+      name: 'Project 1',
+      path: path.join(tmpDir, 'nonexistent'),
+      defaultBranch: 'main',
+      maxParallel: 1,
+    });
+
+    const taskId = 'task-1';
+    ctx.taskRepo.insert({
+      id: taskId,
+      projectId: 'proj1',
+      slug: 't-test-1',
+      title: 'Task with merge failure',
+      status: 'review',
+    });
+
+    // Emit merge.conflict event
+    ctx.eventRepo.insert('merge.conflict', taskId, {
+      actor: 'auto-merge',
+      message: 'Xung đột merge ở: src/index.ts, docs/DECISIONS.md',
+      files: ['src/index.ts', 'docs/DECISIONS.md'],
+    });
+
+    // 1. GET /api/tasks/:id has deliveryIssue
+    const resTask = await server.inject({
+      method: 'GET',
+      url: `/api/tasks/${taskId}`,
+      headers: authHeaders(),
+    });
+    expect(resTask.statusCode).toBe(200);
+    const taskData = resTask.json();
+    expect(taskData.deliveryIssue).toBeDefined();
+    expect(taskData.deliveryIssue.kind).toBe('merge_failed');
+    expect(taskData.deliveryIssue.files).toEqual(['src/index.ts', 'docs/DECISIONS.md']);
+
+    // 2. GET /api/tasks?derived=merge_failed
+    const resList = await server.inject({
+      method: 'GET',
+      url: '/api/tasks?derived=merge_failed',
+      headers: authHeaders(),
+    });
+    expect(resList.statusCode).toBe(200);
+    const list = resList.json();
+    expect(list).toHaveLength(1);
+    expect(list[0].id).toBe(taskId);
+
+    // 3. GET /api/tasks?limit=10&derived=merge_failed (pagination)
+    const resPage = await server.inject({
+      method: 'GET',
+      url: '/api/tasks?limit=10&derived=merge_failed',
+      headers: authHeaders(),
+    });
+    expect(resPage.statusCode).toBe(200);
+    const page = resPage.json();
+    expect(page.total).toBe(1);
+    expect(page.items).toHaveLength(1);
+
+    // 4. GET /api/status has merge_failed count
+    const resStatus = await server.inject({
+      method: 'GET',
+      url: '/api/status',
+      headers: authHeaders(),
+    });
+    expect(resStatus.statusCode).toBe(200);
+    const statusData = resStatus.json();
+    expect(statusData.tasks.merge_failed).toBe(1);
+
+    // 5. GET /api/tasks/:id/timeline has merge_failed step
+    const resTimeline = await server.inject({
+      method: 'GET',
+      url: `/api/tasks/${taskId}/timeline`,
+      headers: authHeaders(),
+    });
+    expect(resTimeline.statusCode).toBe(200);
+    const timeline = resTimeline.json();
+    expect(timeline.some((step: { status: string }) => step.status === 'merge_failed')).toBe(true);
+  });
+
+  it('detects push_failed derived status for done tasks and returns it in APIs', async () => {
+    ctx.projectRepo.insert({
+      id: 'proj2',
+      name: 'Project 2',
+      path: path.join(tmpDir, 'nonexistent'),
+      defaultBranch: 'main',
+      maxParallel: 1,
+    });
+
+    const taskId = 'task-2';
+    ctx.taskRepo.insert({
+      id: taskId,
+      projectId: 'proj2',
+      slug: 't-test-2',
+      title: 'Task with push failure',
+      status: 'done',
+    });
+
+    ctx.taskRepo.update(taskId, {
+      pushResult: JSON.stringify({ state: 'push_failed', error: 'remote rejected: protected branch', failedAt: '2026-11-13T10:00:00.000Z' }),
+    });
+    ctx.eventRepo.insert('task.push_failed', taskId, {
+      error: 'remote rejected: protected branch',
+    });
+
+    // 1. GET /api/tasks/:id has deliveryIssue
+    const resTask = await server.inject({
+      method: 'GET',
+      url: `/api/tasks/${taskId}`,
+      headers: authHeaders(),
+    });
+    expect(resTask.statusCode).toBe(200);
+    const taskData = resTask.json();
+    expect(taskData.deliveryIssue).toBeDefined();
+    expect(taskData.deliveryIssue.kind).toBe('push_failed');
+    expect(taskData.deliveryIssue.error).toContain('remote rejected');
+
+    // 2. GET /api/tasks?derived=push_failed
+    const resList = await server.inject({
+      method: 'GET',
+      url: '/api/tasks?derived=push_failed',
+      headers: authHeaders(),
+    });
+    expect(resList.statusCode).toBe(200);
+    const list = resList.json();
+    expect(list).toHaveLength(1);
+    expect(list[0].id).toBe(taskId);
+
+    // 3. Status counts
+    const resStatus = await server.inject({
+      method: 'GET',
+      url: '/api/status',
+      headers: authHeaders(),
+    });
+    expect(resStatus.statusCode).toBe(200);
+    expect(resStatus.json().tasks.push_failed).toBe(1);
+  });
+
+  it('does not falsely report merge_failed when branch was manually merged into target in git', async () => {
+    const { repoPath, taskBranch } = setupGitRepo();
+    try {
+      ctx.projectRepo.insert({
+        id: 'proj-git',
+        name: 'Project Git',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ integration: { enabled: true } }),
+      });
+
+      const taskId = 'task-git';
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-git',
+        slug: 't-test-1',
+        branch: taskBranch,
+        title: 'Task merged manually',
+        status: 'done',
+      });
+
+      // Initially there was a merge conflict event
+      ctx.eventRepo.insert('merge.conflict', taskId, {
+        actor: 'auto-merge',
+        message: 'Xung đột merge ở: file.txt',
+      });
+
+      const project = ctx.projectRepo.get('proj-git')!;
+
+      // Before manual merge: isGitAncestor is false
+      expect(isGitAncestor(repoPath, taskBranch, 'agenthub/integration')).toBe(false);
+      let issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+      expect(issue).not.toBeNull();
+      expect(issue?.kind).toBe('merge_failed');
+
+      // Now someone manually merges taskBranch into agenthub/integration!
+      git(repoPath, 'checkout', 'agenthub/integration');
+      git(repoPath, 'merge', '--no-ff', taskBranch, '-m', "Manual merge of task");
+      git(repoPath, 'checkout', 'main');
+
+      // After manual merge: isGitAncestor is true!
+      clearGitCheckCache();
+      expect(isGitAncestor(repoPath, taskBranch, 'agenthub/integration')).toBe(true);
+
+      // computeDeliveryIssue now returns null!
+      issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+      expect(issue).toBeNull();
+
+      // GET /api/tasks/:id has deliveryIssue: null
+      const resTask = await server.inject({
+        method: 'GET',
+        url: `/api/tasks/${taskId}`,
+        headers: authHeaders(),
+      });
+      expect(resTask.json().deliveryIssue).toBeNull();
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it('strictly restricts merge target verification to the actual configured target branch', async () => {
+    const { repoPath, taskBranch } = setupGitRepo();
+    try {
+      // 1. Project without integration: target is defaultBranch (main), not agenthub/integration
+      ctx.projectRepo.insert({
+        id: 'proj-no-integration',
+        name: 'Project No Integration',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ integration: { enabled: false } }),
+      });
+
+      const taskId1 = 'task-no-int';
+      ctx.taskRepo.insert({
+        id: taskId1,
+        projectId: 'proj-no-integration',
+        slug: 't-test-no-int',
+        branch: taskBranch,
+        title: 'Task without integration',
+        status: 'done',
+      });
+      ctx.eventRepo.insert('merge.conflict', taskId1, {
+        actor: 'auto-merge',
+        message: 'Xung đột merge ở: file.txt',
+      });
+
+      const projectNoInt = ctx.projectRepo.get('proj-no-integration')!;
+
+      // Merge into agenthub/integration
+      git(repoPath, 'checkout', 'agenthub/integration');
+      git(repoPath, 'merge', '--no-ff', taskBranch, '-m', 'Manual merge into integration');
+      git(repoPath, 'checkout', 'main');
+
+      clearGitCheckCache();
+      // Even though taskBranch is ancestor of agenthub/integration, proj-no-integration does NOT use integration!
+      // Its target is main, which does not contain the commit. So merge_failed must NOT be cleared.
+      let issue1 = computeDeliveryIssue(ctx.taskRepo.get(taskId1)!, ctx.eventRepo.getByTask(taskId1), projectNoInt);
+      expect(issue1).not.toBeNull();
+      expect(issue1?.kind).toBe('merge_failed');
+
+      // Now merge into main (the actual target)
+      git(repoPath, 'merge', '--no-ff', taskBranch, '-m', 'Manual merge into main');
+      clearGitCheckCache();
+      issue1 = computeDeliveryIssue(ctx.taskRepo.get(taskId1)!, ctx.eventRepo.getByTask(taskId1), projectNoInt);
+      expect(issue1).toBeNull();
+
+      // 2. Project with integration: target is integration branch, not defaultBranch (main)
+      // Create a fresh branch to test
+      const branchInt = 'agenthub/t-test-int';
+      git(repoPath, 'checkout', '-b', branchInt);
+      fs.writeFileSync(path.join(repoPath, 'file2.txt'), 'int test\n');
+      git(repoPath, 'add', 'file2.txt');
+      git(repoPath, 'commit', '-m', 'Task int commit');
+      git(repoPath, 'checkout', 'main');
+
+      ctx.projectRepo.insert({
+        id: 'proj-with-integration',
+        name: 'Project With Integration',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ integration: { enabled: true, branch: 'agenthub/integration' } }),
+      });
+
+      const taskId2 = 'task-with-int';
+      ctx.taskRepo.insert({
+        id: taskId2,
+        projectId: 'proj-with-integration',
+        slug: 't-test-int',
+        branch: branchInt,
+        title: 'Task with integration',
+        status: 'done',
+      });
+      ctx.eventRepo.insert('merge.conflict', taskId2, {
+        actor: 'auto-merge',
+        message: 'Xung đột merge ở: file2.txt',
+      });
+
+      const projectWithInt = ctx.projectRepo.get('proj-with-integration')!;
+
+      // Merge into main (not integration)
+      git(repoPath, 'checkout', 'main');
+      git(repoPath, 'merge', '--no-ff', branchInt, '-m', 'Manual merge into main');
+      clearGitCheckCache();
+
+      // Even though branchInt is ancestor of main, project uses integration!
+      // It has not been merged into agenthub/integration yet, so merge_failed must NOT be cleared.
+      let issue2 = computeDeliveryIssue(ctx.taskRepo.get(taskId2)!, ctx.eventRepo.getByTask(taskId2), projectWithInt);
+      expect(issue2).not.toBeNull();
+      expect(issue2?.kind).toBe('merge_failed');
+
+      // Now merge into agenthub/integration (the actual target)
+      git(repoPath, 'checkout', 'agenthub/integration');
+      git(repoPath, 'merge', '--no-ff', branchInt, '-m', 'Manual merge into integration');
+      git(repoPath, 'checkout', 'main');
+
+      clearGitCheckCache();
+      issue2 = computeDeliveryIssue(ctx.taskRepo.get(taskId2)!, ctx.eventRepo.getByTask(taskId2), projectWithInt);
+      expect(issue2).toBeNull();
+
+      // 3. Project without integration and custom settings.publish.branch:
+      // Target is task.baseRef || defaultBranch (main), NOT settings.publish.branch (release)
+      git(repoPath, 'checkout', 'main');
+      git(repoPath, 'branch', 'release');
+
+      const branchNoIntPublish = 'agenthub/t-test-no-int-pub';
+      git(repoPath, 'checkout', '-b', branchNoIntPublish);
+      fs.writeFileSync(path.join(repoPath, 'file3.txt'), 'no int publish test\n');
+      git(repoPath, 'add', 'file3.txt');
+      git(repoPath, 'commit', '-m', 'Task no int publish commit');
+      git(repoPath, 'checkout', 'main');
+
+      ctx.projectRepo.insert({
+        id: 'proj-no-int-publish',
+        name: 'Project No Int Custom Publish',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ integration: { enabled: false }, publish: { branch: 'release' } }),
+      });
+
+      const taskId3 = 'task-no-int-publish';
+      ctx.taskRepo.insert({
+        id: taskId3,
+        projectId: 'proj-no-int-publish',
+        slug: 't-test-no-int-pub',
+        branch: branchNoIntPublish,
+        title: 'Task no int custom publish',
+        status: 'done',
+      });
+      ctx.eventRepo.insert('merge.conflict', taskId3, {
+        actor: 'auto-merge',
+        message: 'Xung đột merge ở: file3.txt',
+      });
+
+      const projectNoIntPublish = ctx.projectRepo.get('proj-no-int-publish')!;
+
+      // Merge into release (publish branch) but NOT main
+      git(repoPath, 'checkout', 'release');
+      git(repoPath, 'merge', '--no-ff', branchNoIntPublish, '-m', 'Manual merge into release');
+      git(repoPath, 'checkout', 'main');
+
+      clearGitCheckCache();
+      // Even though branchNoIntPublish is merged into publish.branch (release), the merge target for non-integration is defaultBranch (main).
+      // So merge_failed must NOT be cleared.
+      let issue3 = computeDeliveryIssue(ctx.taskRepo.get(taskId3)!, ctx.eventRepo.getByTask(taskId3), projectNoIntPublish);
+      expect(issue3).not.toBeNull();
+      expect(issue3?.kind).toBe('merge_failed');
+
+      // Now merge into main (the actual merge target)
+      git(repoPath, 'merge', '--no-ff', branchNoIntPublish, '-m', 'Manual merge into main');
+      clearGitCheckCache();
+      issue3 = computeDeliveryIssue(ctx.taskRepo.get(taskId3)!, ctx.eventRepo.getByTask(taskId3), projectNoIntPublish);
+      expect(issue3).toBeNull();
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it('POST /api/tasks/:id/merge/retry returns conflict files on conflict and disappears on success', async () => {
+    const { repoPath, taskBranch } = setupGitRepo();
+    try {
+      // Create integration worktree
+      const intWorktree = path.join(tmpDir, 'int-worktree');
+      git(repoPath, 'worktree', 'add', intWorktree, 'agenthub/integration');
+
+      ctx.projectRepo.insert({
+        id: 'proj-retry',
+        name: 'Project Retry',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ publish: { enabled: false } }),
+        merge: JSON.stringify({
+          enabled: true,
+          worktrees: { 'agenthub/integration': intWorktree, 'main': intWorktree },
+          checks: [],
+          timeoutSec: 30,
+        }),
+      });
+
+      const taskId = 'task-retry';
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-retry',
+        slug: 't-test-1',
+        branch: taskBranch,
+        title: 'Task retry test',
+        status: 'review',
+      });
+
+      // Create a conflicting change on integration
+      fs.writeFileSync(path.join(intWorktree, 'file.txt'), 'line 1\nconflicting change\n');
+      git(intWorktree, 'add', 'file.txt');
+      git(intWorktree, 'commit', '-m', 'Conflicting commit on integration');
+
+      // 1. Retry merge -> fails with conflict and returns list of files
+      const resRetryConflict = await server.inject({
+        method: 'POST',
+        url: `/api/tasks/${taskId}/merge/retry`,
+        headers: authHeaders(),
+      });
+      expect(resRetryConflict.statusCode).toBe(409);
+      const conflictBody = resRetryConflict.json();
+      expect(conflictBody.error).toBe('conflict');
+      expect(conflictBody.files).toBeDefined();
+      expect(conflictBody.files).toContain('file.txt');
+
+      // 2. Assign worker to resolve conflict
+      const resAssign = await server.inject({
+        method: 'POST',
+        url: `/api/tasks/${taskId}/merge/retry`,
+        headers: authHeaders(),
+        payload: { assignWorker: true },
+      });
+      expect(resAssign.statusCode).toBe(200);
+      const assignBody = resAssign.json();
+      expect(assignBody.ok).toBe(true);
+      expect(assignBody.status).toBe('queued');
+      expect(assignBody.assignedWorker).toBe(true);
+
+      const updatedTask = ctx.taskRepo.get(taskId)!;
+      expect(updatedTask.status).toBe('queued');
+      expect(updatedTask.body).toContain('file.txt');
+
+      // 3. Resolve the conflict on task branch
+      git(repoPath, 'checkout', taskBranch);
+      // Merge integration and resolve
+      try {
+        git(repoPath, 'merge', 'agenthub/integration');
+      } catch {
+        // Resolve conflict
+        fs.writeFileSync(path.join(repoPath, 'file.txt'), 'line 1\nconflicting change\nline 2 task\n');
+        git(repoPath, 'add', 'file.txt');
+        git(repoPath, 'commit', '-m', 'Resolved conflict');
+      }
+      git(repoPath, 'checkout', 'main');
+
+      // Put task back to review/done
+      ctx.taskRepo.update(taskId, { status: 'review' });
+
+      // 4. Retry merge again -> succeeds!
+      const resRetrySuccess = await server.inject({
+        method: 'POST',
+        url: `/api/tasks/${taskId}/merge/retry`,
+        headers: authHeaders(),
+      });
+      expect(resRetrySuccess.statusCode).toBe(200);
+      const successBody = resRetrySuccess.json();
+      expect(successBody.ok).toBe(true);
+      expect(successBody.mergeCommit).toBeDefined();
+
+      // Derived status disappears
+      const resFinalTask = await server.inject({
+        method: 'GET',
+        url: `/api/tasks/${taskId}`,
+        headers: authHeaders(),
+      });
+      expect(resFinalTask.json().deliveryIssue).toBeNull();
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it('POST /api/tasks/:id/merge/retry preserves 422 unprocessable_entity when post-merge checks fail and does not return conflict', async () => {
+    const { repoPath, taskBranch } = setupGitRepo();
+    try {
+      const intWorktree = path.join(tmpDir, 'int-worktree-check-fail');
+      git(repoPath, 'worktree', 'add', intWorktree, 'agenthub/integration');
+
+      ctx.projectRepo.insert({
+        id: 'proj-check-fail',
+        name: 'Project Check Fail',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ publish: { enabled: false } }),
+        merge: JSON.stringify({
+          enabled: true,
+          worktrees: { 'agenthub/integration': intWorktree, 'main': intWorktree },
+          checks: ['node -e "process.exit(1)"'],
+          timeoutSec: 30,
+        }),
+      });
+
+      const taskId = 'task-check-fail';
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-check-fail',
+        slug: 't-check-fail',
+        branch: taskBranch,
+        title: 'Task check fail test',
+        status: 'review',
+      });
+
+      const resRetry = await server.inject({
+        method: 'POST',
+        url: `/api/tasks/${taskId}/merge/retry`,
+        headers: authHeaders(),
+      });
+      expect(resRetry.statusCode).toBe(422);
+      const body = resRetry.json();
+      expect(body.error).toBe('unprocessable_entity');
+      expect(body.message).toContain('Checks sau merge thất bại');
+      expect(body.files).toBeUndefined();
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it('POST /api/tasks/:id/merge/retry preserves 503 environment_error when post-merge checks fail due to environment error', async () => {
+    const { repoPath, taskBranch } = setupGitRepo();
+    try {
+      const intWorktree = path.join(tmpDir, 'int-worktree-env-fail');
+      git(repoPath, 'worktree', 'add', intWorktree, 'agenthub/integration');
+
+      ctx.projectRepo.insert({
+        id: 'proj-env-fail',
+        name: 'Project Env Fail',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ publish: { enabled: false } }),
+        merge: JSON.stringify({
+          enabled: true,
+          worktrees: { 'agenthub/integration': intWorktree, 'main': intWorktree },
+          checks: ['nonexistent_command_xyz_12345'],
+          timeoutSec: 30,
+        }),
+      });
+
+      const taskId = 'task-env-fail';
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-env-fail',
+        slug: 't-env-fail',
+        branch: taskBranch,
+        title: 'Task env fail test',
+        status: 'review',
+      });
+
+      const resRetry = await server.inject({
+        method: 'POST',
+        url: `/api/tasks/${taskId}/merge/retry`,
+        headers: authHeaders(),
+      });
+      expect(resRetry.statusCode).toBe(503);
+      const body = resRetry.json();
+      expect(body.error).toBe('environment_error');
+      expect(body.message).toMatch(/(?:Worktree tích hợp thiếu dependency|Checks sau merge thất bại do lỗi môi trường)/);
+      expect(body.files).toBeUndefined();
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it('POST /api/tasks/:id/merge/retry preserves 409 HttpError when error code is not conflict and does not classify as conflict', async () => {
+    const { repoPath, taskBranch } = setupGitRepo();
+    try {
+      const intWorktree = path.join(tmpDir, 'int-worktree-409-non-conflict');
+      git(repoPath, 'worktree', 'add', intWorktree, 'agenthub/integration');
+
+      ctx.projectRepo.insert({
+        id: 'proj-409-non-conflict',
+        name: 'Project 409 Non Conflict',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ publish: { enabled: false } }),
+        merge: JSON.stringify({
+          enabled: true,
+          worktrees: { 'agenthub/integration': intWorktree, 'main': intWorktree },
+        }),
+      });
+
+      const taskId = 'task-409-non-conflict';
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-409-non-conflict',
+        slug: 't-409-non-conflict',
+        branch: taskBranch,
+        title: 'Task 409 non conflict test',
+        status: 'review',
+      });
+
+      const spy = vi.spyOn(mergeModule, 'mergeTaskIntoBase').mockRejectedValueOnce(
+        new HttpError(409, 'state_conflict', 'Task state conflict')
+      );
+
+      const resRetry = await server.inject({
+        method: 'POST',
+        url: `/api/tasks/${taskId}/merge/retry`,
+        headers: authHeaders(),
+      });
+      expect(resRetry.statusCode).toBe(409);
+      const body = resRetry.json();
+      expect(body.error).toBe('state_conflict');
+      expect(body.message).toBe('Task state conflict');
+      expect(body.files).toBeUndefined();
+
+      const events = ctx.eventRepo.getByTask(taskId);
+      expect(events.some((e) => e.type === 'merge.conflict')).toBe(false);
+      expect(events.some((e) => e.type === 'merge.failed')).toBe(true);
+
+      spy.mockRestore();
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it('checks local and remote independently so remote target containing commit is not reported as push_failed', async () => {
+    const { repoPath, taskBranch, taskCommit } = setupGitRepoWithRemote();
+    try {
+      ctx.projectRepo.insert({
+        id: 'proj-remote',
+        name: 'Project Remote',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+      });
+
+      const taskId = 'task-remote-pushed';
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-remote',
+        slug: 't-remote-1',
+        branch: taskBranch,
+        title: 'Task pushed on remote only',
+        status: 'done',
+      });
+
+      // Simulate a past push failure recorded on task
+      ctx.taskRepo.update(taskId, {
+        pushResult: JSON.stringify({ state: 'push_failed', error: 'transient network error', failedAt: '2026-11-13T10:00:00.000Z' }),
+      });
+
+      // Local main does NOT have taskCommit
+      expect(isGitAncestor(repoPath, taskCommit, 'main')).toBe(false);
+      // But remote origin/main DOES have taskCommit
+      expect(isGitAncestor(repoPath, taskCommit, 'origin/main')).toBe(true);
+
+      // isGitPushed must check remote even when local is false and return true
+      clearGitCheckCache();
+      expect(isGitPushed(repoPath, taskCommit, 'main')).toBe(true);
+
+      // computeDeliveryIssue returns null because commit already reached target branch (remote)
+      const project = ctx.projectRepo.get('proj-remote')!;
+      const issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+      expect(issue).toBeNull();
+
+      const resTask = await server.inject({
+        method: 'GET',
+        url: `/api/tasks/${taskId}`,
+        headers: authHeaders(),
+      });
+      expect(resTask.json().deliveryIssue).toBeNull();
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it('clears push_failed when task.pushed event occurs after pushResult error without task.pushedAt', async () => {
+    ctx.projectRepo.insert({
+      id: 'proj-pushed-event',
+      name: 'Project Pushed Event',
+      path: path.join(tmpDir, 'nonexistent'),
+      defaultBranch: 'main',
+      maxParallel: 1,
+    });
+
+    const taskId = 'task-pushed-event';
+    ctx.taskRepo.insert({
+      id: taskId,
+      projectId: 'proj-pushed-event',
+      slug: 't-event-1',
+      title: 'Task with later push event',
+      status: 'done',
+    });
+
+    // Old pushResult error at 10:00
+    ctx.taskRepo.update(taskId, {
+      pushResult: JSON.stringify({ state: 'push_failed', error: 'connection refused', failedAt: '2026-11-13T10:00:00.000Z' }),
+    });
+
+    const project = ctx.projectRepo.get('proj-pushed-event')!;
+
+    // Before task.pushed event: reported as push_failed
+    let issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+    expect(issue).not.toBeNull();
+    expect(issue?.kind).toBe('push_failed');
+
+    // Emit task.pushed event at 10:05 without setting task.pushedAt in DB
+    ctx.eventRepo.insert('task.pushed', taskId, {
+      commit: 'abc1234',
+      branch: 'main',
+    });
+
+    // Now computeDeliveryIssue sees task.pushed after the pushResult failure and clears push_failed
+    issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+    expect(issue).toBeNull();
+  });
+
+  it('clears push_failed when pushResult error lacks failedAt and task.updatedAt was touched after task.pushed event', async () => {
+    ctx.projectRepo.insert({
+      id: 'proj-pushed-no-failedat',
+      name: 'Project Pushed No FailedAt',
+      path: path.join(tmpDir, 'nonexistent'),
+      defaultBranch: 'main',
+      maxParallel: 1,
+    });
+
+    const taskId = 'task-pushed-no-failedat';
+    ctx.taskRepo.insert({
+      id: taskId,
+      projectId: 'proj-pushed-no-failedat',
+      slug: 't-event-no-failedat',
+      title: 'Task with push error missing failedAt',
+      status: 'done',
+    });
+
+    // 1. pushResult error WITHOUT failedAt, and task.push_failed event at 10:00
+    ctx.taskRepo.update(taskId, {
+      pushResult: JSON.stringify({ state: 'push_failed', error: 'connection refused' }), // no failedAt!
+    });
+    const eventFailedId = ctx.eventRepo.insert('task.push_failed', taskId, {
+      error: 'connection refused',
+    });
+    // Manually ensure event timestamp is 10:00
+    ctx.db.prepare('UPDATE events SET ts = ? WHERE id = ?').run('2026-11-13T10:00:00.000Z', eventFailedId);
+
+    const project = ctx.projectRepo.get('proj-pushed-no-failedat')!;
+
+    // 2. Emit task.pushed event at 10:05 without setting task.pushedAt
+    const eventPushedId = ctx.eventRepo.insert('task.pushed', taskId, {
+      commit: 'abc1234',
+      branch: 'main',
+    });
+    ctx.db.prepare('UPDATE events SET ts = ? WHERE id = ?').run('2026-11-13T10:05:00.000Z', eventPushedId);
+
+    // 3. Task row is touched later at 10:15 (so task.updatedAt > task.pushed event ts)
+    ctx.db.prepare('UPDATE tasks SET updatedAt = ? WHERE id = ?').run('2026-11-13T10:15:00.000Z', taskId);
+
+    // computeDeliveryIssue must determine failure time independently from event and NOT use task.updatedAt,
+    // so task.pushed at 10:05 clears push_failed!
+    let issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+    expect(issue).toBeNull();
+
+    // 4. Also test when there is NO task.push_failed event at all, just pushResult error without failedAt:
+    // If task.pushed occurred at 10:05 and updatedAt was touched at 10:15, push_failed should still be cleared
+    ctx.db.prepare('DELETE FROM events WHERE id = ?').run(eventFailedId);
+    issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+    expect(issue).toBeNull();
+
+    // 5. Conversely, if a subsequent task.push_failed event occurs at 10:20 (after task.pushed), push_failed is NOT cleared
+    const eventFailedLaterId = ctx.eventRepo.insert('task.push_failed', taskId, {
+      error: 'subsequent failure',
+    });
+    ctx.db.prepare('UPDATE events SET ts = ? WHERE id = ?').run('2026-11-13T10:20:00.000Z', eventFailedLaterId);
+    issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+    expect(issue).not.toBeNull();
+    expect(issue?.kind).toBe('push_failed');
+    expect(issue?.error).toBe('subsequent failure');
+  });
+
+  it('supports cursor pagination for derived task queries without looping infinitely', async () => {
+    ctx.projectRepo.insert({
+      id: 'proj-page',
+      name: 'Project Page',
+      path: path.join(tmpDir, 'nonexistent'),
+      defaultBranch: 'main',
+      maxParallel: 1,
+    });
+
+    // Create 25 tasks with merge_failed
+    for (let i = 1; i <= 25; i++) {
+      const pad = String(i).padStart(2, '0');
+      const taskId = `task-page-${pad}`;
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-page',
+        slug: `t-page-${pad}`,
+        title: `Task Page ${pad}`,
+        status: 'review',
+        createdAt: `2026-11-13T10:${pad}:00.000Z`,
+        updatedAt: `2026-11-13T10:${pad}:00.000Z`,
+      });
+      ctx.eventRepo.insert('merge.conflict', taskId, {
+        actor: 'auto-merge',
+        message: `Xung đột merge ở: file-${pad}.txt`,
+        files: [`file-${pad}.txt`],
+      });
+    }
+
+    // Page 1: limit 10
+    const resPage1 = await server.inject({
+      method: 'GET',
+      url: '/api/tasks?limit=10&derived=merge_failed',
+      headers: authHeaders(),
+    });
+    expect(resPage1.statusCode).toBe(200);
+    const page1 = resPage1.json();
+    expect(page1.total).toBe(25);
+    expect(page1.items).toHaveLength(10);
+    expect(page1.nextCursor).toBeDefined();
+    expect(page1.nextCursor).not.toBeNull();
+
+    // Page 2: with cursor from page 1
+    const resPage2 = await server.inject({
+      method: 'GET',
+      url: `/api/tasks?limit=10&derived=merge_failed&cursor=${encodeURIComponent(page1.nextCursor)}`,
+      headers: authHeaders(),
+    });
+    expect(resPage2.statusCode).toBe(200);
+    const page2 = resPage2.json();
+    expect(page2.total).toBe(25);
+    expect(page2.items).toHaveLength(10);
+    expect(page2.nextCursor).toBeDefined();
+    expect(page2.nextCursor).not.toBeNull();
+
+    // Verify items in page 1 and page 2 are completely distinct
+    const ids1 = new Set(page1.items.map((t: { id: string }) => t.id));
+    const ids2 = new Set(page2.items.map((t: { id: string }) => t.id));
+    for (const id of ids2) {
+      expect(ids1.has(id)).toBe(false);
+    }
+
+    // Page 3: with cursor from page 2
+    const resPage3 = await server.inject({
+      method: 'GET',
+      url: `/api/tasks?limit=10&derived=merge_failed&cursor=${encodeURIComponent(page2.nextCursor)}`,
+      headers: authHeaders(),
+    });
+    expect(resPage3.statusCode).toBe(200);
+    const page3 = resPage3.json();
+    expect(page3.total).toBe(25);
+    expect(page3.items).toHaveLength(5);
+    expect(page3.nextCursor).toBeNull();
+
+    // Total unique items across 3 pages is exactly 25
+    const allIds = new Set([...ids1, ...ids2, ...page3.items.map((t: { id: string }) => t.id)]);
+    expect(allIds.size).toBe(25);
+  });
+
+  it('correctly invalidates git check cache by taskId, repoPath, ref, and on merge/push events', async () => {
+    const { repoPath, taskBranch } = setupGitRepo();
+    try {
+      ctx.projectRepo.insert({
+        id: 'proj-cache',
+        name: 'Project Cache',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ integration: { enabled: true, branch: 'agenthub/integration' } }),
+      });
+
+      const taskId = 'task-cache-1';
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-cache',
+        slug: 't-cache-1',
+        branch: taskBranch,
+        title: 'Task cache test',
+        status: 'done',
+      });
+      ctx.eventRepo.insert('merge.conflict', taskId, {
+        actor: 'auto-merge',
+        message: 'Xung đột merge ở: file.txt',
+      });
+
+      const project = ctx.projectRepo.get('proj-cache')!;
+
+      // 1. Initial computeDeliveryIssue caches git ancestor check
+      let issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+      expect(issue).not.toBeNull();
+      expect(issue?.kind).toBe('merge_failed');
+
+      // Now merge taskBranch into agenthub/integration in git
+      git(repoPath, 'checkout', 'agenthub/integration');
+      git(repoPath, 'merge', '--no-ff', taskBranch, '-m', 'Merge taskBranch');
+      git(repoPath, 'checkout', 'main');
+
+      // 2. Invalidate cache using taskId
+      clearGitCheckCache(taskId);
+      issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+      expect(issue).toBeNull(); // Immediately reflected, not using stale cache!
+
+      // 3. Test clearGitCheckCacheForTask
+      clearGitCheckCacheForTask(ctx.taskRepo.get(taskId)!, project);
+
+      // 4. Test EventBus events automatically clear the cache
+      // Warm cache with a positive ancestor check
+      expect(isGitAncestor(repoPath, taskBranch, 'agenthub/integration', 'task-cache-2')).toBe(true);
+      // Emit task.merged event
+      ctx.scheduler.getEventBus().emit('task.merged', taskId, { mergeCommit: 'abc', checks: [] });
+
+      // Emit task.pushed event
+      ctx.scheduler.getEventBus().emit('task.pushed', taskId, {});
+      // Emit merge.conflict event
+      ctx.scheduler.getEventBus().emit('merge.conflict', taskId, {});
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+});

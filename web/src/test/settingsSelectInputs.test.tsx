@@ -8,6 +8,8 @@ import { ThemeProvider } from '../context/ThemeContext';
 import { SelectOrCustomInput, SortableModelList } from '../components/ui';
 import { SettingsPage } from '../pages/SettingsPage';
 import { ProjectSettingsDrawer } from '../components/ProjectSettingsDrawer';
+import { DepartmentsPage } from '../pages/DepartmentsPage';
+import { NewSessionModal } from '../components/chat/NewSessionModal';
 import {
   validateModelSyntax,
   validateChatModelSyntax,
@@ -16,6 +18,7 @@ import {
   validateBranchSyntax,
   getModelProvider,
   getModelsForProvider,
+  formatDiscoveredModelOptions,
 } from '../utils/models';
 import * as client from '../api/client';
 import * as sse from '../api/sse';
@@ -205,8 +208,15 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(validateChatModelSyntax('sonnet', (k) => k)).toBeNull();
       expect(validateChatModelSyntax('opus', (k) => k)).toBeNull();
       expect(validateChatModelSyntax('haiku', (k) => k)).toBeNull();
-      expect(validateChatModelSyntax('gemini-3.8-flash-high', (k) => k)).toBe('settings.invalidChatModelSyntax');
-      expect(validateChatModelSyntax('codex:gpt-5.6-luna', (k) => k)).toBe('settings.invalidChatModelSyntax');
+      // Accepts newly discovered Claude models
+      expect(validateChatModelSyntax('claude-sonnet-5-5', (k) => k, ['claude-sonnet-5-5'])).toBeNull();
+      // Accepts custom models without whitespace
+      expect(validateChatModelSyntax('custom-model-id', (k) => k)).toBeNull();
+      expect(validateChatModelSyntax('gemini-3.8-flash-high', (k) => k)).toBeNull();
+      expect(validateChatModelSyntax('codex:gpt-5.6-luna', (k) => k)).toBeNull();
+      // Rejects model strings with whitespace
+      expect(validateChatModelSyntax('custom model with space', (k) => k)).toBe('settings.invalidChatModelSyntax');
+      expect(validateChatModelSyntax('sonnet with space', (k) => k)).toBe('settings.invalidChatModelSyntax');
     });
 
     it('validates review chain reviewer syntax and reviewer model syntax', () => {
@@ -221,11 +231,18 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(validateReviewerModelSyntax('claude:sonnet', 'claude', (k) => k)).toBeNull();
       expect(validateReviewerModelSyntax('gpt-5.6-luna', 'codex', (k) => k)).toBeNull();
       expect(validateReviewerModelSyntax('codex:gpt-5.6-luna', 'codex', (k) => k)).toBeNull();
+      expect(validateReviewerModelSyntax('my-model', 'codex', (k) => k)).toBeNull();
+      expect(validateReviewerModelSyntax('my-model', 'claude', (k) => k)).toBeNull();
       expect(validateReviewerModelSyntax('invalid model with space', 'codex', (k) => k)).toBe('settings.invalidModelSyntax');
       expect(validateReviewerModelSyntax('codex:', 'codex', (k) => k)).toBe('settings.invalidModelSyntax');
-      expect(validateReviewerModelSyntax('codex:x', 'codex', (k) => k)).toBe('settings.invalidModelSyntax');
-      expect(validateReviewerModelSyntax('gpt-5.6-luna', 'claude', (k) => k)).toBe('settings.invalidChatModelSyntax');
-      expect(validateReviewerModelSyntax('sonnet', 'codex', (k) => k)).toBe('settings.invalidModelSyntax');
+      expect(validateReviewerModelSyntax('claude:', 'claude', (k) => k)).toBe('settings.invalidModelSyntax');
+      expect(validateReviewerModelSyntax('', 'codex', (k) => k)).toBe('settings.emptyChainWarning');
+
+      // Accepts newly discovered Codex models when knownModels is passed
+      expect(validateReviewerModelSyntax('o3-mini', 'codex', (k) => k, ['codex:o3-mini'])).toBeNull();
+      expect(validateReviewerModelSyntax('codex:o3-mini', 'codex', (k) => k, ['o3-mini'])).toBeNull();
+      expect(validateReviewerModelSyntax('custom-reviewer', 'codex', (k) => k, ['custom-reviewer'])).toBeNull();
+      expect(validateReviewChainReviewerSyntax('codex:o3-mini', (k) => k, ['codex:o3-mini'])).toBeNull();
     });
   });
 
@@ -670,6 +687,46 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       </LocaleProvider>,
     );
 
+    it('allows saving a custom chat model without whitespace', async () => {
+      const updateSpy = vi.spyOn(client, 'updateConfig').mockResolvedValue({} as any);
+      renderSettings();
+
+      const chatSelect = await screen.findByLabelText('Model chat Claude');
+      expect(chatSelect).toBeInTheDocument();
+      fireEvent.change(chatSelect, { target: { value: '__custom__' } });
+
+      const customInput = within(chatSelect.closest('div')!).getByPlaceholderText('sonnet');
+      expect(customInput).toBeInTheDocument();
+      fireEvent.change(customInput, { target: { value: 'custom-claude-model' } });
+
+      fireEvent.click(screen.getByRole('button', { name: /Lưu cấu hình/i }));
+      await waitFor(() => expect(updateSpy).toHaveBeenCalled());
+      const payload = updateSpy.mock.calls[0][0];
+      expect(payload.chat?.model).toBe('custom-claude-model');
+    });
+
+    it('allows saving a custom reviewer model my-model with custom warning', async () => {
+      const updateSpy = vi.spyOn(client, 'updateConfig').mockResolvedValue({} as any);
+      renderSettings();
+
+      const reviewerSelect = await screen.findByLabelText('Model reviewer 1');
+      expect(reviewerSelect).toBeInTheDocument();
+      fireEvent.change(reviewerSelect, { target: { value: '__custom__' } });
+
+      const customInput = within(reviewerSelect.closest('div')!).getByPlaceholderText('codex:model');
+      expect(customInput).toBeInTheDocument();
+      fireEvent.change(customInput, { target: { value: 'my-model' } });
+
+      await waitFor(() => {
+        expect(within(reviewerSelect.closest('div')!).getByTestId('custom-warning')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /Lưu cấu hình/i }));
+      await waitFor(() => expect(updateSpy).toHaveBeenCalled());
+      const payload = updateSpy.mock.calls[0][0];
+      expect(payload.reviewer?.order?.[0]?.model).toBe('my-model');
+    });
+
     it('shows a success toast after saving the config', async () => {
       let resolveSave: (value: any) => void = () => {};
       vi.spyOn(client, 'updateConfig').mockImplementation(() => new Promise((resolve) => { resolveSave = resolve; }));
@@ -733,6 +790,10 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       queryClient = new QueryClient({
         defaultOptions: { queries: { retry: false } },
       });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['codex:gpt-5.6-luna', 'sonnet'],
+        configured: ['codex:gpt-5.6-luna', 'sonnet'],
+      });
       vi.spyOn(client, 'getProfiles').mockResolvedValue([
         { name: 'codex-main', engine: 'codex', kind: 'isolated', home: '/home/codex', email: null, enabled: 1 } as any,
         { name: 'claude-main', engine: 'claude', kind: 'isolated', home: '/home/claude', email: null, enabled: 1 } as any,
@@ -773,8 +834,10 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(screen.queryByLabelText(/Ghi đè fallback reviewer/i)).not.toBeInTheDocument();
 
       // Assert that interactive controls are present
-      expect(screen.getAllByText('codex:gpt-5.6-luna').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('claude').length).toBeGreaterThan(0);
+      await waitFor(() => {
+        expect(screen.getAllByText('codex:gpt-5.6-luna').length).toBeGreaterThan(0);
+        expect(screen.getAllByText('claude').length).toBeGreaterThan(0);
+      });
     });
 
     it('saves updated reviewer order and review chain correctly', async () => {
@@ -1042,9 +1105,12 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
 
       // Review step select should display codex:custom-model-dynamic as a known select option, NOT custom input
       const chainBlock = screen.getByTestId('project-review-chain');
+      await waitFor(() => {
+        const stepSelect = within(chainBlock).getByRole('combobox', { name: /^Bước review 1$/i }) as HTMLSelectElement;
+        expect(stepSelect.value).toBe('codex:custom-model-dynamic');
+      });
       const stepSelect = within(chainBlock).getByRole('combobox', { name: /^Bước review 1$/i }) as HTMLSelectElement;
       expect(stepSelect.tagName.toLowerCase()).toBe('select');
-      expect(stepSelect.value).toBe('codex:custom-model-dynamic');
       expect(within(stepSelect).getByRole('option', { name: 'codex:custom-model-dynamic' })).toBeInTheDocument();
       // Ensure hardcoded models like gpt-5.6-turbo/luna are NOT included when not in API or config
       expect(within(stepSelect).queryByRole('option', { name: 'codex:gpt-5.6-turbo' })).not.toBeInTheDocument();
@@ -1212,6 +1278,731 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       const step1Select = within(chainBlock).getByRole('combobox', { name: /^Bước review 1$/i }) as HTMLSelectElement;
       expect(step1Select.value).toBe('');
       expect(within(step1Select).queryByText(/gpt-5.6-luna/i)).not.toBeInTheDocument();
+    });
+
+    it('does not insert hardcoded codex:gpt-5.6-luna when applying presets or quick-fix in ProjectSettingsDrawer with empty codex models', async () => {
+      const cleanProject = {
+        ...mockProject,
+        review: null,
+        settings: {
+          ...mockProject.settings,
+          review: undefined,
+        },
+      };
+
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        configured: [],
+        models: [
+          { id: 'sonnet', name: 'Claude Sonnet', engine: 'claude', profiles: ['p1'], verified: true, available: true },
+        ],
+        suggestions: ['sonnet'],
+      });
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        chat: { model: 'sonnet', models: ['sonnet'] },
+        reviewer: { model: '', claudeModel: 'sonnet' },
+        modelChainHard: [],
+        modelChainEasy: [],
+      } as any);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <ProjectSettingsDrawer
+                  project={cleanProject}
+                  isOpen={true}
+                  onClose={() => {}}
+                />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      const advancedSummary = screen.getByTestId('advanced-settings-section').querySelector('summary');
+      if (advancedSummary) fireEvent.click(advancedSummary);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('project-review-chain')).toBeInTheDocument();
+      });
+
+      // Quick fix button should be disabled when no codex model is available
+      const fixBtn = screen.queryByTestId('automerge-fix-chain');
+      if (fixBtn) {
+        expect(fixBtn).toBeDisabled();
+      }
+
+      // Applying balanced preset should not contain codex:gpt-5.6-luna
+      const balancedBtn = screen.getByTestId('project-preset-card-balanced');
+      fireEvent.click(balancedBtn);
+
+      const chainBlock = screen.getByTestId('project-review-chain');
+      expect(within(chainBlock).queryByText(/gpt-5.6-luna/i)).not.toBeInTheDocument();
+    });
+
+    it('displays warning badge and excludes unavailable configured models from drawer reviewer dropdown', async () => {
+      const projectWithUnavailableModel = {
+        ...mockProject,
+        id: 'p-unavailable',
+        settings: {
+          ...mockProject.settings,
+          review: {
+            order: [{ engine: 'codex', model: 'codex:unavailable-model', profiles: [] }],
+            fallback: { onUnavailable: true, onError: true, onBusyAfterMin: 10 },
+          },
+        },
+        review: {
+          chain: [
+            { reviewer: 'codex:unavailable-model', mode: 'gate' },
+          ],
+          maxRounds: 2,
+        },
+      };
+
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        configured: ['codex:unavailable-model'],
+        models: [
+          { id: 'codex:valid-model', engine: 'codex', profiles: ['p1'], verified: true, available: true },
+          { id: 'codex:unavailable-model', engine: 'codex', profiles: [], verified: false, available: false, warning: 'Không có tài khoản' },
+        ],
+        suggestions: ['codex:valid-model'],
+      });
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <ProjectSettingsDrawer
+                  project={projectWithUnavailableModel}
+                  isOpen={true}
+                  onClose={() => {}}
+                />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      const advancedSummary = screen.getByTestId('advanced-settings-section').querySelector('summary');
+      if (advancedSummary) fireEvent.click(advancedSummary);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('project-review-chain')).toBeInTheDocument();
+        expect(screen.getByTestId('project-reviewer-order')).toBeInTheDocument();
+      });
+
+      // Warning badge is shown in both reviewer-order and review-chain for unavailable-model
+      await waitFor(() => {
+        const orderBlock = screen.getByTestId('project-reviewer-order');
+        expect(within(orderBlock).getByTestId('model-unavailable-warning')).toBeInTheDocument();
+      });
+
+      const chainBlock = screen.getByTestId('project-review-chain');
+      expect(within(chainBlock).getByTestId('model-unavailable-warning')).toBeInTheDocument();
+
+      // Dropdown does NOT propose unavailable model as an available option
+      const orderBlock = screen.getByTestId('project-reviewer-order');
+      const reviewerSelect = within(orderBlock).getByRole('combobox', { name: /^Model reviewer 1$/i }) as HTMLSelectElement;
+      expect(within(reviewerSelect).queryByRole('option', { name: 'codex:unavailable-model' })).not.toBeInTheDocument();
+      expect(within(reviewerSelect).getByRole('option', { name: 'codex:valid-model' })).toBeInTheDocument();
+    });
+  });
+
+  describe('5. Discovered Models Integration & Warnings (f-account-model-discovery)', () => {
+    it('formatDiscoveredModelOptions groups models by engine and formats labels with account count', () => {
+      const mockModels = [
+        { id: 'gemini-3.8-flash-high', name: 'Gemini 3.8 Flash (High)', engine: 'agy' as const, profiles: ['huynq766', 'work'], verified: true, available: true },
+        { id: 'codex:gpt-5.6-luna', name: 'GPT-5.6 Luna', engine: 'codex' as const, profiles: ['openai-1'], verified: true, available: true },
+        { id: 'sonnet', name: 'Claude Sonnet', engine: 'claude' as const, profiles: [], verified: false, available: false, warning: 'No active profile' },
+      ];
+
+      const viOptions = formatDiscoveredModelOptions(mockModels, (k, params) => {
+        if (k === 'models.engineAgy') return 'Antigravity (agy)';
+        if (k === 'models.engineCodex') return 'Codex';
+        if (k === 'models.engineClaude') return 'Claude';
+        if (k === 'models.accountCount') return `${params?.count} tài khoản`;
+        if (k === 'models.unavailableWarning') return 'Không khả dụng';
+        return k;
+      });
+
+      expect(viOptions).toHaveLength(3);
+      expect(viOptions[0].group).toBe('Antigravity (agy)');
+      expect(viOptions[0].label).toContain('Gemini 3.8 Flash (High) (gemini-3.8-flash-high) (2 tài khoản)');
+      expect(viOptions[1].group).toBe('Codex');
+      expect(viOptions[1].label).toContain('(1 tài khoản)');
+      expect(viOptions[2].group).toBe('Claude');
+      expect(viOptions[2].label).toContain('⚠️ Không khả dụng');
+
+      // Filter by engine
+      const codexOnly = formatDiscoveredModelOptions(mockModels, undefined, 'codex');
+      expect(codexOnly).toHaveLength(1);
+      expect(codexOnly[0].value).toBe('codex:gpt-5.6-luna');
+    });
+
+    it('SelectOrCustomInput renders grouped options inside optgroups', () => {
+      const groupedOpts = [
+        { value: 'gemini-3.8-flash-high', label: 'Gemini Flash (2 tài khoản)', group: 'Antigravity' },
+        { value: 'codex:gpt-5.6-luna', label: 'GPT Luna (1 tài khoản)', group: 'Codex' },
+      ];
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <SelectOrCustomInput
+            testId="grouped-select"
+            value="gemini-3.8-flash-high"
+            onChange={() => {}}
+            options={groupedOpts}
+            ariaLabel="Grouped Select"
+          />
+        </LocaleProvider>,
+      );
+
+      const select = screen.getByTestId('grouped-select') as HTMLSelectElement;
+      const optgroups = select.querySelectorAll('optgroup');
+      expect(optgroups.length).toBe(2);
+      expect(optgroups[0].label).toBe('Antigravity');
+      expect(optgroups[1].label).toBe('Codex');
+    });
+
+    it('SelectOrCustomInput displays custom warning when showCustomWarning is enabled and custom value entered', () => {
+      render(
+        <LocaleProvider initialLocale="vi">
+          <SelectOrCustomInput
+            testId="custom-warning-select"
+            value="my-custom-model"
+            onChange={() => {}}
+            options={['preset-model-1']}
+            showCustomWarning={true}
+            ariaLabel="Custom Warning Select"
+          />
+        </LocaleProvider>,
+      );
+
+      // In custom mode with an unverified model
+      expect(screen.getByTestId('custom-warning')).toBeInTheDocument();
+      expect(screen.getByTestId('custom-warning').textContent).toContain('chưa được xác minh');
+    });
+
+    it('SortableModelList marks unavailable models with warning badge', () => {
+      render(
+        <LocaleProvider initialLocale="vi">
+          <SortableModelList
+            title="Model Chain"
+            models={['gemini-3.8-flash-high', 'deprecated-model']}
+            onChange={() => {}}
+            availableOptions={['gemini-3.8-flash-high']}
+            unavailableModels={new Set(['deprecated-model'])}
+          />
+        </LocaleProvider>,
+      );
+
+      const warnings = screen.getAllByTestId('model-unavailable-warning');
+      expect(warnings.length).toBe(1);
+      expect(warnings[0].textContent).toContain('không còn khả dụng');
+    });
+
+    it('SettingsPage displays refresh button and handles clicking refresh', async () => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      const refreshSpy = vi.spyOn(client, 'refreshModels').mockResolvedValue({
+        suggestions: ['gemini-3.8-flash-high'],
+        configured: ['gemini-3.8-flash-high'],
+        models: [
+          { id: 'gemini-3.8-flash-high', engine: 'agy', profiles: ['huynq766'], verified: true, available: true },
+        ],
+      });
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('refresh-models-btn')).toBeInTheDocument();
+      });
+
+      const refreshBtn = screen.getByTestId('refresh-models-btn');
+      fireEvent.click(refreshBtn);
+
+      await waitFor(() => {
+        expect(refreshSpy).toHaveBeenCalled();
+      });
+    });
+
+    it('formatDiscoveredModelOptions with onlyAvailable=true filters out unavailable models', () => {
+      const mockModels = [
+        { id: 'gemini-3.8-flash-high', name: 'Gemini Flash', engine: 'agy' as const, profiles: ['p1'], verified: true, available: true },
+        { id: 'gemini-old', name: 'Gemini Old', engine: 'agy' as const, profiles: [], verified: false, available: false },
+      ];
+
+      const all = formatDiscoveredModelOptions(mockModels);
+      expect(all).toHaveLength(2);
+
+      const availableOnly = formatDiscoveredModelOptions(mockModels, undefined, undefined, true);
+      expect(availableOnly).toHaveLength(1);
+      expect(availableOnly[0].value).toBe('gemini-3.8-flash-high');
+    });
+
+    it('SettingsPage does not propose unavailable configured models in Add Model dropdown', async () => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['gemini-3.8-flash-high'],
+        configured: ['gemini-3.8-flash-high', 'unavailable-configured-model'],
+        models: [
+          { id: 'gemini-3.8-flash-high', engine: 'agy', profiles: ['huynq766'], verified: true, available: true },
+          { id: 'unavailable-configured-model', engine: 'agy', profiles: [], verified: false, available: false, warning: 'Không có tài khoản nào' },
+        ],
+      });
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        modelChainHard: ['gemini-3.8-flash-high', 'unavailable-configured-model'],
+        modelChainEasy: ['gemini-3.8-flash-high'],
+        defaultTimeout: 10800,
+        chat: { claudeBin: 'claude', allowFullMode: false, maxConcurrent: 2, model: 'sonnet', models: ['sonnet'] },
+        reviewer: {
+          model: 'sonnet',
+          order: [],
+          fallback: { onUnavailable: true, onError: true, onBusyAfterMin: 10 },
+          arbiter: { engine: 'claude', model: 'sonnet' },
+        },
+      } as any);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('hard-chain-list')).toBeInTheDocument();
+      });
+
+      // Existing chain item shows warning for unavailable-configured-model
+      const hardChain = screen.getByTestId('hard-chain-list');
+      expect(within(hardChain).getByTestId('model-unavailable-warning')).toBeInTheDocument();
+
+      // But "Add model to chain" select should NOT include unavailable-configured-model as an option
+      const addModelSelect = within(hardChain).getByRole('combobox', { name: /Thêm model vào chuỗi/i }) as HTMLSelectElement;
+      expect(within(addModelSelect).queryByRole('option', { name: /unavailable-configured-model/i })).not.toBeInTheDocument();
+    });
+
+    it('does not insert hardcoded default models as new options when /api/models returns all models as unavailable', async () => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: [],
+        configured: ['sonnet'],
+        models: [
+          { id: 'sonnet', engine: 'claude', profiles: [], verified: false, available: false, warning: 'Chưa xác minh' },
+          { id: 'opus', engine: 'claude', profiles: [], verified: false, available: false, warning: 'Chưa xác minh' },
+          { id: 'gpt-5.6-luna', engine: 'codex', profiles: [], verified: false, available: false, warning: 'Chưa xác minh' },
+        ],
+      });
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        modelChainHard: [],
+        modelChainEasy: [],
+        defaultTimeout: 10800,
+        chat: { claudeBin: 'claude', allowFullMode: false, maxConcurrent: 2, model: 'sonnet', models: ['sonnet'] },
+        reviewer: {
+          model: 'sonnet',
+          order: [],
+          fallback: { onUnavailable: true, onError: true, onBusyAfterMin: 10 },
+          arbiter: { engine: 'claude', model: 'sonnet' },
+        },
+      } as any);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('hard-chain-list')).toBeInTheDocument();
+      });
+
+      // In chat settings, "Thêm model" dropdown should NOT offer opus or haiku from DEFAULT_CLAUDE_MODELS
+      const addChatModelSelect = screen.queryByRole('combobox', { name: /Thêm model Claude/i }) as HTMLSelectElement | null;
+      if (addChatModelSelect) {
+        expect(within(addChatModelSelect).queryByRole('option', { name: 'opus' })).not.toBeInTheDocument();
+        expect(within(addChatModelSelect).queryByRole('option', { name: 'haiku' })).not.toBeInTheDocument();
+      }
+    });
+
+    it('DepartmentsPage does not propose DEFAULT_CLAUDE_MODELS or DEFAULT_CODEX_MODELS when modelOptions is empty', async () => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: [],
+        configured: [],
+        models: [],
+      });
+      vi.spyOn(client, 'getDepartments').mockResolvedValue([
+        {
+          id: 'dept-1',
+          name: 'Engineering',
+          priority: 1,
+          maxParallel: 2,
+          claudeDailyTokenBudget: 0,
+          telegramTopicId: null,
+          brainEngine: 'claude',
+          brainModel: 'inherit',
+          brainCodexProfile: null,
+          brainMode: 'auto',
+          brainPermissions: 'trusted',
+          brainDailyTokenBudget: 100,
+          brainMaxTurnsPerHour: 2,
+          profiles: [],
+          projects: [],
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ]);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+      vi.spyOn(client, 'getProjects').mockResolvedValue([]);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <DepartmentsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await screen.findByText('Engineering');
+      fireEvent.click(screen.getByText('Cấu hình Brain'));
+
+      const brainModelSelect = screen.getByLabelText('Model Brain') as HTMLSelectElement;
+      expect(brainModelSelect).toBeInTheDocument();
+      // Should not have opus or haiku from hardcoded defaults
+      expect(within(brainModelSelect).queryByRole('option', { name: 'opus' })).not.toBeInTheDocument();
+      expect(within(brainModelSelect).queryByRole('option', { name: 'haiku' })).not.toBeInTheDocument();
+    });
+
+    it('NewSessionModal uses discovered models from getModelOptions and excludes unverified hardcoded defaults', async () => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['claude-3-5-sonnet'],
+        configured: [],
+        models: [
+          { id: 'claude-3-5-sonnet', engine: 'claude', profiles: ['claude-p1'], verified: true, available: true },
+        ],
+      });
+      vi.spyOn(client, 'getProjects').mockResolvedValue([]);
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        chat: { allowFullMode: false, models: ['opus', 'sonnet', 'haiku'] },
+      } as any);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <NewSessionModal isOpen={true} onClose={vi.fn()} onSubmit={vi.fn()} />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await screen.findByText(/Cuộc trò chuyện mới/i);
+      const modelSelect = screen.getByDisplayValue(/Mặc định của Claude Code/i);
+      expect(modelSelect).toBeInTheDocument();
+
+      // Discovered model must be present once query resolves
+      await waitFor(() => {
+        expect(screen.getByRole('option', { name: 'claude-3-5-sonnet' })).toBeInTheDocument();
+      });
+
+      // Hardcoded defaults opus and haiku must NOT be offered
+      expect(screen.queryByRole('option', { name: 'opus' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('option', { name: 'haiku' })).not.toBeInTheDocument();
+    });
+
+    it('NewSessionModal allows custom model entry and displays warning for custom model', async () => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['claude-3-5-sonnet'],
+        configured: ['claude-unavailable-model'],
+        models: [
+          { id: 'claude-3-5-sonnet', engine: 'claude', profiles: ['claude-p1'], verified: true, available: true },
+          { id: 'claude-unavailable-model', engine: 'claude', profiles: [], verified: false, available: false, warning: 'Không có tài khoản' },
+        ],
+      });
+      vi.spyOn(client, 'getProjects').mockResolvedValue([]);
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        chat: { allowFullMode: false, models: ['opus', 'sonnet', 'haiku'] },
+      } as any);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+
+      const handleSubmit = vi.fn();
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <NewSessionModal isOpen={true} onClose={vi.fn()} onSubmit={handleSubmit} />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await screen.findByText(/Cuộc trò chuyện mới/i);
+      const modelSelect = screen.getByLabelText(/Model Claude/i) as HTMLSelectElement;
+      expect(modelSelect).toBeInTheDocument();
+
+      // Switch to custom mode
+      fireEvent.change(modelSelect, { target: { value: '__custom__' } });
+
+      const customInput = screen.getByPlaceholderText(/Mặc định của Claude Code/i);
+      expect(customInput).toBeInTheDocument();
+
+      // Enter a custom model
+      fireEvent.change(customInput, { target: { value: 'my-custom-claude-model' } });
+
+      // Custom warning is displayed
+      await waitFor(() => {
+        expect(screen.getByTestId('custom-warning')).toBeInTheDocument();
+      });
+    });
+
+    it('SettingsPage Claude reviewer select uses SelectOrCustomInput and shows model-unavailable-warning when configured model is unavailable', async () => {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['claude-sonnet-4-6'],
+        configured: ['old-unavailable-claude'],
+        models: [
+          { id: 'claude-sonnet-4-6', engine: 'claude', profiles: ['p1'], verified: true, available: true },
+          { id: 'old-unavailable-claude', engine: 'claude', profiles: [], verified: false, available: false },
+        ],
+      });
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        modelChainHard: ['gemini-3.8-flash-high'],
+        modelChainEasy: ['gemini-3.8-flash-medium'],
+        chat: { claudeBin: 'claude', model: 'claude-sonnet-4-6', models: ['claude-sonnet-4-6'] },
+        reviewer: {
+          claudeFallback: true,
+          claudeModel: 'old-unavailable-claude',
+          claudeProfiles: [],
+        },
+        brain: { fallback: [] },
+      } as any);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+      vi.spyOn(client, 'getTelegramStatus').mockResolvedValue({ enabled: false, hasToken: false, chats: [], notify: {} } as any);
+      vi.spyOn(client, 'getTelegramPairingCode').mockResolvedValue({ code: '123' } as any);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await screen.findByTestId('reviewer-settings');
+      const claudeSelect = screen.getByTestId('claude-model-select');
+      expect(claudeSelect).toBeInTheDocument();
+
+      // Warning should be displayed for old-unavailable-claude
+      await waitFor(() => {
+        expect(screen.getAllByTestId('model-unavailable-warning').length).toBeGreaterThan(0);
+      });
+    });
+
+    it('SettingsPage isolates unavailable models in chatModel, chatModels badges, and fallback chain with warning badges', async () => {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['claude-sonnet-4-6'],
+        configured: ['old-chat-model', 'old-fallback-model'],
+        models: [
+          { id: 'claude-sonnet-4-6', engine: 'claude', profiles: ['p1'], verified: true, available: true },
+          { id: 'old-chat-model', engine: 'claude', profiles: [], verified: false, available: false },
+          { id: 'old-fallback-model', engine: 'claude', profiles: [], verified: false, available: false },
+        ],
+      });
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        modelChainHard: ['gemini-3.8-flash-high'],
+        modelChainEasy: ['gemini-3.8-flash-medium'],
+        chat: {
+          claudeBin: 'claude',
+          model: 'old-chat-model',
+          models: ['old-chat-model', 'claude-sonnet-4-6'],
+        },
+        reviewer: { claudeFallback: false, claudeProfiles: [] },
+        brain: {
+          fallback: [{ type: 'model', model: 'old-fallback-model' }],
+        },
+      } as any);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+      vi.spyOn(client, 'getTelegramStatus').mockResolvedValue({ enabled: false, hasToken: false, chats: [], notify: {} } as any);
+      vi.spyOn(client, 'getTelegramPairingCode').mockResolvedValue({ code: '123' } as any);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await screen.findByText(/Cấu hình Chat với Claude/i);
+      const warnings = await screen.findAllByTestId('model-unavailable-warning');
+      expect(warnings.length).toBeGreaterThanOrEqual(3);
+    });
+
+    it('DepartmentsPage brain model uses SelectOrCustomInput and shows model-unavailable-warning when model is unavailable', async () => {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['sonnet'],
+        configured: ['unavailable-brain-model'],
+        models: [
+          { id: 'sonnet', engine: 'claude', profiles: ['p1'], verified: true, available: true },
+          { id: 'unavailable-brain-model', engine: 'claude', profiles: [], verified: false, available: false },
+        ],
+      });
+      vi.spyOn(client, 'getDepartments').mockResolvedValue([
+        {
+          id: 'dept-1',
+          name: 'Security Dept',
+          priority: 1,
+          maxParallel: 2,
+          claudeDailyTokenBudget: 0,
+          telegramTopicId: null,
+          brainEngine: 'claude',
+          brainModel: 'unavailable-brain-model',
+          brainCodexProfile: null,
+          brainMode: 'auto',
+          brainPermissions: 'trusted',
+          brainDailyTokenBudget: 100,
+          brainMaxTurnsPerHour: 2,
+          profiles: [],
+          projects: [],
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ]);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+      vi.spyOn(client, 'getProjects').mockResolvedValue([]);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <DepartmentsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await screen.findByText('Security Dept');
+      fireEvent.click(screen.getByText('Cấu hình Brain'));
+
+      const brainModelSelect = screen.getByLabelText('Model Brain');
+      expect(brainModelSelect).toBeInTheDocument();
+
+      const warning = await screen.findByTestId('model-unavailable-warning');
+      expect(warning).toBeInTheDocument();
+    });
+
+    it('SettingsPage excludes unavailable models from reviewer options and shows model-unavailable-warning for arbiter and reviewerModel', async () => {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['sonnet', 'codex:gpt-5.6-luna'],
+        configured: ['unavailable-codex-model', 'unavailable-arbiter-model'],
+        models: [
+          { id: 'sonnet', engine: 'claude', profiles: ['p1'], verified: true, available: true },
+          { id: 'codex:gpt-5.6-luna', engine: 'codex', profiles: ['p2'], verified: true, available: true },
+          { id: 'unavailable-codex-model', engine: 'codex', profiles: [], verified: false, available: false },
+          { id: 'unavailable-arbiter-model', engine: 'claude', profiles: [], verified: false, available: false },
+        ],
+      });
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        modelChainHard: ['gemini-3.8-flash-high'],
+        modelChainEasy: ['gemini-3.8-flash-medium'],
+        defaultTimeout: 10800,
+        chat: { claudeBin: 'claude', allowFullMode: false, maxConcurrent: 2, model: 'sonnet', models: ['sonnet'] },
+        reviewer: {
+          model: 'unavailable-codex-model',
+          order: [{ engine: 'codex', model: 'codex:gpt-5.6-luna', profiles: [] }],
+          fallback: { onUnavailable: true, onError: true, onBusyAfterMin: 10 },
+          arbiter: { engine: 'claude', model: 'unavailable-arbiter-model' },
+        },
+        brain: { mode: 'off', fallback: [] },
+      } as any);
+      vi.spyOn(client, 'getProfiles').mockResolvedValue([]);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('hard-chain-list')).toBeInTheDocument();
+      });
+
+      // Arbiter options should not propose unavailable models with inactiveOrOld label
+      const arbiterInput = screen.getByLabelText('Trọng tài Model reviewer');
+      expect(arbiterInput).toBeInTheDocument();
+      expect(within(arbiterInput).queryByText(/ngừng hoạt động hoặc cũ/i)).not.toBeInTheDocument();
+
+      // Legacy reviewer model options should not propose unavailable models with inactiveOrOld label
+      const reviewerModelInput = screen.getByTestId('reviewer-model-input');
+      expect(reviewerModelInput).toBeInTheDocument();
+      expect(within(reviewerModelInput).queryByText(/ngừng hoạt động hoặc cũ/i)).not.toBeInTheDocument();
+
+      const warnings = await screen.findAllByTestId('model-unavailable-warning');
+      expect(warnings.length).toBeGreaterThanOrEqual(2);
     });
   });
 });

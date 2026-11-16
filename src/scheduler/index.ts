@@ -20,6 +20,7 @@ import {
   KnowledgeRepo,
   TaskNoteRepo,
   TrackerItemRepo,
+  ProfileModelRepo,
 } from '../db/index.js';
 import { projectSettings } from '../projects/settings.js';
 import { isTriageTaskSlug, parseTriageAnalysis } from '../integrations/openproject/triage.js';
@@ -27,12 +28,14 @@ import { renderCommitTemplate, renderTaskBranch, taskCommitRef } from '../commit
 import { isProjectWorktreeRootAccessible, projectWorktreeRoot, projectWorktreeRoots } from '../projects/paths.js';
 import { Engine, AgyEngine, CodexEngine } from '../engines/index.js';
 import { findAgyBin } from '../agy.js';
-import { getModelFamily, getModelEngine, isKnownModel, QuotaService } from '../quota/index.js';
+import { getModelFamily, getModelEngine, isKnownModel, QuotaService, KNOWN_AGY_MODELS, KNOWN_CODEX_MODELS } from '../quota/index.js';
+import { DEFAULT_CODEX_DISCOVERED_MODELS, DEFAULT_CLAUDE_DISCOVERED_MODELS } from '../models/index.js';
 import { DependencyContext, isDeletableWorktreePath, WorktreeService } from '../worktrees/index.js';
 import { ensureWorktreeNodeModules, nodeModulesCacheSummary, pruneNodeModulesCache } from '../cache.js';
 import { AgentHubConfig, DEFAULT_SCHEDULER_LIMITS } from '../config.js';
 import { ProfileLockService } from '../profiles/locks.js';
 import { sameAccount } from '../profiles/account.js';
+import { isProfileLoggedIn } from '../profiles/index.js';
 import { markClaudeProfileAuthExpired } from '../profiles/auth.js';
 import { QuotaUsageService } from '../quota/usage.js';
 import { CheckRunner, getCheckResults } from '../checks.js';
@@ -398,6 +401,7 @@ export class Scheduler {
   private restartState: Omit<RestartState, 'waitingFor'> = { draining: false, since: null, reason: null, timeoutAt: null };
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private restartReady?: () => void;
+  private profileModelRepo?: ProfileModelRepo;
 
   constructor(
     private config: AgentHubConfig,
@@ -431,6 +435,7 @@ export class Scheduler {
       this.checkRunner = new CheckRunner(db);
       this.taskNoteRepo = new TaskNoteRepo(db);
       this.trackerRepo = new TrackerItemRepo(db);
+      this.profileModelRepo = new ProfileModelRepo(db);
     }
 
     if (engineOverrides && !(engineOverrides instanceof Map) && 'diskSpace' in engineOverrides) {
@@ -493,6 +498,77 @@ export class Scheduler {
 
   getCheckResults(taskId: string) { return this.db ? getCheckResults(this.db, taskId) : []; }
   getDatabase(): Database.Database | undefined { return this.db; }
+  setProfileModelRepo(repo: ProfileModelRepo): void { this.profileModelRepo = repo; }
+
+  getKnownDiscoveredModels(): Set<string> {
+    const known = new Set<string>();
+    const enabledProfiles = this.profileRepo.getEnabled();
+    for (const p of enabledProfiles) {
+      if (p.authState === 'not_logged_in') continue;
+      if (this.profileModelRepo) {
+        const rows = this.profileModelRepo.getForProfile(p.name);
+        if (rows.length > 0) {
+          if (!isProfileLoggedIn(p)) continue;
+          for (const r of rows) {
+            if (r.verified) {
+              known.add(r.modelId);
+            }
+          }
+          continue;
+        }
+      }
+      // If this profile has no discovery recorded yet, merge its engine hardcoded fallback models
+      if (p.engine === 'agy') {
+        for (const m of KNOWN_AGY_MODELS) {
+          known.add(m);
+        }
+      } else if (p.engine === 'codex') {
+        for (const m of DEFAULT_CODEX_DISCOVERED_MODELS) {
+          known.add(m.id);
+        }
+      } else if (p.engine === 'claude') {
+        for (const m of DEFAULT_CLAUDE_DISCOVERED_MODELS) {
+          known.add(m.id);
+        }
+      }
+    }
+    return known;
+  }
+
+  profileHasModel(profileName: string, model: string): boolean {
+    const profile = this.profileRepo.get(profileName);
+    if (!profile) return false;
+    if (profile.authState === 'not_logged_in') return false;
+
+    if (this.profileModelRepo) {
+      const rows = this.profileModelRepo.getForProfile(profileName);
+      if (rows.length > 0) {
+        if (!isProfileLoggedIn(profile)) return false;
+        // Discovery stores Claude ids bare ("opus") and Codex ids prefixed ("codex:gpt-…"),
+        // while callers (e.g. reviewer selection) may pass "claude:opus" or a bare Codex id.
+        const normalize = (id: string): string => {
+          if (profile.engine === 'claude') return id.startsWith('claude:') ? id.slice('claude:'.length) : id;
+          if (profile.engine === 'codex') return id.startsWith('codex:') ? id : `codex:${id}`;
+          return id;
+        };
+        const wanted = normalize(model);
+        return rows.some((r) => normalize(r.modelId) === wanted && Boolean(r.verified));
+      }
+    }
+
+    // Fallback if no discovery has been recorded for this profile yet:
+    if (profile.engine === 'agy') {
+      return KNOWN_AGY_MODELS.has(model);
+    }
+    if (profile.engine === 'codex') {
+      return KNOWN_CODEX_MODELS.has(model) || KNOWN_CODEX_MODELS.has(`codex:${model}`);
+    }
+    if (profile.engine === 'claude') {
+      const raw = model.startsWith('claude:') ? model.slice('claude:'.length) : model;
+      return ['sonnet', 'opus', 'haiku'].includes(raw);
+    }
+    return false;
+  }
 
   private schedulerLimits() {
     return this.config.scheduler || this.config.schedulerLimits;
@@ -3200,6 +3276,7 @@ export class Scheduler {
       const model = normalizeReviewerModel(item.engine, item.model);
       const candidates = this.profileRepo.getEnabled().filter((profile) => {
         if (profile.engine !== item.engine || (item.profiles.length > 0 && !item.profiles.includes(profile.name))) return false;
+        if (!this.profileHasModel(profile.name, model)) return false;
         if (profile.authState != null && profile.authState !== 'ok') return false;
         if (this.quotaService.isExhausted(profile.name, item.engine === 'claude' ? 'claude' : 'codex')) return false;
         if (this.reviewerInBackoff(profile.name)) return false;
@@ -3494,6 +3571,7 @@ export class Scheduler {
     const candidates = this.profileRepo.getEnabled()
       .filter((p) => p.engine === arbiter.engine && (p.authState == null || p.authState === 'ok') &&
         (preferred.length === 0 || preferred.includes(p.name)) &&
+        this.profileHasModel(p.name, normalizeReviewerModel(arbiter.engine, arbiter.model)) &&
         !this.quotaService.isExhausted(p.name, arbiter.engine === 'claude' ? 'claude' : 'codex') &&
         !this.reviewerInBackoff(p.name) &&
         !this.reviewerRunsForProfile(p.name) && this.locks.findFreeSlotSync(p) !== null)
@@ -3527,9 +3605,12 @@ export class Scheduler {
       const claudeEngine = this.engines.get(CLAUDE_REVIEW_ENGINE_KEY);
       if (!claudeEngine || !task.worktreePath || !this.claudeBudgetAvailable(task)) return;
       const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
+      const claudeConfig = this.config.reviewer?.order?.find((item) => item.engine === 'claude');
+      const claudeModel = `claude:${claudeConfig?.model || 'sonnet'}`;
       const candidates = this.profileRepo.getEnabled()
         .filter((profile) => profile.engine === 'claude'
           && (profile.authState == null || profile.authState === 'ok')
+          && this.profileHasModel(profile.name, claudeModel)
           && !this.quotaService.isExhausted(profile.name, 'claude')
           && !this.reviewerInBackoff(profile.name)
           && !this.reviewerRunsForProfile(profile.name)
@@ -3538,8 +3619,6 @@ export class Scheduler {
           (b.priority ?? 0) - (a.priority ?? 0));
       const profile = candidates[0];
       if (!profile) return;
-      const claudeConfig = this.config.reviewer?.order?.find((item) => item.engine === 'claude');
-      const claudeModel = `claude:${claudeConfig?.model || 'sonnet'}`;
       this.eventBus.emit('review.fallback', task.id, {
         from: 'codex',
         to: 'claude',
@@ -3555,8 +3634,11 @@ export class Scheduler {
     const codexEngine = this.engines.get('codex');
     if (!codexEngine || !task.worktreePath) return;
     const lastWorker = this.runRepo.getByTask(task.id).filter((run) => run.kind === 'worker').at(-1);
+    const codexConfig = this.config.reviewer?.order?.find((item) => item.engine === 'codex');
+    const codexModel = `codex:${codexConfig?.model || 'gpt-5.6-luna'}`;
     const candidates = this.profileRepo.getEnabled()
       .filter((profile) => profile.engine === 'codex'
+        && this.profileHasModel(profile.name, codexModel)
         && !this.quotaService.isExhausted(profile.name, 'codex')
         && !this.reviewerInBackoff(profile.name)
         && !this.reviewerRunsForProfile(profile.name)
@@ -3565,8 +3647,6 @@ export class Scheduler {
         (b.priority ?? 0) - (a.priority ?? 0));
     const profile = candidates[0];
     if (!profile) return;
-    const codexConfig = this.config.reviewer?.order?.find((item) => item.engine === 'codex');
-    const codexModel = `codex:${codexConfig?.model || 'gpt-5.6-luna'}`;
     this.eventBus.emit('review.fallback', task.id, {
       from: 'claude',
       to: 'codex',
@@ -3888,6 +3968,18 @@ export class Scheduler {
     }
 
     const task = this.taskRepo.get(taskId);
+    // The task may have been reviewed by a human (or merged) while this reviewer was running.
+    // A late verdict must not override that decision.
+    if (!task || task.status !== 'review' || this.mergingTasks.has(taskId)) {
+      this.runRepo.finish(runId, 'cancelled', undefined, 'stale reviewer result');
+      this.eventBus.emit('review.stale_ignored', taskId, {
+        actor: active.actor,
+        runId,
+        status: task?.status ?? null,
+        merging: this.mergingTasks.has(taskId),
+      });
+      return;
+    }
     const checks = this.getCheckResults(taskId);
     if (checks.length === 0) {
       this.runRepo.finish(runId, 'done', undefined, 'reviewer had no persisted autocheck results');
@@ -4140,6 +4232,7 @@ export class Scheduler {
         (!p.authState || p.authState === 'ok') && this.profileAllowedForDepartment(p.name, departmentId));
       const eligibleProfiles = profiles.filter((profile) => {
         if (profile.engine !== engineId) return false;
+        if (!this.profileHasModel(profile.name, model)) return false;
         if (this.quotaService.isExhausted(profile.name, family)) return false;
         if (this.isProfileBusy(profile.name)) return false;
         if (this.isProfileCooling(profile)) return false;
@@ -4256,8 +4349,13 @@ export class Scheduler {
       : task.level === 'hard'
       ? this.config.defaultModelChains.hard
       : this.config.defaultModelChains.easy;
+    const knownDiscovered = this.getKnownDiscoveredModels();
+    const hasUndiscoveredCodex = this.profileRepo.getEnabled().some(
+      (p) => p.engine === 'codex' && (!this.profileModelRepo || this.profileModelRepo.getForProfile(p.name).length === 0),
+    );
     return chain.filter((model) => {
-      if (isKnownModel(model)) return true;
+      if (isKnownModel(model, knownDiscovered.size > 0 ? knownDiscovered : undefined)) return true;
+      if (hasUndiscoveredCodex && (KNOWN_CODEX_MODELS.has(model) || KNOWN_CODEX_MODELS.has(`codex:${model}`))) return true;
       const key = `${task.id}:${model}`;
       if (!this.notifiedSkippedModels.has(key)) {
         this.notifiedSkippedModels.add(key);
@@ -4730,6 +4828,43 @@ export class Scheduler {
     return project.defaultBranch;
   }
 
+  /** Kill the automated reviewer process of a task (if any) and forget it. Returns the run id it killed. */
+  private killReviewerRun(taskId: string): string | null {
+    const reviewerRun = this.reviewerRuns.get(taskId);
+    if (!reviewerRun) return null;
+    clearTimeout(reviewerRun.timeout);
+    if (reviewerRun.exitTimeout) clearTimeout(reviewerRun.exitTimeout);
+    if (reviewerRun.pid) {
+      try {
+        process.kill(-reviewerRun.pid, 'SIGKILL');
+      } catch {
+        try {
+          process.kill(reviewerRun.pid, 'SIGKILL');
+        } catch {
+          // ignore
+        }
+      }
+    }
+    if (reviewerRun.lockFile) {
+      this.locks.release(reviewerRun.profileName, reviewerRun.lockFile);
+    }
+    this.locks.invalidate(reviewerRun.profileName);
+    this.reviewerRuns.delete(taskId);
+    return reviewerRun.runId;
+  }
+
+  /**
+   * A human review supersedes any automated reviewer still running for the task:
+   * stop it so its late verdict cannot override the manual decision.
+   */
+  supersedeReviewerRun(taskId: string, by?: string): void {
+    const actor = this.reviewerRuns.get(taskId)?.actor;
+    const runId = this.killReviewerRun(taskId);
+    if (!runId) return;
+    this.runRepo.finish(runId, 'cancelled', undefined, 'superseded by manual review');
+    this.eventBus.emit('review.superseded', taskId, { actor: actor ?? null, runId, by: by ?? null });
+  }
+
   /**
    * Cancel a running or pending/idle task
    */
@@ -4742,27 +4877,7 @@ export class Scheduler {
       const task = this.taskRepo.get(taskId);
       if (task?.status === 'done' || task?.status === 'pushed' || task?.status === 'cancelled') return;
 
-      const reviewerRun = this.reviewerRuns.get(taskId);
-      if (reviewerRun) {
-        clearTimeout(reviewerRun.timeout);
-        if (reviewerRun.exitTimeout) clearTimeout(reviewerRun.exitTimeout);
-        if (reviewerRun.pid) {
-          try {
-            process.kill(-reviewerRun.pid, 'SIGKILL');
-          } catch {
-            try {
-              process.kill(reviewerRun.pid, 'SIGKILL');
-            } catch {
-              // ignore
-            }
-          }
-        }
-        if (reviewerRun.lockFile) {
-          this.locks.release(reviewerRun.profileName, reviewerRun.lockFile);
-        }
-        this.locks.invalidate(reviewerRun.profileName);
-        this.reviewerRuns.delete(taskId);
-      }
+      this.killReviewerRun(taskId);
       this.reviewNotified.delete(taskId);
       this.reviewWaitingNotified.delete(taskId);
       this.reviewerFallbackNotified.delete(taskId);

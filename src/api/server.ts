@@ -111,6 +111,7 @@ export async function createServer(
       return reply.status(error.statusCode).send({
         error: error.error,
         message: error.message,
+        ...(error.details || {}),
       });
     }
     if (error.statusCode) {
@@ -664,7 +665,7 @@ export async function createServer(
 
   // --- Tasks API ---
   fastify.get('/api/tasks', async (req: FastifyRequest) => {
-    const query = req.query as { project?: string; status?: string; search?: string; q?: string; limit?: string; cursor?: string; offset?: string; sort?: string; order?: string };
+    const query = req.query as { project?: string; status?: string; derived?: string; search?: string; q?: string; limit?: string; cursor?: string; offset?: string; sort?: string; order?: string };
     if (query.cursor && !decodeCursor(query.cursor)) {
       throw new HttpError(400, 'bad_request', 'Invalid pagination cursor');
     }
@@ -754,6 +755,13 @@ export async function createServer(
     const body = (req.body as { skipAudit?: boolean } | undefined) || {};
     const res = service.startPublishTask(id, { manual: true, skipAudit: Boolean(body.skipAudit) });
     return reply.status(202).send(res);
+  });
+
+  fastify.post('/api/tasks/:id/merge/retry', async (req: FastifyRequest, reply: FastifyReply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as { assignWorker?: boolean };
+    const res = await service.retryTaskMerge(id, body);
+    return reply.status(200).send(res);
   });
 
   fastify.delete('/api/tasks/:id/worktree', async (req: FastifyRequest) => {
@@ -886,6 +894,7 @@ export async function createServer(
     return result;
   });
   fastify.get('/api/models', async () => service.getModelOptions());
+  fastify.post('/api/models/refresh', async () => service.refreshModels());
 
   // --- Savings API ---
   fastify.get('/api/savings', async (req: FastifyRequest) => {

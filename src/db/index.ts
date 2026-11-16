@@ -1118,6 +1118,35 @@ export const MIGRATIONS: string[] = [
     PRIMARY KEY (taskId, rule)
   );
   `,
+  // Migration 77: discovered models per profile (support initial creation or upgrade from legacy schema)
+  `
+  CREATE TABLE IF NOT EXISTS profile_models_new (
+    profileName TEXT NOT NULL,
+    modelId TEXT NOT NULL,
+    modelName TEXT,
+    engine TEXT NOT NULL,
+    verified INTEGER NOT NULL DEFAULT 1,
+    fetchedAt INTEGER NOT NULL,
+    PRIMARY KEY (profileName, engine, modelId),
+    FOREIGN KEY (profileName) REFERENCES profiles(name) ON DELETE CASCADE
+  );
+  CREATE TABLE IF NOT EXISTS profile_models (
+    profileName TEXT NOT NULL,
+    modelId TEXT NOT NULL,
+    modelName TEXT,
+    engine TEXT NOT NULL,
+    verified INTEGER NOT NULL DEFAULT 1,
+    fetchedAt INTEGER NOT NULL,
+    PRIMARY KEY (profileName, engine, modelId),
+    FOREIGN KEY (profileName) REFERENCES profiles(name) ON DELETE CASCADE
+  );
+  INSERT OR IGNORE INTO profile_models_new (profileName, modelId, modelName, engine, verified, fetchedAt)
+    SELECT profileName, modelId, modelName, engine, verified, fetchedAt FROM profile_models;
+  DROP TABLE profile_models;
+  ALTER TABLE profile_models_new RENAME TO profile_models;
+  CREATE INDEX IF NOT EXISTS idx_profile_models_engine ON profile_models(engine);
+  CREATE INDEX IF NOT EXISTS idx_profile_models_profile ON profile_models(profileName);
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -1706,6 +1735,15 @@ export interface QuotaUsageRow {
   fetchedAt: number;
 }
 
+export interface ProfileModelRow {
+  profileName: string;
+  modelId: string;
+  modelName: string | null;
+  engine: string;
+  verified: number;
+  fetchedAt: number;
+}
+
 export type WaitReason = 'disk' | 'quota' | 'no_department_profile' | 'no_matching_profile' | 'parallel' | 'department_parallel' | 'profile_busy' | 'project_unavailable' | 'focus' | 'slot' | 'load' | 'dependency' | 'restart' | null;
 
 export interface BlockingDiskInfo {
@@ -2168,6 +2206,7 @@ export class ProfileRepo {
   delete(name: string): void {
     this.db.prepare('DELETE FROM quota_marks WHERE profileName = ?').run(name);
     this.db.prepare('DELETE FROM quota_usage WHERE profileName = ?').run(name);
+    this.db.prepare('DELETE FROM profile_models WHERE profileName = ?').run(name);
     this.db.prepare('DELETE FROM profiles WHERE name = ?').run(name);
   }
 
@@ -2182,6 +2221,7 @@ export class ProfileRepo {
         }
         this.db.prepare('UPDATE quota_marks SET profileName = ? WHERE profileName = ?').run(newName, oldName);
         this.db.prepare('UPDATE quota_usage SET profileName = ? WHERE profileName = ?').run(newName, oldName);
+        this.db.prepare('UPDATE profile_models SET profileName = ? WHERE profileName = ?').run(newName, oldName);
         this.db.prepare('UPDATE runs SET profileName = ? WHERE profileName = ?').run(newName, oldName);
         this.db.prepare('UPDATE run_metrics SET profileName = ? WHERE profileName = ?').run(newName, oldName);
         this.db.prepare('UPDATE chat_sessions SET profileName = ? WHERE profileName = ?').run(newName, oldName);
@@ -2302,6 +2342,47 @@ export class QuotaUsageRepo {
       ON CONFLICT(profileName, grp, window) DO UPDATE SET
         remainingPct=excluded.remainingPct, resetAt=excluded.resetAt, fetchedAt=excluded.fetchedAt
     `).run(row.profileName, row.grp, row.window, row.remainingPct, row.resetAt, row.fetchedAt);
+  }
+}
+
+export class ProfileModelRepo {
+  constructor(private db: Database.Database) {}
+
+  getForProfile(profileName: string): ProfileModelRow[] {
+    return this.db.prepare('SELECT * FROM profile_models WHERE profileName = ? ORDER BY modelId').all(profileName) as ProfileModelRow[];
+  }
+
+  getAll(): ProfileModelRow[] {
+    return this.db.prepare('SELECT * FROM profile_models ORDER BY engine, modelId').all() as ProfileModelRow[];
+  }
+
+  setForProfile(
+    profileName: string,
+    models: Array<{ modelId: string; modelName?: string | null; engine: string; verified?: boolean }>,
+    fetchedAt = Math.floor(Date.now() / 1000),
+  ): void {
+    const transaction = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM profile_models WHERE profileName = ?').run(profileName);
+      const insert = this.db.prepare(
+        'INSERT OR REPLACE INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt) VALUES (?, ?, ?, ?, ?, ?)',
+      );
+      for (const m of models) {
+        insert.run(profileName, m.modelId, m.modelName || null, m.engine, m.verified === false ? 0 : 1, fetchedAt);
+      }
+    });
+    transaction();
+  }
+
+  deleteForProfile(profileName: string): void {
+    this.db.prepare('DELETE FROM profile_models WHERE profileName = ?').run(profileName);
+  }
+
+  deleteForEngine(engine: string): void {
+    this.db.prepare(`
+      DELETE FROM profile_models
+      WHERE profileName IN (SELECT name FROM profiles WHERE engine = ?)
+         OR engine = ?
+    `).run(engine, engine);
   }
 }
 

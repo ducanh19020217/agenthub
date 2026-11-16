@@ -229,6 +229,7 @@ export const en: typeof vi = {
       auditBlocked: 'Blocked',
       auditRound: 'Round {round}/{maxRounds}',
       findingsCount: '{count} findings',
+      findingSeverityCounts: 'P0: {p0} · P1: {p1} · P2: {p2}',
       btnRetryPublish: 'Retry publish',
       btnBypassAudit: 'Bypass block',
       confirmBypassAudit: 'Are you sure you want to bypass audit block and push task {slug}?',

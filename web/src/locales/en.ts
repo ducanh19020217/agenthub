@@ -1807,7 +1807,10 @@ export const en: typeof vi = {
       gate_completed: "Review gate completed",
       gate_ready: "Review gate ready",
       gate_started: "Review gate started",
+      reopened: "Reopened for manual review",
+      stale_ignored: "Ignored late review result",
       started: "Review started",
+      superseded: "Automated reviewer superseded by manual review",
       waiting: "Waiting for review",
     },
     run: {

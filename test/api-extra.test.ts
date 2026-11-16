@@ -174,8 +174,8 @@ describe('AgentHub API Extra Endpoints', () => {
       expect(onDisk.chat.model).toBe('haiku');
     });
 
-    it('PUT /api/config validates model id (rejects invalid id or empty list)', async () => {
-      // Unknown model id
+    it('PUT /api/config accepts undiscovered model ids but rejects empty lists', async () => {
+      // Unknown model id is allowed; discovery status is surfaced separately.
       const res1 = await server.inject({
         method: 'PUT',
         url: '/api/config',
@@ -184,10 +184,9 @@ describe('AgentHub API Extra Endpoints', () => {
           modelChainHard: ['invalid-nonexistent-model'],
         },
       });
-      expect(res1.statusCode).toBe(400);
-      expect(JSON.parse(res1.body).error).toBe('bad_request');
+      expect(res1.statusCode).toBe(200);
 
-      // Invalid codex model (prefix too short or empty name)
+      // A prefixed custom model is also allowed.
       const res2 = await server.inject({
         method: 'PUT',
         url: '/api/config',
@@ -196,8 +195,7 @@ describe('AgentHub API Extra Endpoints', () => {
           modelChainHard: ['codex:'],
         },
       });
-      expect(res2.statusCode).toBe(400);
-      expect(JSON.parse(res2.body).error).toBe('bad_request');
+      expect(res2.statusCode).toBe(200);
 
       // Empty model chain array
       const res3 = await server.inject({

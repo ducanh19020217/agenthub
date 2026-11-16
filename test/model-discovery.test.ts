@@ -16,6 +16,7 @@ import {
 import { openDatabase, ProfileModelRepo, ProfileRepo, ProfileRow, MIGRATIONS } from '../src/db/index.js';
 import { isKnownModel } from '../src/quota/index.js';
 import { AppService } from '../src/services/index.js';
+import { modelValidator } from '../src/services/index.js';
 import { Scheduler } from '../src/scheduler/index.js';
 import { ChatService } from '../src/chat/service.js';
 
@@ -312,6 +313,30 @@ describe('Engine Model Discovery with Fixtures', () => {
     expect(ids).toContain('haiku');
     expect(ids).toContain('claude-opus-5-5');
     expect(ids).toContain('claude-sonnet-5-5');
+    expect(models.find((m) => m.id === 'sonnet')?.verified).toBe(true);
+  });
+
+  it('discoverClaudeModels marks aliases unverified without a model catalog cache', async () => {
+    const profile: ProfileRow = {
+      name: 'claude-no-cache',
+      engine: 'claude',
+      kind: 'isolated',
+      home: path.join(tmpDir, 'claude-no-cache'),
+      enabled: 1,
+      email: 'claude@example.com',
+    };
+
+    const models = await discoverClaudeModels(profile);
+    expect(models.filter((m) => ['sonnet', 'opus', 'haiku'].includes(m.id)).every((m) => !m.verified)).toBe(true);
+  });
+
+  it('modelValidator accepts unknown model ids but rejects whitespace', () => {
+    expect(modelValidator.safeParse('vendor-model-2026').success).toBe(true);
+    expect(modelValidator.safeParse('codex:vendor-model-2026').success).toBe(true);
+    expect(modelValidator.safeParse('vendor model').success).toBe(false);
+    expect(modelValidator.safeParse(' vendor-model-2026').success).toBe(false);
+    expect(modelValidator.safeParse('vendor-model-2026 ').success).toBe(false);
+    expect(modelValidator.safeParse('   ').success).toBe(false);
   });
 });
 
@@ -792,6 +817,73 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'codex-variants', 'codex:gpt-fake')).toBe(false);
   });
 
+  it('Scheduler.profileHasModel matches unverified Claude aliases when discovery rows have verified: false', () => {
+    profileRepo.upsert({
+      name: 'claude-unverified-aliases',
+      engine: 'claude',
+      kind: 'keyring',
+      email: 'claude3@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('claude-unverified-aliases', [
+      { modelId: 'sonnet', modelName: 'Claude Sonnet', engine: 'claude', verified: false },
+      { modelId: 'opus', modelName: 'Claude Opus', engine: 'claude', verified: false },
+      { modelId: 'haiku', modelName: 'Claude Haiku', engine: 'claude', verified: false },
+      { modelId: 'custom-unverified', modelName: 'Custom Unverified', engine: 'claude', verified: false },
+    ]);
+
+    const scheduler = { profileRepo, profileModelRepo };
+
+    // Prefixed and bare Claude aliases match even with verified: false
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-unverified-aliases', 'claude:opus')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-unverified-aliases', 'opus')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-unverified-aliases', 'claude:sonnet')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-unverified-aliases', 'haiku')).toBe(true);
+
+    // Unverified non-alias model does NOT match
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-unverified-aliases', 'custom-unverified')).toBe(false);
+  });
+
+  it('AppService.getModelOptions treats unverified Claude aliases as available for logged-in Claude profile', () => {
+    const claudeHome = path.join(tmpDir, 'claude-unverified-opts');
+    fs.mkdirSync(claudeHome, { recursive: true });
+    fs.writeFileSync(path.join(claudeHome, '.credentials.json'), '{}');
+    profileRepo.upsert({
+      name: 'claude-active-prof',
+      engine: 'claude',
+      kind: 'isolated',
+      home: claudeHome,
+      email: 'active-claude@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('claude-active-prof', [
+      { modelId: 'sonnet', modelName: 'Claude Sonnet', engine: 'claude', verified: false },
+      { modelId: 'opus', modelName: 'Claude Opus', engine: 'claude', verified: false },
+      { modelId: 'haiku', modelName: 'Claude Haiku', engine: 'claude', verified: false },
+    ]);
+
+    const service = {
+      profileRepo,
+      profileModelRepo,
+      config: {
+        defaultModelChains: { hard: [], easy: [] },
+        reviewer: { order: [] },
+      },
+    };
+
+    const result = AppService.prototype.getModelOptions.call(service as any);
+    const sonnet = result.models.find((m: any) => m.id === 'sonnet' && m.engine === 'claude');
+    expect(sonnet).toBeDefined();
+    expect(sonnet?.available).toBe(true);
+    expect(sonnet?.verified).toBe(false);
+    expect(sonnet?.profiles).toContain('claude-active-prof');
+    expect(result.suggestions).toContain('sonnet');
+    expect(result.suggestions).toContain('opus');
+    expect(result.suggestions).toContain('haiku');
+  });
+
   it('logged-out profile marks cache unverified and is treated as unavailable across discovery, API, and scheduler', async () => {
     // 1. Profile with authState not_logged_in
     profileRepo.upsert({
@@ -900,6 +992,60 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(claudeEntry).toBeDefined();
     expect(claudeEntry?.profiles).toEqual(['claude-sonnet-prof']);
     expect(claudeEntry?.available).toBe(true);
+  });
+
+  it('getModelOptions unifies models by (engine, id) key so identical id across agy and claude is not merged', () => {
+    // Agy profile with "sonnet"
+    profileRepo.upsert({
+      name: 'agy-same-id',
+      engine: 'agy',
+      kind: 'keyring',
+      email: 'agy-same@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('agy-same-id', [
+      { modelId: 'sonnet', modelName: 'Agy Sonnet', engine: 'agy', verified: true },
+    ]);
+
+    // Claude profile with "sonnet"
+    const claudeHome = path.join(tmpDir, 'claude-same-id-home');
+    fs.mkdirSync(claudeHome, { recursive: true });
+    fs.writeFileSync(path.join(claudeHome, '.credentials.json'), '{}');
+    profileRepo.upsert({
+      name: 'claude-same-id',
+      engine: 'claude',
+      kind: 'isolated',
+      home: claudeHome,
+      email: 'claude-same@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('claude-same-id', [
+      { modelId: 'sonnet', modelName: 'Claude Sonnet', engine: 'claude', verified: false },
+    ]);
+
+    const service = {
+      profileRepo,
+      profileModelRepo,
+      config: {
+        defaultModelChains: { hard: [], easy: [] },
+        reviewer: { order: [] },
+      },
+    };
+
+    const result = AppService.prototype.getModelOptions.call(service as any);
+    const matched = result.models.filter((m: any) => m.id === 'sonnet');
+    expect(matched).toHaveLength(2);
+
+    const agyModel = matched.find((m: any) => m.engine === 'agy');
+    const claudeModel = matched.find((m: any) => m.engine === 'claude');
+
+    expect(agyModel).toBeDefined();
+    expect(agyModel?.profiles).toEqual(['agy-same-id']);
+
+    expect(claudeModel).toBeDefined();
+    expect(claudeModel?.profiles).toEqual(['claude-same-id']);
   });
 
   it('getModelOptions normalizes brain.codexModel into codex: namespace without creating false warning or duplicate', () => {

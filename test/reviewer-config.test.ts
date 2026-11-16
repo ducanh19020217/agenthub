@@ -88,11 +88,11 @@ describe('reviewer order configuration', () => {
     expect(modelValidator.safeParse('claude-sonnet-4-6').success).toBe(true);
     expect(modelValidator.safeParse('codex:gpt-5.6-luna').success).toBe(true);
     expect(modelValidator.safeParse('codex:gpt-4o').success).toBe(true);
-    expect(modelValidator.safeParse('codex:x').success).toBe(false);
-    expect(modelValidator.safeParse('codex:custom-model-id').success).toBe(false);
-    expect(modelValidator.safeParse('codex:').success).toBe(false);
+    expect(modelValidator.safeParse('codex:x').success).toBe(true);
+    expect(modelValidator.safeParse('codex:custom-model-id').success).toBe(true);
+    expect(modelValidator.safeParse('codex:').success).toBe(true);
     expect(modelValidator.safeParse('').success).toBe(false);
-    expect(modelValidator.safeParse('gemini-custom').success).toBe(false);
+    expect(modelValidator.safeParse('gemini-custom').success).toBe(true);
 
     // reviewerModelValidator
     expect(reviewerModelValidator.safeParse('codex:gpt-5.6-luna').success).toBe(true);

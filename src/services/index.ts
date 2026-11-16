@@ -320,10 +320,10 @@ export const VALID_AGY_MODELS = new Set([
   'gpt-oss-120b-medium',
 ]);
 
-export const modelValidator = z.string().trim().min(1, 'Model không được để trống').refine(
-  (m) => (m.startsWith('codex:') && isValidReviewerModel('codex', m.slice('codex:'.length))) || VALID_AGY_MODELS.has(m),
-  { message: 'Mỗi model phải là id agy hợp lệ hoặc model codex hợp lệ (codex:gpt-...)' },
-);
+export const modelValidator = z
+  .string()
+  .min(1, 'Model không được để trống')
+  .refine((m) => !/\s/.test(m), { message: 'Model không được chứa khoảng trắng' });
 
 export const reviewerModelValidator = z
   .string()
@@ -333,7 +333,10 @@ export const reviewerModelValidator = z
     (m) => isValidReviewerModel('codex', m) || isValidReviewerModel('claude', m),
     { message: 'Model của reviewer phải theo cú pháp engine codex hoặc claude hợp lệ' },
   );
-const taskModelValidator = z.string().trim().min(1, 'Model không được để trống');
+const taskModelValidator = z
+  .string()
+  .min(1, 'Model không được để trống')
+  .refine((m) => !/\s/.test(m), { message: 'Model không được chứa khoảng trắng' });
 
 export const ProjectHooksSchema = z.object({
   onWorktreeRemoved: z.array(z.string()).optional(),
@@ -5837,6 +5840,15 @@ export class AppService {
       if (knowledge) this.knowledgeRepo.insert({ projectId: task.projectId, taskId, content: knowledge });
     }
     if (mergeResult) {
+      // A manual approval that already merged must leave review even when the scheduler treated the
+      // approval as an automated chain step (e.g. by = 'claude-review'); otherwise the task stays in
+      // review and a new automated reviewer is started on already-merged code.
+      const afterReview = this.taskRepo.get(taskId);
+      if (afterReview?.status === 'review') {
+        this.taskRepo.update(taskId, { reviewerEscalated: 0, reviewerEscalatedAt: null, reviewerEscalationReason: null });
+        this.taskRepo.updateStatus(taskId, 'done');
+        this.scheduler.getEventBus().emit('task.done', taskId, { by: parsed.by || 'manual', verdict: 'approved' });
+      }
       this.exportKnowledgeFile(task.projectId);
       this.scheduler.getEventBus().emit('task.merged', taskId, mergeResult);
       const proj = this.projectRepo.get(task.projectId);
@@ -7031,12 +7043,14 @@ export class AppService {
     const modelMap = new Map<string, DiscoveredModelApiItem>();
 
     // 1. Collect verified models from enabled and logged-in profiles that actually have discovery records
+    // (Also collect Claude aliases sonnet/opus/haiku for logged-in Claude profiles even when unverified)
     for (const profile of enabledProfiles) {
       if (!isProfileLoggedIn(profile)) continue;
       if (!this.profileModelRepo) continue;
       const rows = this.profileModelRepo.getForProfile(profile.name);
       for (const r of rows) {
-        if (!r.verified) continue; // Only verified models are considered available on the account
+        const isClaudeAlias = r.engine === 'claude' && ['sonnet', 'opus', 'haiku'].includes(r.modelId);
+        if (!r.verified && !isClaudeAlias) continue;
         const modelId = r.engine === 'codex' && !r.modelId.startsWith('codex:')
           ? `codex:${r.modelId}`
           : r.modelId;
@@ -7046,7 +7060,10 @@ export class AppService {
           if (!existing.profiles.includes(profile.name)) {
             existing.profiles.push(profile.name);
           }
-          existing.verified = true;
+          if (r.verified) {
+            existing.verified = true;
+            existing.warning = null;
+          }
           existing.available = true;
         } else {
           modelMap.set(key, {
@@ -7054,22 +7071,22 @@ export class AppService {
             engine: r.engine as 'agy' | 'codex' | 'claude',
             name: r.modelName || modelId,
             profiles: [profile.name],
-            verified: true,
+            verified: Boolean(r.verified),
             available: true,
             configured: false,
-            warning: null,
+            warning: r.verified ? null : 'Chưa xác minh qua model catalog',
           });
         }
       }
     }
 
-    // 2. For any enabled engine with no verified models (or all engines if none enabled),
+    // 2. For any enabled engine with no available models (or all engines if none enabled),
     // provide fallback default models marked verified: false, available: false, profiles: []
     const enabledEngines = new Set(enabledProfiles.map((p) => p.engine));
     const enginesToCheck = enabledEngines.size > 0 ? enabledEngines : new Set(['agy', 'codex', 'claude']);
     for (const engine of enginesToCheck) {
-      const hasVerifiedForEngine = Array.from(modelMap.values()).some((m) => m.engine === engine && m.verified);
-      if (!hasVerifiedForEngine) {
+      const hasAvailableForEngine = Array.from(modelMap.values()).some((m) => m.engine === engine && m.available);
+      if (!hasAvailableForEngine) {
         const defaults = getDefaultModelsForEngine(engine);
         for (const item of defaults) {
           const modelId = item.engine === 'codex' && !item.id.startsWith('codex:')

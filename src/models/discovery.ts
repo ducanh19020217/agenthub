@@ -246,14 +246,14 @@ export async function discoverClaudeModels(
   profile: ProfileRow,
   options?: { customHome?: string },
 ): Promise<DiscoveredModelItem[]> {
-  const baseAliases: DiscoveredModelItem[] = [
-    { id: 'sonnet', name: 'Claude Sonnet', engine: 'claude', verified: true },
-    { id: 'opus', name: 'Claude Opus', engine: 'claude', verified: true },
-    { id: 'haiku', name: 'Claude Haiku', engine: 'claude', verified: true },
+  const baseAliases = (verified: boolean): DiscoveredModelItem[] => [
+    { id: 'sonnet', name: 'Claude Sonnet', engine: 'claude', verified },
+    { id: 'opus', name: 'Claude Opus', engine: 'claude', verified },
+    { id: 'haiku', name: 'Claude Haiku', engine: 'claude', verified },
   ];
 
   const home = options?.customHome || profile.home || (process.env.VITEST ? undefined : os.homedir());
-  if (!home) return baseAliases;
+  if (!home) return baseAliases(false);
   const candidateDirs = profile.kind === 'isolated'
     ? [path.join(home, '.claude', 'cache', 'model-catalog'), path.join(home, 'cache', 'model-catalog')]
     : [path.join(home, '.claude', 'cache', 'model-catalog')];
@@ -288,8 +288,9 @@ export async function discoverClaudeModels(
   }
 
   // Merge catalog models with base aliases (aliases first, then catalog without duplicate IDs)
-  const seenIds = new Set(baseAliases.map((a) => a.id));
-  const merged: DiscoveredModelItem[] = [...baseAliases];
+  const aliases = baseAliases(catalogModels.length > 0);
+  const seenIds = new Set(aliases.map((a) => a.id));
+  const merged: DiscoveredModelItem[] = [...aliases];
   for (const m of catalogModels) {
     if (!seenIds.has(m.id)) {
       seenIds.add(m.id);

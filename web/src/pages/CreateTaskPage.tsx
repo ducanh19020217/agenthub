@@ -49,7 +49,7 @@ export const CreateTaskPage: React.FC = () => {
   const openProjectSource = openProject?.sourceId ? openProjectSources.find((source) => source.id === openProject.sourceId) : undefined;
   const modelSuggestions = React.useMemo(() => {
     if (modelOptions?.models) {
-      return modelOptions.models.filter((m) => m.available).map((m) => m.id);
+      return modelOptions.models.filter((m) => m.available && !m.unavailable).map((m) => m.id);
     }
     return modelOptions?.suggestions?.length ? modelOptions.suggestions : [];
   }, [modelOptions]);
@@ -58,7 +58,7 @@ export const CreateTaskPage: React.FC = () => {
     const set = new Set<string>();
     if (modelOptions?.models) {
       for (const m of modelOptions.models) {
-        if (!m.available) set.add(m.id);
+        if (!m.available || m.unavailable) set.add(m.id);
       }
     }
     return set;

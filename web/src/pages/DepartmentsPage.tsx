@@ -69,10 +69,10 @@ export const DepartmentsPage: React.FC = () => {
   const modelOptionsByEngine = useMemo(() => {
     if (modelOptions?.models) {
       const claude = modelOptions.models
-        .filter((m) => m.engine === 'claude' && m.available)
+        .filter((m) => m.engine === 'claude' && m.available && !m.unavailable)
         .map((m) => m.id);
       const codex = modelOptions.models
-        .filter((m) => m.engine === 'codex' && m.available)
+        .filter((m) => m.engine === 'codex' && m.available && !m.unavailable)
         .map((m) => (m.id.startsWith('codex:') ? m.id.slice('codex:'.length) : m.id));
       return {
         claude: Array.from(new Set(claude)),
@@ -89,7 +89,7 @@ export const DepartmentsPage: React.FC = () => {
     const set = new Set<string>();
     if (modelOptions?.models) {
       for (const m of modelOptions.models) {
-        if (!m.available) {
+        if (!m.available || m.unavailable) {
           set.add(m.id);
           if (m.id.startsWith('codex:')) {
             set.add(m.id.slice('codex:'.length));

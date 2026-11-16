@@ -7072,8 +7072,10 @@ export class AppService {
           if (!existing.runVerified && !existing.unavailable && !r.verified) existing.warning = 'Chưa xác minh qua model catalog';
           if (r.unavailableReason) existing.unavailableReason = r.unavailableReason;
           existing.available = existing.available || !isUnavailable;
-          existing.unavailable = Boolean(existing.unavailable && isUnavailable);
-          if (!isUnavailable) existing.unavailable = false;
+          // Keep a rejection visible even when another profile happens to expose
+          // the same model. The model must not be used as a chain's first choice
+          // until the provider rejection has been resolved.
+          existing.unavailable = Boolean(existing.unavailable || isUnavailable);
         } else {
           modelMap.set(key, {
             id: modelId,

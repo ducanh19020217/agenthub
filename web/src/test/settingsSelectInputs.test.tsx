@@ -1555,6 +1555,22 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(availableOnly[0].value).toBe('gemini-3.8-flash-high');
     });
 
+    it('formatDiscoveredModelOptions excludes a provider-rejected model even when another profile can run it', () => {
+      const options = formatDiscoveredModelOptions([
+        {
+          id: 'codex:mixed-model',
+          name: 'Mixed model',
+          engine: 'codex',
+          profiles: ['codex-usable', 'codex-rejected'],
+          verified: true,
+          available: true,
+          unavailable: true,
+        },
+      ], undefined, undefined, true);
+
+      expect(options).toEqual([]);
+    });
+
     it('formatDiscoveredModelOptions labels rejected and unverified models from their state flags', () => {
       const options = formatDiscoveredModelOptions([
         {

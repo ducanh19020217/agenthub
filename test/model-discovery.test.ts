@@ -732,6 +732,40 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(result.suggestions).not.toContain('gemini-3.8-flash-high');
   });
 
+  it('getModelOptions preserves provider rejection when another profile exposes the same model', () => {
+    profileRepo.upsert({
+      name: 'agy-usable',
+      engine: 'agy',
+      kind: 'keyring',
+      email: 'usable@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileRepo.upsert({
+      name: 'agy-rejected',
+      engine: 'agy',
+      kind: 'keyring',
+      email: 'rejected@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('agy-usable', [
+      { modelId: 'gemini-mixed-model', modelName: 'Gemini Mixed', engine: 'agy', verified: true },
+    ]);
+    profileModelRepo.markUnavailable('agy-rejected', 'gemini-mixed-model', 'agy', 'provider_rejected', 123);
+
+    const result = AppService.prototype.getModelOptions.call({
+      profileRepo,
+      profileModelRepo,
+      config: { defaultModelChains: { hard: [], easy: [] }, reviewer: { order: [] } },
+    } as any);
+    const mixed = result.models.find((model) => model.id === 'gemini-mixed-model');
+
+    expect(mixed?.available).toBe(true);
+    expect(mixed?.unavailable).toBe(true);
+    expect(mixed?.unavailableReason).toBe('provider_rejected');
+  });
+
   it('AppService.getModelOptions includes brain.fallback models and warns if no profile provides them', () => {
     const fakeConfig: any = {
       defaultModelChains: { hard: [], easy: [] },

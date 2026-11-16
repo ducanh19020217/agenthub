@@ -165,7 +165,7 @@ export const SettingsPage: React.FC = () => {
     const set = new Set<string>();
     if (modelOptions?.models) {
       for (const m of modelOptions.models) {
-        if (!m.available) {
+        if (!m.available || m.unavailable) {
           set.add(m.id);
         }
       }
@@ -250,7 +250,7 @@ export const SettingsPage: React.FC = () => {
   const availableChatModels = useMemo(() => {
     if (modelOptions?.models) {
       return modelOptions.models
-        .filter((m) => m.engine === 'claude' && m.available)
+        .filter((m) => m.engine === 'claude' && m.available && !m.unavailable)
         .map((m) => m.id);
     }
     return config?.chat?.models || [];

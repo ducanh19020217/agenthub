@@ -80,7 +80,7 @@ export function formatDiscoveredModelOptions(
     : models;
 
   if (onlyAvailable) {
-    filtered = filtered.filter((m) => m.available);
+    filtered = filtered.filter((m) => m.available && !m.unavailable);
   }
 
   const engineLabels: Record<string, string> = {

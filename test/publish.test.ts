@@ -2675,7 +2675,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(remoteLog).not.toContain('feat: task b late commit after merge');
     });
 
-    describe('Audit diff base and range fix (DEC-034 / t-audit-diff-base-fix)', () => {
+    describe('Audit diff base and range fix (DEC-035 / t-audit-diff-base-fix)', () => {
       it('tái hiện sự cố ui-dashboard: task A đã push lên remote, task B merge master ngược chiều rồi merge vào master 2 lần -> diff audit không chứa file của A và chứa trọn vẹn cả 2 lần merge của B', async () => {
         const { getTaskDiff, findForwardMergeCommitsForTask, findMergeCommitForTask } = await import('../src/publish.js');
         const remotePath = path.join(tmpDir, 'remote-ui-dashboard.git');
@@ -3387,6 +3387,86 @@ describe('Publish Service (t-auto-push-after-done)', () => {
             testEnv,
             null,
             mergeSha,
+          ),
+        ).rejects.toThrow(/Failed to resolve remote base commit/);
+      });
+
+      it('khi nhánh task không còn tồn tại cục bộ và p2 không chứa commit của task, không chấp nhận merge chỉ dựa vào commit message', async () => {
+        const { findForwardMergeCommitsForTask } = await import('../src/publish.js');
+        const repoPath = path.join(tmpDir, 'local-deleted-branch-unrelated-p2');
+        fs.mkdirSync(repoPath, { recursive: true });
+        execFileSync('git', ['init', '-b', 'master'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['config', 'user.name', 'Tester'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['config', 'user.email', 'tester@example.com'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'README.md'), '# Base\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'chore: initial'], { cwd: repoPath, env: testEnv });
+
+        // Tạo một nhánh hoàn toàn khác với commit không liên quan đến task
+        execFileSync('git', ['checkout', '-b', 'other-feature'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'unrelated.txt'), 'unrelated content\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: completely unrelated commit'], { cwd: repoPath, env: testEnv });
+
+        // Merge nhánh khác này vào master nhưng đặt message có tên nhánh task bị xoá
+        execFileSync('git', ['checkout', 'master'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--no-ff', 'other-feature', '-m', "Merge branch 'agenthub/ghost-task' into master"], { cwd: repoPath, env: testEnv });
+
+        const taskRow: any = {
+          id: 'proj/ghost-task',
+          projectId: 'proj',
+          slug: 'ghost-task',
+          title: 'Ghost Task',
+          branch: 'agenthub/ghost-task',
+          baseRef: 'master',
+        };
+
+        // Nhánh task không hề tồn tại (hasBranch === false), message khớp pattern nhưng p2 log không chứa task slug hay title.
+        // findForwardMergeCommitsForTask bắt buộc fail closed và không chấp nhận merge này.
+        const merges = await findForwardMergeCommitsForTask(repoPath, taskRow, ['master'], testEnv);
+        expect(merges).toEqual([]);
+      });
+
+      it('khi rơi vào snapshot fallback nhưng remote base không resolve được, getTaskDiff fail-closed ném lỗi chứ không fallback sang branch/HEAD local', async () => {
+        const { getTaskDiff } = await import('../src/publish.js');
+        const repoPath = path.join(tmpDir, 'local-snapshot-fallback-unresolvable-base');
+        fs.mkdirSync(repoPath, { recursive: true });
+        execFileSync('git', ['init', '-b', 'master'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['config', 'user.name', 'Tester'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['config', 'user.email', 'tester@example.com'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'README.md'), '# Base\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'chore: initial'], { cwd: repoPath, env: testEnv });
+
+        // Tạo nhánh task với commit riêng, nhưng chưa hề merge
+        execFileSync('git', ['checkout', '-b', 'agenthub/snapshot-task'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'snapshot.txt'), 'snapshot content\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: snapshot task work'], { cwd: repoPath, env: testEnv });
+        const snapshotSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        const taskRow = {
+          id: 'proj/snapshot-task',
+          projectId: 'proj',
+          slug: 'snapshot-task',
+          title: 'Snapshot Task',
+          status: 'done',
+          branch: 'agenthub/snapshot-task',
+          baseRef: 'master',
+        } as unknown as Parameters<typeof getTaskDiff>[1];
+
+        // Không có forward merge nào, getTaskDiff rơi vào khối snapshot fallback (!usedMergeDiff).
+        // Khi remote base không resolve được (baseRef và targetBranch không có remote tracking ref tương ứng),
+        // getTaskDiff bắt buộc fail-closed ném lỗi, tuyệt đối không dùng snapshotSha/master local/HEAD.
+        await expect(
+          getTaskDiff(
+            repoPath,
+            taskRow,
+            'agenthub/snapshot-task',
+            'master',
+            'nonexistent-remote-base-ref',
+            testEnv,
+            snapshotSha,
           ),
         ).rejects.toThrow(/Failed to resolve remote base commit/);
       });

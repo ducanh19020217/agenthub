@@ -143,6 +143,51 @@ async function refExists(repo: string, ref: string, env: NodeJS.ProcessEnv): Pro
   }
 }
 
+async function isCommitOnRemote(
+  repoPath: string,
+  sha: string,
+  targetBranch: string,
+  task: TaskRow,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  const remoteCandidates = [
+    `refs/remotes/origin/${targetBranch}`,
+    `origin/${targetBranch}`,
+    task.baseRef && task.baseRef !== targetBranch ? `refs/remotes/origin/${task.baseRef}` : '',
+    task.baseRef && task.baseRef !== targetBranch ? `origin/${task.baseRef}` : '',
+  ].filter(Boolean);
+
+  for (const r of remoteCandidates) {
+    if (await refExists(repoPath, r, env)) {
+      try {
+        if (await isAncestor(repoPath, sha, r, env)) {
+          return true;
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  try {
+    const allRemotes = (
+      await runGit(['-C', repoPath, 'for-each-ref', '--format=%(refname)', 'refs/remotes/'], repoPath, env)
+    )
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const r of allRemotes) {
+      if (await isAncestor(repoPath, sha, r, env)) {
+        return true;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return false;
+}
+
 async function resolveRemoteAuditBase(
   repoPath: string,
   baseRef: string,
@@ -150,16 +195,41 @@ async function resolveRemoteAuditBase(
   task: TaskRow,
   env: NodeJS.ProcessEnv,
 ): Promise<string> {
-  const candidates = [
-    baseRef,
-    `refs/remotes/origin/${targetBranch}`,
-    `origin/${targetBranch}`,
-    task.baseRef && task.baseRef !== targetBranch ? `refs/remotes/origin/${task.baseRef}` : '',
-    task.baseRef && task.baseRef !== targetBranch ? `origin/${task.baseRef}` : '',
-  ].filter(Boolean);
+  const isSha = /^[0-9a-f]{40}$/i.test(baseRef);
+  let verifiedSha: string | null = null;
+  if (isSha) {
+    if (await isCommitOnRemote(repoPath, baseRef, targetBranch, task, env)) {
+      try {
+        verifiedSha = (await runGit(['-C', repoPath, 'rev-parse', `${baseRef}^{commit}`], repoPath, env)).trim();
+      } catch {
+        verifiedSha = null;
+      }
+    }
+  }
 
-  for (const ref of candidates) {
-    if (!/^[0-9a-f]{40}$/i.test(ref) && !(await refExists(repoPath, ref, env))) continue;
+  const remoteRefCandidates: string[] = [];
+  if (verifiedSha) {
+    remoteRefCandidates.push(verifiedSha);
+  } else if (!isSha && baseRef) {
+    if (baseRef.startsWith('refs/remotes/') || baseRef.startsWith('origin/')) {
+      remoteRefCandidates.push(baseRef);
+    } else if (!baseRef.startsWith('refs/heads/')) {
+      remoteRefCandidates.push(`refs/remotes/origin/${baseRef}`);
+      remoteRefCandidates.push(`origin/${baseRef}`);
+    }
+  }
+
+  remoteRefCandidates.push(`refs/remotes/origin/${targetBranch}`);
+  remoteRefCandidates.push(`origin/${targetBranch}`);
+  if (task.baseRef && task.baseRef !== targetBranch) {
+    remoteRefCandidates.push(`refs/remotes/origin/${task.baseRef}`);
+    remoteRefCandidates.push(`origin/${task.baseRef}`);
+  }
+
+  for (const ref of remoteRefCandidates) {
+    if (!ref) continue;
+    if (ref === verifiedSha) return verifiedSha;
+    if (!(await refExists(repoPath, ref, env))) continue;
     try {
       const resolved = (await runGit(['-C', repoPath, 'rev-parse', `${ref}^{commit}`], repoPath, env)).trim();
       if (resolved) return resolved;
@@ -311,16 +381,22 @@ export async function isFirstParentAncestor(
   return hashes.has(commit);
 }
 
+export interface TaskMergeCandidatesResult {
+  forwardMerges: string[];
+  rejectedMerges: string[];
+}
+
 /**
- * Find the merge commit that merged a task's branch into the integration or target branch.
+ * Find merge candidates for a task's branch into the integration or target branch,
+ * separating verified forward merges from rejected merges (reverse merges or unverified ancestry).
  */
-export async function findForwardMergeCommitsForTask(
+export async function findMergeCandidatesForTask(
   repoPath: string,
   task: TaskRow,
   candidateBranches: string[],
   env: NodeJS.ProcessEnv,
   failClosed = false,
-): Promise<string[]> {
+): Promise<TaskMergeCandidatesResult> {
   const taskBranch = task.branch || `agenthub/${task.slug}`;
   let branchRef = `refs/heads/${taskBranch}`;
   let hasBranch = await refExists(repoPath, branchRef, env);
@@ -416,6 +492,7 @@ export async function findForwardMergeCommitsForTask(
   });
 
   const forwardMerges: string[] = [];
+  const rejectedMerges: string[] = [];
   const seenMerges = new Set<string>();
 
   const destRefs: string[] = [];
@@ -458,6 +535,7 @@ export async function findForwardMergeCommitsForTask(
 
         // 1. Reverse merge check by commit subject:
         if (reverseRegexes.some((re) => re.test(subject))) {
+          if (!rejectedMerges.includes(hash)) rejectedMerges.push(hash);
           continue;
         }
 
@@ -509,6 +587,7 @@ export async function findForwardMergeCommitsForTask(
 
         if (ancestryVerificationFailed || isP1OnTask) {
           // Parent 1 is on the task branch or ancestry verification failed -> reject reverse merge / fail closed
+          if (!rejectedMerges.includes(hash)) rejectedMerges.push(hash);
           continue;
         }
 
@@ -527,6 +606,7 @@ export async function findForwardMergeCommitsForTask(
           } catch (err) {
             if (failClosed) throw err;
             ancestryVerificationFailed = true;
+            if (!rejectedMerges.includes(hash)) rejectedMerges.push(hash);
             continue;
           }
         } else {
@@ -538,6 +618,7 @@ export async function findForwardMergeCommitsForTask(
           const targetRefs = destRefs.filter((d) => d !== hash && d !== p1 && d !== p2);
           if (targetRefs.length === 0) {
             ancestryVerificationFailed = true;
+            if (!rejectedMerges.includes(hash)) rejectedMerges.push(hash);
             continue;
           }
           try {
@@ -566,8 +647,14 @@ export async function findForwardMergeCommitsForTask(
             }
           } catch {
             ancestryVerificationFailed = true;
+            if (!rejectedMerges.includes(hash)) rejectedMerges.push(hash);
             continue;
           }
+        }
+
+        if (ancestryVerificationFailed) {
+          if (!rejectedMerges.includes(hash)) rejectedMerges.push(hash);
+          continue;
         }
 
         const isForward = isMsgForward && isP2OnTask;
@@ -575,6 +662,8 @@ export async function findForwardMergeCommitsForTask(
         if (isForward && !seenMerges.has(hash)) {
           seenMerges.add(hash);
           forwardMerges.push(hash);
+        } else if (isMsgForward && !isForward) {
+          if (!rejectedMerges.includes(hash)) rejectedMerges.push(hash);
         }
       }
     } catch (err) {
@@ -584,7 +673,21 @@ export async function findForwardMergeCommitsForTask(
     }
   }
 
-  return forwardMerges;
+  return { forwardMerges, rejectedMerges };
+}
+
+/**
+ * Find the merge commit that merged a task's branch into the integration or target branch.
+ */
+export async function findForwardMergeCommitsForTask(
+  repoPath: string,
+  task: TaskRow,
+  candidateBranches: string[],
+  env: NodeJS.ProcessEnv,
+  failClosed = false,
+): Promise<string[]> {
+  const result = await findMergeCandidatesForTask(repoPath, task, candidateBranches, env, failClosed);
+  return result.forwardMerges;
 }
 
 /**
@@ -673,7 +776,13 @@ export async function getTaskDiff(
     }
   }
 
-  const forwardMerges = await findForwardMergeCommitsForTask(
+  const patterns = [taskBranch, task.slug].filter(Boolean) as string[];
+  const reverseRegexes = patterns.map((p) => {
+    const escaped = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`into\\s+['"/]?(refs/heads/)?(agenthub/)?${escaped}(['"/)]|\\s*$)`, 'i');
+  });
+
+  const { forwardMerges, rejectedMerges } = await findMergeCandidatesForTask(
     repoPath,
     task,
     candidateBranches,
@@ -705,7 +814,14 @@ export async function getTaskDiff(
     usedMergeDiff = true;
   }
 
-  // 2. If no forward merge commit was found, use snapshot commit or branch
+  // If candidate merges were rejected (e.g. reverse merges or unverified ancestry) and no forward merge was found, fail closed!
+  if (!usedMergeDiff && rejectedMerges.length > 0) {
+    throw new Error(
+      `Failed to resolve a verified audit diff for task ${task.id}: candidate merge was rejected as a reverse or unverified merge, and no valid forward merge was found.`,
+    );
+  }
+
+  // 2. If no forward merge commit was found and no merges were rejected, use snapshot commit or branch
   if (!usedMergeDiff) {
     let taskSnapshotCommit: string | null = null;
     if (sourceSha && (taskBranch === sourceBranch || !task.branch)) {
@@ -746,6 +862,84 @@ export async function getTaskDiff(
         branchSha = taskSnapshotCommit;
       }
       const effectiveBase = await resolveRemoteAuditBase(repoPath, baseRef, targetBranch, task, env);
+
+      // Verify taskSnapshotCommit does not contain any reverse merges
+      const snapshotParents = (
+        await runGit(['-C', repoPath, 'rev-parse', `${taskSnapshotCommit}^@`], repoPath, env)
+      )
+        .split(/\s+/)
+        .filter(Boolean);
+
+      let isReverseMerge = false;
+      if (snapshotParents.length > 1) {
+        const snapshotSubject = (
+          await runGit(['-C', repoPath, 'log', '-1', '--format=%s', taskSnapshotCommit], repoPath, env)
+        ).trim();
+        if (reverseRegexes.some((re) => re.test(snapshotSubject))) {
+          isReverseMerge = true;
+        }
+        if (!isReverseMerge && targetBranch) {
+          const targetPattern = new RegExp(`Merge\\s+(branch\\s+)?['"/]?(refs/heads/)?${targetBranch}(['"/)]|\\s+into|$)`, 'i');
+          if (targetPattern.test(snapshotSubject)) isReverseMerge = true;
+        }
+        if (!isReverseMerge && snapshotParents[1]) {
+          try {
+            if (
+              (await isAncestor(repoPath, snapshotParents[1], effectiveBase, env)) ||
+              (Boolean(targetSha) && (await isAncestor(repoPath, snapshotParents[1], targetSha!, env)))
+            ) {
+              isReverseMerge = true;
+            }
+          } catch {
+            isReverseMerge = true;
+          }
+        }
+        if (isReverseMerge) {
+          throw new Error(
+            `Failed to resolve a verified audit diff for task ${task.id}: task snapshot tip ${taskSnapshotCommit} is a reverse merge and no forward merge was found.`,
+          );
+        }
+      }
+
+      // Check if any reverse merges exist in effectiveBase..taskSnapshotCommit
+      try {
+        const commitLog = await runGit(
+          ['-C', repoPath, 'log', '--merges', '--first-parent', '--format=%H\t%P\t%s', `${effectiveBase}..${taskSnapshotCommit}`],
+          repoPath,
+          env,
+        );
+        const mergeLines = commitLog.split('\n').map((l) => l.trim()).filter(Boolean);
+        for (const line of mergeLines) {
+          const [hash, parents, ...subjectParts] = line.split('\t');
+          if (!hash || !parents) continue;
+          const subject = subjectParts.join('\t');
+          const [, p2] = parents.split(/\s+/).filter(Boolean);
+          const isSubjectReverse = reverseRegexes.some((re) => re.test(subject));
+          let isP2FromBase = false;
+          if (p2) {
+            try {
+              isP2FromBase =
+                (await isAncestor(repoPath, p2, effectiveBase, env)) ||
+                (Boolean(targetSha) && (await isAncestor(repoPath, p2, targetSha!, env)));
+            } catch {
+              isP2FromBase = true;
+            }
+          }
+          if (isSubjectReverse || isP2FromBase) {
+            throw new Error(
+              `Failed to resolve a verified audit diff for task ${task.id}: reverse merge ${hash} detected in task snapshot lineage and no forward merge was found.`,
+            );
+          }
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith('Failed to resolve a verified audit diff')) {
+          throw err;
+        }
+        throw new Error(
+          `Failed to verify ancestry for task snapshot ${taskSnapshotCommit}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
       const mergeBase = (await runGit(['-C', repoPath, 'merge-base', effectiveBase, taskSnapshotCommit], repoPath, env)).trim();
       if (!mergeBase) throw new Error('Failed to resolve merge-base for audit diff.');
       auditRange = `${mergeBase}..${taskSnapshotCommit}`;
@@ -1337,9 +1531,14 @@ export async function publishTask(
       sourceSha = await runGit(['-C', repoPath, 'rev-parse', sourceRef], repoPath, env);
     }
 
-    const auditBaseRef = prevRemoteSha
-      ? remoteRef
-      : (targetSha ? targetSha : (sourceSha ? sourceSha : targetBranch));
+    const defaultBranch = currentProject.defaultBranch || 'main';
+    const defaultRemoteRef = `refs/remotes/${remote}/${defaultBranch}`;
+    let auditBaseRef = prevRemoteSha || remoteRef;
+    if (!prevRemoteSha && !(await refExists(repoPath, remoteRef, env))) {
+      if (await refExists(repoPath, defaultRemoteRef, env)) {
+        auditBaseRef = defaultRemoteRef;
+      }
+    }
 
     // --- Pre-Publish Audit Gate ---
     const isSkipAudit = isManual && Boolean(options?.skipAudit);
@@ -1498,16 +1697,33 @@ export async function publishTask(
       }
 
       for (const t of tasksToAudit) {
-        const { diff, changedFiles, commitSha, branchSha, auditRange } = await getTaskDiff(
-          repoPath,
-          t,
-          sourceBranch,
-          targetBranch,
-          auditBaseRef,
-          env,
-          sourceSha,
-          targetSha,
-        );
+        let taskDiffResult: Awaited<ReturnType<typeof getTaskDiff>>;
+        try {
+          taskDiffResult = await getTaskDiff(
+            repoPath,
+            t,
+            sourceBranch,
+            targetBranch,
+            auditBaseRef,
+            env,
+            sourceSha,
+            targetSha,
+          );
+        } catch (err) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          const failedAt = new Date().toISOString();
+          deps.taskRepo.update(taskId, {
+            pushResult: JSON.stringify({
+              state: 'push_failed',
+              error: errorMsg,
+              failedAt,
+              retryable: false,
+            }),
+          });
+          emitPushFailed(deps, taskId, currentProject.id, errorMsg, remote, targetBranch, isManual);
+          return { ok: false, error: errorMsg, remote, branch: targetBranch, retryable: false };
+        }
+        const { diff, changedFiles, commitSha, branchSha, auditRange } = taskDiffResult;
         if (auditRange) {
           taskAuditRangeMap.set(t.id, auditRange);
         }

@@ -2537,14 +2537,10 @@ describe('Publish Service (t-auto-push-after-done)', () => {
 
     it('getTaskDiff dùng snapshot sourceSha: khi nhánh task thay đổi sau snapshot, diff và branchSha chỉ phản ánh đúng commit snapshot', async () => {
       const { getTaskDiff } = await import('../src/publish.js');
+      const remotePath = path.join(tmpDir, 'remote-diff-snapshot.git');
+      initBareRemote(remotePath);
       const repoPath = path.join(tmpDir, 'repo-diff-snapshot');
-      fs.mkdirSync(repoPath, { recursive: true });
-      execFileSync('git', ['init', '-b', 'main'], { cwd: repoPath, env: testEnv });
-      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repoPath, env: testEnv });
-      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoPath, env: testEnv });
-      fs.writeFileSync(path.join(repoPath, 'init.txt'), 'init');
-      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
-      execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoPath, env: testEnv });
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
 
       execFileSync('git', ['checkout', '-b', 'agenthub/diff-task'], { cwd: repoPath, env: testEnv });
       fs.writeFileSync(path.join(repoPath, 'task.txt'), 'commit 1 snapshot content\n');
@@ -3147,14 +3143,10 @@ describe('Publish Service (t-auto-push-after-done)', () => {
 
       it('khi merge commit có diff hợp lệ rỗng, không rơi xuống snapshot fallback và không kéo diff của task khác', async () => {
         const { getTaskDiff } = await import('../src/publish.js');
+        const remotePath = path.join(tmpDir, 'remote-empty-diff-merge.git');
+        initBareRemote(remotePath);
         const repoPath = path.join(tmpDir, 'local-empty-diff-merge');
-        fs.mkdirSync(repoPath, { recursive: true });
-        execFileSync('git', ['init', '-b', 'master'], { cwd: repoPath, env: testEnv });
-        execFileSync('git', ['config', 'user.name', 'Tester'], { cwd: repoPath, env: testEnv });
-        execFileSync('git', ['config', 'user.email', 'tester@example.com'], { cwd: repoPath, env: testEnv });
-        fs.writeFileSync(path.join(repoPath, 'README.md'), '# Base\n');
-        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
-        execFileSync('git', ['commit', '-m', 'chore: initial'], { cwd: repoPath, env: testEnv });
+        initGitRepoWithRemote(repoPath, remotePath, 'master');
 
         // Task A: tạo file a-other.txt
         execFileSync('git', ['checkout', '-b', 'agenthub/task-a'], { cwd: repoPath, env: testEnv });
@@ -3165,6 +3157,7 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         execFileSync('git', ['checkout', 'master'], { cwd: repoPath, env: testEnv });
         execFileSync('git', ['merge', '--no-ff', 'agenthub/task-a', '-m', "Merge branch 'agenthub/task-a' into master"], { cwd: repoPath, env: testEnv });
         const masterWithASha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+        execFileSync('git', ['push', 'origin', 'master'], { cwd: repoPath, env: testEnv });
 
         // Task B: rẽ từ master (đã có A), thêm file rồi xóa file đó (diff rỗng so với master)
         execFileSync('git', ['checkout', '-b', 'agenthub/empty-task'], { cwd: repoPath, env: testEnv });
@@ -3468,6 +3461,253 @@ describe('Publish Service (t-auto-push-after-done)', () => {
             snapshotSha,
           ),
         ).rejects.toThrow(/Failed to resolve remote base commit/);
+      });
+
+      it('khi baseRef là một SHA local chưa từng push lên remote, resolveRemoteAuditBase từ chối và fail-closed', async () => {
+        const { getTaskDiff } = await import('../src/publish.js');
+        const remotePath = path.join(tmpDir, 'remote-local-sha.git');
+        initBareRemote(remotePath);
+        const repoPath = path.join(tmpDir, 'local-snapshot-sha-not-on-remote');
+        initGitRepoWithRemote(repoPath, remotePath, 'master');
+
+        // Tạo commit local-only trên master (chưa push)
+        fs.writeFileSync(path.join(repoPath, 'local-unpushed.txt'), 'local only\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'chore: local only'], { cwd: repoPath, env: testEnv });
+        const localOnlySha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        execFileSync('git', ['checkout', '-b', 'agenthub/local-sha-task'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'file.txt'), 'content\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: task work'], { cwd: repoPath, env: testEnv });
+        const snapshotSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        const taskRow = {
+          id: 'proj/local-sha-task',
+          projectId: 'proj',
+          slug: 'local-sha-task',
+          title: 'Local SHA Task',
+          status: 'done',
+          branch: 'agenthub/local-sha-task',
+          baseRef: 'nonexistent-base',
+        } as unknown as Parameters<typeof getTaskDiff>[1];
+
+        // localOnlySha là 40 ký tự hex nhưng là commit local, không hề có trên refs/remotes/*.
+        // resolveRemoteAuditBase bắt buộc từ chối và fail-closed ném lỗi, không được dùng local SHA này làm remote base.
+        await expect(
+          getTaskDiff(
+            repoPath,
+            taskRow,
+            'agenthub/local-sha-task',
+            'nonexistent-remote-target',
+            localOnlySha,
+            testEnv,
+            snapshotSha,
+          ),
+        ).rejects.toThrow(/Failed to resolve remote base commit/);
+      });
+
+      it('publishTask fail-closed khi không có prevRemoteSha và không thể resolve remote base (không dùng targetSha local)', async () => {
+        const remotePath = path.join(tmpDir, 'remote-publish-no-remote-base.git');
+        initBareRemote(remotePath);
+        const repoPath = path.join(tmpDir, 'local-publish-no-remote-base');
+        fs.mkdirSync(repoPath, { recursive: true });
+        execFileSync('git', ['init', '-b', 'master'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['config', 'user.name', 'Tester'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['config', 'user.email', 'tester@example.com'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['remote', 'add', 'origin', remotePath], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'README.md'), '# Initial\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'chore: initial'], { cwd: repoPath, env: testEnv });
+
+        execFileSync('git', ['checkout', '-b', 'agenthub/no-remote-task'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'feature.txt'), 'feature code\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: no remote feature'], { cwd: repoPath, env: testEnv });
+
+        // Tạo project không có remote tracking branch
+        ctx.service.createProject({
+          id: 'proj-no-remote',
+          name: 'Project No Remote',
+          path: repoPath,
+          defaultBranch: 'master',
+          settings: {
+            integration: { enabled: false },
+            publish: {
+              enabled: true,
+              remote: 'origin',
+              branch: 'master',
+              audit: { enabled: true, maxFixRounds: 2 },
+            },
+          },
+        });
+
+        const taskRow: any = {
+          id: 'proj-no-remote/no-remote-task',
+          projectId: 'proj-no-remote',
+          slug: 'no-remote-task',
+          title: 'No Remote Task',
+          status: 'done',
+          branch: 'agenthub/no-remote-task',
+          baseRef: 'master',
+        };
+        ctx.taskRepo.insert(taskRow);
+
+        // Khi publish, vì không có prevRemoteSha và origin/master không tồn tại,
+        // publishTask bắt buộc fail-closed với state push_failed và không được dùng targetSha/sourceSha local
+        const pubResult = await ctx.service.publishTask('proj-no-remote/no-remote-task');
+        expect(pubResult.ok).toBe(false);
+        if (!pubResult.ok) {
+          expect(pubResult.error).toMatch(/Failed to resolve remote base commit/);
+        }
+        const updatedTask = ctx.taskRepo.get('proj-no-remote/no-remote-task');
+        const pr = JSON.parse(updatedTask?.pushResult || '{}');
+        expect(pr.state).toBe('push_failed');
+        expect(pr.error).toMatch(/Failed to resolve remote base commit/);
+      });
+
+      it('ở project không dùng integration, khi nhánh task có reverse merge và không có forward merge, getTaskDiff fail-closed ném lỗi chứ không snapshot fallback', async () => {
+        const { getTaskDiff } = await import('../src/publish.js');
+        const remotePath = path.join(tmpDir, 'remote-non-integ-rev.git');
+        initBareRemote(remotePath);
+        const repoPath = path.join(tmpDir, 'local-non-integ-rev');
+        initGitRepoWithRemote(repoPath, remotePath, 'master');
+        const initialCommit = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Commit ngoài phạm vi trên master (đã có trên remote)
+        fs.writeFileSync(path.join(repoPath, 'approvals.txt'), 'other approvals content\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat(approvals): approvals feature'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['push', 'origin', 'master'], { cwd: repoPath, env: testEnv });
+        const remoteMasterSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'origin/master'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Tạo nhánh task agenthub/rev-task từ initialCommit
+        execFileSync('git', ['checkout', '-b', 'agenthub/rev-task', initialCommit], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'rev-task.txt'), 'rev task work\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: rev task work'], { cwd: repoPath, env: testEnv });
+
+        // Reverse merge master vào nhánh task
+        execFileSync('git', ['merge', '--no-ff', 'master', '-m', "Merge branch 'master' into agenthub/rev-task"], { cwd: repoPath, env: testEnv });
+        const taskTipSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        const taskRow = {
+          id: 'proj/rev-task',
+          projectId: 'proj',
+          slug: 'rev-task',
+          title: 'Rev Task',
+          status: 'done',
+          branch: 'agenthub/rev-task',
+          baseRef: 'master',
+        } as unknown as Parameters<typeof getTaskDiff>[1];
+
+        // Nhánh task chưa hề forward merge vào master. Tip nhánh task chứa reverse merge mang approvals sang.
+        // getTaskDiff bắt buộc fail-closed ném lỗi, tuyệt đối không rơi xuống snapshot fallback lấy tip sau reverse merge.
+        await expect(
+          getTaskDiff(
+            repoPath,
+            taskRow,
+            'agenthub/rev-task',
+            'master',
+            remoteMasterSha,
+            testEnv,
+            taskTipSha,
+            null,
+          ),
+        ).rejects.toThrow(/reverse merge/i);
+      });
+
+      it('ở project không dùng integration, khi candidate merge bị loại (rejected) và không có forward merge, getTaskDiff fail-closed ném lỗi', async () => {
+        const { getTaskDiff } = await import('../src/publish.js');
+        const remotePath = path.join(tmpDir, 'remote-rejected-merge.git');
+        initBareRemote(remotePath);
+        const repoPath = path.join(tmpDir, 'local-rejected-merge');
+        initGitRepoWithRemote(repoPath, remotePath, 'master');
+        const remoteMasterSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'origin/master'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Tạo nhánh task
+        execFileSync('git', ['checkout', '-b', 'agenthub/rej-task'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'rej-task.txt'), 'rej task work\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: rej task work'], { cwd: repoPath, env: testEnv });
+        const taskSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Tạo một reverse merge trên master với subject "into agenthub/rej-task"
+        execFileSync('git', ['checkout', 'master'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['merge', '--no-ff', 'agenthub/rej-task', '-m', "Merge branch 'master' into agenthub/rej-task"], { cwd: repoPath, env: testEnv });
+        const rejMergeSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        const taskRow = {
+          id: 'proj/rej-task',
+          projectId: 'proj',
+          slug: 'rej-task',
+          title: 'Rej Task',
+          status: 'done',
+          branch: 'agenthub/rej-task',
+          baseRef: 'master',
+        } as unknown as Parameters<typeof getTaskDiff>[1];
+
+        // Merge commit bị loại do reverse merge, và không có forward merge hợp lệ nào.
+        // getTaskDiff bắt buộc fail-closed ném lỗi, tuyệt đối không rơi xuống snapshot fallback.
+        await expect(
+          getTaskDiff(
+            repoPath,
+            taskRow,
+            'agenthub/rej-task',
+            'master',
+            remoteMasterSha,
+            testEnv,
+            taskSha,
+            rejMergeSha,
+          ),
+        ).rejects.toThrow(/candidate merge was rejected/i);
+      });
+
+      it('ở project không dùng integration, khi nhánh task sạch không có merge, snapshot fallback hoạt động bình thường', async () => {
+        const { getTaskDiff } = await import('../src/publish.js');
+        const remotePath = path.join(tmpDir, 'remote-clean-linear.git');
+        initBareRemote(remotePath);
+        const repoPath = path.join(tmpDir, 'local-clean-linear');
+        initGitRepoWithRemote(repoPath, remotePath, 'master');
+        const remoteMasterSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'origin/master'], { encoding: 'utf8', env: testEnv }).trim();
+
+        // Tạo nhánh task với các commit sạch tuần tự
+        execFileSync('git', ['checkout', '-b', 'agenthub/clean-task'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'clean-1.txt'), 'clean 1\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: clean 1'], { cwd: repoPath, env: testEnv });
+        fs.writeFileSync(path.join(repoPath, 'clean-2.txt'), 'clean 2\n');
+        execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+        execFileSync('git', ['commit', '-m', 'feat: clean 2'], { cwd: repoPath, env: testEnv });
+        const cleanTipSha = execFileSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: testEnv }).trim();
+
+        const taskRow = {
+          id: 'proj/clean-task',
+          projectId: 'proj',
+          slug: 'clean-task',
+          title: 'Clean Task',
+          status: 'done',
+          branch: 'agenthub/clean-task',
+          baseRef: 'master',
+        } as unknown as Parameters<typeof getTaskDiff>[1];
+
+        // Nhánh task sạch không có reverse merge, getTaskDiff snapshot fallback hoạt động thành công
+        const diffRes = await getTaskDiff(
+          repoPath,
+          taskRow,
+          'agenthub/clean-task',
+          'master',
+          remoteMasterSha,
+          testEnv,
+          cleanTipSha,
+          null,
+        );
+
+        expect(diffRes.commitSha).toBe(cleanTipSha);
+        expect(diffRes.auditRange).toBe(`${remoteMasterSha}..${cleanTipSha}`);
+        expect(diffRes.changedFiles).toEqual(expect.arrayContaining(['clean-1.txt', 'clean-2.txt']));
+        expect(diffRes.diff).toContain('clean 1');
+        expect(diffRes.diff).toContain('clean 2');
       });
     });
   });

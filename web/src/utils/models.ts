@@ -108,9 +108,7 @@ export function formatDiscoveredModelOptions(
     }
     if (m.available && m.runVerified === false) {
       const unverifiedLabel = t?.('models.unverifiedRunWarning');
-      label = `${label} (⚠️ ${unverifiedLabel && unverifiedLabel !== 'models.unverifiedRunWarning'
-        ? unverifiedLabel
-        : 'Not verified to run'})`;
+      label = `${label} (⚠️ ${unverifiedLabel && unverifiedLabel !== 'models.unverifiedRunWarning' ? unverifiedLabel : 'Not verified'})`;
     }
 
     return {

@@ -559,7 +559,6 @@ export class Scheduler {
     if (this.profileModelRepo) {
       const rows = this.profileModelRepo.getForProfile(profileName);
       if (rows.length > 0) {
-        if (!isProfileLoggedIn(profile)) return false;
         // Discovery stores Claude ids bare ("opus") and Codex ids prefixed ("codex:gpt-…"),
         // while callers (e.g. reviewer selection) may pass "claude:opus" or a bare Codex id.
         const normalize = (id: string): string => {

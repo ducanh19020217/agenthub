@@ -1836,7 +1836,10 @@ export const vi = {
       gate_completed: "Hoàn tất bước kiểm soát",
       gate_ready: "Sẵn sàng duyệt bước kiểm soát",
       gate_started: "Bắt đầu duyệt bước kiểm soát",
+      reopened: "Mở lại để duyệt thủ công",
+      stale_ignored: "Bỏ qua kết quả duyệt về muộn",
       started: "Bắt đầu duyệt",
+      superseded: "Dừng reviewer tự động vì đã duyệt thủ công",
       waiting: "Đang chờ duyệt",
     },
     run: {

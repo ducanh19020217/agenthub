@@ -970,6 +970,96 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
+  const staleSleepers: ChildProcess[] = [];
+  afterEach(() => {
+    for (const sleeper of staleSleepers.splice(0)) {
+      try { sleeper.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+  });
+
+  function setupStaleReviewTask(suffix: string) {
+    const projectPath = path.join(tmpDir, `review-repo-${suffix}`);
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: `codex-${suffix}`, engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const worktreePath = path.join(tmpDir, `review-worktree-${suffix}`);
+    fs.cpSync(projectPath, worktreePath, { recursive: true });
+    const taskId = `test-project/review-${suffix}`;
+    taskRepo.insert({ id: taskId, projectId: 'test-project', slug: `review-${suffix}`, title: 'Review stale', body: 'Check.', status: 'review' });
+    taskRepo.update(taskId, { worktreePath });
+    db.prepare('INSERT INTO runs (id, taskId, engine, model, profileName) VALUES (?, ?, ?, ?, ?)')
+      .run(`autocheck-${suffix}`, taskId, 'agy', 'gemini-3.8-flash-low', `codex-${suffix}`);
+    db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(taskId, `autocheck-${suffix}`, 'test', 1, 0, 10, 'OK');
+    const child = new EventEmitter() as unknown as ChildProcess;
+    // Back the fake reviewer with a real, harmless, detached process so a kill never hits an unrelated pid.
+    const sleeper = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+    staleSleepers.push(sleeper);
+    (child as { pid?: number }).pid = sleeper.pid;
+    child.unref = vi.fn();
+    const mockEngine: Engine = {
+      id: 'codex',
+      family: () => 'codex',
+      spawn: (opts: { outputPath?: string }) => {
+        if (opts.outputPath) {
+          fs.mkdirSync(path.dirname(opts.outputPath), { recursive: true });
+          fs.writeFileSync(opts.outputPath, JSON.stringify({ verdict: 'changes_requested', feedback: 'Late verdict: please change more things.' }), 'utf8');
+        }
+        return child;
+      },
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    config.reviewer.enabled = true;
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['codex', mockEngine]]), undefined, undefined, db);
+    const failover = new ClaudeFailoverState(path.join(tmpDir, `failover-${suffix}.json`));
+    failover.activate(3600);
+    scheduler.configureReviewer(new ReviewRepo(db), failover);
+    scheduler.tick();
+    const active = scheduler.getReviewerRun(taskId);
+    expect(active).toBeDefined();
+    return { scheduler, taskId, runId: active!.runId, profile: `codex-${suffix}` };
+  }
+
+  it('ignores a late automated verdict that lands while a manual approval is merging the task', () => {
+    const { scheduler, taskId, runId, profile } = setupStaleReviewTask('stale-merge');
+    scheduler.setTaskMerging(taskId, true);
+    (scheduler as unknown as { finishReview: (...args: unknown[]) => void }).finishReview(taskId, runId, profile, 'exit', 0);
+    scheduler.setTaskMerging(taskId, false);
+
+    const task = taskRepo.get(taskId)!;
+    expect(task.status).toBe('review');
+    expect(task.reviewerChangesRequested || 0).toBe(0);
+    expect(task.body).not.toContain('Late verdict');
+    expect(runRepo.get(runId)?.outcome).toBe('cancelled');
+    const types = eventRepo.getRecent(50).filter((e) => e.taskId === taskId).map((e) => e.type);
+    expect(types).toContain('review.stale_ignored');
+    expect(types).not.toContain('review.completed');
+    scheduler.stop();
+  });
+
+  it('ignores a late automated verdict once the task has left review', () => {
+    const { scheduler, taskId, runId, profile } = setupStaleReviewTask('stale-done');
+    taskRepo.updateStatus(taskId, 'done');
+    (scheduler as unknown as { finishReview: (...args: unknown[]) => void }).finishReview(taskId, runId, profile, 'exit', 0);
+    expect(taskRepo.get(taskId)!.status).toBe('done');
+    expect(eventRepo.getRecent(50).some((e) => e.taskId === taskId && e.type === 'review.stale_ignored')).toBe(true);
+    scheduler.stop();
+  });
+
+  it('supersedeReviewerRun stops the automated reviewer so its verdict is never applied', () => {
+    const { scheduler, taskId, runId, profile } = setupStaleReviewTask('superseded');
+    scheduler.supersedeReviewerRun(taskId, 'mcp');
+    expect(scheduler.getReviewerRun(taskId)).toBeUndefined();
+    expect(runRepo.get(runId)?.outcome).toBe('cancelled');
+    // A late exit of the killed reviewer is a no-op.
+    (scheduler as unknown as { finishReview: (...args: unknown[]) => void }).finishReview(taskId, runId, profile, 'exit', 0);
+    expect(taskRepo.get(taskId)!.status).toBe('review');
+    expect(eventRepo.getRecent(50).some((e) => e.taskId === taskId && e.type === 'review.superseded')).toBe(true);
+    scheduler.stop();
+  });
+
   it('does not overwrite or clear exitTimeout of a new run on late close or exit from an old run', async () => {
     const projectPath = path.join(tmpDir, 'review-repo-late');
     createTestProject(projectPath);

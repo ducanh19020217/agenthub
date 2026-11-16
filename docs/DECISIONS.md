@@ -563,3 +563,11 @@
      - `TaskDetailPage`: Thêm thẻ **"AI Audit"** hiển thị chi tiết trạng thái, summary, danh sách findings (severity, kind, file:line, detail), lịch sử các vòng audit, nút "Chạy lại publish" và nút "Bỏ qua chặn" (với task bị chặn, gọi `publishTask(id, { skipAudit: true })`).
      - Cập nhật workflow timeline hiển thị các bước "AI Audit bắt đầu", "Audit đạt" và "Audit không đạt (vòng n)".
      - Hỗ trợ đa ngôn ngữ (i18n tiếng Việt và tiếng Anh) đầy đủ.
+
+## DEC-036: Duyệt thủ công thắng kết quả reviewer tự động về muộn
+
+- **Bối cảnh**: Ngày 2026-11-16, `agenthub/t-account-model-discovery` được người dùng approve thủ công (merge=true). Trong lúc daemon đang merge, task vẫn ở `review`. Reviewer tự động đang chạy kết thúc một giây sau với `changes_requested`. Daemon tính đó là vòng thứ 3 và chuyển task sang `blocked`, dù code đã merge vào integration.
+- **Quyết định**:
+  1. `finishReview` bỏ qua kết quả reviewer nếu task không còn ở `review` hoặc đang merge (`mergingTasks`). Run được đóng là `cancelled` và phát event `review.stale_ignored`. Kết quả này không đổi trạng thái và không tăng `reviewerChangesRequested`.
+  2. Khi có review thủ công (`by` không phải reviewer tự động), `AppService.reviewTask` gọi `Scheduler.supersedeReviewerRun` để dừng reviewer đang chạy, rồi phát event `review.superseded`.
+  3. Người dùng được approve một task `blocked` vì reviewer hết vòng (`reviewerEscalated` và `reviewerEscalationReason = reviewer_changes_limit`). Task được đưa lại `review` (event `review.reopened`) rồi đi luồng approve → merge → publish như bình thường. Reviewer tự động không được dùng đường này. Không thêm endpoint mới; dùng lại `POST /api/tasks/:id/review` và MCP `hub_review`.

@@ -5715,16 +5715,30 @@ export class AppService {
     if (!task) {
       throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
     }
-    if (task.status !== 'review') {
+    const parsed = ReviewTaskSchema.parse(raw);
+    const manualReview = !isAutoReviewer(parsed.by);
+    // A human may approve a task that the automated reviewers blocked after
+    // exhausting their review rounds; it re-enters review so the normal
+    // approve → merge → publish path applies.
+    const reopenEscalated = manualReview
+      && parsed.verdict === 'approved'
+      && task.status === 'blocked'
+      && Boolean(task.reviewerEscalated)
+      && task.reviewerEscalationReason === 'reviewer_changes_limit';
+    if (task.status !== 'review' && !reopenEscalated) {
       throw new HttpError(400, 'bad_request', `Task "${taskId}" không ở trạng thái review (hiện tại: ${task.status})`);
     }
-
-    const parsed = ReviewTaskSchema.parse(raw);
     if (this.reviewingTasks.has(taskId)) {
       throw new HttpError(409, 'conflict', 'Task đang được duyệt');
     }
     this.reviewingTasks.add(taskId);
     try {
+    if (reopenEscalated) {
+      this.taskRepo.updateStatus(taskId, 'review');
+      this.scheduler.getEventBus().emit('review.reopened', taskId, { from: 'blocked', by: parsed.by ?? null });
+    }
+    // Stop any automated reviewer still running so its late verdict cannot override this decision.
+    if (manualReview) this.scheduler.supersedeReviewerRun(taskId, parsed.by);
 
     let mergeResult: { mergeCommit: string; checks: string[] } | undefined;
     const isPlan = task.slug.endsWith('-plan');

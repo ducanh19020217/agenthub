@@ -96,7 +96,7 @@ const statusColor = (status: FlowStatus) =>
   status === 'merge_failed' || status === 'push_failed' || status === 'audit_failed'
     ? 'var(--t-crit)'
     : status === 'auditing'
-      ? 'var(--status-auditing-color, #0891b2)'
+      ? 'var(--status-auditing-color, var(--t-accent))'
       : `var(--status-${status}-color, var(--t-accent))`;
 const taskHref = (task: Task) => `/tasks/${encodeURIComponent(task.id.replace('/', '~'))}`;
 

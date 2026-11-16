@@ -5837,6 +5837,15 @@ export class AppService {
       if (knowledge) this.knowledgeRepo.insert({ projectId: task.projectId, taskId, content: knowledge });
     }
     if (mergeResult) {
+      // A manual approval that already merged must leave review even when the scheduler treated the
+      // approval as an automated chain step (e.g. by = 'claude-review'); otherwise the task stays in
+      // review and a new automated reviewer is started on already-merged code.
+      const afterReview = this.taskRepo.get(taskId);
+      if (afterReview?.status === 'review') {
+        this.taskRepo.update(taskId, { reviewerEscalated: 0, reviewerEscalatedAt: null, reviewerEscalationReason: null });
+        this.taskRepo.updateStatus(taskId, 'done');
+        this.scheduler.getEventBus().emit('task.done', taskId, { by: parsed.by || 'manual', verdict: 'approved' });
+      }
       this.exportKnowledgeFile(task.projectId);
       this.scheduler.getEventBus().emit('task.merged', taskId, mergeResult);
       const proj = this.projectRepo.get(task.projectId);

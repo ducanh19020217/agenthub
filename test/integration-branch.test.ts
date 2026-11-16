@@ -586,6 +586,32 @@ describe('Integration branch and cross-project dependencies', () => {
     }
   });
 
+  it('a manual claude-review approval that merges leaves review even with an automated chain step pending', async () => {
+    const repo = path.join(tmpDir, 'chain-merge-repo');
+    initGitRepo(repo, 'main');
+    ctx.service.createProject({
+      id: 'chain-merge',
+      name: 'chain-merge',
+      path: repo,
+      defaultBranch: 'main',
+      reviewChain: [{ reviewer: 'codex:gpt-5.6-luna', mode: 'final' }],
+      settings: { review: { autoMerge: true } },
+      merge: { enabled: true, worktrees: { main: repo }, checks: [], timeoutSec: 30 },
+    });
+    ctx.service.createTask({ project: 'chain-merge', slug: 'feat', title: 'Feature', body: 'Do it', level: 'easy', start: true });
+    ctx.scheduler.tick();
+    const task = ctx.taskRepo.get('chain-merge/feat')!;
+    fs.writeFileSync(path.join(task.worktreePath!, 'feature.txt'), 'feature\n');
+    execFileSync('git', ['-C', task.worktreePath!, 'add', '.']);
+    execFileSync('git', ['-C', task.worktreePath!, 'commit', '-m', 'feat: chain']);
+    ctx.taskRepo.update(task.id, { status: 'review', reviewStep: 0 });
+    persistPassedCheck(task.id, 'chain-merge');
+
+    await ctx.service.reviewTask(task.id, { verdict: 'approved', by: 'claude-review', feedback: 'ok', merge: true });
+    expect(fs.existsSync(path.join(repo, 'feature.txt'))).toBe(true);
+    expect(ctx.taskRepo.get(task.id)!.status).toBe('done');
+  });
+
   it('retries an escalated review even when the brain runs in auto mode', async () => {
     ctx.config.brain.mode = 'auto';
     const repo = path.join(tmpDir, 'esc-auto-repo');

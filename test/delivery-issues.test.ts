@@ -260,6 +260,7 @@ describe('Delivery issues (merge_failed & push_failed)', () => {
         path: repoPath,
         defaultBranch: 'main',
         maxParallel: 1,
+        settings: JSON.stringify({ integration: { enabled: true } }),
       });
 
       const taskId = 'task-git';
@@ -306,6 +307,111 @@ describe('Delivery issues (merge_failed & push_failed)', () => {
         headers: authHeaders(),
       });
       expect(resTask.json().deliveryIssue).toBeNull();
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it('strictly restricts merge target verification to the actual configured target branch', async () => {
+    const { repoPath, taskBranch } = setupGitRepo();
+    try {
+      // 1. Project without integration: target is defaultBranch (main), not agenthub/integration
+      ctx.projectRepo.insert({
+        id: 'proj-no-integration',
+        name: 'Project No Integration',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ integration: { enabled: false } }),
+      });
+
+      const taskId1 = 'task-no-int';
+      ctx.taskRepo.insert({
+        id: taskId1,
+        projectId: 'proj-no-integration',
+        slug: 't-test-no-int',
+        branch: taskBranch,
+        title: 'Task without integration',
+        status: 'done',
+      });
+      ctx.eventRepo.insert('merge.conflict', taskId1, {
+        actor: 'auto-merge',
+        message: 'Xung đột merge ở: file.txt',
+      });
+
+      const projectNoInt = ctx.projectRepo.get('proj-no-integration')!;
+
+      // Merge into agenthub/integration
+      git(repoPath, 'checkout', 'agenthub/integration');
+      git(repoPath, 'merge', '--no-ff', taskBranch, '-m', 'Manual merge into integration');
+      git(repoPath, 'checkout', 'main');
+
+      clearGitCheckCache();
+      // Even though taskBranch is ancestor of agenthub/integration, proj-no-integration does NOT use integration!
+      // Its target is main, which does not contain the commit. So merge_failed must NOT be cleared.
+      let issue1 = computeDeliveryIssue(ctx.taskRepo.get(taskId1)!, ctx.eventRepo.getByTask(taskId1), projectNoInt);
+      expect(issue1).not.toBeNull();
+      expect(issue1?.kind).toBe('merge_failed');
+
+      // Now merge into main (the actual target)
+      git(repoPath, 'merge', '--no-ff', taskBranch, '-m', 'Manual merge into main');
+      clearGitCheckCache();
+      issue1 = computeDeliveryIssue(ctx.taskRepo.get(taskId1)!, ctx.eventRepo.getByTask(taskId1), projectNoInt);
+      expect(issue1).toBeNull();
+
+      // 2. Project with integration: target is integration branch, not defaultBranch (main)
+      // Create a fresh branch to test
+      const branchInt = 'agenthub/t-test-int';
+      git(repoPath, 'checkout', '-b', branchInt);
+      fs.writeFileSync(path.join(repoPath, 'file2.txt'), 'int test\n');
+      git(repoPath, 'add', 'file2.txt');
+      git(repoPath, 'commit', '-m', 'Task int commit');
+      git(repoPath, 'checkout', 'main');
+
+      ctx.projectRepo.insert({
+        id: 'proj-with-integration',
+        name: 'Project With Integration',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ integration: { enabled: true, branch: 'agenthub/integration' } }),
+      });
+
+      const taskId2 = 'task-with-int';
+      ctx.taskRepo.insert({
+        id: taskId2,
+        projectId: 'proj-with-integration',
+        slug: 't-test-int',
+        branch: branchInt,
+        title: 'Task with integration',
+        status: 'done',
+      });
+      ctx.eventRepo.insert('merge.conflict', taskId2, {
+        actor: 'auto-merge',
+        message: 'Xung đột merge ở: file2.txt',
+      });
+
+      const projectWithInt = ctx.projectRepo.get('proj-with-integration')!;
+
+      // Merge into main (not integration)
+      git(repoPath, 'checkout', 'main');
+      git(repoPath, 'merge', '--no-ff', branchInt, '-m', 'Manual merge into main');
+      clearGitCheckCache();
+
+      // Even though branchInt is ancestor of main, project uses integration!
+      // It has not been merged into agenthub/integration yet, so merge_failed must NOT be cleared.
+      let issue2 = computeDeliveryIssue(ctx.taskRepo.get(taskId2)!, ctx.eventRepo.getByTask(taskId2), projectWithInt);
+      expect(issue2).not.toBeNull();
+      expect(issue2?.kind).toBe('merge_failed');
+
+      // Now merge into agenthub/integration (the actual target)
+      git(repoPath, 'checkout', 'agenthub/integration');
+      git(repoPath, 'merge', '--no-ff', branchInt, '-m', 'Manual merge into integration');
+      git(repoPath, 'checkout', 'main');
+
+      clearGitCheckCache();
+      issue2 = computeDeliveryIssue(ctx.taskRepo.get(taskId2)!, ctx.eventRepo.getByTask(taskId2), projectWithInt);
+      expect(issue2).toBeNull();
     } finally {
       fs.rmSync(repoPath, { recursive: true, force: true });
     }

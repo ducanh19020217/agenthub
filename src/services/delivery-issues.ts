@@ -283,15 +283,10 @@ export function computeDeliveryIssue(
       if (project?.path) {
         const settings = projectSettings(project);
         const candidates: string[] = [];
-        if (settings.integration?.branch) {
-          candidates.push(settings.integration.branch);
-        }
-        candidates.push('agenthub/integration');
-        if (task.baseRef) {
-          candidates.push(task.baseRef);
-        }
-        if (project.defaultBranch) {
-          candidates.push(project.defaultBranch);
+        if (settings.integration.enabled) {
+          candidates.push(settings.integration.branch || 'agenthub/integration');
+        } else {
+          candidates.push(settings.publish?.branch || task.baseRef || project.defaultBranch || 'main');
         }
         const taskRef = resolveTaskGitRef(task, project.path);
         if (taskRef) {

@@ -1139,6 +1139,16 @@ export interface ModelOptionsResponse {
   configured: string[];
 }
 
+function getModelKey(engine: 'agy' | 'codex' | 'claude' | string, model: string): string {
+  if (engine === 'codex') {
+    return model.startsWith('codex:') ? model : `codex:${model}`;
+  }
+  if (engine === 'claude' && model.startsWith('claude:')) {
+    return `claude:${model.slice('claude:'.length)}`;
+  }
+  return `${engine}:${model}`;
+}
+
 export class AppService {
   private restartHandler?: () => void;
   private userShutdownRequested = false;
@@ -6930,7 +6940,10 @@ export class AppService {
       const rows = this.profileModelRepo.getForProfile(profile.name);
       for (const r of rows) {
         if (!r.verified) continue; // Only verified models are considered available on the account
-        const key = `${r.engine}:${r.modelId}`;
+        const modelId = r.engine === 'codex' && !r.modelId.startsWith('codex:')
+          ? `codex:${r.modelId}`
+          : r.modelId;
+        const key = getModelKey(r.engine, modelId);
         const existing = modelMap.get(key);
         if (existing) {
           if (!existing.profiles.includes(profile.name)) {
@@ -6940,9 +6953,9 @@ export class AppService {
           existing.available = true;
         } else {
           modelMap.set(key, {
-            id: r.modelId,
+            id: modelId,
             engine: r.engine as 'agy' | 'codex' | 'claude',
-            name: r.modelName || r.modelId,
+            name: r.modelName || modelId,
             profiles: [profile.name],
             verified: true,
             available: true,
@@ -6962,10 +6975,13 @@ export class AppService {
       if (!hasVerifiedForEngine) {
         const defaults = getDefaultModelsForEngine(engine);
         for (const item of defaults) {
-          const key = `${item.engine}:${item.id}`;
+          const modelId = item.engine === 'codex' && !item.id.startsWith('codex:')
+            ? `codex:${item.id}`
+            : item.id;
+          const key = getModelKey(item.engine, modelId);
           if (!modelMap.has(key)) {
             modelMap.set(key, {
-              id: item.id,
+              id: modelId,
               engine: item.engine,
               name: item.name,
               profiles: [],
@@ -7104,9 +7120,7 @@ export class AppService {
       }
     }
 
-    const configuredModels = [...new Set(configuredItems.map((item) => item.model))];
-
-    for (const item of configuredItems) {
+    const normalizedConfiguredItems = configuredItems.map((item) => {
       let engine: 'agy' | 'codex' | 'claude' = item.engine || 'agy';
       if (!item.engine) {
         if (item.model.startsWith('codex:') || (item.model.startsWith('gpt-') && !item.model.startsWith('gpt-oss-'))) {
@@ -7115,7 +7129,7 @@ export class AppService {
           engine = 'claude';
         } else {
           for (const eng of ['agy', 'codex', 'claude'] as const) {
-            const entry = modelMap.get(`${eng}:${item.model}`);
+            const entry = modelMap.get(getModelKey(eng, item.model));
             if (entry && entry.available) {
               engine = eng;
               break;
@@ -7123,13 +7137,21 @@ export class AppService {
           }
         }
       }
+      const model = engine === 'codex'
+        ? (item.model.startsWith('codex:') ? item.model : `codex:${item.model}`)
+        : (engine === 'claude' && item.model.startsWith('claude:') ? item.model.slice('claude:'.length) : item.model);
+      return { model, engine };
+    });
 
-      const key = `${engine}:${item.model}`;
+    const configuredModels = [...new Set(normalizedConfiguredItems.map((item) => item.model))];
+
+    for (const item of normalizedConfiguredItems) {
+      const key = getModelKey(item.engine, item.model);
       const existing = modelMap.get(key);
       if (!existing) {
         modelMap.set(key, {
           id: item.model,
-          engine,
+          engine: item.engine,
           name: item.model,
           profiles: [],
           verified: false,

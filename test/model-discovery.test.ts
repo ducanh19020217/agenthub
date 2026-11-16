@@ -723,6 +723,50 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'codex-undiscovered', 'codex:gpt-fake')).toBe(false);
   });
 
+  it('Scheduler.profileHasModel only allows defined fallback models for undiscovered claude profiles', () => {
+    profileRepo.upsert({
+      name: 'claude-undiscovered',
+      engine: 'claude',
+      kind: 'keyring',
+      email: 'claude@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+
+    const scheduler = {
+      profileRepo,
+      profileModelRepo,
+    };
+
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-undiscovered', 'sonnet')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-undiscovered', 'claude:sonnet')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-undiscovered', 'opus')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-undiscovered', 'haiku')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-undiscovered', 'claude-sonnet-4-6')).toBe(false);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-undiscovered', 'claude-fake-model')).toBe(false);
+  });
+
+  it('Scheduler.profileHasModel matches prefixed reviewer ids against discovered Claude rows', () => {
+    profileRepo.upsert({
+      name: 'claude-discovered',
+      engine: 'claude',
+      kind: 'keyring',
+      email: 'claude2@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('claude-discovered', [
+      { modelId: 'opus', modelName: 'Claude Opus', engine: 'claude', verified: true },
+    ]);
+
+    const scheduler = { profileRepo, profileModelRepo };
+
+    // Reviewer selection passes normalizeReviewerModel('claude', 'opus') === 'claude:opus'
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-discovered', 'claude:opus')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-discovered', 'opus')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-discovered', 'claude:sonnet')).toBe(false);
+  });
+
   it('logged-out profile marks cache unverified and is treated as unavailable across discovery, API, and scheduler', async () => {
     // 1. Profile with authState not_logged_in
     profileRepo.upsert({
@@ -875,6 +919,57 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     // Should NOT have a duplicate or warning model for 'gpt-5.6-luna'
     const bareLuna = result.models.find((m) => m.id === 'gpt-5.6-luna');
     expect(bareLuna).toBeUndefined();
+  });
+
+  it('getModelOptions correctly keys codex models as codex:<id> and matches configured without codex:codex: key or false warning', () => {
+    const codexHome = path.join(tmpDir, 'codex-audit-home');
+    fs.mkdirSync(codexHome, { recursive: true });
+    fs.writeFileSync(path.join(codexHome, 'auth.json'), '{}');
+    profileRepo.upsert({
+      name: 'codex-audit-prof',
+      engine: 'codex',
+      kind: 'isolated',
+      home: codexHome,
+      email: 'codex-audit@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('codex-audit-prof', [
+      { modelId: 'codex:gpt-5.6-luna', modelName: 'GPT-5.6-Luna', engine: 'codex', verified: true },
+    ]);
+
+    const service = {
+      profileRepo,
+      profileModelRepo,
+      config: {
+        defaultModelChains: { hard: ['codex:gpt-5.6-luna'], easy: ['gpt-5.6-luna'] },
+        reviewer: {
+          order: [{ engine: 'codex', model: 'codex:gpt-5.6-luna' }],
+          arbiter: { engine: 'codex', model: 'codex:gpt-5.6-luna' },
+        },
+      },
+    };
+
+    const result = AppService.prototype.getModelOptions.call(service as any);
+    expect(result.configured).toContain('codex:gpt-5.6-luna');
+    expect(result.configured).not.toContain('gpt-5.6-luna');
+
+    // No model should have codex:codex:
+    for (const m of result.models) {
+      expect(m.id).not.toContain('codex:codex:');
+      expect(m.name).not.toContain('codex:codex:');
+    }
+
+    const codexLuna = result.models.find((m) => m.id === 'codex:gpt-5.6-luna');
+    expect(codexLuna).toBeDefined();
+    expect(codexLuna?.available).toBe(true);
+    expect(codexLuna?.configured).toBe(true);
+    expect(codexLuna?.warning).toBeNull();
+    expect(codexLuna?.profiles).toContain('codex-audit-prof');
+
+    // There should NOT be any false warning entry for gpt-5.6-luna
+    const warnings = result.models.filter((m) => m.warning && m.id.includes('gpt-5.6-luna'));
+    expect(warnings).toHaveLength(0);
   });
 
   it('AppService.getModelOptions scans projectRepo and returns models configured only in a project with available:false, configured:true', () => {

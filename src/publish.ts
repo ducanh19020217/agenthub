@@ -246,13 +246,23 @@ export type PublishResult = PublishSuccessResult | PublishFailedResult | Publish
 
 /**
  * Checks if a commit is an ancestor of a base ref.
+ * Returns true if ancestor, false if not an ancestor (exit code 1).
+ * Throws on any fatal git error or execution failure (fail closed).
  */
-async function isAncestor(repoPath: string, commit: string, base: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+export async function isAncestor(
+  repoPath: string,
+  commit: string,
+  base: string,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean> {
   try {
     await execFileAsync('git', ['-C', repoPath, 'merge-base', '--is-ancestor', commit, base], { env });
     return true;
-  } catch {
-    return false;
+  } catch (err: unknown) {
+    if (typeof err === 'object' && err !== null && 'code' in err && (err as { code: unknown }).code === 1) {
+      return false;
+    }
+    throw err;
   }
 }
 
@@ -425,6 +435,7 @@ export async function findForwardMergeCommitsForTask(
 
         // 2. Structural parent/ancestry check: p1 must NOT be on the task branch
         let isP1OnTask = false;
+        let ancestryVerificationFailed = false;
         if (hasBranch && branchSha) {
           try {
             if (p1 === branchSha || (await isAncestor(repoPath, branchRef, p1, env))) {
@@ -436,7 +447,7 @@ export async function findForwardMergeCommitsForTask(
               isP1OnTask = true;
             }
           } catch {
-            isP1OnTask = false;
+            ancestryVerificationFailed = true;
           }
         } else {
           // When task branch does not exist locally, recover structural parent check from commit data:
@@ -458,12 +469,12 @@ export async function findForwardMergeCommitsForTask(
               isP1OnTask = true;
             }
           } catch {
-            isP1OnTask = false;
+            ancestryVerificationFailed = true;
           }
         }
 
-        if (isP1OnTask) {
-          // Parent 1 is on the task branch -> reverse merge, never use as audit source
+        if (ancestryVerificationFailed || isP1OnTask) {
+          // Parent 1 is on the task branch or ancestry verification failed -> reject reverse merge / fail closed
           continue;
         }
 
@@ -472,10 +483,13 @@ export async function findForwardMergeCommitsForTask(
         let isP2OnTask = false;
         if (hasBranch && branchSha) {
           try {
-            isP2OnTask =
-              p2 === branchSha ||
-              (await isAncestor(repoPath, p2, branchRef, env)) ||
-              (await isAncestor(repoPath, branchRef, p2, env));
+            const p2IsAncestorOfP1 = await isAncestor(repoPath, p2, p1, env);
+            if (!p2IsAncestorOfP1) {
+              isP2OnTask =
+                p2 === branchSha ||
+                (await isAncestor(repoPath, p2, branchRef, env)) ||
+                (await isAncestor(repoPath, branchRef, p2, env));
+            }
           } catch {
             isP2OnTask = false;
           }
@@ -648,18 +662,11 @@ export async function getTaskDiff(
 
       // Base commit:
       // Always prioritize remote base (baseRef / prevRemoteSha / origin/<target>) before publish.
-      // If baseRef is an ancestor of earliestMergeP1 (e.g. an earlier unpushed task already merged on destination branch),
-      // earliestMergeP1 isolates this task and does not include earlier tasks.
-      // If baseRef and earliestMergeP1 diverged or baseRef is ahead, use baseRef.
+      // Remote base is always used directly as baseCommit when available.
       let baseCommit = earliestMergeP1;
       if (baseRef && (await refExists(repoPath, baseRef, env))) {
         try {
-          const baseRefSha = (await runGit(['-C', repoPath, 'rev-parse', baseRef], repoPath, env)).trim();
-          if (await isAncestor(repoPath, baseRefSha, earliestMergeP1, env)) {
-            baseCommit = earliestMergeP1;
-          } else {
-            baseCommit = baseRefSha;
-          }
+          baseCommit = (await runGit(['-C', repoPath, 'rev-parse', baseRef], repoPath, env)).trim();
         } catch {
           baseCommit = earliestMergeP1;
         }

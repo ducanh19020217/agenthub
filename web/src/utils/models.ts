@@ -117,11 +117,10 @@ export function validateModelSyntax(
   model: string,
   t?: (key: string) => string,
 ): string | null {
-  const trimmed = model.trim();
-  if (!trimmed) {
+  if (!model || /^\s*$/.test(model)) {
     return t ? t('settings.emptyChainWarning') : 'Model cannot be empty';
   }
-  if (/\s/.test(trimmed)) {
+  if (/\s/.test(model)) {
     return t
       ? t('settings.invalidModelSyntax')
       : 'Model cannot contain whitespace';

@@ -16,6 +16,7 @@ import {
 import { openDatabase, ProfileModelRepo, ProfileRepo, ProfileRow, MIGRATIONS } from '../src/db/index.js';
 import { isKnownModel } from '../src/quota/index.js';
 import { AppService } from '../src/services/index.js';
+import { modelValidator } from '../src/services/index.js';
 import { Scheduler } from '../src/scheduler/index.js';
 import { ChatService } from '../src/chat/service.js';
 
@@ -312,6 +313,28 @@ describe('Engine Model Discovery with Fixtures', () => {
     expect(ids).toContain('haiku');
     expect(ids).toContain('claude-opus-5-5');
     expect(ids).toContain('claude-sonnet-5-5');
+    expect(models.find((m) => m.id === 'sonnet')?.verified).toBe(true);
+  });
+
+  it('discoverClaudeModels marks aliases unverified without a model catalog cache', async () => {
+    const profile: ProfileRow = {
+      name: 'claude-no-cache',
+      engine: 'claude',
+      kind: 'isolated',
+      home: path.join(tmpDir, 'claude-no-cache'),
+      enabled: 1,
+      email: 'claude@example.com',
+    };
+
+    const models = await discoverClaudeModels(profile);
+    expect(models.filter((m) => ['sonnet', 'opus', 'haiku'].includes(m.id)).every((m) => !m.verified)).toBe(true);
+  });
+
+  it('modelValidator accepts unknown model ids but rejects whitespace', () => {
+    expect(modelValidator.safeParse('vendor-model-2026').success).toBe(true);
+    expect(modelValidator.safeParse('codex:vendor-model-2026').success).toBe(true);
+    expect(modelValidator.safeParse('vendor model').success).toBe(false);
+    expect(modelValidator.safeParse('   ').success).toBe(false);
   });
 });
 

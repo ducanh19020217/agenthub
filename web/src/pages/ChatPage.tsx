@@ -101,10 +101,8 @@ export const ChatPage: React.FC = () => {
         .filter((m) => m.engine === 'claude' && m.available)
         .map((m) => m.id);
     }
-    return (modelOptions?.suggestions || []).filter(
-      (m) => m.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(m),
-    );
-  }, [modelOptions]);
+    return systemConfig?.chat?.models || [];
+  }, [modelOptions, systemConfig?.chat?.models]);
 
   // Resolve active session
   const activeSession = useMemo(() => {

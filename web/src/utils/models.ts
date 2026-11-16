@@ -122,21 +122,10 @@ export function validateModelSyntax(
   if (!trimmed) {
     return t ? t('settings.emptyChainWarning') : 'Model cannot be empty';
   }
-  if (knownModels && new Set(knownModels).has(trimmed)) {
-    return null;
-  }
-  const isAgy = VALID_AGY_MODELS.includes(trimmed);
-  const isCodex =
-    trimmed.startsWith('codex:') &&
-    (() => {
-      const raw = trimmed.slice('codex:'.length);
-      return DEFAULT_CODEX_MODELS.includes(raw) || (raw.startsWith('gpt-') && raw.length > 4);
-    })();
-
-  if (!isAgy && !isCodex) {
+  if (/\s/.test(trimmed)) {
     return t
       ? t('settings.invalidModelSyntax')
-      : 'Each model must be a valid agy id or codex model (codex:gpt-...)';
+      : 'Model cannot contain whitespace';
   }
   return null;
 }

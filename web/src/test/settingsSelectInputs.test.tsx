@@ -194,13 +194,13 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(validateModelSyntax('claude-sonnet-4-6', (k) => k)).toBeNull();
       expect(validateModelSyntax('codex:gpt-5.6-luna', (k) => k)).toBeNull();
       expect(validateModelSyntax('codex:gpt-4o', (k) => k)).toBeNull();
-      expect(validateModelSyntax('codex:x', (k) => k)).toBe('settings.invalidModelSyntax');
-      expect(validateModelSyntax('codex:custom-model-id', (k) => k)).toBe('settings.invalidModelSyntax');
+      expect(validateModelSyntax('codex:x', (k) => k)).toBeNull();
+      expect(validateModelSyntax('codex:custom-model-id', (k) => k)).toBeNull();
       expect(validateModelSyntax('   ', (k) => k)).toBe('settings.emptyChainWarning');
-      // Arbitrary non-agy and non-codex models should be rejected
-      expect(validateModelSyntax('gemini-custom', (k) => k)).toBe('settings.invalidModelSyntax');
-      expect(validateModelSyntax('gpt-custom', (k) => k)).toBe('settings.invalidModelSyntax');
-      expect(validateModelSyntax('claude:custom', (k) => k)).toBe('settings.invalidModelSyntax');
+      expect(validateModelSyntax('gemini-custom', (k) => k)).toBeNull();
+      expect(validateModelSyntax('gpt-custom', (k) => k)).toBeNull();
+      expect(validateModelSyntax('claude:custom', (k) => k)).toBeNull();
+      expect(validateModelSyntax('custom model', (k) => k)).toBe('settings.invalidModelSyntax');
     });
 
     it('validates chat model syntax consistently with chat.model enum', () => {

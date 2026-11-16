@@ -59,10 +59,8 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
         .filter((m) => m.engine === 'claude' && m.available)
         .map((m) => m.id);
     }
-    return (modelOptions?.suggestions || []).filter(
-      (m) => m.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(m),
-    );
-  }, [modelOptions]);
+    return config?.chat?.models || [];
+  }, [config?.chat?.models, modelOptions]);
 
   const isModelUnavailable = useMemo(() => {
     if (!model) return false;

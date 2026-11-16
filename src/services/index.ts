@@ -318,8 +318,8 @@ export const VALID_AGY_MODELS = new Set([
 ]);
 
 export const modelValidator = z.string().trim().min(1, 'Model không được để trống').refine(
-  (m) => (m.startsWith('codex:') && isValidReviewerModel('codex', m.slice('codex:'.length))) || VALID_AGY_MODELS.has(m),
-  { message: 'Mỗi model phải là id agy hợp lệ hoặc model codex hợp lệ (codex:gpt-...)' },
+  (m) => !/\s/.test(m),
+  { message: 'Model không được chứa khoảng trắng' },
 );
 
 export const reviewerModelValidator = z

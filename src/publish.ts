@@ -667,7 +667,7 @@ async function runAuditAgentForTask(
   doneReport: string,
   commitSha?: string,
 ): Promise<
-  | { ok: true; result: PrePublishAuditResult; engineId: string; profileName: string }
+  | { ok: true; result: PrePublishAuditResult; engineId: string; profileName: string; model: string }
   | { ok: false; error: string; retryable: boolean; isQuota?: boolean }
 > {
   const currentSettings = projectSettings(project);
@@ -852,7 +852,7 @@ async function runAuditAgentForTask(
     };
   }
 
-  return { ok: true, result: parsed, engineId: chosenProfile.engine, profileName: chosenProfile.name };
+  return { ok: true, result: parsed, engineId: chosenProfile.engine, profileName: chosenProfile.name, model: chosenModel };
 }
 
 /**
@@ -1206,17 +1206,18 @@ export async function publishTask(
           }
         }
 
+        const auditStartedAt = new Date().toISOString();
         deps.taskRepo.update(t.id, {
           pushResult: JSON.stringify({
             state: 'auditing',
-            startedAt: new Date().toISOString(),
+            startedAt: auditStartedAt,
           }),
         });
         if (taskId !== t.id) {
           deps.taskRepo.update(taskId, {
             pushResult: JSON.stringify({
               state: 'auditing',
-              startedAt: new Date().toISOString(),
+              startedAt: auditStartedAt,
             }),
           });
         }
@@ -1224,10 +1225,12 @@ export async function publishTask(
         deps.eventBus.emit('task.auditing', t.id, {
           taskId: t.id,
           projectId: currentProject.id,
+          startedAt: auditStartedAt,
         });
         deps.eventBus.emit('task.audit_started', t.id, {
           taskId: t.id,
           projectId: currentProject.id,
+          startedAt: auditStartedAt,
         });
 
         const auditExec = await runAuditAgentForTask(
@@ -1249,6 +1252,7 @@ export async function publishTask(
             pushResult: JSON.stringify({
               error: errorMsg,
               failedAt,
+              startedAt: auditStartedAt,
               retryable: true,
               auditFailed: true,
             }),
@@ -1260,6 +1264,7 @@ export async function publishTask(
                 blockedByTaskId: t.id,
                 error: `Bị chặn bởi task ${t.slug} do audit lỗi: ${errorMsg}`,
                 failedAt,
+                startedAt: auditStartedAt,
                 retryable: true,
               }),
             });
@@ -1282,6 +1287,10 @@ export async function publishTask(
             projectId: currentProject.id,
             findings: auditResult.findings,
             summary: auditResult.summary,
+            engine: auditExec.engineId,
+            model: auditExec.model,
+            startedAt: auditStartedAt,
+            finishedAt: new Date().toISOString(),
           });
         } else {
           // Task failed audit
@@ -1295,8 +1304,11 @@ export async function publishTask(
                 state: 'push_failed',
                 error: errorMsg,
                 failedAt,
+                startedAt: auditStartedAt,
                 retryable: true,
                 auditFailed: true,
+                engine: auditExec.engineId,
+                model: auditExec.model,
                 findings: auditResult.findings,
                 summary: auditResult.summary,
               }),
@@ -1308,6 +1320,7 @@ export async function publishTask(
                   blockedByTaskId: t.id,
                   error: `Bị chặn bởi task ${t.slug}: ${errorMsg}`,
                   failedAt,
+                  startedAt: auditStartedAt,
                   retryable: true,
                 }),
               });
@@ -1330,6 +1343,7 @@ export async function publishTask(
           if (currentAuditRounds >= maxFixRounds) {
             // Exceeded maxFixRounds -> stop, do not return to worker
             // Emit task.audit_failed ONCE with exceededMaxRounds: true
+            const failedAt = new Date().toISOString();
             deps.eventBus.emit('task.audit_failed', t.id, {
               taskId: t.id,
               projectId: currentProject.id,
@@ -1337,9 +1351,13 @@ export async function publishTask(
               maxFixRounds,
               findings: auditResult.findings,
               summary: auditResult.summary,
+              engine: auditExec.engineId,
+              model: auditExec.model,
+              auditFixRounds: currentAuditRounds,
+              startedAt: auditStartedAt,
+              finishedAt: failedAt,
             });
 
-            const failedAt = new Date().toISOString();
             const pushResultObj = {
               auditFailed: true,
               exceededMaxRounds: true,
@@ -1347,6 +1365,9 @@ export async function publishTask(
               auditFixRounds: currentAuditRounds,
               findings: auditResult.findings,
               summary: auditResult.summary,
+              engine: auditExec.engineId,
+              model: auditExec.model,
+              startedAt: auditStartedAt,
               failedAt,
               retryable: false,
               error: `Task ${t.slug} vượt quá số vòng sửa tối đa (${maxFixRounds}) khi audit`,
@@ -1361,6 +1382,7 @@ export async function publishTask(
                   blockedByTaskId: t.id,
                   error: `Chặn publish do task ${t.slug} vượt quá số vòng sửa audit (${maxFixRounds})`,
                   failedAt,
+                  startedAt: auditStartedAt,
                   retryable: false,
                 }),
               });
@@ -1385,6 +1407,9 @@ export async function publishTask(
             auditFixRounds: nextRound,
             findings: auditResult.findings,
             summary: auditResult.summary,
+            engine: auditExec.engineId,
+            model: auditExec.model,
+            startedAt: auditStartedAt,
             failedAt,
             retryable: false,
             error: `Audit trước khi publish thất bại: ${auditResult.summary}`,
@@ -1399,6 +1424,7 @@ export async function publishTask(
                 blockedByTaskId: t.id,
                 error: `Bị chặn bởi task ${t.slug} do audit không đạt`,
                 failedAt,
+                startedAt: auditStartedAt,
                 retryable: false,
               }),
             });
@@ -1411,6 +1437,11 @@ export async function publishTask(
             exceededMaxRounds: false,
             findings: auditResult.findings,
             summary: auditResult.summary,
+            engine: auditExec.engineId,
+            model: auditExec.model,
+            auditFixRounds: nextRound,
+            startedAt: auditStartedAt,
+            finishedAt: failedAt,
           });
 
           const feedback = [

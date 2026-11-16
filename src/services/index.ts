@@ -86,6 +86,7 @@ import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
 import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
 import { computeDeliveryIssue, clearGitCheckCache, clearGitCheckCacheForTask, extractConflictFiles, type DeliveryIssue } from './delivery-issues.js';
+import { computeTaskAudit, getDerivedAuditStatus, type TaskAuditInfo } from './audit-status.js';
 import { publishTask as executePublishTask, isProjectPublishing, onProjectPublishLockReleased, type PublishResult } from '../publish.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
@@ -198,6 +199,7 @@ export interface TaskTimelineItem {
   durationMs?: number;
   runId?: string | null;
   actor?: string | null;
+  round?: number;
   estimated?: boolean;
 }
 
@@ -1724,6 +1726,8 @@ export class AppService {
       focusWaiting: 0,
       merge_failed: 0,
       push_failed: 0,
+      auditing: 0,
+      audit_failed: 0,
     };
 
     const tasksByProject: Record<string, Record<string, number>> = {};
@@ -1775,6 +1779,11 @@ export class AppService {
         const issue = computeDeliveryIssue(t, events, project);
         if (issue) {
           byStatus[issue.kind] = (byStatus[issue.kind] || 0) + 1;
+        }
+        const reviews = this.reviewRepo ? this.reviewRepo.getByTask(t.id) : [];
+        const audit = computeTaskAudit(t, events, project, reviews);
+        if (audit && (audit.state === 'auditing' || audit.state === 'audit_failed')) {
+          byStatus[audit.state] = (byStatus[audit.state] || 0) + 1;
         }
       }
     }
@@ -4246,10 +4255,13 @@ export class AppService {
         } catch { /* ignore malformed legacy event */ }
       }
       const taskEvents = this.eventRepo ? this.eventRepo.getByTask(task.id) : [];
+      const reviews = this.reviewRepo ? this.reviewRepo.getByTask(task.id) : [];
       const deliveryIssue = computeDeliveryIssue(task, taskEvents, project);
+      const audit = computeTaskAudit(task, taskEvents, project, reviews);
       return {
         ...apiTask(task, blockingDisk),
         deliveryIssue,
+        audit,
         externalUrl: this.openProjectTicketUrl(task),
         blockingDisk,
         reviewChain,
@@ -4283,26 +4295,46 @@ export class AppService {
   }
 
   listTasks(filter?: { project?: string; status?: string; derived?: string }): TaskRow[] {
-    const derived = filter?.derived || (filter?.status === 'merge_failed' || filter?.status === 'push_failed' ? filter.status : undefined);
-    const statusFilter = (filter?.status === 'merge_failed' || filter?.status === 'push_failed') ? undefined : filter?.status;
+    const isDerivedStatus = filter?.status === 'merge_failed' || filter?.status === 'push_failed' || filter?.status === 'auditing' || filter?.status === 'audit_failed';
+    const derived = filter?.derived || (isDerivedStatus ? filter.status : undefined);
+    const statusFilter = isDerivedStatus ? undefined : filter?.status;
     let tasks = this.decorateTriageTasks(this.decorateTasks(this.taskRepo.list({ project: filter?.project, status: statusFilter })));
     if (derived) {
-      tasks = tasks.filter((t) => (t as unknown as { deliveryIssue?: DeliveryIssue }).deliveryIssue?.kind === derived);
+      tasks = tasks.filter((t) => {
+        const item = t as unknown as { deliveryIssue?: DeliveryIssue; audit?: TaskAuditInfo };
+        if (derived === 'merge_failed' || derived === 'push_failed') {
+          return item.deliveryIssue?.kind === derived;
+        }
+        if (derived === 'auditing' || derived === 'audit_failed') {
+          return item.audit?.state === derived;
+        }
+        return false;
+      });
     }
     return tasks;
   }
 
   listTasksPage(filter?: { project?: string; status?: string; derived?: string; search?: string; limit?: string | number; cursor?: string; offset?: string | number; sort?: string; order?: string }): PageResult<TaskRow> {
-    const derived = filter?.derived || (filter?.status === 'merge_failed' || filter?.status === 'push_failed' ? filter.status : undefined);
+    const isDerivedStatus = filter?.status === 'merge_failed' || filter?.status === 'push_failed' || filter?.status === 'auditing' || filter?.status === 'audit_failed';
+    const derived = filter?.derived || (isDerivedStatus ? filter.status : undefined);
     if (!derived) {
       const page = this.taskRepo.page(filter);
       return { ...page, items: this.decorateTriageTasks(this.decorateTasks(page.items)) };
     }
 
-    // For derived delivery issue queries (merge_failed | push_failed), retrieve candidate tasks and filter
+    // For derived queries (merge_failed | push_failed | auditing | audit_failed), retrieve candidate tasks and filter
     const candidateTasks = this.taskRepo.list({ project: filter?.project });
     const decorated = this.decorateTriageTasks(this.decorateTasks(candidateTasks));
-    let matching = decorated.filter((t) => (t as unknown as { deliveryIssue?: DeliveryIssue }).deliveryIssue?.kind === derived);
+    let matching = decorated.filter((t) => {
+      const item = t as unknown as { deliveryIssue?: DeliveryIssue; audit?: TaskAuditInfo };
+      if (derived === 'merge_failed' || derived === 'push_failed') {
+        return item.deliveryIssue?.kind === derived;
+      }
+      if (derived === 'auditing' || derived === 'audit_failed') {
+        return item.audit?.state === derived;
+      }
+      return false;
+    });
 
     if (filter?.search?.trim()) {
       const term = filter.search.trim().toLowerCase();
@@ -4501,9 +4533,11 @@ export class AppService {
     const skippedEvent = events.filter((event) => event.type === 'review.auto_merge_skipped').at(-1);
     const skippedPayload = skippedEvent?.payload && typeof skippedEvent.payload === 'object' ? skippedEvent.payload as { reason?: unknown; checks?: unknown; retried?: unknown } : undefined;
     const deliveryIssue = computeDeliveryIssue(task, rawEvents, project);
+    const audit = computeTaskAudit(task, rawEvents, project, reviews);
     return {
       ...apiTask(task, blockingDisk),
       deliveryIssue,
+      audit,
       externalUrl: this.openProjectTicketUrl(task),
       blockingDisk,
       reviewer,
@@ -4590,6 +4624,7 @@ export class AppService {
       at: string;
       runId?: string | null;
       actor?: string | null;
+      round?: number;
       estimated?: boolean;
     }> = [];
 
@@ -4649,7 +4684,28 @@ export class AppService {
           candidates.push({ status: 'publishing', at });
           break;
         case 'task.auditing':
+        case 'task.audit_started':
           candidates.push({ status: 'auditing', at });
+          break;
+        case 'task.audit_passed':
+          candidates.push({
+            status: 'audit_passed',
+            at,
+            actor: typeof payload?.engine === 'string' ? payload.engine : undefined,
+          });
+          break;
+        case 'task.audit_failed':
+          candidates.push({
+            status: 'audit_failed',
+            at,
+            actor: typeof payload?.engine === 'string' ? payload.engine : undefined,
+            round: typeof payload?.auditFixRounds === 'number'
+              ? payload.auditFixRounds
+              : (typeof payload?.round === 'number' ? payload.round : undefined),
+          });
+          break;
+        case 'task.audit_skipped':
+          candidates.push({ status: 'audit_skipped', at });
           break;
         case 'task.pushed':
           candidates.push({ status: 'pushed', at });
@@ -4729,12 +4785,24 @@ export class AppService {
       }
     }
 
-    if (task.pushResult && !candidates.some((c) => c.status === 'push_failed')) {
+    if (task.pushResult) {
       try {
         const pr = typeof task.pushResult === 'string' ? JSON.parse(task.pushResult) : task.pushResult;
-        if (pr && typeof pr === 'object' && (pr.state === 'push_failed' || (pr.error && !task.pushedAt))) {
-          const at = toApiTime(pr.failedAt || task.updatedAt || task.createdAt);
-          if (at) candidates.push({ status: 'push_failed', at });
+        if (pr && typeof pr === 'object') {
+          if (pr.state === 'push_failed' || (pr.error && !task.pushedAt)) {
+            const at = toApiTime(pr.failedAt || task.updatedAt || task.createdAt);
+            if (at && !candidates.some((c) => c.status === 'push_failed')) candidates.push({ status: 'push_failed', at });
+          }
+          if (pr.state === 'auditing' && !candidates.some((c) => c.status === 'auditing')) {
+            const at = toApiTime(pr.startedAt || task.updatedAt || task.createdAt);
+            if (at) candidates.push({ status: 'auditing', at });
+          } else if (pr.auditFailed && !candidates.some((c) => c.status === 'audit_failed')) {
+            const at = toApiTime(pr.failedAt || task.updatedAt || task.createdAt);
+            if (at) candidates.push({ status: 'audit_failed', at, round: typeof pr.auditFixRounds === 'number' ? pr.auditFixRounds : undefined });
+          } else if (pr.auditPassed && !candidates.some((c) => c.status === 'audit_passed')) {
+            const at = toApiTime(task.pushedAt || task.updatedAt || task.createdAt);
+            if (at) candidates.push({ status: 'audit_passed', at });
+          }
         }
       } catch {
         // ignore
@@ -4753,6 +4821,7 @@ export class AppService {
       } else {
         if (!last.runId && item.runId) last.runId = item.runId;
         if (!last.actor && item.actor) last.actor = item.actor;
+        if (!last.round && item.round) last.round = item.round;
       }
     }
 
@@ -4767,8 +4836,8 @@ export class AppService {
     } else {
       const lastStatus = deduplicated.at(-1)!.status;
       const isDoneMatching =
-        task.status === 'done' && (lastStatus === 'done' || lastStatus === 'merged' || lastStatus === 'pushed' || lastStatus === 'push_failed' || lastStatus === 'merge_failed');
-      if (lastStatus !== task.status && !isDoneMatching && lastStatus !== 'merge_failed' && lastStatus !== 'push_failed') {
+        task.status === 'done' && (lastStatus === 'done' || lastStatus === 'merged' || lastStatus === 'pushed' || lastStatus === 'push_failed' || lastStatus === 'merge_failed' || lastStatus === 'auditing' || lastStatus === 'audit_passed' || lastStatus === 'audit_failed');
+      if (lastStatus !== task.status && !isDoneMatching && lastStatus !== 'merge_failed' && lastStatus !== 'push_failed' && lastStatus !== 'audit_failed' && lastStatus !== 'auditing') {
         const at = toApiTime(task.statusChangedAt ?? task.updatedAt)!;
         deduplicated.push({
           status: task.status,
@@ -4798,6 +4867,7 @@ export class AppService {
         ...(durationMs !== undefined ? { durationMs } : {}),
         ...(curr.runId ? { runId: curr.runId } : {}),
         ...(curr.actor ? { actor: curr.actor } : {}),
+        ...(curr.round !== undefined ? { round: curr.round } : {}),
         ...(curr.estimated ? { estimated: true } : {}),
       });
     }

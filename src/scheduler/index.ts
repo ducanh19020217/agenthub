@@ -552,11 +552,12 @@ export class Scheduler {
           return id;
         };
         const wanted = normalize(model);
-        return rows.some((r) => normalize(r.modelId) === wanted && Boolean(r.verified));
+        if (rows.some((r) => normalize(r.modelId) === wanted && Boolean(r.verified))) return true;
+        // Discovery is additive: fall through to the statically known models below.
       }
     }
 
-    // Fallback if no discovery has been recorded for this profile yet:
+    // Statically known models (also the fallback when no discovery has been recorded yet):
     if (profile.engine === 'agy') {
       return KNOWN_AGY_MODELS.has(model);
     }
@@ -4355,6 +4356,10 @@ export class Scheduler {
     );
     return chain.filter((model) => {
       if (isKnownModel(model, knownDiscovered.size > 0 ? knownDiscovered : undefined)) return true;
+      // Discovery only adds models. A Codex account's models_cache.json can list variant slugs
+      // (e.g. gpt-5.6-luna-wm) without the canonical id the CLI accepts, so statically known
+      // models must never be dropped because discovery did not list them.
+      if (isKnownModel(model)) return true;
       if (hasUndiscoveredCodex && (KNOWN_CODEX_MODELS.has(model) || KNOWN_CODEX_MODELS.has(`codex:${model}`))) return true;
       const key = `${task.id}:${model}`;
       if (!this.notifiedSkippedModels.has(key)) {

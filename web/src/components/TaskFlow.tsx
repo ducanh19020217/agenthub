@@ -463,6 +463,58 @@ const FlowEdges: React.FC<{
     return b.y + b.h;
   })) + 36;
 
+  const renderIssueEdge = (
+    edge: { from: FlowStatus; to: FlowStatus; label: string },
+    direction: 'upper' | 'lower',
+  ) => {
+    const bFrom = getNodeBox(edge.from);
+    const bTo = getNodeBox(edge.to);
+    const hasTasks = (counts[edge.to] ?? 0) > 0;
+    const xFrom = bFrom.x + bFrom.w * 0.7;
+    const xTo = bTo.x + bTo.w * 0.7;
+    const yFrom = direction === 'upper' ? bFrom.y + 8 : bFrom.y + bFrom.h - 8;
+    const yTo = direction === 'upper' ? bTo.y + bTo.h - 8 : bTo.y + 8;
+
+    return (
+      <Edge
+        key={`${edge.from}-${edge.to}`}
+        d={`M ${xFrom} ${yFrom} L ${xTo} ${yTo}`}
+        label={edge.label}
+        lx={xFrom + 8}
+        ly={direction === 'upper' ? (yFrom + yTo) / 2 - 4 : (bFrom.y + bFrom.h + bTo.y) / 2}
+        anchor="start"
+        animated={hasTasks}
+        stroke={hasTasks ? 'var(--t-crit)' : EDGE_STYLE.stroke}
+        marker={hasTasks ? 'url(#flow-arrow-issue)' : 'url(#flow-arrow)'}
+        kind={`issue-${direction}`}
+      />
+    );
+  };
+
+  const renderRetryPath = (edge: { to: FlowStatus }, direction: 'upper' | 'lower') => {
+    const box = getNodeBox(edge.to);
+    const x = box.x + box.w * 0.3;
+    const laneY = direction === 'upper' ? upperLaneY : lowerLaneY;
+    const sourceY = direction === 'upper' ? box.y : box.y + box.h;
+    const queuedY = direction === 'upper' ? bQueued.y - 6 : bQueued.y + bQueued.h + 6;
+    const hasTasks = (counts[edge.to] ?? 0) > 0;
+
+    return (
+      <path
+        key={`${direction}-retry-${edge.to}`}
+        d={`M ${x} ${sourceY} L ${x} ${laneY} L ${queuedX} ${laneY} L ${queuedX} ${queuedY}`}
+        fill="none"
+        strokeWidth={1.75}
+        strokeDasharray="6 5"
+        stroke={EDGE_STYLE.stroke}
+        markerEnd="url(#flow-arrow)"
+        className={hasTasks ? 'flow-edge-animated' : undefined}
+        data-animated={hasTasks ? 'true' : undefined}
+        data-edge={`retry-${direction}`}
+      />
+    );
+  };
+
   return (
     <g data-testid="flow-edges">
       {/* Main flow across the top row. */}
@@ -502,51 +554,15 @@ const FlowEdges: React.FC<{
       })}
 
       {/* Errors above their source point upward; errors below point downward. */}
-      {upper.map(({ from, to, label }) => {
-        const bFrom = getNodeBox(from);
-        const bTo = getNodeBox(to);
-        const startX = bFrom.x + bFrom.w * 0.7;
-        const startY = bFrom.y + 8;
-        const endX = bTo.x + bTo.w * 0.7;
-        const endY = bTo.y + bTo.h - 8;
-        const animated = (counts[to] ?? 0) > 0;
-
-        return (
-          <Edge
-            key={`${from}-${to}`}
-            d={`M ${startX} ${startY} L ${endX} ${endY}`}
-            label={label}
-            lx={startX + 8}
-            ly={(startY + endY) / 2 - 4}
-            anchor="start"
-            animated={animated}
-            stroke={(counts[to] ?? 0) > 0 ? 'var(--t-crit)' : EDGE_STYLE.stroke}
-            marker={(counts[to] ?? 0) > 0 ? 'url(#flow-arrow-issue)' : 'url(#flow-arrow)'}
-            kind="issue-upper"
-          />
-        );
-      })}
-      {lower.map(({ from, to, label }) => {
-        const bFrom = getNodeBox(from);
-        const bTo = getNodeBox(to);
-        const animated = (counts[to] ?? 0) > 0;
-        return <Edge key={`${from}-${to}`} d={`M ${bFrom.x + bFrom.w * 0.7} ${bFrom.y + bFrom.h - 8} L ${bTo.x + bTo.w * 0.7} ${bTo.y + 8}`} label={label} lx={bFrom.x + bFrom.w * 0.7 + 8} ly={(bFrom.y + bFrom.h + bTo.y) / 2} anchor="start" animated={animated} stroke={(counts[to] ?? 0) > 0 ? 'var(--t-crit)' : EDGE_STYLE.stroke} marker={(counts[to] ?? 0) > 0 ? 'url(#flow-arrow-issue)' : 'url(#flow-arrow)'} kind="issue-lower" />;
-      })}
+      {upper.map((edge) => renderIssueEdge(edge, 'upper'))}
+      {lower.map((edge) => renderIssueEdge(edge, 'lower'))}
 
       {/* Reviewer rework loop between the two rows. */}
       <Edge d={`M ${bReview.x + bReview.w * 0.3} ${bReview.y + bReview.h} L ${bReview.x + bReview.w * 0.3} ${bReview.y + bReview.h + 48} L ${bRunning.x + bRunning.w / 2} ${bReview.y + bReview.h + 48} L ${bRunning.x + bRunning.w / 2} ${bRunning.y + bRunning.h + 2}`} dashed animated={(counts.review ?? 0) > 0} label={t('tasks.flow.edgeRework')} lx={(bReview.x + bRunning.x) / 2} ly={bReview.y + bReview.h + 54} />
 
       {/* Shared retry lanes: upper issues return from above, lower issues from below. */}
-      {upper.map(({ to }) => {
-        const b = getNodeBox(to);
-        const x = b.x + b.w * 0.3;
-        return <path key={`upper-retry-${to}`} d={`M ${x} ${b.y} L ${x} ${upperLaneY} L ${queuedX} ${upperLaneY} L ${queuedX} ${bQueued.y - 6}`} fill="none" strokeWidth={1.75} strokeDasharray="6 5" stroke={EDGE_STYLE.stroke} markerEnd="url(#flow-arrow)" className={(counts[to] ?? 0) > 0 ? 'flow-edge-animated' : undefined} data-animated={(counts[to] ?? 0) > 0 ? 'true' : undefined} data-edge="retry-upper" />;
-      })}
-      {lower.map(({ to }) => {
-        const b = getNodeBox(to);
-        const x = b.x + b.w * 0.3;
-        return <path key={`lower-retry-${to}`} d={`M ${x} ${b.y + b.h} L ${x} ${lowerLaneY} L ${queuedX} ${lowerLaneY} L ${queuedX} ${bQueued.y + bQueued.h + 6}`} fill="none" strokeWidth={1.75} strokeDasharray="6 5" stroke={EDGE_STYLE.stroke} markerEnd="url(#flow-arrow)" className={(counts[to] ?? 0) > 0 ? 'flow-edge-animated' : undefined} data-animated={(counts[to] ?? 0) > 0 ? 'true' : undefined} data-edge="retry-lower" />;
-      })}
+      {upper.map((edge) => renderRetryPath(edge, 'upper'))}
+      {lower.map((edge) => renderRetryPath(edge, 'lower'))}
       <text x={queuedX + 10} y={upperLaneY - 8} fontSize={11.5} textAnchor="start" className="select-none fill-[var(--t-text-3)] font-medium">{t('tasks.flow.edgeRetry')}</text>
       <text x={queuedX + 10} y={lowerLaneY + 16} fontSize={11.5} textAnchor="start" className="select-none fill-[var(--t-text-3)] font-medium">{t('tasks.flow.edgeRetry')}</text>
     </g>

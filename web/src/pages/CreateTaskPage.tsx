@@ -71,6 +71,21 @@ export const CreateTaskPage: React.FC = () => {
     return configuredList.filter((m) => unavailableModels.has(m));
   }, [modelChain, level, config, unavailableModels]);
 
+  const unverifiedModels = React.useMemo(() => {
+    const set = new Set<string>();
+    for (const model of modelOptions?.models || []) {
+      if (model.available && !model.unavailable && model.runVerified === false) set.add(model.id);
+    }
+    return set;
+  }, [modelOptions]);
+
+  const unverifiedConfiguredModels = React.useMemo(() => {
+    const configuredList = modelChain.length > 0
+      ? modelChain
+      : (level === 'hard' ? config?.modelChainHard : config?.modelChainEasy) || [];
+    return configuredList.filter((model) => unverifiedModels.has(model));
+  }, [modelChain, level, config, unverifiedModels]);
+
   // Set default project when loaded
   React.useEffect(() => {
     setCreateTicket(false);
@@ -279,7 +294,11 @@ export const CreateTaskPage: React.FC = () => {
             <input
               aria-label={t('createTask.modelChainLabel')}
               value={modelChain.join(', ')}
-              onChange={(e) => setModelChain(e.target.value.split(',').map((model) => model.trim()).filter(Boolean))}
+              onChange={(e) => {
+                const next = e.target.value.split(',').map((model) => model.trim()).filter(Boolean);
+                if (next[0] && unavailableModels.has(next[0])) return;
+                setModelChain(next);
+              }}
               list="create-task-model-suggestions"
               placeholder={(level === 'hard' ? config?.modelChainHard : config?.modelChainEasy)?.join(', ') || 'gemini-3.8-flash-medium, codex:gpt-5.6-luna'}
               className="w-full text-sm font-mono rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-[var(--t-text)]"
@@ -293,6 +312,15 @@ export const CreateTaskPage: React.FC = () => {
               >
                 <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
                 <span>{t('models.unavailableWarning')} ({unavailableConfiguredModels.join(', ')})</span>
+              </div>
+            )}
+            {unverifiedConfiguredModels.length > 0 && unavailableConfiguredModels.length === 0 && (
+              <div
+                className="mt-1.5 text-xs text-[var(--t-warn)] flex items-center gap-1 font-medium"
+                data-testid="model-unverified-warning"
+              >
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                <span>{t('models.unverifiedRunWarning')} ({unverifiedConfiguredModels.join(', ')})</span>
               </div>
             )}
           </div>

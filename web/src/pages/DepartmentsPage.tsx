@@ -16,6 +16,7 @@ import {
 } from '../api/client';
 import { Department, Profile } from '../types/api';
 import { useLocale } from '../context/LocaleContext';
+import { formatDiscoveredModelOptions } from '../utils/models';
 
 export const DepartmentsPage: React.FC = () => {
   const { t } = useLocale();
@@ -68,12 +69,9 @@ export const DepartmentsPage: React.FC = () => {
   };
   const modelOptionsByEngine = useMemo(() => {
     if (modelOptions?.models) {
-      const claude = modelOptions.models
-        .filter((m) => m.engine === 'claude' && m.available && !m.unavailable)
-        .map((m) => m.id);
-      const codex = modelOptions.models
-        .filter((m) => m.engine === 'codex' && m.available && !m.unavailable)
-        .map((m) => (m.id.startsWith('codex:') ? m.id.slice('codex:'.length) : m.id));
+      const claude = formatDiscoveredModelOptions(modelOptions.models, t, 'claude', true);
+      const codex = formatDiscoveredModelOptions(modelOptions.models, t, 'codex', true)
+        .map((option) => ({ ...option, value: option.value.startsWith('codex:') ? option.value.slice('codex:'.length) : option.value }));
       return {
         claude: Array.from(new Set(claude)),
         codex: Array.from(new Set(codex)),
@@ -83,7 +81,7 @@ export const DepartmentsPage: React.FC = () => {
       claude: [],
       codex: [],
     };
-  }, [modelOptions]);
+  }, [modelOptions, t]);
 
   const unavailableModels = useMemo(() => {
     const set = new Set<string>();
@@ -252,14 +250,17 @@ export const DepartmentsPage: React.FC = () => {
                 const isUnavailable = Boolean(
                   currentModel &&
                   currentModel !== 'inherit' &&
-                  (unavailableModels.has(currentModel) || (modelOptions?.models && !availableModels.includes(currentModel)))
+                  (unavailableModels.has(currentModel) || (modelOptions?.models && !availableModels.some((model) => typeof model === 'string' ? model === currentModel : model.value === currentModel)))
                 );
                 return (
                   <div>
                     <SelectOrCustomInput
                       ariaLabel={t('departments.brainModel')}
                       value={currentModel}
-                      onChange={(val) => update.mutate({ id: department.id, data: { brainModel: val } })}
+                      onChange={(val) => {
+                        if (unavailableModels.has(val)) return;
+                        update.mutate({ id: department.id, data: { brainModel: val } });
+                      }}
                       options={options}
                       showCustomWarning={true}
                       placeholder={t('departments.chooseModel')}

@@ -3774,6 +3774,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                                 ariaLabel={`${t('settings.reviewerModel')} ${index + 1}`}
                                 value={item.model}
                                 onChange={(val) => {
+                                  if (index === 0 && isReviewerModelUnavailable(val, item.engine)) return;
                                   const next = reviewerOrder.map((row, i) =>
                                     i === index ? { ...row, model: val } : row,
                                   );

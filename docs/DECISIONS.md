@@ -602,3 +602,9 @@
      - Mở rộng interface `PublishSuccessResult` và `PublishFailedResult` bổ sung trường `auditRange?: string` (định dạng `base..tip`).
      - Ghi nhận `auditRange` vào `pushResult` (trạng thái `pushed`, `audit_failed`, `push_failed`).
      - Truyền `auditRange` vào payload các sự kiện: `task.auditing`, `task.audit_started`, `task.audit_passed`, `task.audit_failed`, `task.pushed`.
+  4. **Nguyên tắc Remote Base fail-closed và chặn Reverse Merge trong Snapshot**:
+     - Trong publishTask: auditBaseRef bắt buộc chỉ lấy từ prevRemoteSha || remoteRef (hoặc defaultRemoteRef khi target branch lần đầu tiên được đẩy lên remote). Tuyệt đối không bao giờ dùng snapshot local (targetSha/sourceSha/targetBranch) làm audit base.
+     - Hàm resolveRemoteAuditBase xác minh tính hợp lệ trên remote: nếu baseRef là 40-char SHA thì bắt buộc kiểm tra SHA đó đã nằm trên remote (isCommitOnRemote đối chiếu với refs/remotes/*). Mọi trường hợp không resolve được remote commit đều ném lỗi fail-closed, không fallback sang commit local.
+     - Bọc gọi getTaskDiff trong publishTask bằng try-catch để chuyển mọi ngoại lệ fail-closed thành push_failed có kiểm soát, phát sự kiện task.push_failed và chặn publish.
+     - Hàm findMergeCandidatesForTask tách biệt { forwardMerges, rejectedMerges }. Nếu không có forward merge nào nhưng có candidate merge bị từ chối (reverse merge), getTaskDiff fail-closed ném lỗi ngay, cấm rơi xuống snapshot fallback.
+     - Trong nhánh snapshot fallback (!usedMergeDiff), kiểm tra cả commit snapshot tip và các merge trong lineage ${effectiveBase}..${taskSnapshotCommit}: nếu chứa reverse merge (qua commit message hoặc parent 2 là tổ tiên của base/targetSha), lập tức ném lỗi fail-closed, ngăn tuyệt đối việc lọt thay đổi target→task ngoài phạm vi vào audit.

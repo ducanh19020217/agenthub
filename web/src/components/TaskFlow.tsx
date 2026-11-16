@@ -772,6 +772,15 @@ export const FlowTaskList: React.FC<{ status: FlowStatus; project?: string; sear
             const maxRounds = audit?.maxRounds || 3;
             const isBlocked = audit?.substate === 'blocked';
             const findings = audit?.findings || [];
+            const severityCounts = findings.reduce(
+              (counts, finding) => {
+                if (finding.severity === 'P0') counts.p0 += 1;
+                if (finding.severity === 'P1') counts.p1 += 1;
+                if (finding.severity === 'P2') counts.p2 += 1;
+                return counts;
+              },
+              { p0: 0, p1: 0, p2: 0 },
+            );
             const isActing = actionInProgress === task.id;
 
             return (
@@ -831,6 +840,13 @@ export const FlowTaskList: React.FC<{ status: FlowStatus; project?: string; sear
                     <div className="space-y-1.5" data-testid="audit-findings-list">
                       <div className="text-xs font-semibold text-[var(--t-text-3)]">
                         {t('tasks.flow.findingsCount', { count: String(findings.length) })}
+                        <span className="ml-2 font-mono font-normal" data-testid="audit-finding-severity-counts">
+                          {t('tasks.flow.findingSeverityCounts', {
+                            p0: String(severityCounts.p0),
+                            p1: String(severityCounts.p1),
+                            p2: String(severityCounts.p2),
+                          })}
+                        </span>
                       </div>
                       <div className="space-y-1">
                         {findings.map((f, idx) => (
@@ -1090,6 +1106,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
   const checkingCount = qChecking.data?.total ?? 0;
   const reviewCount = qReview.data?.total ?? 0;
   const auditingCount = isAuditDisabled ? 0 : (qAuditing.data?.total ?? 0);
+  const auditFailedCount = isAuditDisabled ? 0 : (qAuditFailed.data?.total ?? 0);
   const activeCount = runningCount + checkingCount + reviewCount + auditingCount;
   const refetchInterval = getFlowRefetchInterval(activeCount);
 
@@ -1106,7 +1123,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
     failed: qFailed.data?.total ?? 0,
     blocked: qBlocked.data?.total ?? 0,
     merge_failed: qMergeFailed.data?.total ?? 0,
-    audit_failed: qAuditFailed.data?.total ?? 0,
+    audit_failed: auditFailedCount,
     push_failed: qPushFailed.data?.total ?? 0,
     cancelled: 0,
   };
@@ -1124,7 +1141,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
     failed: qFailed.isLoading,
     blocked: qBlocked.isLoading,
     merge_failed: qMergeFailed.isLoading,
-    audit_failed: qAuditFailed.isLoading,
+    audit_failed: isAuditDisabled ? false : qAuditFailed.isLoading,
     push_failed: qPushFailed.isLoading,
     cancelled: false,
   };
@@ -1278,7 +1295,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
                 search={search}
                 total={counts[def.status]}
                 isLoading={loading[def.status]}
-                isDisabled={def.status === 'auditing' && isAuditDisabled}
+                isDisabled={(def.status === 'auditing' || def.status === 'audit_failed') && isAuditDisabled}
                 refetchInterval={refetchInterval}
                 onOpen={setOpenStatus}
                 registerRef={registerRef}

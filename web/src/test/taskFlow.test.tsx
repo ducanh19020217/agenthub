@@ -713,11 +713,14 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     renderPage('/tasks?view=flow&project=p1');
 
     const auditNode = await screen.findByTestId('flow-node-auditing');
+    const auditFailedNode = await screen.findByTestId('flow-node-audit_failed');
     await waitFor(() => {
       expect(auditNode).toHaveAttribute('data-disabled', 'true');
+      expect(auditFailedNode).toHaveAttribute('data-disabled', 'true');
     });
 
     expect(within(auditNode).getByTestId('badge-audit-disabled')).toHaveTextContent('Đã tắt');
+    expect(within(auditFailedNode).getByTestId('badge-audit-disabled')).toHaveTextContent('Đã tắt');
   });
 
   it('opens modal for audit_failed, displays findings and triggers actions', async () => {
@@ -762,6 +765,7 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     const findingsList = within(dialog).getByTestId('audit-findings-list');
     expect(findingsList).toHaveTextContent('Missing currency validation');
     expect(findingsList).toHaveTextContent('Unbounded map');
+    expect(within(dialog).getByTestId('audit-finding-severity-counts')).toHaveTextContent('P0: 0 · P1: 1 · P2: 1');
 
     // Click Publish lại
     const retryBtn = within(dialog).getByTestId('btn-retry-publish');

@@ -227,6 +227,7 @@ export const vi = {
       auditBlocked: 'Bị chặn',
       auditRound: 'Vòng {round}/{maxRounds}',
       findingsCount: '{count} lỗi',
+      findingSeverityCounts: 'P0: {p0} · P1: {p1} · P2: {p2}',
       btnRetryPublish: 'Publish lại',
       btnBypassAudit: 'Bỏ qua chặn',
       confirmBypassAudit: 'Bạn có chắc muốn bỏ qua chặn audit và đẩy git cho task {slug}?',

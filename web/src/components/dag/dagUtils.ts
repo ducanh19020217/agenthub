@@ -66,6 +66,7 @@ export function filterTasksForDag(
   options?: {
     project?: string;
     status?: string;
+    search?: string;
     doneFilter?: 'active_chains' | '1d' | '3d' | '7d' | '30d' | 'all';
   }
 ): Task[] {
@@ -75,14 +76,7 @@ export function filterTasksForDag(
     list = list.filter((t) => t.projectId === options.project);
   }
 
-  if (options?.status && options.status !== 'all') {
-    list = list.filter((t) => t.status === options.status);
-  }
-
   const doneFilter = options?.doneFilter || 'active_chains';
-  if (doneFilter === 'all') {
-    return list;
-  }
 
   // Parse days cutoff if e.g. "1d", "7d"
   let daysCutoff: number | null = null;
@@ -131,7 +125,7 @@ export function filterTasksForDag(
 
   const now = Date.now();
 
-  return list.filter((t) => {
+  const activeChainTasks = doneFilter === 'all' ? list : list.filter((t) => {
     if (t.status !== 'done' && t.status !== 'pushed') return true;
 
     // Active chain: prerequisite for remaining unfinished work
@@ -150,6 +144,33 @@ export function filterTasksForDag(
     // Default: hide completed tasks that have no unfinished descendants
     return false;
   });
+
+  const status = options?.status || 'all';
+  const search = options?.search?.trim().toLocaleLowerCase() || '';
+  if (status === 'all' && !search) return activeChainTasks;
+
+  // Status and text filters select the focal task(s), then retain their prerequisite
+  // context so the dependency edges remain useful in the diagram.
+  const available = new Map(activeChainTasks.map((task) => [task.id, task]));
+  const selected = new Set(activeChainTasks.filter((task) =>
+    (status === 'all' || task.status === status) &&
+    (!search || `${task.slug} ${task.title}`.toLocaleLowerCase().includes(search))
+  ).map((task) => task.id));
+  const includePrerequisites = (id: string, visited = new Set<string>()) => {
+    if (visited.has(id)) return;
+    visited.add(id);
+    const task = available.get(id);
+    if (!task) return;
+    for (const ref of parseDependsOn(task.dependsOn)) {
+      const parent = taskMap.get(ref) || taskMap.get(normalizeTaskId(ref)) || slugMap.get(ref);
+      if (parent && available.has(parent.id)) {
+        selected.add(parent.id);
+        includePrerequisites(parent.id, visited);
+      }
+    }
+  };
+  for (const id of [...selected]) includePrerequisites(id);
+  return activeChainTasks.filter((task) => selected.has(task.id));
 }
 
 /**

@@ -997,9 +997,21 @@ export interface CockpitImportResult {
   failedCount: number;
 }
 
+export interface DiscoveredModel {
+  id: string;
+  engine: 'agy' | 'codex' | 'claude';
+  name?: string | null;
+  profiles: string[];
+  verified: boolean;
+  available: boolean;
+  configured?: boolean;
+  warning?: string | null;
+}
+
 export interface ModelOptions {
   suggestions: string[];
   configured: string[];
+  models?: DiscoveredModel[];
 }
 
 export type ChatMode = 'safe' | 'full';

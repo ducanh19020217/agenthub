@@ -33,6 +33,7 @@ import { subscribeToRunOutput, subscribeToEvents } from '../api/sse';
 import { formatDateTime, formatIsoTitle, parseApiTime, formatShortContextualTime, formatDuration } from '../lib/time';
 import { CheckResults } from '../components/CheckResults';
 import { StatusBadge } from '../components/StatusBadge';
+import { SelectOrCustomInput } from '../components/ui/SelectOrCustomInput';
 import { SilentRunIndicator } from '../components/SilentRunIndicator';
 import { ModelBadge } from '../components/ModelBadge';
 import { useLocale } from '../context/LocaleContext';
@@ -67,18 +68,27 @@ import {
   UploadCloud,
 } from 'lucide-react';
 
-const VALID_MODELS = [
-  'gemini-3.8-flash-high',
-  'gemini-3.8-flash-medium',
-  'gemini-3.8-flash-low',
-  'claude-sonnet-4-6',
-  'claude-opus-4-6-thinking',
-  'codex:gpt-5.6-luna',
-  'gpt-oss-120b-medium',
-];
-
 const TERMINAL_STATUSES = new Set<string>(['done', 'merged', 'pushed', 'cancelled', 'failed']);
+function tailPrefixOverlap(snapshot: string, stream: string): number {
+  const length = Math.min(snapshot.length, stream.length);
+  if (length === 0) return 0;
 
+  const prefix = new Uint32Array(length);
+  for (let index = 1, matched = 0; index < length; index += 1) {
+    while (matched > 0 && stream[index] !== stream[matched]) matched = prefix[matched - 1];
+    if (stream[index] === stream[matched]) matched += 1;
+    prefix[index] = matched;
+  }
+
+  let matched = 0;
+  const start = Math.max(0, snapshot.length - length);
+  for (let index = start; index < snapshot.length; index += 1) {
+    while (matched > 0 && snapshot[index] !== stream[matched]) matched = prefix[matched - 1];
+    if (snapshot[index] === stream[matched]) matched += 1;
+    if (matched === length && index < snapshot.length - 1) matched = prefix[matched - 1];
+  }
+  return matched;
+}
 export const TaskDetailPage: React.FC = () => {
   const { t, locale } = useLocale();
   const { id = '' } = useParams<{ id: string }>();
@@ -108,15 +118,63 @@ export const TaskDetailPage: React.FC = () => {
   const [editLevel, setEditLevel] = useState<TaskLevel>('easy');
   const [modelChain, setModelChain] = useState<string[]>([]);
   const [selectedDeps, setSelectedDeps] = useState<string[]>([]);
-  const [selectedModelToAdd, setSelectedModelToAdd] = useState(VALID_MODELS[0]);
+  const [selectedModelToAdd, setSelectedModelToAdd] = useState('');
   const [editError, setEditError] = useState<string | null>(null);
   const [retryWithDifferentModel, setRetryWithDifferentModel] = useState(false);
 
   // Live log state
-  const [liveLog, setLiveLog] = useState<string>('');
+  const liveLogSegments = useRef<Array<{ sequence: number; taskId: string; text: string }>>([]);
+  const liveLogSequence = useRef(0);
+  const [liveLogRevision, setLiveLogRevision] = useState(0);
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
   const logContainerRef = useRef<HTMLDivElement>(null);
-  const logLines = React.useMemo(() => liveLog.split('\n'), [liveLog]);
+  const appendLiveLog = (text: string) => {
+    if (!text) return;
+    const sequence = ++liveLogSequence.current;
+    liveLogSegments.current.push({ sequence, taskId: id, text });
+    let size = liveLogSegments.current.reduce((total, segment) => total + segment.text.length, 0);
+    while (size > 512 * 1024 && liveLogSegments.current.length > 0) {
+      const excess = size - 512 * 1024;
+      const first = liveLogSegments.current[0];
+      if (first.text.length <= excess) {
+        size -= first.text.length;
+        liveLogSegments.current.shift();
+      } else {
+        first.text = first.text.slice(excess);
+        size -= excess;
+      }
+    }
+    setLiveLogRevision((revision) => revision + 1);
+  };
+  const logQuery = useQuery<{ snapshot: string; sequenceAtStart: number } | string>({
+    queryKey: ['taskLog', id],
+    queryFn: async () => {
+      const sequenceAtStart = liveLogSequence.current;
+      const snapshot = await getTaskLog(id, { tail: 500, scope: 'all' });
+      return { snapshot, sequenceAtStart };
+    },
+    enabled: !!id,
+    staleTime: 0,
+    refetchOnMount: 'always',
+  });
+  const logSnapshot = typeof logQuery.data === 'string' ? logQuery.data : logQuery.data?.snapshot || '';
+  const fetchedSequence = typeof logQuery.data === 'object' && logQuery.data ? logQuery.data.sequenceAtStart : -1;
+  useEffect(() => {
+    if (typeof logQuery.data !== 'object' || !logQuery.data) return;
+    const fetchedSequenceAtStart = logQuery.data.sequenceAtStart;
+    liveLogSegments.current = liveLogSegments.current.filter((segment) => segment.taskId !== id || segment.sequence > fetchedSequenceAtStart);
+  }, [id, logQuery.data]);
+  const liveLog = React.useMemo(() => liveLogSegments.current
+    .filter((segment) => segment.taskId === id && segment.sequence > fetchedSequence)
+    .map((segment) => segment.text)
+    .join(''), [fetchedSequence, id, liveLogRevision]);
+  const displayedLog = React.useMemo(() => {
+    const storedLog = logQuery.isFetching && !logQuery.isFetchedAfterMount ? '' : logSnapshot;
+    if (!storedLog || !liveLog) return storedLog + liveLog;
+    const overlap = tailPrefixOverlap(storedLog, liveLog);
+    return storedLog + liveLog.slice(overlap);
+  }, [logSnapshot, logQuery.isFetching, logQuery.isFetchedAfterMount, liveLog]);
+  const logLines = React.useMemo(() => displayedLog.split('\n'), [displayedLog]);
   const [logScrollTop, setLogScrollTop] = useState(0);
   const logVirtualized = logLines.length > 500;
   const logStart = logVirtualized ? Math.max(0, Math.floor(logScrollTop / 18) - 20) : 0;
@@ -159,15 +217,15 @@ export const TaskDetailPage: React.FC = () => {
 
   const showLastRunHint = React.useMemo(() => {
     if (task?.status !== 'review' && task?.status !== 'checking') return false;
-    if (!liveLog) return false;
-    const lastHeaderIndex = liveLog.lastIndexOf('── Run #');
+    if (!displayedLog) return false;
+    const lastHeaderIndex = displayedLog.lastIndexOf('── Run #');
     if (lastHeaderIndex === -1) {
-      return liveLog.trim() === '';
+      return displayedLog.trim() === '';
     }
-    const newlineAfterHeader = liveLog.indexOf('\n', lastHeaderIndex);
-    const contentAfterHeader = newlineAfterHeader === -1 ? '' : liveLog.slice(newlineAfterHeader).trim();
+    const newlineAfterHeader = displayedLog.indexOf('\n', lastHeaderIndex);
+    const contentAfterHeader = newlineAfterHeader === -1 ? '' : displayedLog.slice(newlineAfterHeader).trim();
     return contentAfterHeader === '';
-  }, [task?.status, liveLog]);
+  }, [task?.status, displayedLog]);
 
   const [runParams, setRunParams] = useSearchParams();
   const [runsPage, setRunsPage] = useState(Math.max(1, Number(runParams.get('runsPage') || 1)));
@@ -180,6 +238,9 @@ export const TaskDetailPage: React.FC = () => {
     placeholderData: (previous) => previous,
   });
   const runs = runsQuery.isSuccess ? runsQuery.data.items : task?.runs || [];
+  const runCount = runsQuery.isSuccess
+    ? runsQuery.data.total
+    : task?.runs?.length ?? 0;
   useEffect(() => {
     if (runsQuery.data?.nextCursor) setRunsCursors((current) => ({ ...current, [runsPage]: runsQuery.data!.nextCursor || undefined }));
   }, [runsPage, runsQuery.data?.nextCursor]);
@@ -229,47 +290,50 @@ export const TaskDetailPage: React.FC = () => {
       if (event.taskId === id || (rawId && event.taskId === rawId)) {
         setLiveEvents((prev) => [event, ...prev.filter((e) => e.id !== event.id)]);
         if (event.type === 'review.started' || event.type === 'task.running') {
-          setLiveLog((prev) => {
-            const p = (event.payload || {}) as Record<string, any>;
-            const runId = p.runId;
-            const matchingRun = task?.runs?.find((r) => r.id === runId);
+          const p = (event.payload || {}) as Record<string, any>;
+          const runId = p.runId;
+          const matchingRun = task?.runs?.find((r) => r.id === runId);
+          const prev = liveLogSegments.current
+            .filter((segment) => segment.taskId === id && segment.sequence > fetchedSequence)
+            .map((segment) => segment.text)
+            .join('');
 
-            // Determine run sequence number:
-            // 1. Explicit runNumber from SSE event payload
-            // 2. Index in task.runs if matchingRun exists
-            // 3. Highest run number already present in prev + 1
-            // 4. task.runs.length + 1
-            let runNum = typeof p.runNumber === 'number' && p.runNumber > 0 ? p.runNumber : 0;
-            if (!runNum && matchingRun && task?.runs) {
-              const idx = task.runs.findIndex((r) => r.id === runId);
-              if (idx !== -1) runNum = idx + 1;
-            }
-            if (!runNum) {
-              const lastMatch = [...prev.matchAll(/── Run #(\d+)/g)].pop();
-              const lastNum = lastMatch ? parseInt(lastMatch[1], 10) : 0;
-              runNum = Math.max(lastNum + 1, (task?.runs?.length || 0) + 1);
-            }
+          // Determine run sequence number:
+          // 1. Explicit runNumber from SSE event payload
+          // 2. Index in task.runs if matchingRun exists
+          // 3. Highest run number already present in prev + 1
+          // 4. task.runs.length + 1
+          let runNum = typeof p.runNumber === 'number' && p.runNumber > 0 ? p.runNumber : 0;
+          if (!runNum && matchingRun && task?.runs) {
+            const idx = task.runs.findIndex((r) => r.id === runId);
+            if (idx !== -1) runNum = idx + 1;
+          }
+          if (!runNum) {
+            const lastMatch = [...prev.matchAll(/── Run #(\d+)/g)].pop();
+            const lastNum = lastMatch ? parseInt(lastMatch[1], 10) : 0;
+            runNum = Math.max(lastNum + 1, (task?.runs?.length || 0) + 1);
+          }
 
-            const d = new Date(event.ts || Date.now());
-            const hh = String(d.getHours()).padStart(2, '0');
-            const mm = String(d.getMinutes()).padStart(2, '0');
-            const timeStr = `${hh}:${mm}`;
-            const kind = event.type === 'review.started' ? 'reviewer' : 'worker';
+          const d = new Date(event.ts || Date.now());
+          const hh = String(d.getHours()).padStart(2, '0');
+          const mm = String(d.getMinutes()).padStart(2, '0');
+          const timeStr = `${hh}:${mm}`;
+          const kind = event.type === 'review.started' ? 'reviewer' : 'worker';
 
-            // Consistent engine/profile formatting matching server formatRunLogHeader
-            const engine = matchingRun?.engine || p.engine || (p.model?.startsWith('claude') ? 'claude' : p.model?.startsWith('codex') ? 'codex' : 'worker');
-            const profile = matchingRun?.profileName || p.profile || p.profileName || '';
-            const agent = profile ? `${engine}/${profile}` : engine;
+          // Consistent engine/profile formatting matching server formatRunLogHeader
+          const engine = matchingRun?.engine || p.engine || (p.model?.startsWith('claude') ? 'claude' : p.model?.startsWith('codex') ? 'codex' : 'worker');
+          const profile = matchingRun?.profileName || p.profile || p.profileName || '';
+          const agent = profile ? `${engine}/${profile}` : engine;
 
-            const header = `── Run #${runNum} · ${kind} · ${agent} · ${timeStr} ──`;
-            if (prev.includes(`── Run #${runNum} ·`)) return prev;
-            return prev ? `${prev.trimEnd()}\n\n${header}\n` : `${header}\n`;
-          });
+          const header = `── Run #${runNum} · ${kind} · ${agent} · ${timeStr} ──`;
+          if (!prev.includes(`── Run #${runNum} ·`)) {
+            appendLiveLog(prev ? `\n${header}\n` : `${header}\n`);
+          }
         }
       }
     });
     return unsub;
-  }, [id, task?.runs?.length]);
+  }, [id, task?.runs?.length, fetchedSequence]);
 
   const timelineEvents = React.useMemo(() => {
     const initial = task?.events || [];
@@ -286,22 +350,6 @@ export const TaskDetailPage: React.FC = () => {
     return unique;
   }, [task?.events, liveEvents]);
 
-  // Fetch initial log
-  useQuery({
-    queryKey: ['taskLog', id],
-    queryFn: async () => {
-      const text = await getTaskLog(id, { tail: 500, scope: 'all' });
-      setLiveLog(text);
-      return text;
-    },
-    enabled: !!id,
-  });
-
-  // Reset log on task change
-  useEffect(() => {
-    setLiveLog('');
-  }, [id]);
-
   // Listen to SSE live output
   useEffect(() => {
     if (!id) return;
@@ -311,7 +359,7 @@ export const TaskDetailPage: React.FC = () => {
         taskId.replace(/\//g, '~') === id.replace(/\//g, '~') ||
         taskId.replace(/~/g, '/') === id.replace(/~/g, '/');
       if (match) {
-        setLiveLog((prev) => prev + chunk);
+        appendLiveLog(chunk);
       }
     });
     return unsubscribe;
@@ -322,7 +370,7 @@ export const TaskDetailPage: React.FC = () => {
     if (autoScroll && logContainerRef.current) {
       logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
     }
-  }, [liveLog, autoScroll]);
+  }, [displayedLog, autoScroll]);
 
   const handleScroll = () => {
     if (!logContainerRef.current) return;
@@ -493,7 +541,28 @@ export const TaskDetailPage: React.FC = () => {
     enabled: showEditModal && !!task?.projectId,
   });
   const { data: modelOptions } = useQuery({ queryKey: ['model-options'], queryFn: getModelOptions });
-  const modelSuggestions = modelOptions?.suggestions?.length ? modelOptions.suggestions : VALID_MODELS;
+  const modelSuggestions = React.useMemo(() => {
+    if (modelOptions?.models) {
+      return modelOptions.models.filter((m) => m.available).map((m) => m.id);
+    }
+    return modelOptions?.suggestions?.length ? modelOptions.suggestions : [];
+  }, [modelOptions]);
+
+  const unavailableModels = React.useMemo(() => {
+    const set = new Set<string>();
+    if (modelOptions?.models) {
+      for (const m of modelOptions.models) {
+        if (!m.available) set.add(m.id);
+      }
+    }
+    return set;
+  }, [modelOptions]);
+
+  React.useEffect(() => {
+    if (!selectedModelToAdd && modelSuggestions.length > 0) {
+      setSelectedModelToAdd(modelSuggestions[0]);
+    }
+  }, [modelSuggestions, selectedModelToAdd]);
 
   const editMutation = useMutation({
     mutationFn: (data: { modelChain: string[]; dependsOn: string[]; level: TaskLevel }) => updateTask(id, data),
@@ -542,7 +611,7 @@ export const TaskDetailPage: React.FC = () => {
     setModelChain(initialChain);
     setSelectedDeps(initialDeps);
     setEditLevel(task.level || 'easy');
-    setSelectedModelToAdd(modelSuggestions[0] || VALID_MODELS[0]);
+    setSelectedModelToAdd(modelSuggestions[0] || '');
     setEditError(null);
     setShowEditModal(true);
   };
@@ -1370,7 +1439,7 @@ export const TaskDetailPage: React.FC = () => {
           }`}
         >
           <Clock className="w-4 h-4" />
-          <span>{t('taskDetail.tabRuns', { count: (task.runs || []).length })}</span>
+          <span>{t('taskDetail.tabRuns', { count: runCount })}</span>
         </button>
 
         <button
@@ -1409,7 +1478,7 @@ export const TaskDetailPage: React.FC = () => {
             onScroll={handleScroll}
             className="w-full h-[520px] bg-[var(--t-log-bg)] text-[var(--t-log-text)] font-mono text-xs p-4 rounded-xl overflow-y-auto border border-[var(--t-border)] shadow-inner whitespace-pre-wrap leading-relaxed select-text"
           >
-            {liveLog.trim() ? (
+            {displayedLog.trim() ? (
               <>
                 {logVirtualized ? (
                   <div style={{ height: `${logLines.length * 18}px`, position: 'relative' }}>
@@ -1417,7 +1486,7 @@ export const TaskDetailPage: React.FC = () => {
                       {logLines.slice(logStart, logEnd).map((line, index) => <div key={logStart + index} className="h-[18px]">{line || '\u00a0'}</div>)}
                     </div>
                   </div>
-                ) : liveLog}
+                ) : displayedLog}
                 {showLastRunHint && (
                   <div className="text-[var(--t-log-muted)] mt-1">{emptyLogMessage}</div>
                 )}
@@ -1841,23 +1910,23 @@ export const TaskDetailPage: React.FC = () => {
                   {t('taskDetail.modelChainLabel')}
                 </label>
                 <div className="flex gap-2">
-                  <select
-                    data-testid="add-model-select"
+                  <SelectOrCustomInput
+                    testId="add-model-select"
                     value={selectedModelToAdd}
-                    onChange={(e) => setSelectedModelToAdd(e.target.value)}
-                    className="flex-1 text-xs rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-2.5 py-1.5 text-[var(--t-text)] focus:outline-none focus:ring-2 focus:ring-[var(--t-accent)]"
-                  >
-                    {modelSuggestions.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setSelectedModelToAdd}
+                    options={modelSuggestions}
+                    placeholder="—"
+                    showCustomWarning={true}
+                    className="flex-1"
+                    selectClassName="text-xs py-1.5 px-2.5"
+                    inputClassName="text-xs py-1.5 px-2.5"
+                  />
                   <button
                     type="button"
                     data-testid="add-model-btn"
                     onClick={addModel}
-                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] inline-flex items-center gap-1 cursor-pointer"
+                    disabled={!selectedModelToAdd.trim()}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] inline-flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
                   >
                     <Plus className="w-3.5 h-3.5" />
                     <span>{t('taskDetail.addModelBtn')}</span>
@@ -1877,6 +1946,15 @@ export const TaskDetailPage: React.FC = () => {
                         <div className="flex items-center gap-2 truncate">
                           <ModelBadge model={model} />
                           <span className="font-mono text-[var(--t-text)] truncate">{model}</span>
+                          {unavailableModels.has(model) && (
+                            <span
+                              className="inline-flex items-center gap-1 text-[10px] text-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_10%,transparent)] px-1.5 py-0.5 rounded border border-[color-mix(in_srgb,var(--t-crit)_30%,transparent)] shrink-0"
+                              title={t('models.unavailableWarning')}
+                            >
+                              <AlertCircle className="w-3 h-3" />
+                              <span>{t('models.unavailableWarning')}</span>
+                            </span>
+                          )}
                         </div>
                         <div className="flex items-center gap-1">
                           <button

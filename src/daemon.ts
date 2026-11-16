@@ -29,8 +29,10 @@ import {
   TimesheetEntryRepo,
   TimesheetManualEntryRepo,
   TimesheetDayOverrideRepo,
+  ProfileModelRepo,
   HealthIssueCooldownRepo,
 } from './db/index.js';
+import { ModelDiscoveryService } from './models/index.js';
 import { HealthSweepService } from './health/sweep.js';
 import { CiWatchService } from './ci.js';
 import { OpenProjectIntakeService } from './integrations/openproject/intake.js';
@@ -212,7 +214,10 @@ export function createContext(
 
   const profileService = new ProfileService(config, profileRepo, quotaMarkRepo);
   const locks = new ProfileLockService(path.join(config.agyHomesDir, '.state'), config.slotsPerAgyProfile, config.slotsPerCodexProfile);
+  const profileModelRepo = new ProfileModelRepo(db);
+  const modelDiscoveryService = new ModelDiscoveryService(profileRepo, profileModelRepo);
   const usageService = new QuotaUsageService(profileRepo, usageRepo, quotaMarkRepo);
+  usageService.onCollectAll(() => modelDiscoveryService.discoverAll({ force: true }));
   const quotaService = new QuotaService(quotaMarkRepo, profileRepo);
   const savingsService = new SavingsService(
     config,
@@ -289,7 +294,7 @@ export function createContext(
     quotaMarkRepo,
     usageRepo,
     eventRepo,
-    { failoverState, retryRepo: chatRetryRepo, knowledgeRepo },
+    { failoverState, retryRepo: chatRetryRepo, knowledgeRepo, profileModelRepo },
   );
   scheduler.getEventBus().on('claude.quota_available', (_taskId, payload) => {
     const data = payload && typeof payload === 'object' ? payload as { profileName?: unknown; observedAt?: unknown } : {};
@@ -356,6 +361,8 @@ export function createContext(
     directiveRepo,
     departmentRepo,
   );
+  service.profileModelRepo = profileModelRepo;
+  service.modelDiscoveryService = modelDiscoveryService;
   service.setSetupTools(new SetupTools(config, db, scheduler.getEventBus(), () => service));
   service.deployService = deployService;
   service.remoteDeployService = remoteDeployService;

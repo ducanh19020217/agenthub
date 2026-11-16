@@ -414,13 +414,13 @@ describe('AgentHub API Extra Endpoints', () => {
     });
 
     it('PUT /api/config validates chat.* properties', async () => {
-      // Invalid chat.model enum
+      // Invalid chat.model with whitespace
       const res1 = await server.inject({
         method: 'PUT',
         url: '/api/config',
         headers: authHeaders(),
         payload: {
-          chat: { model: 'gpt-4o' },
+          chat: { model: 'invalid model name with spaces' },
         },
       });
       expect(res1.statusCode).toBe(400);
@@ -446,6 +446,76 @@ describe('AgentHub API Extra Endpoints', () => {
         },
       });
       expect(res3.statusCode).toBe(400);
+    });
+
+    it('PUT /api/config saves claude-sonnet-5-5 and custom model, rejects whitespace', async () => {
+      // 1. Success with claude-sonnet-5-5 and custom model without whitespace
+      const resSuccess = await server.inject({
+        method: 'PUT',
+        url: '/api/config',
+        headers: authHeaders(),
+        payload: {
+          chat: {
+            model: 'claude-sonnet-5-5',
+            models: ['claude-sonnet-5-5', 'custom-model-x'],
+          },
+          brain: {
+            model: 'claude-opus-custom',
+          },
+        },
+      });
+      expect(resSuccess.statusCode).toBe(200);
+
+      const getRes = await server.inject({
+        method: 'GET',
+        url: '/api/config',
+        headers: authHeaders(),
+      });
+      expect(getRes.statusCode).toBe(200);
+      const conf = JSON.parse(getRes.body);
+      expect(conf.chat.model).toBe('claude-sonnet-5-5');
+      expect(conf.chat.models).toContain('claude-sonnet-5-5');
+      expect(conf.chat.models).toContain('custom-model-x');
+      expect(conf.brain.model).toBe('claude-opus-custom');
+
+      // 2. Reject whitespace in chat.model
+      const resSpaceChat = await server.inject({
+        method: 'PUT',
+        url: '/api/config',
+        headers: authHeaders(),
+        payload: { chat: { model: 'claude sonnet' } },
+      });
+      expect(resSpaceChat.statusCode).toBe(400);
+
+      // 3. Reject whitespace in chat.models
+      const resSpaceModels = await server.inject({
+        method: 'PUT',
+        url: '/api/config',
+        headers: authHeaders(),
+        payload: { chat: { models: ['valid-model', 'invalid model with spaces'] } },
+      });
+      expect(resSpaceModels.statusCode).toBe(400);
+
+      // 4. Reject whitespace in brain.model
+      const resSpaceBrain = await server.inject({
+        method: 'PUT',
+        url: '/api/config',
+        headers: authHeaders(),
+        payload: { brain: { model: 'brain model with spaces' } },
+      });
+      expect(resSpaceBrain.statusCode).toBe(400);
+
+      // 5. Empty string '' is allowed for chat.model and brain.model
+      const resEmpty = await server.inject({
+        method: 'PUT',
+        url: '/api/config',
+        headers: authHeaders(),
+        payload: {
+          chat: { model: '' },
+          brain: { model: '' },
+        },
+      });
+      expect(resEmpty.statusCode).toBe(200);
     });
 
     it('PUT /api/config validates and persists load.autoPauseThresholdSec', async () => {

@@ -19,6 +19,7 @@ import {
   ChatRetryRepo,
   ChatRetryRow,
   KnowledgeRepo,
+  ProfileModelRepo,
 } from '../db/index.js';
 import { PermissionBroker, canAlwaysAllowCommand, commandPermissionLabel } from './permissions.js';
 import { EventBus } from '../scheduler/index.js';
@@ -210,7 +211,7 @@ export class ChatService {
     public quotaMarkRepo?: QuotaMarkRepo,
     public quotaUsageRepo?: QuotaUsageRepo,
     public eventRepo?: EventRepo,
-    options?: { claudeBin?: string; codexBin?: string; failoverState?: ClaudeFailoverState; retryRepo?: ChatRetryRepo; knowledgeRepo?: KnowledgeRepo },
+    options?: { claudeBin?: string; codexBin?: string; failoverState?: ClaudeFailoverState; retryRepo?: ChatRetryRepo; knowledgeRepo?: KnowledgeRepo; profileModelRepo?: ProfileModelRepo },
   ) {
     if (options?.claudeBin) {
       this.claudeBinOverride = options.claudeBin;
@@ -223,12 +224,18 @@ export class ChatService {
     this.chatSessionRepo.resetAllBusy();
     this.retryRepo = options?.retryRepo;
     this.knowledgeRepo = options?.knowledgeRepo;
+    this.profileModelRepo = options?.profileModelRepo;
     for (const retry of this.retryRepo?.getPending() || []) this.armRetry(retry);
   }
 
+  public profileModelRepo?: ProfileModelRepo;
   private failoverState: ClaudeFailoverState;
   private retryRepo?: ChatRetryRepo;
   private knowledgeRepo?: KnowledgeRepo;
+
+  setProfileModelRepo(repo: ProfileModelRepo): void {
+    this.profileModelRepo = repo;
+  }
 
   private assistantPrompt(session: ChatSessionRow): string {
     const project = session.projectId ? this.projectRepo.get(session.projectId) : undefined;
@@ -834,10 +841,13 @@ export class ChatService {
     if (mode === 'full' && !fullAllowed) {
       throw new HttpError(403, 'forbidden', 'Chế độ full chưa được cho phép trong cấu hình');
     }
-    const model = body.model ?? this.config.chat.model;
-    const allowedModels = new Set(['', ...(this.config.chat.models || ['opus', 'sonnet', 'haiku']), this.config.chat.model]);
-    if (!allowedModels.has(model)) {
-      throw new HttpError(400, 'bad_request', 'Model chat phải là mặc định, sonnet hoặc haiku');
+    const rawModel = body.model !== undefined && body.model !== null ? body.model : (this.config.chat.model ?? '');
+    if (typeof rawModel !== 'string') {
+      throw new HttpError(400, 'bad_request', 'Model chat không hợp lệ');
+    }
+    const model = rawModel.trim();
+    if (/\s/.test(model)) {
+      throw new HttpError(400, 'bad_request', 'Tên model chat không được chứa khoảng trắng');
     }
     return { mode, model };
   }

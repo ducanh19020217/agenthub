@@ -485,3 +485,26 @@
      - HTTP API: `GET /api/health/sweep` xem kết quả quét gần nhất, `POST /api/health/sweep` kích hoạt quét tức thì.
      - CLI & MCP: `agenthub health [--run]` và MCP tool `hub_health_sweep`.
      - Logic an toàn cho `checking` mồ côi được tích hợp hoàn toàn trong sweep, không chạy song song trùng lặp.
+
+## DEC-033: Khám phá model theo từng tài khoản (profile) và bảo vệ an toàn thông tin đăng nhập
+
+- **Bối cảnh**:
+  - Danh sách model trước đây bị hardcode hoặc suy luận tĩnh chung chung, không phản ánh các model thực tế mà từng tài khoản/hồ sơ (`profile`) của agy, codex và claude có quyền truy cập.
+  - Các trang Web UI (Cài đặt, Tạo task, Chi tiết task, Phòng ban, Brain) cần hiển thị model khả dụng thực tế theo tài khoản kích hoạt, gom nhóm theo engine, hiển thị số tài khoản hỗ trợ model, cảnh báo model không còn khả dụng hoặc model tuỳ chỉnh ngoài danh sách phát hiện.
+- **Quyết định thiết kế**:
+  1. **Nguồn khám phá model theo từng engine**:
+     - `agy`: Chạy `agy models` trong môi trường isolated của profile (`HOME = profile.home`), bọc timeout 15s, phân tích regex các dòng output loại bỏ mã màu ANSI và spinner để lấy model ID và tên hiển thị.
+     - `codex`: Ưu tiên đọc file cache `~/.codex/models_cache.json` trong thư mục profile; nếu không có hoặc cần làm mới thì gọi API ChatGPT/Codex `GET /backend-api/models` sử dụng access token lấy an toàn qua hàm `readCodexAccessToken` có sẵn (tuyệt đối không log, in hay giải mã token ra ngoài).
+     - `claude`: Đọc danh mục model từ cache `model-catalog` trong profile/home hoặc ánh xạ các alias chuẩn (`opus`, `sonnet`, `haiku`) sang ID thật.
+  2. **Bảo mật và an toàn kiểm thử (Zero Leaks & Test Safety)**:
+     - Tuân thủ tuyệt đối quy tắc bảo mật: Không in, lưu trữ hay phát tán token/keyring trong log, database hay API payload. Chỉ lưu model ID và metadata vào bảng `profile_models`.
+     - Tuyệt đối không chạy agy/codex thật hoặc thực hiện network call trong môi trường test: Khi `process.env.VITEST` bật mà không truyền mock/options cụ thể, các hàm discovery tự động fallback về danh sách model mặc định, đảm bảo suite test chạy nhanh, cô lập và an toàn tuyệt đối.
+  3. **Lưu trữ và làm mới (Cache & Refresh)**:
+     - Thêm bảng `profile_models` (migration 77) liên kết `(profile_id, engine, model_id)`.
+     - `ModelDiscoveryService` lưu cache vào database, tự động khám phá định kỳ khi daemon/usage service khởi động hoặc theo chu kỳ quét quota.
+     - Thêm endpoint `POST /api/models/refresh` cho phép người dùng chủ động làm mới danh sách model từ Web dashboard.
+     - API `GET /api/models` trả về danh sách model tổng hợp kèm danh sách profile hỗ trợ (`supportedProfiles`).
+  4. **Frontend & UX**:
+     - `SelectOrCustomInput`: Hỗ trợ `<optgroup>` theo engine, hiển thị cảnh báo `customWarning` bằng token màu theme `text-[var(--t-warn)]` khi người dùng nhập model lạ.
+     - `SortableModelList`: Cảnh báo và đánh dấu viền đỏ cho các model trong cấu hình không còn khả dụng trên bất kỳ tài khoản kích hoạt nào.
+     - `SettingsPage`: Nút "Làm mới danh sách model" với animation xoay, tooltip hiển thị số tài khoản hỗ trợ từng model.

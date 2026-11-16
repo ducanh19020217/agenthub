@@ -17,7 +17,7 @@ import {
   normalizeMessagesResponse,
   retryChatLimitNow,
 } from '../api/chat';
-import { getConfig } from '../api/client';
+import { getConfig, getModelOptions } from '../api/client';
 import { subscribeToEvents } from '../api/sse';
 import { ChatMessage, ChatMode, ChatSession, ChatPermissionRequest, UpdateChatSessionInput } from '../types/api';
 import { SessionList } from '../components/chat/SessionList';
@@ -29,6 +29,7 @@ import { NewSessionModal } from '../components/chat/NewSessionModal';
 import { useLocale } from '../context/LocaleContext';
 import { UI_Z_INDEX } from '../components/ui/layers';
 import { ModelBadge } from '../components/ModelBadge';
+import { SelectOrCustomInput } from '../components/ui/SelectOrCustomInput';
 import {
   Menu,
   X,
@@ -36,6 +37,7 @@ import {
   Bot,
   Square,
   RotateCcw,
+  AlertCircle,
 } from 'lucide-react';
 import { ToastViewport, useToasts, type ToastKind } from '../components/ui/Toast';
 
@@ -91,6 +93,18 @@ export const ChatPage: React.FC = () => {
   );
   const isSessionsLoading = sessionsQuery.isLoading;
   const { data: systemConfig } = useQuery({ queryKey: ['config'], queryFn: getConfig });
+  const { data: modelOptions } = useQuery({ queryKey: ['model-options'], queryFn: getModelOptions });
+
+  const availableClaudeModels = useMemo(() => {
+    if (modelOptions?.models) {
+      return modelOptions.models
+        .filter((m) => m.engine === 'claude' && m.available)
+        .map((m) => m.id);
+    }
+    return (modelOptions?.suggestions || []).filter(
+      (m) => m.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(m),
+    );
+  }, [modelOptions]);
 
   // Resolve active session
   const activeSession = useMemo(() => {
@@ -99,6 +113,19 @@ export const ChatPage: React.FC = () => {
     }
     return null;
   }, [sessionId, sessions]);
+
+  const currentChatModel = useMemo(() => {
+    return activeSession?.model || systemConfig?.chat?.model || 'sonnet';
+  }, [activeSession?.model, systemConfig?.chat?.model]);
+
+  const isCurrentModelUnavailable = useMemo(() => {
+    if (!currentChatModel) return false;
+    if (modelOptions?.models) {
+      const match = modelOptions.models.find((m) => (m.id === currentChatModel || `claude:${m.id}` === currentChatModel || m.id === `claude:${currentChatModel}`) && m.engine === 'claude');
+      if (match) return !match.available;
+    }
+    return false;
+  }, [currentChatModel, modelOptions]);
 
   // Navigate to first session if no sessionId specified
   useEffect(() => {
@@ -663,16 +690,30 @@ export const ChatPage: React.FC = () => {
           <div className="flex items-center gap-2 shrink-0">
             {activeSession && (
               <>
-                {/* Context Meter */}
-                <select
-                  aria-label={t('extra.modelChatAria')}
-                  value={activeSession.model || systemConfig?.chat?.model || 'sonnet'}
-                  disabled={isBusy || updateSessionMutation.isPending}
-                  onChange={(event) => updateSessionMutation.mutate({ id: activeSession.id, data: { model: event.target.value } })}
-                  className="hidden sm:block max-w-28 text-xs rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-2 py-1.5 text-[var(--t-text)]"
-                >
-                  {(systemConfig?.chat?.models || ['opus', 'sonnet', 'haiku']).map((model) => <option key={model} value={model}>{model}</option>)}
-                </select>
+                {/* Chat Model Selector */}
+                <div className="hidden sm:flex flex-col">
+                  <SelectOrCustomInput
+                    ariaLabel={t('extra.modelChatAria')}
+                    value={currentChatModel}
+                    disabled={isBusy || updateSessionMutation.isPending}
+                    onChange={(val) => updateSessionMutation.mutate({ id: activeSession.id, data: { model: val } })}
+                    options={availableClaudeModels}
+                    showCustomWarning={true}
+                    selectClassName="text-xs py-1 px-2 h-8"
+                    inputClassName="text-xs py-1 px-2 h-8"
+                    className="w-36 sm:w-44"
+                  />
+                  {isCurrentModelUnavailable && (
+                    <div
+                      className="mt-0.5 text-[11px] text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                      data-testid="model-unavailable-warning"
+                      title={t('models.unavailableWarning')}
+                    >
+                      <AlertCircle className="w-3 h-3 text-[var(--t-crit)] shrink-0" />
+                      <span className="truncate">{t('models.unavailableWarning')}</span>
+                    </div>
+                  )}
+                </div>
                 <div className="hidden md:block w-56 lg:w-72">
                   <ContextMeter
                     session={activeSession}

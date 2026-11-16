@@ -66,7 +66,7 @@ import { ProfileService as CoreProfileService, accountKey, isProfileLoggedIn, ex
 import { Scheduler } from '../scheduler/index.js';
 import { CodexEngine } from '../engines/index.js';
 import { hasClaudeQuotaAvailable, QuotaUsageService } from '../quota/usage.js';
-import { QuotaService } from '../quota/index.js';
+import { getModelEngine, QuotaService } from '../quota/index.js';
 import { ProfileLockService } from '../profiles/locks.js';
 import { CheckRunner } from '../checks.js';
 import { BrainService } from '../brain.js';
@@ -7332,10 +7332,16 @@ export class AppService {
     if (this.profileModelRepo && requestedChains.length > 0) {
       const enabledProfiles = this.profileRepo.getAll().filter((p) => Boolean(p.enabled) && !p.deletedAt);
       for (const model of requestedChains) {
-        const engine = model.startsWith('codex:') ? 'codex' : 'agy';
+        const engine = model.startsWith('claude:') || ['sonnet', 'opus', 'haiku'].includes(model)
+          ? 'claude'
+          : getModelEngine(model);
         const candidates = enabledProfiles.filter((p) => p.engine === engine);
         if (candidates.length === 0) continue;
-        const normalized = engine === 'codex' && !model.startsWith('codex:') ? `codex:${model}` : model;
+        const normalized = engine === 'codex' && !model.startsWith('codex:')
+          ? `codex:${model}`
+          : engine === 'claude' && model.startsWith('claude:')
+            ? model.slice('claude:'.length)
+            : model;
         const rejectedEverywhere = candidates.every((profile) => this.profileModelRepo!.getForProfile(profile.name)
           .some((row) => row.modelId === normalized && row.engine === engine && Boolean(row.unavailableAt)));
         if (rejectedEverywhere) {

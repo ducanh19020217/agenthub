@@ -555,6 +555,7 @@ export class Scheduler {
     const profile = this.profileRepo.get(profileName);
     if (!profile) return false;
     if (profile.authState === 'not_logged_in') return false;
+    if (!isProfileLoggedIn(profile)) return false;
 
     if (this.profileModelRepo) {
       const rows = this.profileModelRepo.getForProfile(profileName);

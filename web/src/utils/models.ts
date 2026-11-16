@@ -107,7 +107,10 @@ export function formatDiscoveredModelOptions(
       label = `${baseName} (⚠️ ${t ? t('models.unavailableWarning') : 'Unavailable'})`;
     }
     if (m.available && m.runVerified === false) {
-      label = `${label} (⚠️ ${t ? t('models.unverifiedRunWarning') : 'Not verified to run'})`;
+      const unverifiedLabel = t?.('models.unverifiedRunWarning');
+      label = `${label} (⚠️ ${unverifiedLabel && unverifiedLabel !== 'models.unverifiedRunWarning'
+        ? unverifiedLabel
+        : 'Not verified to run'})`;
     }
 
     return {

@@ -1555,6 +1555,39 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(availableOnly[0].value).toBe('gemini-3.8-flash-high');
     });
 
+    it('formatDiscoveredModelOptions labels rejected and unverified models from their state flags', () => {
+      const options = formatDiscoveredModelOptions([
+        {
+          id: 'codex:gpt-rejected',
+          name: 'GPT Rejected',
+          engine: 'codex',
+          profiles: ['codex-1'],
+          verified: false,
+          available: false,
+          unavailable: true,
+        },
+        {
+          id: 'gemini-unverified',
+          name: 'Gemini Unverified',
+          engine: 'agy',
+          profiles: ['agy-1'],
+          verified: true,
+          available: true,
+          runVerified: false,
+        },
+      ], (key) => ({
+        'models.engineAgy': 'Antigravity',
+        'models.engineCodex': 'Codex',
+        'models.unavailableAccountWarning': 'Not usable with this account',
+        'models.unverifiedRunWarning': 'Not verified to run',
+      }[key] || key));
+
+      expect(options[0].label).toContain('Not usable with this account');
+      expect(options[1].label).toContain('Not verified to run');
+      expect(options[0].unavailable).toBe(true);
+      expect(options[1].runVerified).toBe(false);
+    });
+
     it('SettingsPage does not propose unavailable configured models in Add Model dropdown', async () => {
       const queryClient = new QueryClient({
         defaultOptions: { queries: { retry: false } },

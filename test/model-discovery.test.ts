@@ -813,11 +813,14 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
   });
 
   it('Scheduler.profileHasModel only allows defined fallback models for undiscovered codex profiles', () => {
+    const home = path.join(tmpDir, 'codex-undiscovered-home');
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(home, 'auth.json'), '{}');
     profileRepo.upsert({
       name: 'codex-undiscovered',
       engine: 'codex',
       kind: 'isolated',
-      home: '/tmp/dummy-codex',
+      home,
       email: 'codex@example.com',
       enabled: 1,
       accountType: 'personal',

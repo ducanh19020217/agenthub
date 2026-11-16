@@ -557,7 +557,7 @@ export class Scheduler {
     }
     if (profile.engine === 'claude') {
       const raw = model.startsWith('claude:') ? model.slice('claude:'.length) : model;
-      return ['sonnet', 'opus', 'haiku'].includes(raw) || raw.startsWith('claude-');
+      return ['sonnet', 'opus', 'haiku'].includes(raw);
     }
     return false;
   }

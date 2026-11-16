@@ -89,6 +89,8 @@ export const vi = {
     cancelled: 'Đã hủy {time}',
     merged: 'Đã gộp {time}',
     changes_requested: 'Yêu cầu sửa {time}',
+    merge_failed: 'Merge lỗi {time}',
+    push_failed: 'Push lỗi {time}',
     auditing: 'Đang audit từ {time}',
     publishing: 'Đang đẩy git từ {time}',
     estimated: 'ước lượng',

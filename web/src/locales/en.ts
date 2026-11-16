@@ -91,6 +91,8 @@ export const en: typeof vi = {
     cancelled: 'Cancelled {time}',
     merged: 'Merged {time}',
     changes_requested: 'Changes requested {time}',
+    merge_failed: 'Merge failed {time}',
+    push_failed: 'Push failed {time}',
     auditing: 'Auditing since {time}',
     publishing: 'Publishing since {time}',
     estimated: 'estimated',

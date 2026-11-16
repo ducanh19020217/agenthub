@@ -40,7 +40,7 @@ function TestSelectWrapper({ initialValue = 'sonnet', options = ['sonnet', 'opus
   );
 }
 
-function TestSortableWrapper({ initialModels = ['sonnet', 'haiku'] }: { initialModels?: string[] }) {
+function TestSortableWrapper({ initialModels = ['sonnet', 'haiku'], unavailableModels }: { initialModels?: string[]; unavailableModels?: Set<string> }) {
   const [models, setModels] = useState<string[]>(initialModels);
   return (
     <div>
@@ -50,6 +50,7 @@ function TestSortableWrapper({ initialModels = ['sonnet', 'haiku'] }: { initialM
         models={models}
         onChange={setModels}
         availableOptions={['sonnet', 'opus', 'haiku', 'codex:gpt-5.6-luna']}
+        unavailableModels={unavailableModels}
         dataTestId="sortable-list"
       />
     </div>
@@ -111,6 +112,21 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(all[1].label).toContain('Not verified to run');
       expect(formatDiscoveredModelOptions([rejected, unverified], translate, 'codex', true).map((option) => option.value))
         .toEqual(['codex:gpt-unverified']);
+    });
+
+    it('does not allow a rejected model to become the first chain entry', () => {
+      render(
+        <LocaleProvider initialLocale="vi">
+          <TestSortableWrapper
+            initialModels={['codex:gpt-rejected', 'codex:gpt-good']}
+            unavailableModels={new Set(['codex:gpt-rejected'])}
+          />
+        </LocaleProvider>,
+      );
+
+      const firstInput = screen.getByRole('textbox', { name: /Model Chain 1/i }) as HTMLInputElement;
+      fireEvent.change(firstInput, { target: { value: 'codex:gpt-rejected' } });
+      expect(screen.getByTestId('models-json').textContent).toBe(JSON.stringify(['codex:gpt-rejected', 'codex:gpt-good']));
     });
 
     it('renders preset options and allows selecting a standard model', () => {

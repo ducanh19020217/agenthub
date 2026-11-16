@@ -1845,6 +1845,7 @@ export const en: typeof vi = {
       looping: "Task looping",
       merged: "Task merged",
       model_skipped: "Task model skipped",
+      model_unavailable: "Model unavailable, switching model",
       no_commit: "Task has no commits",
       note: "Task note",
       overlap: "Task overlap",

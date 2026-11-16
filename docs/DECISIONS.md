@@ -522,14 +522,14 @@
   1. **Loại trừ tuyệt đối Reverse Merge**:
      - Loại bỏ các nhánh trùng với nhánh task (`taskBranch`, `refs/heads/${taskBranch}`, SHA của task branch) khỏi danh sách tìm kiếm candidate branches của nhánh đích.
      - Kiểm tra tiêu đề commit bằng regex: loại bỏ bất kỳ commit nào có dạng `into ... <taskBranch>`.
-     - Kiểm tra cấu trúc parent và ancestry nghiêm ngặt: parent đầu (`p1`) không bao giờ được phép thuộc nhánh task (loại bỏ nếu `p1 === branchSha`, `isAncestor(branchRef, p1)`, hoặc `isAncestor(p1, branchRef) && !isAncestor(p1, p2)`).
+     - Kiểm tra cấu trúc parent và ancestry nghiêm ngặt: parent đầu (`p1`) không bao giờ được phép thuộc nhánh task (loại bỏ nếu `p1 === branchSha`, `isAncestor(branchRef, p1)`, hoặc `isAncestor(p1, branchRef) && !isAncestor(p1, p2)`). Hàm `isAncestor` chỉ coi exit code 1 là không phải tổ tiên; mọi lỗi thực thi git hoặc ref không hợp lệ đều ném lỗi. Bất kỳ lỗi hoặc sự cố nào trong quá trình kiểm tra ancestry của `p1` đều bắt buộc fail-closed và loại bỏ merge commit (không chấp nhận theo message).
      - Khi nhánh task không còn tồn tại cục bộ (`hasBranch === false`), khôi phục kiểm tra cấu trúc parent từ dữ liệu commit qua chuỗi `first-parent`: nếu `p2` thuộc first-parent lineage của nhánh đích (`destRefs`) trong khi `p1` không thuộc, commit đó là reverse merge và bắt buộc bị loại bỏ. Trong trường hợp không xác minh được cấu trúc ancestry, bắt buộc fail-closed (`isForward = isMsgForward && isP2OnTask`), tuyệt đối không chấp nhận merge chỉ dựa vào commit message.
-     - Chỉ chấp nhận forward merge: commit message có dạng `Merge branch '<taskBranch>'` và parent 2 (`p2`) thuộc nhánh task / là tổ tiên của task tip.
+     - Chỉ chấp nhận forward merge: commit message có dạng `Merge branch '<taskBranch>'`, parent 2 (`p2`) thuộc nhánh task / là tổ tiên của task tip, và `p2` không phải là tổ tiên của `p1`.
   2. **Hỗ trợ đầy đủ nhiều lần merge vào integration / target branch**:
      - Bổ sung hàm `findForwardMergeCommitsForTask` trả về toàn bộ danh sách commit forward merge của task trên `--first-parent` của candidate branch (sắp xếp từ mới nhất đến cũ nhất).
      - Khi tính diff (`getTaskDiff`):
        - Tip của task lấy từ parent 2 của merge commit mới nhất (`latestMerge^2`).
-       - Mốc base: luôn ưu tiên remote base (`baseRef` / `auditBaseRef` / `prevRemoteSha`) của snapshot publish trên nhánh đích. Nếu `baseRef` và `earliestMergeP1` diverge hoặc `baseRef` đi trước, mốc gốc bắt buộc là remote base (`baseRef`). Trường hợp `baseRef` là tổ tiên của `earliestMergeP1` (ví dụ trên integration branch có các task tuần tự trước đó chưa push), `earliestMergeP1` được dùng làm mốc cô lập để bảo đảm không kéo thay đổi chưa push của các task trước vào audit của task hiện tại.
+       - Mốc base: luôn luôn sử dụng remote base (`baseRef` / `auditBaseRef` / `prevRemoteSha`) của snapshot publish trên nhánh đích làm `baseCommit` khi `baseRef` khả dụng, áp dụng cho mọi loại dự án và mọi mối quan hệ ancestry (kể cả khi `baseRef` là tổ tiên của `earliestMergeP1` hay diverged).
        - Dải diff audit được tính qua `mb = git merge-base(baseCommit, taskTip)` và diff theo dải `mb..taskTip`.
        - Cơ chế này bao trọn toàn bộ các commit của task qua tất cả các lần merge, đồng thời tự động loại trừ mọi thay đổi đã có sẵn trên remote hoặc nhánh đích.
        - Khi merge commit có diff hợp lệ rỗng, giữ nguyên range đã xác định (`auditRange = mb..taskTip`, `diff = ""`, `changedFiles = []`) và tuyệt đối không rơi xuống snapshot fallback để tránh kéo diff không thuộc task vào audit.

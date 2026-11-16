@@ -37,7 +37,6 @@ import {
 import { Link } from 'react-router-dom';
 import {
   DEFAULT_COMMON_BRANCHES,
-  getModelsForProvider,
   validateBranchSyntax,
   validateReviewerModelSyntax,
   validateReviewChainReviewerSyntax,
@@ -460,42 +459,44 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
 
   const availableCodexReviewerModels = useMemo(() => {
     if (modelOptions?.models) {
-      return getModelsForProvider(
-        modelOptions.models.filter((m) => m.engine === 'codex' && m.available).map((m) => m.id),
-        'codex',
+      return modelOptions.models
+        .filter((m) => m.engine === 'codex' && m.available)
+        .map((m) => m.id);
+    }
+    if (modelOptions?.suggestions) {
+      return modelOptions.suggestions.filter(
+        (m) => m.startsWith('codex:') || (m.startsWith('gpt-') && !m.startsWith('gpt-oss-')),
       );
     }
-    const fromApi = (modelOptions?.suggestions || []).filter(
-      (m) => m.startsWith('codex:') || (m.startsWith('gpt-') && !m.startsWith('gpt-oss-')),
-    );
-    return getModelsForProvider(fromApi, 'codex');
+    return [];
   }, [modelOptions]);
 
   const availableClaudeReviewerModels = useMemo(() => {
     if (modelOptions?.models) {
-      return getModelsForProvider(
-        modelOptions.models.filter((m) => m.engine === 'claude' && m.available).map((m) => m.id),
-        'claude',
+      return modelOptions.models
+        .filter((m) => m.engine === 'claude' && m.available)
+        .map((m) => (m.id.startsWith('claude:') ? m.id.slice('claude:'.length) : m.id));
+    }
+    if (modelOptions?.suggestions) {
+      return modelOptions.suggestions.filter(
+        (m) => m.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(m),
       );
     }
-    const fromApi = (modelOptions?.suggestions || []).filter(
-      (m) => m.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(m),
-    );
-    return getModelsForProvider(fromApi, 'claude');
+    return [];
   }, [modelOptions]);
 
   const availableReviewChainReviewers = useMemo(() => {
     const codexModels = availableCodexReviewerModels.map((m) =>
       m.startsWith('codex:') ? m : `codex:${m}`,
     );
-    const hasClaude = availableClaudeReviewerModels.length > 0 || !modelOptions?.models;
+    const hasClaude = availableClaudeReviewerModels.length > 0;
     return Array.from(
       new Set([
         ...(hasClaude ? ['claude'] : []),
         ...codexModels,
       ]),
     ).filter(Boolean);
-  }, [availableCodexReviewerModels, availableClaudeReviewerModels, modelOptions]);
+  }, [availableCodexReviewerModels, availableClaudeReviewerModels]);
 
   const allDiscoveredReviewerModels = useMemo(() => {
     const list: string[] = [];

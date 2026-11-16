@@ -2004,5 +2004,139 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       const warnings = await screen.findAllByTestId('model-unavailable-warning');
       expect(warnings.length).toBeGreaterThanOrEqual(2);
     });
+
+    it('SettingsPage allows saving undiscovered model with unverified warning without blocking save', async () => {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const updateConfigSpy = vi.spyOn(client, 'updateConfig').mockResolvedValue({} as any);
+
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: ['gemini-3.8-flash-high'],
+        configured: ['custom-undiscovered-model'],
+        models: [
+          { id: 'gemini-3.8-flash-high', engine: 'agy', profiles: ['p1'], verified: true, available: true },
+          { id: 'custom-undiscovered-model', engine: 'agy', profiles: [], verified: false, available: false, warning: 'Chưa xác minh qua tài khoản' },
+        ],
+      });
+
+      vi.spyOn(client, 'getConfig').mockResolvedValue({
+        modelChainHard: ['custom-undiscovered-model'],
+        modelChainEasy: ['gemini-3.8-flash-high'],
+        defaultTimeout: 10800,
+        chat: { claudeBin: 'claude', allowFullMode: false, maxConcurrent: 2, model: 'sonnet', models: ['sonnet'] },
+        reviewer: {
+          model: 'codex:gpt-5.6-luna',
+          order: [],
+          fallback: { onUnavailable: true, onError: true, onBusyAfterMin: 10 },
+          arbiter: { engine: 'claude', model: 'sonnet' },
+        },
+      } as any);
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <SettingsPage />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('hard-chain-list')).toBeInTheDocument();
+      });
+
+      // Warning badge is displayed for the undiscovered model
+      await waitFor(() => {
+        const warnings = screen.getAllByTestId('model-unavailable-warning');
+        expect(warnings.length).toBeGreaterThanOrEqual(1);
+      });
+
+      // Save button should still work and not block save
+      const saveBtn = screen.getByRole('button', { name: /Lưu cấu hình/i });
+      fireEvent.click(saveBtn);
+
+      await waitFor(() => {
+        expect(updateConfigSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            modelChainHard: ['custom-undiscovered-model'],
+          }),
+        );
+      });
+    });
+
+    it('ProjectSettingsDrawer does not insert hardcoded default models when getModelOptions has no available models or is loading, and preserves configured model with warning', async () => {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const testProject = {
+        id: 'p1',
+        name: 'XFarm',
+        path: '/home/repo',
+        defaultBranch: 'main',
+        maxParallel: 2,
+        settings: {
+          integration: { enabled: true, branch: 'integration', baseRef: 'main' },
+          commitConvention: { branchTemplate: 'agenthub/{slug}' },
+          brain: { engine: 'claude', model: 'sonnet', mode: 'suggest', permissions: 'standard' },
+          worktree: {},
+          ci: {},
+          references: [],
+          reviewChecklist: [],
+          notifications: { telegramContent: 'full' },
+          review: {
+            order: [{ engine: 'claude', model: 'configured-unverified-claude', profiles: [] }],
+            fallback: { onUnavailable: true, onError: true, onBusyAfterMin: 10 },
+          },
+        },
+        review: {
+          chain: [{ reviewer: 'configured-unverified-claude', mode: 'gate' }],
+          maxRounds: 2,
+        },
+      };
+
+      // getModelOptions returns no available models (all available: false)
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        configured: ['configured-unverified-claude'],
+        suggestions: [],
+        models: [
+          { id: 'configured-unverified-claude', engine: 'claude', profiles: [], verified: false, available: false, warning: 'Chưa có tài khoản' },
+        ],
+      });
+
+      render(
+        <LocaleProvider initialLocale="vi">
+          <ThemeProvider>
+            <QueryClientProvider client={queryClient}>
+              <MemoryRouter>
+                <ProjectSettingsDrawer
+                  project={testProject}
+                  isOpen={true}
+                  onClose={() => {}}
+                />
+              </MemoryRouter>
+            </QueryClientProvider>
+          </ThemeProvider>
+        </LocaleProvider>,
+      );
+
+      const advancedSummary = screen.getByTestId('advanced-settings-section').querySelector('summary');
+      if (advancedSummary) fireEvent.click(advancedSummary);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('project-reviewer-order')).toBeInTheDocument();
+      });
+
+      // Warning is displayed for configured model
+      const orderBlock = screen.getByTestId('project-reviewer-order');
+      await waitFor(() => {
+        expect(within(orderBlock).getByTestId('model-unavailable-warning')).toBeInTheDocument();
+      });
+
+      // Reviewer dropdown should NOT insert hardcoded models (opus, haiku, gpt-5.6-luna) as new options
+      const reviewerSelect = within(orderBlock).getByRole('combobox', { name: /^Model reviewer 1$/i }) as HTMLSelectElement;
+      expect(within(reviewerSelect).queryByRole('option', { name: 'opus' })).not.toBeInTheDocument();
+      expect(within(reviewerSelect).queryByRole('option', { name: 'haiku' })).not.toBeInTheDocument();
+      expect(within(reviewerSelect).queryByRole('option', { name: 'gpt-5.6-luna' })).not.toBeInTheDocument();
+    });
   });
 });

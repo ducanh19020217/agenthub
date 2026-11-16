@@ -385,4 +385,96 @@ describe('Chat với Claude Tests', () => {
     expect(onSendMock).toHaveBeenCalledTimes(1);
     expect(onSendMock).toHaveBeenCalledWith('Nội dung tin nhắn');
   });
+
+  it('6. NewSessionModal lấy model Claude khả dụng từ /api/models và fallback về config.chat.models khi API lỗi', async () => {
+    // A. Thành công: lấy từ getModelOptions
+    vi.spyOn(clientApi, 'getConfig').mockResolvedValue({
+      chat: { allowFullMode: false, models: ['fallback-model-1', 'fallback-model-2'] },
+    } as any);
+    vi.spyOn(clientApi, 'getProjects').mockResolvedValue([]);
+    vi.spyOn(clientApi, 'getProfiles').mockResolvedValue([]);
+    vi.spyOn(clientApi, 'getModelOptions').mockResolvedValue({
+      models: [
+        { id: 'claude-discovered-available', engine: 'claude', available: true, verified: true, profiles: ['p1'] },
+        { id: 'claude-discovered-unavailable', engine: 'claude', available: false, verified: false, profiles: [] },
+      ],
+      suggestions: ['claude-discovered-available'],
+      configured: [],
+    });
+
+    const qc1 = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { unmount } = render(
+      <QueryClientProvider client={qc1}>
+        <NewSessionModal isOpen={true} onClose={vi.fn()} onSubmit={vi.fn()} />
+      </QueryClientProvider>,
+    );
+
+    await screen.findByText(/Cuộc trò chuyện mới/i);
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: 'claude-discovered-available' })).toBeInTheDocument();
+    });
+    // Không hiện model unavailable hoặc fallback
+    expect(screen.queryByRole('option', { name: 'claude-discovered-unavailable' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'fallback-model-1' })).not.toBeInTheDocument();
+
+    unmount();
+
+    // B. Khi getModelOptions lỗi: fallback về config.chat.models
+    vi.spyOn(clientApi, 'getModelOptions').mockRejectedValue(new Error('Network error'));
+    const qc2 = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc2}>
+        <NewSessionModal isOpen={true} onClose={vi.fn()} onSubmit={vi.fn()} />
+      </QueryClientProvider>,
+    );
+
+    await screen.findByText(/Cuộc trò chuyện mới/i);
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: 'fallback-model-1' })).toBeInTheDocument();
+      expect(screen.getByRole('option', { name: 'fallback-model-2' })).toBeInTheDocument();
+    });
+  });
+
+  it('7. ChatPage lấy model Claude khả dụng từ /api/models và fallback về config.chat.models khi API lỗi', async () => {
+    vi.spyOn(chatApi, 'getChatSessions').mockResolvedValue([
+      {
+        id: 's1',
+        title: 'Active Session',
+        mode: 'safe',
+        model: 'active-model',
+        busy: false,
+        updatedAt: new Date().toISOString(),
+      },
+    ]);
+    vi.spyOn(chatApi, 'getChatMessages').mockResolvedValue([]);
+    vi.spyOn(clientApi, 'getConfig').mockResolvedValue({
+      chat: { model: 'sonnet', models: ['fallback-chat-model'] },
+    } as any);
+    vi.spyOn(clientApi, 'getModelOptions').mockResolvedValue({
+      models: [
+        { id: 'active-model', engine: 'claude', available: false, verified: false, profiles: [] },
+        { id: 'api-available-model', engine: 'claude', available: true, verified: true, profiles: ['p1'] },
+      ],
+      suggestions: ['api-available-model'],
+      configured: ['active-model'],
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/chat/s1']}>
+          <Routes>
+            <Route path="/chat/:sessionId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    // Active session loads
+    await screen.findByPlaceholderText(/Nhập tin nhắn/i);
+
+    // Active model is unavailable, shows warning
+    await waitFor(() => {
+      expect(screen.getByTestId('model-unavailable-warning')).toBeInTheDocument();
+    });
+  });
 });

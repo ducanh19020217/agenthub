@@ -116,7 +116,6 @@ export function formatDiscoveredModelOptions(
 export function validateModelSyntax(
   model: string,
   t?: (key: string) => string,
-  _knownModels?: Iterable<string>,
 ): string | null {
   const trimmed = model.trim();
   if (!trimmed) {

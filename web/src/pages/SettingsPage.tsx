@@ -14,7 +14,6 @@ import { ToastViewport, useToasts } from '../components/ui/Toast';
 import { DataTable, SelectOrCustomInput, SortableModelList } from '../components/ui';
 import {
   formatDiscoveredModelOptions,
-  getModelsForProvider,
   validateModelSyntax,
   validateChatModelSyntax,
   validateReviewerModelSyntax,
@@ -182,9 +181,10 @@ export const SettingsPage: React.FC = () => {
     if (modelOptions?.models) {
       return formatDiscoveredModelOptions(modelOptions.models, t, undefined, true);
     }
-    const fromApi = modelOptions?.suggestions || [];
-    const set = new Set([...fromApi]);
-    return Array.from(set).filter(Boolean);
+    if (modelOptions?.suggestions) {
+      return Array.from(new Set(modelOptions.suggestions)).filter(Boolean);
+    }
+    return [];
   }, [modelOptions, t]);
 
   const availableClaudeProfiles = useMemo(
@@ -228,10 +228,9 @@ export const SettingsPage: React.FC = () => {
       return formatDiscoveredModelOptions(modelOptions.models, t, 'codex', true);
     }
     if (modelOptions?.suggestions) {
-      const fromApi = modelOptions.suggestions.filter(
+      return modelOptions.suggestions.filter(
         (m) => m.startsWith('codex:') || (m.startsWith('gpt-') && !m.startsWith('gpt-oss-')),
       );
-      return getModelsForProvider(fromApi, 'codex');
     }
     return [];
   }, [modelOptions, t]);
@@ -241,10 +240,9 @@ export const SettingsPage: React.FC = () => {
       return formatDiscoveredModelOptions(modelOptions.models, t, 'claude', true);
     }
     if (modelOptions?.suggestions) {
-      const fromApi = modelOptions.suggestions.filter(
+      return modelOptions.suggestions.filter(
         (m) => m.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(m),
       );
-      return getModelsForProvider(fromApi, 'claude');
     }
     return [];
   }, [modelOptions, t]);
@@ -285,12 +283,12 @@ export const SettingsPage: React.FC = () => {
       setMultiplePerProvider(config.multiplePerProvider !== false);
       setClaudeBin(config.chat?.claudeBin || 'claude');
       setAllowFullMode(Boolean(config.chat?.allowFullMode));
-      setChatModel(config.chat?.model || '');
+      setChatModel(config.chat?.model || 'sonnet');
       setChatModels(config.chat?.models || []);
       setReviewerModel(config.reviewer?.model || '');
       setClaudeFallback(config.reviewer?.claudeFallback !== false);
       setClaudeProfiles(config.reviewer?.claudeProfiles || []);
-      setClaudeModel(config.reviewer?.claudeModel || '');
+      setClaudeModel(config.reviewer?.claudeModel || 'sonnet');
       const defaultReviewOrder: ReviewerOrderItem[] = [];
       if (config.reviewer?.model) {
         defaultReviewOrder.push({
@@ -404,14 +402,14 @@ export const SettingsPage: React.FC = () => {
       return;
     }
 
-    const invalidHard = hardModels.find((m) => validateModelSyntax(m, t, knownDiscovered));
+    const invalidHard = hardModels.find((m) => validateModelSyntax(m, t));
     if (invalidHard) {
-      failValidation(`${t('settings.hardChainLabel')}: ${validateModelSyntax(invalidHard, t, knownDiscovered)} ("${invalidHard}")`);
+      failValidation(`${t('settings.hardChainLabel')}: ${validateModelSyntax(invalidHard, t)} ("${invalidHard}")`);
       return;
     }
-    const invalidEasy = easyModels.find((m) => validateModelSyntax(m, t, knownDiscovered));
+    const invalidEasy = easyModels.find((m) => validateModelSyntax(m, t));
     if (invalidEasy) {
-      failValidation(`${t('settings.easyChainLabel')}: ${validateModelSyntax(invalidEasy, t, knownDiscovered)} ("${invalidEasy}")`);
+      failValidation(`${t('settings.easyChainLabel')}: ${validateModelSyntax(invalidEasy, t)} ("${invalidEasy}")`);
       return;
     }
 
@@ -822,7 +820,7 @@ export const SettingsPage: React.FC = () => {
               onChange={setHardChainModels}
               availableOptions={availableWorkerModels}
               unavailableModels={unavailableModels}
-              validate={(val) => validateModelSyntax(val, t, knownDiscovered)}
+              validate={(val) => validateModelSyntax(val, t)}
               ariaLabel={t('settings.hardChainLabel')}
             />
 
@@ -835,7 +833,7 @@ export const SettingsPage: React.FC = () => {
               onChange={setEasyChainModels}
               availableOptions={availableWorkerModels}
               unavailableModels={unavailableModels}
-              validate={(val) => validateModelSyntax(val, t, knownDiscovered)}
+              validate={(val) => validateModelSyntax(val, t)}
               ariaLabel={t('settings.easyChainLabel')}
             />
 
@@ -1410,7 +1408,7 @@ export const SettingsPage: React.FC = () => {
             {fallback.map((step, index) => (
               <div key={`${step.type}-${index}`} draggable onDragStart={(event) => event.dataTransfer.setData('text/plain', String(index))} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { const from = Number(event.dataTransfer.getData('text/plain')); if (!Number.isInteger(from) || from === index) return; const next = [...fallback]; const [moved] = next.splice(from, 1); next.splice(index, 0, moved); setFallback(next); }} className="flex flex-wrap items-center gap-2 p-2.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] cursor-grab">
                 <span className="text-xs text-[var(--t-text-3)] shrink-0">⠿ {index + 1}.</span>
-                <select value={step.type} onChange={(event) => { const next = [...fallback]; const type = event.target.value; next[index] = type === 'model' ? { type: 'model', model: availableChatModels[0] || '' } : type === 'apiKey' ? { type: 'apiKey', dailyCapUSD: 5 } : type === 'profile' ? { type: 'profile', profile: '' } : type === 'wait' ? { type: 'wait' } : { type: 'engine', engine: 'codex' }; setFallback(next); }} className="text-xs rounded border border-[var(--t-border)] bg-[var(--t-surface)] p-1.5 text-[var(--t-text)] shrink-0">
+                <select value={step.type} onChange={(event) => { const next = [...fallback]; const type = event.target.value; next[index] = type === 'model' ? { type: 'model', model: availableChatModels[0] || config?.chat?.model || 'sonnet' } : type === 'apiKey' ? { type: 'apiKey', dailyCapUSD: 5 } : type === 'profile' ? { type: 'profile', profile: '' } : type === 'wait' ? { type: 'wait' } : { type: 'engine', engine: 'codex' }; setFallback(next); }} className="text-xs rounded border border-[var(--t-border)] bg-[var(--t-surface)] p-1.5 text-[var(--t-text)] shrink-0">
                   <option value="profile">profile</option><option value="model">model</option><option value="apiKey">apiKey</option><option value="engine">engine: codex</option><option value="wait">wait</option>
                 </select>
                 {step.type === 'profile' && (

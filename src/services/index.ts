@@ -5942,21 +5942,52 @@ export class AppService {
       });
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : String(error);
-      const isConflict = (error instanceof HttpError && (error.error === 'conflict' || error.statusCode === 409)) ||
-        (error instanceof MergeError && error.error === 'conflict') ||
-        (error instanceof Error && /conflict/i.test(error.message));
-      const files = extractConflictFiles(rawMessage);
+      const isMergeError = error instanceof MergeError;
+      const isHttpError = error instanceof HttpError;
+
+      const isConfig = isMergeError && error.configuration;
+      const isEnv = (isHttpError && (error.error === 'environment_error' || error.statusCode === 503)) ||
+        (isMergeError && error.environment);
+
+      const isConflict = !isConfig && !isEnv && (
+        (isHttpError && (error.error === 'conflict' || error.statusCode === 409)) ||
+        (isMergeError && error.error === 'conflict') ||
+        (!isMergeError && !isHttpError && error instanceof Error && /xung đột|conflict/i.test(error.message))
+      );
 
       this.failedAutoMerges.add(taskId);
-      this.scheduler.getEventBus().emit(isConflict ? 'merge.conflict' : 'merge.failed', taskId, {
+
+      if (isConflict) {
+        const files = extractConflictFiles(rawMessage);
+        const conflictCount = this.eventRepo
+          ? this.eventRepo.getByTask(taskId).filter((e) => e.type === 'merge.conflict').length + 1
+          : 1;
+
+        this.scheduler.getEventBus().emit('merge.conflict', taskId, {
+          actor: 'retry-merge',
+          message: rawMessage,
+          files: files.length > 0 ? files.join(', ') : rawMessage,
+          conflictCount,
+          autoRetried: false,
+        });
+
+        throw new HttpError(409, 'conflict', rawMessage, { files });
+      }
+
+      this.scheduler.getEventBus().emit('merge.failed', taskId, {
         actor: 'retry-merge',
         message: rawMessage,
-        files: files.length > 0 ? files.join(', ') : rawMessage,
-        conflictCount: this.eventRepo ? this.eventRepo.getByTask(taskId).filter((e) => e.type === 'merge.conflict').length + 1 : 1,
+        environment: isEnv || undefined,
         autoRetried: false,
       });
 
-      throw new HttpError(409, 'conflict', rawMessage, { files });
+      if (isMergeError) {
+        throw new HttpError(error.statusCode, error.error, error.message);
+      }
+      if (isHttpError) {
+        throw error;
+      }
+      throw new HttpError(500, 'merge_failed', rawMessage);
     } finally {
       this.scheduler.setTaskMerging(taskId, false);
     }

@@ -522,6 +522,98 @@ describe('Delivery issues (merge_failed & push_failed)', () => {
     }
   });
 
+  it('POST /api/tasks/:id/merge/retry preserves 422 unprocessable_entity when post-merge checks fail and does not return conflict', async () => {
+    const { repoPath, taskBranch } = setupGitRepo();
+    try {
+      const intWorktree = path.join(tmpDir, 'int-worktree-check-fail');
+      git(repoPath, 'worktree', 'add', intWorktree, 'agenthub/integration');
+
+      ctx.projectRepo.insert({
+        id: 'proj-check-fail',
+        name: 'Project Check Fail',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ publish: { enabled: false } }),
+        merge: JSON.stringify({
+          enabled: true,
+          worktrees: { 'agenthub/integration': intWorktree, 'main': intWorktree },
+          checks: ['node -e "process.exit(1)"'],
+          timeoutSec: 30,
+        }),
+      });
+
+      const taskId = 'task-check-fail';
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-check-fail',
+        slug: 't-check-fail',
+        branch: taskBranch,
+        title: 'Task check fail test',
+        status: 'review',
+      });
+
+      const resRetry = await server.inject({
+        method: 'POST',
+        url: `/api/tasks/${taskId}/merge/retry`,
+        headers: authHeaders(),
+      });
+      expect(resRetry.statusCode).toBe(422);
+      const body = resRetry.json();
+      expect(body.error).toBe('unprocessable_entity');
+      expect(body.message).toContain('Checks sau merge thất bại');
+      expect(body.files).toBeUndefined();
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it('POST /api/tasks/:id/merge/retry preserves 503 environment_error when post-merge checks fail due to environment error', async () => {
+    const { repoPath, taskBranch } = setupGitRepo();
+    try {
+      const intWorktree = path.join(tmpDir, 'int-worktree-env-fail');
+      git(repoPath, 'worktree', 'add', intWorktree, 'agenthub/integration');
+
+      ctx.projectRepo.insert({
+        id: 'proj-env-fail',
+        name: 'Project Env Fail',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ publish: { enabled: false } }),
+        merge: JSON.stringify({
+          enabled: true,
+          worktrees: { 'agenthub/integration': intWorktree, 'main': intWorktree },
+          checks: ['nonexistent_command_xyz_12345'],
+          timeoutSec: 30,
+        }),
+      });
+
+      const taskId = 'task-env-fail';
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-env-fail',
+        slug: 't-env-fail',
+        branch: taskBranch,
+        title: 'Task env fail test',
+        status: 'review',
+      });
+
+      const resRetry = await server.inject({
+        method: 'POST',
+        url: `/api/tasks/${taskId}/merge/retry`,
+        headers: authHeaders(),
+      });
+      expect(resRetry.statusCode).toBe(503);
+      const body = resRetry.json();
+      expect(body.error).toBe('environment_error');
+      expect(body.message).toMatch(/(?:Worktree tích hợp thiếu dependency|Checks sau merge thất bại do lỗi môi trường)/);
+      expect(body.files).toBeUndefined();
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
   it('checks local and remote independently so remote target containing commit is not reported as push_failed', async () => {
     const { repoPath, taskBranch, taskCommit } = setupGitRepoWithRemote();
     try {

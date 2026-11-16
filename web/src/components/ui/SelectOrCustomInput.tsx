@@ -147,14 +147,14 @@ export const SelectOrCustomInput: React.FC<SelectOrCustomInputProps> = ({
         {groupedOptions.hasGroups ? (
           <>
             {groupedOptions.ungrouped.map((opt) => (
-              <option key={opt.value} value={opt.value}>
+              <option key={opt.value} value={opt.value} aria-label={opt.value}>
                 {opt.label || opt.value}
               </option>
             ))}
             {Object.entries(groupedOptions.groups).map(([groupName, groupOpts]) => (
               <optgroup key={groupName} label={groupName}>
                 {groupOpts.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
+                  <option key={opt.value} value={opt.value} aria-label={opt.value}>
                     {opt.label || opt.value}
                   </option>
                 ))}
@@ -163,7 +163,7 @@ export const SelectOrCustomInput: React.FC<SelectOrCustomInputProps> = ({
           </>
         ) : (
           normalizedOptions.map((opt) => (
-            <option key={opt.value} value={opt.value}>
+            <option key={opt.value} value={opt.value} aria-label={opt.value}>
               {opt.label || opt.value}
             </option>
           ))

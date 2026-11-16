@@ -223,19 +223,26 @@ export function computeDeliveryIssue(
     let pushFailed = false;
     let pushError = '';
     let pushFailedAt = '';
-    let latestFailureTs = 0;
+    let actualFailureTs: number | undefined;
+
+    let pushResultHasError = false;
+    let pushResultError = '';
+    let pushResultFailedAt: string | undefined;
+    let pushResultTs: number | undefined;
 
     if (task.pushResult) {
       try {
         const pr = typeof task.pushResult === 'string' ? JSON.parse(task.pushResult) : task.pushResult;
         if (pr && typeof pr === 'object') {
           if (pr.state === 'push_failed' || pr.error) {
-            pushFailed = true;
-            pushError = String(pr.error || 'Push lên git thất bại');
-            pushFailedAt = pr.failedAt || task.updatedAt || task.createdAt;
-            const ts = new Date(pushFailedAt).getTime();
-            if (!isNaN(ts)) {
-              latestFailureTs = ts;
+            pushResultHasError = true;
+            pushResultError = String(pr.error || 'Push lên git thất bại');
+            if (pr.failedAt) {
+              const ts = new Date(pr.failedAt).getTime();
+              if (!isNaN(ts)) {
+                pushResultFailedAt = pr.failedAt;
+                pushResultTs = ts;
+              }
             }
           }
         }
@@ -245,35 +252,72 @@ export function computeDeliveryIssue(
     }
 
     const pushFailedEvent = events.filter((e) => e.type === 'task.push_failed').at(-1);
+    let eventHasError = false;
+    let eventError = '';
+    let eventFailedAt: string | undefined;
+    let eventTs: number | undefined;
+
     if (pushFailedEvent) {
-      const eventTs = new Date(pushFailedEvent.ts).getTime();
-      if (eventTs >= latestFailureTs) {
-        pushFailed = true;
-        latestFailureTs = eventTs;
-        pushFailedAt = toApiTime(pushFailedEvent.ts) || pushFailedEvent.ts;
-        if (pushFailedEvent.payload) {
-          try {
-            const p = typeof pushFailedEvent.payload === 'string' ? JSON.parse(pushFailedEvent.payload) : pushFailedEvent.payload;
-            pushError = String(p.error || p.message || 'Push lên git thất bại');
-          } catch {
-            // ignore
-          }
+      eventHasError = true;
+      const ts = new Date(pushFailedEvent.ts).getTime();
+      if (!isNaN(ts)) {
+        eventTs = ts;
+        eventFailedAt = toApiTime(pushFailedEvent.ts) || pushFailedEvent.ts;
+      }
+      if (pushFailedEvent.payload) {
+        try {
+          const p = typeof pushFailedEvent.payload === 'string' ? JSON.parse(pushFailedEvent.payload) : pushFailedEvent.payload;
+          eventError = String(p.error || p.message || 'Push lên git thất bại');
+        } catch {
+          // ignore
         }
+      }
+    }
+
+    if (pushResultHasError || eventHasError) {
+      pushFailed = true;
+
+      // Determine actual failure timestamp and error/time strings independently
+      if (pushResultTs !== undefined && eventTs !== undefined) {
+        if (pushResultTs > eventTs) {
+          actualFailureTs = pushResultTs;
+          pushFailedAt = pushResultFailedAt!;
+          pushError = pushResultError || eventError || 'Push lên git thất bại';
+        } else {
+          actualFailureTs = eventTs;
+          pushFailedAt = eventFailedAt || toApiTime(pushFailedEvent!.ts) || pushFailedEvent!.ts;
+          pushError = eventError || pushResultError || 'Push lên git thất bại';
+        }
+      } else if (eventTs !== undefined) {
+        actualFailureTs = eventTs;
+        pushFailedAt = eventFailedAt || toApiTime(pushFailedEvent!.ts) || pushFailedEvent!.ts;
+        pushError = eventError || pushResultError || 'Push lên git thất bại';
+      } else if (pushResultTs !== undefined) {
+        actualFailureTs = pushResultTs;
+        pushFailedAt = pushResultFailedAt!;
+        pushError = pushResultError || 'Push lên git thất bại';
+      } else {
+        // Error recorded in pushResult without failedAt and no task.push_failed event
+        actualFailureTs = undefined;
+        pushFailedAt = toApiTime(task.updatedAt) || task.updatedAt || toApiTime(task.createdAt) || task.createdAt;
+        pushError = pushResultError || eventError || 'Push lên git thất bại';
       }
     }
 
     if (pushFailed) {
       const pushedEvent = events.filter((e) => e.type === 'task.pushed').at(-1);
       if (pushedEvent) {
-        const isPushedAfter = new Date(pushedEvent.ts).getTime() >= latestFailureTs;
-        if (isPushedAfter) {
-          pushFailed = false;
+        const pushedTs = new Date(pushedEvent.ts).getTime();
+        if (!isNaN(pushedTs)) {
+          if (actualFailureTs === undefined || pushedTs >= actualFailureTs) {
+            pushFailed = false;
+          }
         }
       }
 
       if (task.pushedAt) {
         const pushedAtTs = new Date(task.pushedAt).getTime();
-        if (isNaN(pushedAtTs) || pushedAtTs >= latestFailureTs) {
+        if (isNaN(pushedAtTs) || actualFailureTs === undefined || pushedAtTs >= actualFailureTs) {
           pushFailed = false;
         }
       }

@@ -614,6 +614,68 @@ describe('Delivery issues (merge_failed & push_failed)', () => {
     expect(issue).toBeNull();
   });
 
+  it('clears push_failed when pushResult error lacks failedAt and task.updatedAt was touched after task.pushed event', async () => {
+    ctx.projectRepo.insert({
+      id: 'proj-pushed-no-failedat',
+      name: 'Project Pushed No FailedAt',
+      path: path.join(tmpDir, 'nonexistent'),
+      defaultBranch: 'main',
+      maxParallel: 1,
+    });
+
+    const taskId = 'task-pushed-no-failedat';
+    ctx.taskRepo.insert({
+      id: taskId,
+      projectId: 'proj-pushed-no-failedat',
+      slug: 't-event-no-failedat',
+      title: 'Task with push error missing failedAt',
+      status: 'done',
+    });
+
+    // 1. pushResult error WITHOUT failedAt, and task.push_failed event at 10:00
+    ctx.taskRepo.update(taskId, {
+      pushResult: JSON.stringify({ state: 'push_failed', error: 'connection refused' }), // no failedAt!
+    });
+    const eventFailedId = ctx.eventRepo.insert('task.push_failed', taskId, {
+      error: 'connection refused',
+    });
+    // Manually ensure event timestamp is 10:00
+    ctx.db.prepare('UPDATE events SET ts = ? WHERE id = ?').run('2026-11-13T10:00:00.000Z', eventFailedId);
+
+    const project = ctx.projectRepo.get('proj-pushed-no-failedat')!;
+
+    // 2. Emit task.pushed event at 10:05 without setting task.pushedAt
+    const eventPushedId = ctx.eventRepo.insert('task.pushed', taskId, {
+      commit: 'abc1234',
+      branch: 'main',
+    });
+    ctx.db.prepare('UPDATE events SET ts = ? WHERE id = ?').run('2026-11-13T10:05:00.000Z', eventPushedId);
+
+    // 3. Task row is touched later at 10:15 (so task.updatedAt > task.pushed event ts)
+    ctx.db.prepare('UPDATE tasks SET updatedAt = ? WHERE id = ?').run('2026-11-13T10:15:00.000Z', taskId);
+
+    // computeDeliveryIssue must determine failure time independently from event and NOT use task.updatedAt,
+    // so task.pushed at 10:05 clears push_failed!
+    let issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+    expect(issue).toBeNull();
+
+    // 4. Also test when there is NO task.push_failed event at all, just pushResult error without failedAt:
+    // If task.pushed occurred at 10:05 and updatedAt was touched at 10:15, push_failed should still be cleared
+    ctx.db.prepare('DELETE FROM events WHERE id = ?').run(eventFailedId);
+    issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+    expect(issue).toBeNull();
+
+    // 5. Conversely, if a subsequent task.push_failed event occurs at 10:20 (after task.pushed), push_failed is NOT cleared
+    const eventFailedLaterId = ctx.eventRepo.insert('task.push_failed', taskId, {
+      error: 'subsequent failure',
+    });
+    ctx.db.prepare('UPDATE events SET ts = ? WHERE id = ?').run('2026-11-13T10:20:00.000Z', eventFailedLaterId);
+    issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+    expect(issue).not.toBeNull();
+    expect(issue?.kind).toBe('push_failed');
+    expect(issue?.error).toBe('subsequent failure');
+  });
+
   it('supports cursor pagination for derived task queries without looping infinitely', async () => {
     ctx.projectRepo.insert({
       id: 'proj-page',

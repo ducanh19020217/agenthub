@@ -81,10 +81,11 @@ import { getDailyUsageReport } from '../daily-usage.js';
 import { ClaudeSessionRepo } from '../claude-sessions/repo.js';
 import type { ClaudeSessionRow } from '../claude-sessions/repo.js';
 import { isClaudeProcessOpen, isClaudeQuotaLimited, ClaudeSessionScanner } from '../claude-sessions/scanner.js';
-import type { PageResult } from '../pagination.js';
+import { decodeCursor, encodeCursor, parsePageSize, type PageResult } from '../pagination.js';
 import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
 import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
+import { computeDeliveryIssue, clearGitCheckCache, clearGitCheckCacheForTask, extractConflictFiles, type DeliveryIssue } from './delivery-issues.js';
 import { publishTask as executePublishTask, isProjectPublishing, onProjectPublishLockReleased, type PublishResult } from '../publish.js';
 import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } from './dag.js';
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
@@ -1212,6 +1213,15 @@ export class AppService {
     this.claudeAuthRecoveryTimer = setInterval(() => void this.recheckExpiredClaudeProfiles(), 5 * 60_000);
     this.claudeAuthRecoveryTimer.unref?.();
     this.chatService?.eventBus.on('brain.profiles_synced', this.profileSyncHandler);
+    const onGitStateChanged = () => clearGitCheckCache();
+    const eventBus = this.scheduler?.getEventBus?.();
+    if (eventBus) {
+      eventBus.on('task.merged', onGitStateChanged);
+      eventBus.on('task.pushed', onGitStateChanged);
+      eventBus.on('task.push_failed', onGitStateChanged);
+      eventBus.on('merge.conflict', onGitStateChanged);
+      eventBus.on('merge.failed', onGitStateChanged);
+    }
   }
 
   /** Backfill the legacy merge column for projects registered before automatic mapping existed. */
@@ -1712,6 +1722,8 @@ export class AppService {
       blocked: 0,
       cancelled: 0,
       focusWaiting: 0,
+      merge_failed: 0,
+      push_failed: 0,
     };
 
     const tasksByProject: Record<string, Record<string, number>> = {};
@@ -1756,6 +1768,15 @@ export class AppService {
         };
       }
       tasksByProject[t.projectId][t.status] = (tasksByProject[t.projectId][t.status] || 0) + 1;
+
+      if (t.status !== 'pushed' && t.status !== 'cancelled' && t.status !== 'failed') {
+        const events = this.eventRepo ? this.eventRepo.getByTask(t.id) : [];
+        const project = projects.find((p) => p.id === t.projectId);
+        const issue = computeDeliveryIssue(t, events, project);
+        if (issue) {
+          byStatus[issue.kind] = (byStatus[issue.kind] || 0) + 1;
+        }
+      }
     }
 
     for (const [taskId, runtime] of runningMap.entries()) {
@@ -4224,8 +4245,11 @@ export class AppService {
           autoMergeSkippedRetried = payload.retried === true;
         } catch { /* ignore malformed legacy event */ }
       }
+      const taskEvents = this.eventRepo ? this.eventRepo.getByTask(task.id) : [];
+      const deliveryIssue = computeDeliveryIssue(task, taskEvents, project);
       return {
         ...apiTask(task, blockingDisk),
+        deliveryIssue,
         externalUrl: this.openProjectTicketUrl(task),
         blockingDisk,
         reviewChain,
@@ -4258,13 +4282,79 @@ export class AppService {
     }) as TaskRow[];
   }
 
-  listTasks(filter?: { project?: string; status?: string }): TaskRow[] {
-    return this.decorateTriageTasks(this.decorateTasks(this.taskRepo.list(filter)));
+  listTasks(filter?: { project?: string; status?: string; derived?: string }): TaskRow[] {
+    const derived = filter?.derived || (filter?.status === 'merge_failed' || filter?.status === 'push_failed' ? filter.status : undefined);
+    const statusFilter = (filter?.status === 'merge_failed' || filter?.status === 'push_failed') ? undefined : filter?.status;
+    let tasks = this.decorateTriageTasks(this.decorateTasks(this.taskRepo.list({ project: filter?.project, status: statusFilter })));
+    if (derived) {
+      tasks = tasks.filter((t) => (t as unknown as { deliveryIssue?: DeliveryIssue }).deliveryIssue?.kind === derived);
+    }
+    return tasks;
   }
 
-  listTasksPage(filter?: { project?: string; status?: string; search?: string; limit?: string | number; cursor?: string; offset?: string | number; sort?: string; order?: string }): PageResult<TaskRow> {
-    const page = this.taskRepo.page(filter);
-    return { ...page, items: this.decorateTriageTasks(this.decorateTasks(page.items)) };
+  listTasksPage(filter?: { project?: string; status?: string; derived?: string; search?: string; limit?: string | number; cursor?: string; offset?: string | number; sort?: string; order?: string }): PageResult<TaskRow> {
+    const derived = filter?.derived || (filter?.status === 'merge_failed' || filter?.status === 'push_failed' ? filter.status : undefined);
+    if (!derived) {
+      const page = this.taskRepo.page(filter);
+      return { ...page, items: this.decorateTriageTasks(this.decorateTasks(page.items)) };
+    }
+
+    // For derived delivery issue queries (merge_failed | push_failed), retrieve candidate tasks and filter
+    const candidateTasks = this.taskRepo.list({ project: filter?.project });
+    const decorated = this.decorateTriageTasks(this.decorateTasks(candidateTasks));
+    let matching = decorated.filter((t) => (t as unknown as { deliveryIssue?: DeliveryIssue }).deliveryIssue?.kind === derived);
+
+    if (filter?.search?.trim()) {
+      const term = filter.search.trim().toLowerCase();
+      matching = matching.filter((t) => t.slug?.toLowerCase().includes(term) || t.title?.toLowerCase().includes(term));
+    }
+
+    const sortColumn = filter?.sort === 'statusChangedAt' ? 'statusChangedAt' : filter?.sort === 'updatedAt' ? 'updatedAt' : filter?.sort === 'title' ? 'title' : filter?.sort === 'slug' ? 'slug' : 'createdAt';
+    const descending = filter?.order !== 'asc';
+
+    matching.sort((a, b) => {
+      const va = (a[sortColumn as keyof TaskRow] as string | number | null) ?? '';
+      const vb = (b[sortColumn as keyof TaskRow] as string | number | null) ?? '';
+      if (va < vb) return descending ? 1 : -1;
+      if (va > vb) return descending ? -1 : 1;
+      return descending ? (a.id < b.id ? 1 : -1) : (a.id > b.id ? 1 : -1);
+    });
+
+    const total = matching.length;
+    const limit = parsePageSize(filter?.limit);
+    const offset = typeof filter?.offset === 'number' ? filter.offset : Number(filter?.offset || 0);
+    const safeOffset = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
+
+    let rows = matching;
+    if (filter?.cursor) {
+      const cursor = decodeCursor(filter.cursor);
+      if (!cursor) {
+        throw new HttpError(400, 'bad_request', 'Invalid pagination cursor');
+      }
+      rows = rows.filter((item) => {
+        const va = (item[sortColumn as keyof TaskRow] as string | number | null) ?? '';
+        if (descending) {
+          if (va < cursor.value) return true;
+          if (va > cursor.value) return false;
+          return item.id < cursor.id;
+        } else {
+          if (va > cursor.value) return true;
+          if (va < cursor.value) return false;
+          return item.id > cursor.id;
+        }
+      });
+    }
+
+    const sliced = rows.slice(safeOffset, safeOffset + limit + 1);
+    const hasMore = sliced.length > limit;
+    const items = hasMore ? sliced.slice(0, limit) : sliced;
+    const last = items.at(-1);
+
+    return {
+      items,
+      total,
+      nextCursor: hasMore && last ? encodeCursor((last[sortColumn as keyof TaskRow] as string | number | null) ?? '', last.id) : null,
+    };
   }
 
   private decorateTriageTasks(tasks: TaskRow[]): TaskRow[] {
@@ -4410,8 +4500,10 @@ export class AppService {
     const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
     const skippedEvent = events.filter((event) => event.type === 'review.auto_merge_skipped').at(-1);
     const skippedPayload = skippedEvent?.payload && typeof skippedEvent.payload === 'object' ? skippedEvent.payload as { reason?: unknown; checks?: unknown; retried?: unknown } : undefined;
+    const deliveryIssue = computeDeliveryIssue(task, rawEvents, project);
     return {
       ...apiTask(task, blockingDisk),
+      deliveryIssue,
       externalUrl: this.openProjectTicketUrl(task),
       blockingDisk,
       reviewer,
@@ -4584,6 +4676,18 @@ export class AppService {
         case 'task.resumed':
           candidates.push({ status: 'running', at });
           break;
+        case 'merge.conflict':
+        case 'merge.failed':
+          candidates.push({ status: 'merge_failed', at });
+          break;
+        case 'review.auto_merge_skipped':
+          if (payload && (payload as { reason?: string }).reason === 'merge_failed') {
+            candidates.push({ status: 'merge_failed', at });
+          }
+          break;
+        case 'task.push_failed':
+          candidates.push({ status: 'push_failed', at });
+          break;
       }
     }
 
@@ -4625,6 +4729,18 @@ export class AppService {
       }
     }
 
+    if (task.pushResult && !candidates.some((c) => c.status === 'push_failed')) {
+      try {
+        const pr = typeof task.pushResult === 'string' ? JSON.parse(task.pushResult) : task.pushResult;
+        if (pr && typeof pr === 'object' && (pr.state === 'push_failed' || (pr.error && !task.pushedAt))) {
+          const at = toApiTime(pr.failedAt || task.updatedAt || task.createdAt);
+          if (at) candidates.push({ status: 'push_failed', at });
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     // Sort chronologically
     candidates.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
 
@@ -4651,8 +4767,8 @@ export class AppService {
     } else {
       const lastStatus = deduplicated.at(-1)!.status;
       const isDoneMatching =
-        task.status === 'done' && (lastStatus === 'done' || lastStatus === 'merged' || lastStatus === 'pushed');
-      if (lastStatus !== task.status && !isDoneMatching) {
+        task.status === 'done' && (lastStatus === 'done' || lastStatus === 'merged' || lastStatus === 'pushed' || lastStatus === 'push_failed' || lastStatus === 'merge_failed');
+      if (lastStatus !== task.status && !isDoneMatching && lastStatus !== 'merge_failed' && lastStatus !== 'push_failed') {
         const at = toApiTime(task.statusChangedAt ?? task.updatedAt)!;
         deduplicated.push({
           status: task.status,
@@ -5797,6 +5913,134 @@ export class AppService {
     }
   }
 
+  async retryTaskMerge(idParam: string, options?: { assignWorker?: boolean }): Promise<Record<string, unknown>> {
+    const taskId = toTaskId(idParam);
+    const task = this.taskRepo.get(taskId);
+    if (!task) {
+      throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
+    }
+
+    const project = this.projectRepo.get(task.projectId);
+    if (!project) {
+      throw new HttpError(404, 'not_found', `Project "${task.projectId}" không tồn tại`);
+    }
+
+    // Giao worker xử lý xung đột
+    if (options?.assignWorker) {
+      const events = this.eventRepo ? this.eventRepo.getByTask(taskId) : [];
+      const currentIssue = computeDeliveryIssue(task, events, project);
+      const files = currentIssue?.files || [];
+      const filesText = files.length > 0 ? files.join(', ') : (currentIssue?.error || 'Xung đột khi merge vào integration');
+      const note = `\n\n## Yêu cầu xử lý xung đột merge\n\nCác file/chi tiết xung đột: ${filesText}\nCác nhánh đã merge trước đó có thể cũng sửa các file này. Hãy chạy \`git merge <base>\`, giữ thay đổi của cả hai bên rồi chạy đầy đủ checks trước khi commit.`;
+
+      this.taskRepo.update(taskId, {
+        status: 'queued',
+        resume: 1,
+        body: `${task.body || ''}${note}`,
+        notBefore: null,
+      });
+
+      this.scheduler.getEventBus().emit('task.queued', taskId, {
+        reason: 'merge_conflict_manual_assign',
+        feedback: note.trim(),
+        files,
+      });
+
+      clearGitCheckCacheForTask(task, project);
+      if (project.path) clearGitCheckCache(project.path);
+      clearGitCheckCache();
+      return { ok: true, status: 'queued', assignedWorker: true, files };
+    }
+
+    // Merge lại
+    this.failedAutoMerges.delete(taskId);
+    clearGitCheckCacheForTask(task, project);
+    if (project.path) clearGitCheckCache(project.path);
+    clearGitCheckCache();
+    this.scheduler.setTaskMerging(taskId, true);
+    let mergeResult: { mergeCommit: string; checks: string[] };
+
+    try {
+      mergeResult = await mergeTaskIntoBase(task, project, {
+        hubHome: this.config.hubHome,
+        cacheDir: this.config.cacheDir,
+        cacheMaxEntries: this.config.cacheMaxEntries,
+        cacheMaxGB: this.config.cacheMaxGB,
+        cachePolicy: {
+          maxEntries: this.config.cacheMaxEntries,
+          maxBytes: this.config.cacheMaxGB * 1024 ** 3,
+        },
+      });
+    } catch (error) {
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const isMergeError = error instanceof MergeError;
+      const isHttpError = error instanceof HttpError;
+
+      const isConfig = isMergeError && error.configuration;
+      const isEnv = (isHttpError && (error.error === 'environment_error' || error.statusCode === 503)) ||
+        (isMergeError && error.environment);
+
+      const isConflict = !isConfig && !isEnv && (
+        (isHttpError && (error.error === 'conflict' || error.statusCode === 409)) ||
+        (isMergeError && error.error === 'conflict') ||
+        (!isMergeError && !isHttpError && error instanceof Error && /xung đột|conflict/i.test(error.message))
+      );
+
+      this.failedAutoMerges.add(taskId);
+
+      if (isConflict) {
+        const files = extractConflictFiles(rawMessage);
+        const conflictCount = this.eventRepo
+          ? this.eventRepo.getByTask(taskId).filter((e) => e.type === 'merge.conflict').length + 1
+          : 1;
+
+        this.scheduler.getEventBus().emit('merge.conflict', taskId, {
+          actor: 'retry-merge',
+          message: rawMessage,
+          files: files.length > 0 ? files.join(', ') : rawMessage,
+          conflictCount,
+          autoRetried: false,
+        });
+
+        throw new HttpError(409, 'conflict', rawMessage, { files });
+      }
+
+      this.scheduler.getEventBus().emit('merge.failed', taskId, {
+        actor: 'retry-merge',
+        message: rawMessage,
+        environment: isEnv || undefined,
+        autoRetried: false,
+      });
+
+      if (isMergeError) {
+        throw new HttpError(error.statusCode, error.error, error.message);
+      }
+      if (isHttpError) {
+        throw error;
+      }
+      throw new HttpError(500, 'merge_failed', rawMessage);
+    } finally {
+      this.scheduler.setTaskMerging(taskId, false);
+    }
+
+    if (task.status !== 'done') {
+      this.taskRepo.update(taskId, { status: 'done' });
+    }
+    this.failedAutoMerges.delete(taskId);
+    clearGitCheckCacheForTask(task, project);
+    if (project.path) clearGitCheckCache(project.path);
+    clearGitCheckCache();
+
+    this.exportKnowledgeFile(task.projectId);
+    this.scheduler.getEventBus().emit('task.merged', taskId, mergeResult);
+
+    if (projectSettings(project).publish?.enabled) {
+      this.enqueueAutoPublish(task.projectId, taskId);
+    }
+
+    return { ok: true, mergeResult, mergeCommit: mergeResult.mergeCommit };
+  }
+
   /**
    * Brains do not receive reviewer escalations, so without this the task would sit in review
    * forever. Send it back once with the reviewer's feedback on the strongest model; a second
@@ -6122,6 +6366,15 @@ export class AppService {
 
   async publishTask(idParam: string, options?: { manual?: boolean; skipAudit?: boolean }): Promise<PublishResult> {
     const taskId = toTaskId(idParam);
+    const task = this.taskRepo.get(taskId);
+    const project = task ? this.projectRepo.get(task.projectId) : undefined;
+    if (task) {
+      clearGitCheckCacheForTask(task, project);
+    }
+    if (project?.path) {
+      clearGitCheckCache(project.path);
+    }
+    clearGitCheckCache();
     return executePublishTask(
       taskId,
       {

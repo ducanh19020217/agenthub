@@ -483,6 +483,8 @@ export function formatStatusTimeLabel(
       case 'changes_requested': label = `Changes requested ${timeStr}`; break;
       case 'auditing': label = `Auditing since ${timeStr}`; break;
       case 'publishing': label = `Publishing since ${timeStr}`; break;
+      case 'merge_failed': label = `Merge failed ${timeStr}`; break;
+      case 'push_failed': label = `Push failed ${timeStr}`; break;
       default: label = `${status} ${timeStr}`; break;
     }
   } else {
@@ -503,6 +505,8 @@ export function formatStatusTimeLabel(
       case 'changes_requested': label = `Yêu cầu sửa ${timeStr}`; break;
       case 'auditing': label = `Đang audit từ ${timeStr}`; break;
       case 'publishing': label = `Đang đẩy git từ ${timeStr}`; break;
+      case 'merge_failed': label = `Merge lỗi ${timeStr}`; break;
+      case 'push_failed': label = `Push lỗi ${timeStr}`; break;
       default: label = `${status} ${timeStr}`; break;
     }
   }

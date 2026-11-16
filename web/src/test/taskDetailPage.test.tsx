@@ -1264,5 +1264,86 @@ describe('TaskDetailPage', () => {
     // Custom model is added to chain
     expect(screen.getByTestId('model-item-0')).toHaveTextContent('custom-unverified-model');
   });
+
+  it('35. Task với deliveryIssue (merge_failed): hiển thị banner, nút Merge lại, Giao worker xử lý, và bước timeline', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      deliveryIssue: {
+        kind: 'merge_failed',
+        error: 'CONFLICT: Merge conflict in docs/DECISIONS.md',
+        failedAt: '2026-11-13T10:00:00Z',
+        files: ['docs/DECISIONS.md'],
+      },
+    });
+
+    const retrySpy = vi.spyOn(client, 'retryTaskMerge').mockResolvedValue({ ok: true });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+
+    const banner = await screen.findByTestId('delivery-issue-banner');
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveTextContent('Merge vào nhánh đích bị xung đột');
+    expect(within(banner).getByTestId('banner-delivery-error')).toHaveTextContent('CONFLICT: Merge conflict in docs/DECISIONS.md');
+    expect(within(banner).getByTestId('banner-conflict-files')).toHaveTextContent('docs/DECISIONS.md');
+
+    // Click Merge lại
+    const retryBtn = within(banner).getByTestId('banner-btn-retry-merge');
+    fireEvent.click(retryBtn);
+    expect(retrySpy).toHaveBeenCalledWith('proj-1~t1', { assignWorker: false });
+
+    await waitFor(() => expect(retryBtn).not.toBeDisabled());
+
+    // Click Giao worker xử lý
+    const assignBtn = within(banner).getByTestId('banner-btn-assign-worker');
+    fireEvent.click(assignBtn);
+    expect(retrySpy).toHaveBeenCalledWith('proj-1~t1', { assignWorker: true });
+
+    // Workflow timeline has merge_failed step
+    const timeline = await screen.findByTestId('workflow-timeline');
+    expect(timeline).toBeInTheDocument();
+    const mergeFailedStep = timeline.querySelector('[data-status="merge_failed"]');
+    expect(mergeFailedStep).toBeInTheDocument();
+    expect(mergeFailedStep).toHaveTextContent('Merge lỗi');
+  });
+
+  it('36. Task với deliveryIssue (push_failed): hiển thị banner và nút Push lại, và bước timeline', async () => {
+    vi.spyOn(client, 'getTask').mockResolvedValue({
+      ...baseTask,
+      status: 'done',
+      deliveryIssue: {
+        kind: 'push_failed',
+        error: 'remote rejected: protected branch hook failed',
+        failedAt: '2026-11-13T10:05:00Z',
+      },
+    });
+
+    const publishSpy = vi.spyOn(client, 'publishTask').mockResolvedValue({ ok: true, started: true });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    renderPage();
+
+    expect(await screen.findByText('Task Alpha')).toBeInTheDocument();
+
+    const banner = await screen.findByTestId('delivery-issue-banner');
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveTextContent('Đẩy lên git thất bại');
+    expect(within(banner).getByTestId('banner-delivery-error')).toHaveTextContent('remote rejected: protected branch hook failed');
+
+    // Click Push lại
+    const pushBtn = within(banner).getByTestId('banner-btn-retry-push');
+    fireEvent.click(pushBtn);
+    expect(publishSpy).toHaveBeenCalledWith('proj-1~t1');
+
+    // Workflow timeline has push_failed step
+    const timeline = await screen.findByTestId('workflow-timeline');
+    expect(timeline).toBeInTheDocument();
+    const pushFailedStep = timeline.querySelector('[data-status="push_failed"]');
+    expect(pushFailedStep).toBeInTheDocument();
+    expect(pushFailedStep).toHaveTextContent('Push lỗi');
+  });
 });
 

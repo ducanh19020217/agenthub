@@ -26,6 +26,7 @@ import {
   resumeTask,
   splitTask,
   publishTask,
+  retryTaskMerge,
   getProject,
 } from '../api/client';
 import { TaskLevel, EventItem, TaskTimelineItem, TaskStatus } from '../types/api';
@@ -66,9 +67,11 @@ import {
   ExternalLink,
   GitFork,
   UploadCloud,
+  UserCheck,
 } from 'lucide-react';
+import { useToasts, ToastViewport } from '../components/ui/Toast';
 
-const TERMINAL_STATUSES = new Set<string>(['done', 'merged', 'pushed', 'cancelled', 'failed']);
+const TERMINAL_STATUSES = new Set<string>(['done', 'merged', 'pushed', 'cancelled', 'failed', 'merge_failed', 'push_failed']);
 function tailPrefixOverlap(snapshot: string, stream: string): number {
   const length = Math.min(snapshot.length, stream.length);
   if (length === 0) return 0;
@@ -121,6 +124,57 @@ export const TaskDetailPage: React.FC = () => {
   const [selectedModelToAdd, setSelectedModelToAdd] = useState('');
   const [editError, setEditError] = useState<string | null>(null);
   const [retryWithDifferentModel, setRetryWithDifferentModel] = useState(false);
+  const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
+  const [deliveryActionLoading, setDeliveryActionLoading] = useState(false);
+
+  const handleDeliveryRetryMerge = async (assignWorker = false) => {
+    if (!task) return;
+    const confirmMsg = assignWorker
+      ? t('taskDetail.confirmAssignWorker')
+      : t('taskDetail.confirmRetryMerge');
+    if (!window.confirm(confirmMsg)) return;
+
+    setDeliveryActionLoading(true);
+    try {
+      await retryTaskMerge(task.id, { assignWorker });
+      if (assignWorker) {
+        pushToast({ kind: 'success', title: t('taskDetail.assignWorkerSuccess') });
+      } else {
+        pushToast({ kind: 'success', title: t('taskDetail.mergeRetrySuccess') });
+      }
+      queryClient.invalidateQueries({ queryKey: ['task', id] });
+      queryClient.invalidateQueries({ queryKey: ['status'] });
+      queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (assignWorker) {
+        pushToast({ kind: 'error', title: t('taskDetail.assignWorkerFailed', { error: msg }) });
+      } else {
+        pushToast({ kind: 'error', title: t('taskDetail.mergeRetryFailed', { error: msg }) });
+      }
+    } finally {
+      setDeliveryActionLoading(false);
+    }
+  };
+
+  const handleDeliveryRetryPush = async () => {
+    if (!task) return;
+    if (!window.confirm(t('taskDetail.confirmRetryPush'))) return;
+
+    setDeliveryActionLoading(true);
+    try {
+      await publishTask(task.id);
+      pushToast({ kind: 'success', title: t('taskDetail.publishRetrySuccess') });
+      queryClient.invalidateQueries({ queryKey: ['task', id] });
+      queryClient.invalidateQueries({ queryKey: ['status'] });
+      queryClient.invalidateQueries({ queryKey: ['tasks-kanban'] });
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      pushToast({ kind: 'error', title: t('taskDetail.publishRetryFailed', { error: msg }) });
+    } finally {
+      setDeliveryActionLoading(false);
+    }
+  };
 
   // Live log state
   const liveLogSegments = useRef<Array<{ sequence: number; taskId: string; text: string }>>([]);
@@ -188,9 +242,11 @@ export const TaskDetailPage: React.FC = () => {
   });
 
   const workflowTimelineItems: TaskTimelineItem[] = useMemo(() => {
-    if (task?.timeline && task.timeline.length > 0) return task.timeline;
-    if (task) {
-      return [
+    let items: TaskTimelineItem[] = [];
+    if (task?.timeline && task.timeline.length > 0) {
+      items = [...task.timeline];
+    } else if (task) {
+      items = [
         {
           status: task.status,
           at: task.statusChangedAt || task.updatedAt || task.createdAt,
@@ -198,7 +254,14 @@ export const TaskDetailPage: React.FC = () => {
         },
       ];
     }
-    return [];
+    if (task?.deliveryIssue && !items.some((it) => it.status === task.deliveryIssue!.kind)) {
+      items.push({
+        status: task.deliveryIssue.kind,
+        at: task.deliveryIssue.failedAt,
+        estimated: false,
+      });
+    }
+    return items;
   }, [task]);
 
   const emptyLogMessage = React.useMemo(() => {
@@ -1041,6 +1104,98 @@ export const TaskDetailPage: React.FC = () => {
           )}
         </div>
       </div>
+
+      {task.deliveryIssue && (
+        <section
+          data-testid="delivery-issue-banner"
+          className="rounded-xl border border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_8%,transparent)] p-5 space-y-3 shadow-xs"
+        >
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-[var(--t-crit)] shrink-0" />
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-[var(--t-crit)]">
+                {task.deliveryIssue.kind === 'merge_failed'
+                  ? t('taskDetail.mergeFailedTitle')
+                  : t('taskDetail.pushFailedTitle')}
+              </h2>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {task.deliveryIssue.kind === 'merge_failed' && (
+                <>
+                  <button
+                    type="button"
+                    data-testid="banner-btn-retry-merge"
+                    onClick={() => handleDeliveryRetryMerge(false)}
+                    disabled={deliveryActionLoading}
+                    className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>{t('taskDetail.btnRetryMerge')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="banner-btn-assign-worker"
+                    onClick={() => handleDeliveryRetryMerge(true)}
+                    disabled={deliveryActionLoading}
+                    className="px-3 py-1.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] hover:bg-[var(--t-surface-2)] text-[var(--t-text)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                  >
+                    <UserCheck className="w-3.5 h-3.5" />
+                    <span>{t('taskDetail.btnAssignWorker')}</span>
+                  </button>
+                </>
+              )}
+              {task.deliveryIssue.kind === 'push_failed' && (
+                <button
+                  type="button"
+                  data-testid="banner-btn-retry-push"
+                  onClick={handleDeliveryRetryPush}
+                  disabled={deliveryActionLoading}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                >
+                  <UploadCloud className="w-3.5 h-3.5" />
+                  <span>{t('taskDetail.btnRetryPush')}</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-1.5 text-xs text-[var(--t-text-2)]">
+            <div className="flex items-baseline gap-2">
+              <span className="font-semibold text-[var(--t-text)]">{t('taskDetail.failedAt')}:</span>
+              <span
+                data-testid="banner-delivery-failed-at"
+                className="font-mono"
+                title={formatIsoTitle(task.deliveryIssue.failedAt)}
+              >
+                {formatDateTime(task.deliveryIssue.failedAt, locale)}
+              </span>
+            </div>
+            {task.deliveryIssue.error && (
+              <div
+                data-testid="banner-delivery-error"
+                className="rounded-lg bg-[var(--t-surface)] border border-[var(--t-border)] p-2.5 font-mono text-[11px] text-[var(--t-text)] whitespace-pre-wrap max-h-36 overflow-y-auto"
+              >
+                {task.deliveryIssue.error}
+              </div>
+            )}
+            {task.deliveryIssue.files && task.deliveryIssue.files.length > 0 && (
+              <div className="space-y-1 pt-1" data-testid="banner-conflict-files">
+                <span className="font-semibold text-[var(--t-text)]">{t('taskDetail.conflictFiles')}:</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {task.deliveryIssue.files.map((file) => (
+                    <span
+                      key={file}
+                      className="font-mono text-[11px] rounded bg-[color-mix(in_srgb,var(--t-crit)_12%,transparent)] border border-[color-mix(in_srgb,var(--t-crit)_25%,transparent)] px-2 py-0.5 text-[var(--t-crit)]"
+                    >
+                      {file}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {task.status === 'cancelled' && (
         <section data-testid="task-cancelled-banner" className="rounded-xl border border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_8%,transparent)] p-4 text-sm space-y-1">
@@ -2094,6 +2249,7 @@ export const TaskDetailPage: React.FC = () => {
           </div>
         </div>
       )}
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} closeLabel={t('common.close')} />
     </div>
   );
 };

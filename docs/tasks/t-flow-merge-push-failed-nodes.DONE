@@ -1,0 +1,57 @@
+# Báo cáo hoàn thành: t-flow-merge-push-failed-nodes
+
+## Tóm tắt công việc đã làm
+1. **Trạng thái dẫn xuất `merge_failed` & `push_failed` ở tầng backend service**:
+   - Tính toán dẫn xuất không sửa đổi schema SQLite (`tasks.status`), tránh migration và rebuild bảng.
+   - `merge_failed`: Nhận diện task có sự kiện lỗi merge gần nhất (`merge.conflict`, `merge.failed`, hoặc `review.auto_merge_skipped` với `merge_failed`), chưa có `task.merged` sau đó, và nhánh task thực sự chưa được merge vào nhánh đích thực tế:
+     - Khi project bật `integration`: kiểm tra nhánh `settings.integration.branch || 'agenthub/integration'`.
+     - Khi project không dùng integration: kiểm tra chính xác nhánh `task.baseRef || project.defaultBranch || 'main'` (khớp luồng merge thực tế trong `mergeTaskIntoBase`, không dùng `publish.branch`).
+     - Xác minh độc lập qua `git merge-base --is-ancestor`.
+   - `push_failed`: Nhận diện task `done` có sự kiện `task.push_failed` hoặc `pushResult` lỗi gần nhất, chưa có `task.pushed` hay `pushedAt` sau thời điểm lỗi thực tế, và commit của task chưa có trên nhánh đích (kiểm tra cả local branch và `origin/<target>` độc lập qua `isGitPushed`).
+   - Tự động xóa trạng thái dẫn xuất ngay khi merge hoặc push thành công sau đó.
+   - Cơ chế cache git checks (`isAncestor`/`isPushed`) với TTL ngắn (15s) cho non-ancestor và dài hạn (1h) cho ancestor. Invalidation chính xác theo `repoPath`, `ref`, `taskId` (thông qua bảng ánh xạ `taskKeyMap`), và xóa toàn bộ cache khi có sự kiện merge/push/retry.
+   - Hỗ trợ filter `?derived=merge_failed|push_failed` trong `GET /api/tasks` với cursor pagination chuẩn xác (`nextCursor`), trả `deliveryIssue` trong `GET /api/tasks/:id`, và thống kê số lượng trong `GET /api/status`.
+
+2. **API Retry & Giao worker xử lý xung đột**:
+   - `POST /api/tasks/:id/merge/retry`: Chạy lại luồng auto-merge hiện có (`mergeTaskIntoBase`).
+     - Khi còn xung đột merge thực sự (`isConflict`), trả HTTP 409 `conflict` kèm danh sách file xung đột (`files`).
+     - Chỉ coi là `conflict` khi `error.error === 'conflict'` (hoặc `MergeError` conflict không phải config/env, hoặc message regex không phải HttpError/MergeError).
+     - Với lỗi khác (MergeError 422 `unprocessable_entity`, 503 `environment_error`, hoặc HttpError 409 có error code không phải conflict), giữ nguyên mã và semantics lỗi gốc, phát `merge.failed` và không trả files.
+   - Hỗ trợ body `{ assignWorker: true }`: Chuyển task về `queued` kèm ghi chú danh sách file xung đột vào body task để worker tự xử lý (`git merge <base>`).
+
+3. **Giao diện Web (`TaskFlow.tsx`, `TaskDetailPage.tsx`, modal `FlowTaskList`)**:
+   - Thêm 2 node ở hàng nhánh lỗi (row 2) của TaskFlow:
+     - "Merge lỗi" dưới cột `done` với mũi tên kết nối và nhãn "xung đột".
+     - "Push lỗi" dưới cột `pushed` với mũi tên kết nối và nhãn "push lỗi".
+     - Badge số lượng nổi bật màu cảnh báo (`--t-crit`) khi số lượng > 0.
+   - Modal danh sách (`FlowTaskList`): Hiển thị tên task, project, thời điểm lỗi, lỗi rút gọn, file xung đột, và các nút **Merge lại**, **Push lại**, **Giao worker xử lý** kèm confirm và toast thông báo kết quả.
+   - `TaskDetailPage`: Hiển thị banner lỗi giao hàng khi có `deliveryIssue` kèm các nút thao tác tương ứng, và bước lỗi trên timeline trạng thái với mốc thời gian tĩnh (không tính duration cho terminal status).
+   - i18n tiếng Việt và tiếng Anh đầy đủ, bao gồm chuỗi `statusTime.merge_failed` và `statusTime.push_failed`.
+
+4. **Xử lý audit feedback trước khi publish**:
+   - Sửa `src/services/delivery-issues.ts:399`: khi project không dùng integration, kiểm tra `merge_failed` sử dụng `task.baseRef || project.defaultBranch || 'main'`, không dùng `settings.publish.branch`.
+   - Sửa `src/services/index.ts:5984` (và 5848): `isConflict` chỉ coi `HttpError` là conflict khi `error.error === 'conflict'`, không gom chung mọi HTTP 409 khác.
+   - Bổ sung unit tests trong `test/delivery-issues.test.ts` kiểm thử độc lập cả 2 trường hợp.
+
+## Kết quả kiểm tra
+- **Root Unit Tests (`vitest run`)**: 149/149 test files passed, 1918/1918 tests passed.
+- **Web Unit Tests (`npm --prefix web test -- --run`)**: 75/75 test files passed, 713/713 tests passed.
+- **Root Lint (`npm run lint`)**: 0 errors, 150 warnings (chỉ có các cảnh báo `any` từ trước trong test/legacy).
+- **Root Typecheck (`npm run typecheck`)**: 0 errors.
+- **Web Typecheck (`npm --prefix web run typecheck`)**: 0 errors.
+- **Root Build (`npm run build`)**: Thành công.
+- **Web Build (`npm --prefix web run build`)**: Thành công.
+
+## Việc chưa làm được
+- Không có. Tất cả yêu cầu backend, web UI, retry API, git verification, cache invalidation, cursor pagination, và audit feedback đều đã hoàn thành và kiểm tra đạt 100%.
+
+## Danh sách commit trên nhánh
+- `ef0255c0` fix(api): correct non-integration merge target verification and restrict 409 conflict classification
+- `4687fd5a` Merge branch 'agenthub/integration' into agenthub/t-flow-merge-push-failed-nodes
+- `89c4d12b` fix(api): preserve original error codes and avoid reporting conflict on retry check failures
+- `defb19ec` fix(api): determine push failure timestamp independently and avoid using task.updatedAt
+- `d4b92fa1` fix(api): safely guard scheduler eventBus registration in AppService constructor
+- `35f048b8` fix(api): fix git check cache invalidation for delivery issues
+- `7f73c530` fix(web): add statusTime translations and fallback labels for merge_failed and push_failed
+- `59b26548` fix(api): restrict merge target verification to actual target branch
+- `952a4e8c` fix(api): fix git pushed verification, success event clearance and derived cursor pagination

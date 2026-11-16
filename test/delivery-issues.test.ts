@@ -8,7 +8,7 @@ import { createContext } from '../src/daemon.js';
 import { createServer } from '../src/api/server.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
-import { isGitAncestor, computeDeliveryIssue, clearGitCheckCache } from '../src/services/delivery-issues.js';
+import { isGitAncestor, isGitPushed, computeDeliveryIssue, clearGitCheckCache } from '../src/services/delivery-issues.js';
 
 let tmpDir: string;
 let config: ReturnType<typeof loadConfig>;
@@ -50,6 +50,34 @@ function setupGitRepo(): { repoPath: string; taskBranch: string } {
 
   git(repoPath, 'checkout', 'main');
   return { repoPath, taskBranch };
+}
+
+function setupGitRepoWithRemote(): { repoPath: string; taskBranch: string; taskCommit: string } {
+  const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-remote-'));
+  git(repoPath, 'init');
+  git(repoPath, 'checkout', '-b', 'main');
+  git(repoPath, 'config', 'user.email', 'test@example.com');
+  git(repoPath, 'config', 'user.name', 'AgentHub Test');
+  fs.writeFileSync(path.join(repoPath, 'file.txt'), 'initial\n');
+  git(repoPath, 'add', 'file.txt');
+  git(repoPath, 'commit', '-m', 'Initial commit');
+  const initialCommit = git(repoPath, 'rev-parse', 'HEAD');
+
+  const taskBranch = 'agenthub/t-remote-1';
+  git(repoPath, 'checkout', '-b', taskBranch);
+  fs.writeFileSync(path.join(repoPath, 'file.txt'), 'initial\ntask update\n');
+  git(repoPath, 'add', 'file.txt');
+  git(repoPath, 'commit', '-m', 'Task update');
+  const taskCommit = git(repoPath, 'rev-parse', 'HEAD');
+
+  // Set remote ref refs/remotes/origin/main to taskCommit directly without requiring git push
+  git(repoPath, 'update-ref', 'refs/remotes/origin/main', taskCommit);
+
+  // Keep local main at initial commit (behind remote origin/main)
+  git(repoPath, 'checkout', 'main');
+  git(repoPath, 'reset', '--hard', initialCommit);
+
+  return { repoPath, taskBranch, taskCommit };
 }
 
 describe('Delivery issues (merge_failed & push_failed)', () => {
@@ -386,5 +414,176 @@ describe('Delivery issues (merge_failed & push_failed)', () => {
     } finally {
       fs.rmSync(repoPath, { recursive: true, force: true });
     }
+  });
+
+  it('checks local and remote independently so remote target containing commit is not reported as push_failed', async () => {
+    const { repoPath, taskBranch, taskCommit } = setupGitRepoWithRemote();
+    try {
+      ctx.projectRepo.insert({
+        id: 'proj-remote',
+        name: 'Project Remote',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+      });
+
+      const taskId = 'task-remote-pushed';
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-remote',
+        slug: 't-remote-1',
+        branch: taskBranch,
+        title: 'Task pushed on remote only',
+        status: 'done',
+      });
+
+      // Simulate a past push failure recorded on task
+      ctx.taskRepo.update(taskId, {
+        pushResult: JSON.stringify({ state: 'push_failed', error: 'transient network error', failedAt: '2026-11-13T10:00:00.000Z' }),
+      });
+
+      // Local main does NOT have taskCommit
+      expect(isGitAncestor(repoPath, taskCommit, 'main')).toBe(false);
+      // But remote origin/main DOES have taskCommit
+      expect(isGitAncestor(repoPath, taskCommit, 'origin/main')).toBe(true);
+
+      // isGitPushed must check remote even when local is false and return true
+      clearGitCheckCache();
+      expect(isGitPushed(repoPath, taskCommit, 'main')).toBe(true);
+
+      // computeDeliveryIssue returns null because commit already reached target branch (remote)
+      const project = ctx.projectRepo.get('proj-remote')!;
+      const issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+      expect(issue).toBeNull();
+
+      const resTask = await server.inject({
+        method: 'GET',
+        url: `/api/tasks/${taskId}`,
+        headers: authHeaders(),
+      });
+      expect(resTask.json().deliveryIssue).toBeNull();
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it('clears push_failed when task.pushed event occurs after pushResult error without task.pushedAt', async () => {
+    ctx.projectRepo.insert({
+      id: 'proj-pushed-event',
+      name: 'Project Pushed Event',
+      path: path.join(tmpDir, 'nonexistent'),
+      defaultBranch: 'main',
+      maxParallel: 1,
+    });
+
+    const taskId = 'task-pushed-event';
+    ctx.taskRepo.insert({
+      id: taskId,
+      projectId: 'proj-pushed-event',
+      slug: 't-event-1',
+      title: 'Task with later push event',
+      status: 'done',
+    });
+
+    // Old pushResult error at 10:00
+    ctx.taskRepo.update(taskId, {
+      pushResult: JSON.stringify({ state: 'push_failed', error: 'connection refused', failedAt: '2026-11-13T10:00:00.000Z' }),
+    });
+
+    const project = ctx.projectRepo.get('proj-pushed-event')!;
+
+    // Before task.pushed event: reported as push_failed
+    let issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+    expect(issue).not.toBeNull();
+    expect(issue?.kind).toBe('push_failed');
+
+    // Emit task.pushed event at 10:05 without setting task.pushedAt in DB
+    ctx.eventRepo.insert('task.pushed', taskId, {
+      commit: 'abc1234',
+      branch: 'main',
+    });
+
+    // Now computeDeliveryIssue sees task.pushed after the pushResult failure and clears push_failed
+    issue = computeDeliveryIssue(ctx.taskRepo.get(taskId)!, ctx.eventRepo.getByTask(taskId), project);
+    expect(issue).toBeNull();
+  });
+
+  it('supports cursor pagination for derived task queries without looping infinitely', async () => {
+    ctx.projectRepo.insert({
+      id: 'proj-page',
+      name: 'Project Page',
+      path: path.join(tmpDir, 'nonexistent'),
+      defaultBranch: 'main',
+      maxParallel: 1,
+    });
+
+    // Create 25 tasks with merge_failed
+    for (let i = 1; i <= 25; i++) {
+      const pad = String(i).padStart(2, '0');
+      const taskId = `task-page-${pad}`;
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-page',
+        slug: `t-page-${pad}`,
+        title: `Task Page ${pad}`,
+        status: 'review',
+        createdAt: `2026-11-13T10:${pad}:00.000Z`,
+        updatedAt: `2026-11-13T10:${pad}:00.000Z`,
+      });
+      ctx.eventRepo.insert('merge.conflict', taskId, {
+        actor: 'auto-merge',
+        message: `Xung đột merge ở: file-${pad}.txt`,
+        files: [`file-${pad}.txt`],
+      });
+    }
+
+    // Page 1: limit 10
+    const resPage1 = await server.inject({
+      method: 'GET',
+      url: '/api/tasks?limit=10&derived=merge_failed',
+      headers: authHeaders(),
+    });
+    expect(resPage1.statusCode).toBe(200);
+    const page1 = resPage1.json();
+    expect(page1.total).toBe(25);
+    expect(page1.items).toHaveLength(10);
+    expect(page1.nextCursor).toBeDefined();
+    expect(page1.nextCursor).not.toBeNull();
+
+    // Page 2: with cursor from page 1
+    const resPage2 = await server.inject({
+      method: 'GET',
+      url: `/api/tasks?limit=10&derived=merge_failed&cursor=${encodeURIComponent(page1.nextCursor)}`,
+      headers: authHeaders(),
+    });
+    expect(resPage2.statusCode).toBe(200);
+    const page2 = resPage2.json();
+    expect(page2.total).toBe(25);
+    expect(page2.items).toHaveLength(10);
+    expect(page2.nextCursor).toBeDefined();
+    expect(page2.nextCursor).not.toBeNull();
+
+    // Verify items in page 1 and page 2 are completely distinct
+    const ids1 = new Set(page1.items.map((t: { id: string }) => t.id));
+    const ids2 = new Set(page2.items.map((t: { id: string }) => t.id));
+    for (const id of ids2) {
+      expect(ids1.has(id)).toBe(false);
+    }
+
+    // Page 3: with cursor from page 2
+    const resPage3 = await server.inject({
+      method: 'GET',
+      url: `/api/tasks?limit=10&derived=merge_failed&cursor=${encodeURIComponent(page2.nextCursor)}`,
+      headers: authHeaders(),
+    });
+    expect(resPage3.statusCode).toBe(200);
+    const page3 = resPage3.json();
+    expect(page3.total).toBe(25);
+    expect(page3.items).toHaveLength(5);
+    expect(page3.nextCursor).toBeNull();
+
+    // Total unique items across 3 pages is exactly 25
+    const allIds = new Set([...ids1, ...ids2, ...page3.items.map((t: { id: string }) => t.id)]);
+    expect(allIds.size).toBe(25);
   });
 });

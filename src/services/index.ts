@@ -79,7 +79,7 @@ import { getDailyUsageReport } from '../daily-usage.js';
 import { ClaudeSessionRepo } from '../claude-sessions/repo.js';
 import type { ClaudeSessionRow } from '../claude-sessions/repo.js';
 import { isClaudeProcessOpen, isClaudeQuotaLimited, ClaudeSessionScanner } from '../claude-sessions/scanner.js';
-import { encodeCursor, parsePageSize, type PageResult } from '../pagination.js';
+import { decodeCursor, encodeCursor, parsePageSize, type PageResult } from '../pagination.js';
 import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
 import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
@@ -4284,8 +4284,30 @@ export class AppService {
     const limit = parsePageSize(filter?.limit);
     const offset = typeof filter?.offset === 'number' ? filter.offset : Number(filter?.offset || 0);
     const safeOffset = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
-    const items = matching.slice(safeOffset, safeOffset + limit);
-    const hasMore = safeOffset + limit < total;
+
+    let rows = matching;
+    if (filter?.cursor) {
+      const cursor = decodeCursor(filter.cursor);
+      if (!cursor) {
+        throw new HttpError(400, 'bad_request', 'Invalid pagination cursor');
+      }
+      rows = rows.filter((item) => {
+        const va = (item[sortColumn as keyof TaskRow] as string | number | null) ?? '';
+        if (descending) {
+          if (va < cursor.value) return true;
+          if (va > cursor.value) return false;
+          return item.id < cursor.id;
+        } else {
+          if (va > cursor.value) return true;
+          if (va < cursor.value) return false;
+          return item.id > cursor.id;
+        }
+      });
+    }
+
+    const sliced = rows.slice(safeOffset, safeOffset + limit + 1);
+    const hasMore = sliced.length > limit;
+    const items = hasMore ? sliced.slice(0, limit) : sliced;
     const last = items.at(-1);
 
     return {

@@ -75,11 +75,12 @@ export function isGitPushed(repoPath: string, commitOrBranch: string, targetBran
 
   let result = false;
   try {
-    const isLocal = isGitAncestor(repoPath, commitOrBranch, targetBranch);
-    if (!isLocal) {
-      result = false;
+    const localBranch = targetBranch.replace(/^origin\//, '');
+    const isLocal = isGitAncestor(repoPath, commitOrBranch, localBranch);
+    if (isLocal) {
+      result = true;
     } else {
-      const remoteRef = `origin/${targetBranch}`;
+      const remoteRef = targetBranch.startsWith('origin/') ? targetBranch : `origin/${targetBranch}`;
       let hasRemote = false;
       try {
         execFileSync('git', ['-C', repoPath, 'rev-parse', '--verify', '--quiet', `refs/remotes/${remoteRef}`], { stdio: 'ignore' });
@@ -95,8 +96,6 @@ export function isGitPushed(repoPath: string, commitOrBranch: string, targetBran
 
       if (hasRemote) {
         result = isGitAncestor(repoPath, commitOrBranch, remoteRef);
-      } else {
-        result = isLocal;
       }
     }
   } catch {
@@ -158,15 +157,20 @@ export function computeDeliveryIssue(
     let pushFailed = false;
     let pushError = '';
     let pushFailedAt = '';
+    let latestFailureTs = 0;
 
     if (task.pushResult) {
       try {
         const pr = typeof task.pushResult === 'string' ? JSON.parse(task.pushResult) : task.pushResult;
         if (pr && typeof pr === 'object') {
-          if (pr.state === 'push_failed' || (pr.error && !task.pushedAt)) {
+          if (pr.state === 'push_failed' || pr.error) {
             pushFailed = true;
             pushError = String(pr.error || 'Push lên git thất bại');
             pushFailedAt = pr.failedAt || task.updatedAt || task.createdAt;
+            const ts = new Date(pushFailedAt).getTime();
+            if (!isNaN(ts)) {
+              latestFailureTs = ts;
+            }
           }
         }
       } catch {
@@ -175,14 +179,13 @@ export function computeDeliveryIssue(
     }
 
     const pushFailedEvent = events.filter((e) => e.type === 'task.push_failed').at(-1);
-    const pushedEvent = events.filter((e) => e.type === 'task.pushed').at(-1);
-
     if (pushFailedEvent) {
-      const isPushedAfter = pushedEvent && new Date(pushedEvent.ts).getTime() >= new Date(pushFailedEvent.ts).getTime();
-      if (!isPushedAfter && !task.pushedAt) {
+      const eventTs = new Date(pushFailedEvent.ts).getTime();
+      if (eventTs >= latestFailureTs) {
         pushFailed = true;
-        if (!pushFailedAt) pushFailedAt = toApiTime(pushFailedEvent.ts) || pushFailedEvent.ts;
-        if (!pushError && pushFailedEvent.payload) {
+        latestFailureTs = eventTs;
+        pushFailedAt = toApiTime(pushFailedEvent.ts) || pushFailedEvent.ts;
+        if (pushFailedEvent.payload) {
           try {
             const p = typeof pushFailedEvent.payload === 'string' ? JSON.parse(pushFailedEvent.payload) : pushFailedEvent.payload;
             pushError = String(p.error || p.message || 'Push lên git thất bại');
@@ -190,13 +193,24 @@ export function computeDeliveryIssue(
             // ignore
           }
         }
-      } else {
-        pushFailed = false;
       }
     }
 
-    if (task.pushedAt) {
-      pushFailed = false;
+    if (pushFailed) {
+      const pushedEvent = events.filter((e) => e.type === 'task.pushed').at(-1);
+      if (pushedEvent) {
+        const isPushedAfter = new Date(pushedEvent.ts).getTime() >= latestFailureTs;
+        if (isPushedAfter) {
+          pushFailed = false;
+        }
+      }
+
+      if (task.pushedAt) {
+        const pushedAtTs = new Date(task.pushedAt).getTime();
+        if (isNaN(pushedAtTs) || pushedAtTs >= latestFailureTs) {
+          pushFailed = false;
+        }
+      }
     }
 
     if (pushFailed) {

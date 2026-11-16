@@ -143,6 +143,36 @@ async function refExists(repo: string, ref: string, env: NodeJS.ProcessEnv): Pro
   }
 }
 
+async function resolveRemoteAuditBase(
+  repoPath: string,
+  baseRef: string,
+  targetBranch: string,
+  task: TaskRow,
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
+  const candidates = [
+    baseRef,
+    `refs/remotes/origin/${targetBranch}`,
+    `origin/${targetBranch}`,
+    task.baseRef && task.baseRef !== targetBranch ? `refs/remotes/origin/${task.baseRef}` : '',
+    task.baseRef && task.baseRef !== targetBranch ? `origin/${task.baseRef}` : '',
+  ].filter(Boolean);
+
+  for (const ref of candidates) {
+    if (!/^[0-9a-f]{40}$/i.test(ref) && !(await refExists(repoPath, ref, env))) continue;
+    try {
+      const resolved = (await runGit(['-C', repoPath, 'rev-parse', `${ref}^{commit}`], repoPath, env)).trim();
+      if (resolved) return resolved;
+    } catch {
+      // Try the next explicitly supplied remote-base candidate.
+    }
+  }
+
+  throw new Error(
+    `Failed to resolve remote base commit for audit diff (baseRef: "${baseRef}", targetBranch: "${targetBranch}"). Remote base is required and cannot fall back to a local snapshot.`,
+  );
+}
+
 async function gitIdentityArgs(repo: string, env: NodeJS.ProcessEnv): Promise<string[]> {
   const read = async (key: string): Promise<string> => {
     try {
@@ -525,8 +555,7 @@ export async function findForwardMergeCommitsForTask(
               const taskPatterns = patterns.map((p) => p.toLowerCase());
               const matchesTask =
                 taskPatterns.some((pat) => lowerLog.includes(pat)) ||
-                (task.title ? lowerLog.includes(task.title.toLowerCase()) : false) ||
-                isMsgForward;
+                (task.title ? lowerLog.includes(task.title.toLowerCase()) : false);
               if (matchesTask) {
                 isP2OnTask = true;
               }
@@ -650,60 +679,16 @@ export async function getTaskDiff(
     const latestMerge = forwardMerges[0];
     commitSha = latestMerge;
 
-    let taskTip: string;
-    try {
-      taskTip = (await runGit(['-C', repoPath, 'rev-parse', `${latestMerge}^2`], repoPath, env)).trim();
-    } catch {
-      taskTip = latestMerge;
-    }
+    const taskTip = (await runGit(['-C', repoPath, 'rev-parse', `${latestMerge}^2`], repoPath, env)).trim();
     branchSha = taskTip;
 
     // Base commit:
     // Always use remote base before publish (baseRef / prevRemoteSha / origin/<targetBranch>).
     // Never fall back to earliest merge parent or parent merge.
     // If remote base cannot be resolved, fail closed (throw).
-    let baseCommit: string | null = null;
-    const candidatesToResolve: string[] = [];
-    if (baseRef) candidatesToResolve.push(baseRef);
-    if (targetBranch) {
-      candidatesToResolve.push(`refs/remotes/origin/${targetBranch}`);
-      candidatesToResolve.push(`origin/${targetBranch}`);
-    }
-    if (task.baseRef && task.baseRef !== targetBranch) {
-      candidatesToResolve.push(`refs/remotes/origin/${task.baseRef}`);
-      candidatesToResolve.push(`origin/${task.baseRef}`);
-    }
-
-    for (const ref of candidatesToResolve) {
-      if (await refExists(repoPath, ref, env)) {
-        try {
-          baseCommit = (await runGit(['-C', repoPath, 'rev-parse', `${ref}^{commit}`], repoPath, env)).trim();
-          if (baseCommit) break;
-        } catch {
-          // ignore and try next candidate
-        }
-      } else if (/^[0-9a-f]{40}$/i.test(ref)) {
-        try {
-          baseCommit = (await runGit(['-C', repoPath, 'rev-parse', `${ref}^{commit}`], repoPath, env)).trim();
-          if (baseCommit) break;
-        } catch {
-          // ignore and try next candidate
-        }
-      }
-    }
-
-    if (!baseCommit) {
-      throw new Error(
-        `Failed to resolve remote base commit for audit diff (baseRef: "${baseRef}", targetBranch: "${targetBranch}"). Remote base is required and cannot fall back to merge parent.`,
-      );
-    }
-
-    let mb = '';
-    try {
-      mb = (await runGit(['-C', repoPath, 'merge-base', baseCommit, taskTip], repoPath, env)).trim();
-    } catch {
-      mb = baseCommit;
-    }
+    const baseCommit = await resolveRemoteAuditBase(repoPath, baseRef, targetBranch, task, env);
+    const mb = (await runGit(['-C', repoPath, 'merge-base', baseCommit, taskTip], repoPath, env)).trim();
+    if (!mb) throw new Error('Failed to resolve merge-base for audit diff.');
 
     auditRange = `${mb}..${taskTip}`;
     diff = await runGit(['-C', repoPath, 'diff', auditRange], repoPath, env);
@@ -752,32 +737,13 @@ export async function getTaskDiff(
       if (!branchSha) {
         branchSha = taskSnapshotCommit;
       }
-      try {
-        let effectiveBase = baseRef;
-        if (!(await refExists(repoPath, effectiveBase, env))) {
-          effectiveBase = (sourceSha && (await refExists(repoPath, sourceSha, env)))
-            ? sourceSha
-            : (await refExists(repoPath, `refs/heads/${sourceBranch}`, env))
-              ? `refs/heads/${sourceBranch}`
-              : (targetSha && (await refExists(repoPath, targetSha, env)))
-                ? targetSha
-                : (await refExists(repoPath, `refs/heads/${targetBranch}`, env))
-                  ? `refs/heads/${targetBranch}`
-                  : 'HEAD';
-        }
-        let mergeBase = '';
-        try {
-          mergeBase = (await runGit(['-C', repoPath, 'merge-base', effectiveBase, taskSnapshotCommit], repoPath, env)).trim();
-        } catch {
-          mergeBase = effectiveBase;
-        }
-        auditRange = `${mergeBase}..${taskSnapshotCommit}`;
-        diff = await runGit(['-C', repoPath, 'diff', auditRange], repoPath, env);
-        const filesOut = await runGit(['-C', repoPath, 'diff', '--name-only', auditRange], repoPath, env);
-        changedFiles = filesOut.split('\n').map((s) => s.trim()).filter(Boolean);
-      } catch {
-        // Fallback
-      }
+      const effectiveBase = await resolveRemoteAuditBase(repoPath, baseRef, targetBranch, task, env);
+      const mergeBase = (await runGit(['-C', repoPath, 'merge-base', effectiveBase, taskSnapshotCommit], repoPath, env)).trim();
+      if (!mergeBase) throw new Error('Failed to resolve merge-base for audit diff.');
+      auditRange = `${mergeBase}..${taskSnapshotCommit}`;
+      diff = await runGit(['-C', repoPath, 'diff', auditRange], repoPath, env);
+      const filesOut = await runGit(['-C', repoPath, 'diff', '--name-only', auditRange], repoPath, env);
+      changedFiles = filesOut.split('\n').map((s) => s.trim()).filter(Boolean);
     }
   }
 
@@ -791,14 +757,6 @@ export async function getTaskDiff(
         commitSha = 'HEAD';
       }
     }
-  }
-
-  if (!usedMergeDiff && !diff && task.diffStat) {
-    diff = task.diffStat;
-  }
-
-  if (!auditRange && commitSha) {
-    auditRange = `${commitSha}^..${commitSha}`;
   }
 
   return { diff, changedFiles, commitSha, branchSha, auditRange };

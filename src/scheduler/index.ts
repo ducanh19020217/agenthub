@@ -544,7 +544,15 @@ export class Scheduler {
       const rows = this.profileModelRepo.getForProfile(profileName);
       if (rows.length > 0) {
         if (!isProfileLoggedIn(profile)) return false;
-        return rows.some((r) => r.modelId === model && Boolean(r.verified));
+        // Discovery stores Claude ids bare ("opus") and Codex ids prefixed ("codex:gpt-…"),
+        // while callers (e.g. reviewer selection) may pass "claude:opus" or a bare Codex id.
+        const normalize = (id: string): string => {
+          if (profile.engine === 'claude') return id.startsWith('claude:') ? id.slice('claude:'.length) : id;
+          if (profile.engine === 'codex') return id.startsWith('codex:') ? id : `codex:${id}`;
+          return id;
+        };
+        const wanted = normalize(model);
+        return rows.some((r) => normalize(r.modelId) === wanted && Boolean(r.verified));
       }
     }
 

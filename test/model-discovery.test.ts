@@ -746,6 +746,27 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-undiscovered', 'claude-fake-model')).toBe(false);
   });
 
+  it('Scheduler.profileHasModel matches prefixed reviewer ids against discovered Claude rows', () => {
+    profileRepo.upsert({
+      name: 'claude-discovered',
+      engine: 'claude',
+      kind: 'keyring',
+      email: 'claude2@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('claude-discovered', [
+      { modelId: 'opus', modelName: 'Claude Opus', engine: 'claude', verified: true },
+    ]);
+
+    const scheduler = { profileRepo, profileModelRepo };
+
+    // Reviewer selection passes normalizeReviewerModel('claude', 'opus') === 'claude:opus'
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-discovered', 'claude:opus')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-discovered', 'opus')).toBe(true);
+    expect(Scheduler.prototype.profileHasModel.call(scheduler as any, 'claude-discovered', 'claude:sonnet')).toBe(false);
+  });
+
   it('logged-out profile marks cache unverified and is treated as unavailable across discovery, API, and scheduler', async () => {
     // 1. Profile with authState not_logged_in
     profileRepo.upsert({

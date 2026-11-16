@@ -26,7 +26,9 @@ describe('SettingsPage Notifications & Digest (b-brain-notify)', () => {
         allowFullMode: false,
         maxConcurrent: 2,
         model: 'sonnet',
+        models: ['sonnet'],
       },
+      reviewer: { claudeModel: 'sonnet' },
       brain: {
         mode: 'suggest',
         digest: { enabled: true, time: '18:00' },

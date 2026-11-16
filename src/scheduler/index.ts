@@ -552,7 +552,8 @@ export class Scheduler {
           return id;
         };
         const wanted = normalize(model);
-        if (rows.some((r) => normalize(r.modelId) === wanted && Boolean(r.verified))) return true;
+        const isClaudeAlias = profile.engine === 'claude' && ['sonnet', 'opus', 'haiku'].includes(wanted);
+        if (rows.some((r) => normalize(r.modelId) === wanted && (Boolean(r.verified) || isClaudeAlias))) return true;
         // Discovery is additive: fall through to the statically known models below.
       }
     }
@@ -4345,11 +4346,21 @@ export class Scheduler {
   }
 
   private getModelChain(task: TaskRow): string[] {
-    const chain = task.modelChain
-      ? JSON.parse(task.modelChain) as string[]
-      : task.level === 'hard'
-      ? this.config.defaultModelChains.hard
-      : this.config.defaultModelChains.easy;
+    let chain: string[] = [];
+    if (task.modelChain) {
+      try {
+        const parsed = JSON.parse(task.modelChain);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          chain = parsed;
+        }
+      } catch {
+        chain = [];
+      }
+    }
+    if (chain.length === 0) {
+      const defaults = this.config.defaultModelChains;
+      chain = (task.level === 'hard' ? defaults?.hard : defaults?.easy) || [];
+    }
     const knownDiscovered = this.getKnownDiscoveredModels();
     const hasUndiscoveredCodex = this.profileRepo.getEnabled().some(
       (p) => p.engine === 'codex' && (!this.profileModelRepo || this.profileModelRepo.getForProfile(p.name).length === 0),

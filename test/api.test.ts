@@ -236,8 +236,8 @@ describe('AgentHub HTTP API Endpoints', () => {
     expect(initialConfig.slotsPerCodexProfile).toBe(2);
     expect(initialConfig.watchdog).toEqual({ stallMinutes: 20, waitingMinutes: 15 });
 
-    // 2. PUT config with invalid model -> 400
-    const invalidRes = await server.inject({
+    // 2. PUT config with an undiscovered model -> 200 (discovery only warns in the UI)
+    const undiscoveredRes = await server.inject({
       method: 'PUT',
       url: '/api/config',
       headers: authHeaders(),
@@ -245,7 +245,8 @@ describe('AgentHub HTTP API Endpoints', () => {
         modelChainHard: ['invalid-nonexistent-model'],
       },
     });
-    expect(invalidRes.statusCode).toBe(400);
+    expect(undiscoveredRes.statusCode).toBe(200);
+    expect(JSON.parse(undiscoveredRes.body).modelChainHard).toEqual(['invalid-nonexistent-model']);
 
     // 3. PUT config with valid models -> 200
     const validRes = await server.inject({

@@ -2089,7 +2089,7 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
           },
         },
         review: {
-          chain: [{ reviewer: 'configured-unverified-claude', mode: 'gate' }],
+          chain: [{ reviewer: 'configured-unverified-claude', mode: 'gate' as const }],
           maxRounds: 2,
         },
       };
@@ -2109,7 +2109,7 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
             <QueryClientProvider client={queryClient}>
               <MemoryRouter>
                 <ProjectSettingsDrawer
-                  project={testProject}
+                  project={testProject as any}
                   isOpen={true}
                   onClose={() => {}}
                 />

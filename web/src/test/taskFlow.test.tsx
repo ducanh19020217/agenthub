@@ -405,6 +405,52 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     expect(grid).not.toBeNull();
     expect(grid?.className).toContain('grid-cols-[repeat(5,minmax(216px,1fr))]');
     expect(grid?.className).toContain('grid-rows-[60px_minmax(124px,auto)_72px_minmax(124px,auto)_60px]');
+    expect(board?.className).toContain('pt-12');
+    expect(board?.className).toContain('pb-12');
+  });
+
+  it('keeps nodes in U columns, points edges in the right direction, and renders both retry lanes', async () => {
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      const totals: Partial<Record<string, number>> = {
+        waiting_quota: 1,
+        merge_failed: 1,
+      };
+      const total = totals[params?.status ?? ''] ?? 0;
+      return { items: [], total, nextCursor: null };
+    });
+
+    renderPage('/tasks?view=flow');
+    const edges = await screen.findByTestId('flow-edges');
+    await waitFor(() => expect(screen.getByTestId('flow-node-waiting_quota')).toHaveAttribute('data-count', '1'));
+
+    expect(screen.getByTestId('flow-node-auditing')).toHaveClass('col-start-4', 'row-start-4');
+    expect(screen.getByTestId('flow-node-pushed')).toHaveClass('col-start-3', 'row-start-4');
+    expect(screen.getByTestId('flow-node-done')).toHaveClass('col-start-5', 'row-start-4');
+
+    const upperIssuePaths = edges.querySelectorAll('[data-edge="issue-upper"]');
+    const lowerIssuePaths = edges.querySelectorAll('[data-edge="issue-lower"]');
+    expect(upperIssuePaths).toHaveLength(3);
+    expect(lowerIssuePaths).toHaveLength(3);
+    expect(Number(upperIssuePaths[0].getAttribute('d')?.match(/M [^ ]+ ([^ ]+)/)?.[1])).toBeGreaterThan(
+      Number(upperIssuePaths[0].getAttribute('d')?.match(/L [^ ]+ ([^ ]+)/)?.[1]),
+    );
+    expect(Number(lowerIssuePaths[0].getAttribute('d')?.match(/M [^ ]+ ([^ ]+)/)?.[1])).toBeLessThan(
+      Number(lowerIssuePaths[0].getAttribute('d')?.match(/L [^ ]+ ([^ ]+)/)?.[1]),
+    );
+    expect(upperIssuePaths[0]).toHaveAttribute('stroke', 'var(--t-crit)');
+    expect(upperIssuePaths[1]).toHaveAttribute('stroke', 'var(--t-text-3)');
+    expect(lowerIssuePaths[0]).toHaveAttribute('stroke', 'var(--t-crit)');
+    expect(lowerIssuePaths[1]).toHaveAttribute('stroke', 'var(--t-text-3)');
+
+    const lowerMainPaths = edges.querySelectorAll('[data-edge="main-lower"]');
+    expect(lowerMainPaths).toHaveLength(2);
+    expect(Number(lowerMainPaths[0].getAttribute('d')?.match(/M ([^ ]+)/)?.[1])).toBeGreaterThan(
+      Number(lowerMainPaths[0].getAttribute('d')?.match(/L ([^ ]+)/)?.[1]),
+    );
+    expect(edges.querySelectorAll('[data-edge="retry-upper"]')).toHaveLength(3);
+    expect(edges.querySelectorAll('[data-edge="retry-lower"]')).toHaveLength(3);
+    expect(within(edges).getAllByText('Chạy lại / tiếp tục')).toHaveLength(2);
+    expect(within(screen.getByTestId('flow-node-running')).getByText('Đang chạy')).not.toHaveClass('truncate');
   });
 
   it('does not cause an infinite render loop when getBoundingClientRect returns non-zero dimensions', async () => {

@@ -111,9 +111,9 @@ const getFallbackBox = (status: FlowStatus): NodeRect => {
   const def = NODE_DEFS.find((n) => n.status === status) || NODE_DEFS[0];
   const colW = 216;
   const gapX = 40;
-  const rowOffsets = [0, 60, 60 + 124 + 72, 60 + 124 + 72 + 124, 60 + 124 + 72 + 124 + 124];
+  const rowOffsets = [0, 60, 184, 256, 380];
   const x = 24 + def.col * (colW + gapX);
-  const y = 24 + (rowOffsets[def.row - 1] ?? 0);
+  const y = 72 + (rowOffsets[def.row - 1] ?? 0);
   return { x, y, w: colW, h: def.issue ? 60 : 124 };
 };
 
@@ -166,7 +166,7 @@ const FlowNodeCard: React.FC<{
   refetchInterval?: number;
   registerRef: (status: FlowStatus, el: HTMLDivElement | null) => void;
 }> = ({ node, project, search, onOpen, total: propTotal, isLoading: propIsLoading, isDisabled, refetchInterval, registerRef }) => {
-  const { t, locale } = useLocale();
+  const { t } = useLocale();
   const query = useStatusTotal(project, node.status, search, refetchInterval);
   const total = isDisabled ? 0 : (propTotal !== undefined ? propTotal : (query.data?.total ?? 0));
   const isLoading = isDisabled ? false : (propIsLoading !== undefined ? propIsLoading : query.isLoading);
@@ -176,17 +176,18 @@ const FlowNodeCard: React.FC<{
   const isNodeActive = !isDisabled && (node.status === 'running' || node.status === 'checking' || node.status === 'review' || node.status === 'auditing') && hasTasks;
   const isIssueNode = node.issue === true || node.status === 'merge_failed' || node.status === 'push_failed' || node.status === 'audit_failed';
   const isCompactIssue = isIssueNode;
-  const description = node.status === 'checking'
-    ? 'lint · typecheck · test · build'
+  const descriptionKey = node.status === 'checking'
+    ? 'descriptionChecking'
     : node.status === 'review'
-      ? 'reviewer AI'
+      ? 'descriptionReview'
       : node.status === 'done'
-        ? (locale === 'vi' ? 'đã merge integration' : 'merged into integration')
+        ? 'descriptionDone'
         : node.status === 'auditing'
-          ? (locale === 'vi' ? 'rà soát git diff' : 'review git diff')
+          ? 'descriptionAuditing'
           : node.status === 'pushed'
-            ? (locale === 'vi' ? 'tự merge + push' : 'auto-merge + push')
+            ? 'descriptionPushed'
             : undefined;
+  const description = descriptionKey ? t(`tasks.flow.${descriptionKey}`) : undefined;
   const Icon = STATUS_ICON[node.status];
   const open = () => {
     if (!isDisabled) onOpen(node.status);
@@ -389,7 +390,8 @@ const Edge: React.FC<{
   anchor?: 'start' | 'middle' | 'end';
   stroke?: string;
   marker?: string;
-}> = ({ d, label, lx, ly, dashed, animated, anchor = 'middle', stroke = EDGE_STYLE.stroke, marker = 'url(#flow-arrow)' }) => (
+  kind?: string;
+}> = ({ d, label, lx, ly, dashed, animated, anchor = 'middle', stroke = EDGE_STYLE.stroke, marker = 'url(#flow-arrow)', kind }) => (
   <g>
     <path
       d={d}
@@ -399,6 +401,7 @@ const Edge: React.FC<{
       markerEnd={marker}
       stroke={stroke}
       strokeOpacity={stroke === 'var(--t-crit)' ? 0.9 : EDGE_STYLE.strokeOpacity}
+      data-edge={kind}
       className={animated ? 'flow-edge-animated' : undefined}
       data-animated={animated ? 'true' : undefined}
     />
@@ -495,7 +498,7 @@ const FlowEdges: React.FC<{
         const bFrom = getNodeBox(from);
         const bTo = getNodeBox(to);
         const animated = isStatusActive(from) || isStatusActive(to);
-        return <Edge key={`${from}-${to}`} d={`M ${bFrom.x - 2} ${bFrom.y + bFrom.h * 0.36} L ${bTo.x + bTo.w + 6} ${bTo.y + bTo.h * 0.36}`} animated={animated} />;
+        return <Edge key={`${from}-${to}`} d={`M ${bFrom.x - 2} ${bFrom.y + bFrom.h * 0.36} L ${bTo.x + bTo.w + 6} ${bTo.y + bTo.h * 0.36}`} animated={animated} kind="main-lower" />;
       })}
 
       {/* Errors above their source point upward; errors below point downward. */}
@@ -503,9 +506,9 @@ const FlowEdges: React.FC<{
         const bFrom = getNodeBox(from);
         const bTo = getNodeBox(to);
         const startX = bFrom.x + bFrom.w * 0.7;
-        const startY = bFrom.y - 2;
+        const startY = bFrom.y + 8;
         const endX = bTo.x + bTo.w * 0.7;
-        const endY = bTo.y + bTo.h + 6;
+        const endY = bTo.y + bTo.h - 8;
         const animated = (counts[to] ?? 0) > 0;
 
         return (
@@ -519,6 +522,7 @@ const FlowEdges: React.FC<{
             animated={animated}
             stroke={(counts[to] ?? 0) > 0 ? 'var(--t-crit)' : EDGE_STYLE.stroke}
             marker={(counts[to] ?? 0) > 0 ? 'url(#flow-arrow-issue)' : 'url(#flow-arrow)'}
+            kind="issue-upper"
           />
         );
       })}
@@ -526,7 +530,7 @@ const FlowEdges: React.FC<{
         const bFrom = getNodeBox(from);
         const bTo = getNodeBox(to);
         const animated = (counts[to] ?? 0) > 0;
-        return <Edge key={`${from}-${to}`} d={`M ${bFrom.x + bFrom.w * 0.7} ${bFrom.y + bFrom.h + 2} L ${bTo.x + bTo.w * 0.7} ${bTo.y - 6}`} label={label} lx={bFrom.x + bFrom.w * 0.7 + 8} ly={(bFrom.y + bFrom.h + bTo.y) / 2} anchor="start" animated={animated} stroke={(counts[to] ?? 0) > 0 ? 'var(--t-crit)' : EDGE_STYLE.stroke} marker={(counts[to] ?? 0) > 0 ? 'url(#flow-arrow-issue)' : 'url(#flow-arrow)'} />;
+        return <Edge key={`${from}-${to}`} d={`M ${bFrom.x + bFrom.w * 0.7} ${bFrom.y + bFrom.h - 8} L ${bTo.x + bTo.w * 0.7} ${bTo.y + 8}`} label={label} lx={bFrom.x + bFrom.w * 0.7 + 8} ly={(bFrom.y + bFrom.h + bTo.y) / 2} anchor="start" animated={animated} stroke={(counts[to] ?? 0) > 0 ? 'var(--t-crit)' : EDGE_STYLE.stroke} marker={(counts[to] ?? 0) > 0 ? 'url(#flow-arrow-issue)' : 'url(#flow-arrow)'} kind="issue-lower" />;
       })}
 
       {/* Reviewer rework loop between the two rows. */}
@@ -536,12 +540,12 @@ const FlowEdges: React.FC<{
       {upper.map(({ to }) => {
         const b = getNodeBox(to);
         const x = b.x + b.w * 0.3;
-        return <path key={`upper-retry-${to}`} d={`M ${x} ${b.y} L ${x} ${upperLaneY} L ${queuedX} ${upperLaneY} L ${queuedX} ${bQueued.y - 6}`} fill="none" strokeWidth={1.75} strokeDasharray="6 5" stroke={EDGE_STYLE.stroke} markerEnd="url(#flow-arrow)" className={(counts[to] ?? 0) > 0 ? 'flow-edge-animated' : undefined} data-animated={(counts[to] ?? 0) > 0 ? 'true' : undefined} />;
+        return <path key={`upper-retry-${to}`} d={`M ${x} ${b.y} L ${x} ${upperLaneY} L ${queuedX} ${upperLaneY} L ${queuedX} ${bQueued.y - 6}`} fill="none" strokeWidth={1.75} strokeDasharray="6 5" stroke={EDGE_STYLE.stroke} markerEnd="url(#flow-arrow)" className={(counts[to] ?? 0) > 0 ? 'flow-edge-animated' : undefined} data-animated={(counts[to] ?? 0) > 0 ? 'true' : undefined} data-edge="retry-upper" />;
       })}
       {lower.map(({ to }) => {
         const b = getNodeBox(to);
         const x = b.x + b.w * 0.3;
-        return <path key={`lower-retry-${to}`} d={`M ${x} ${b.y + b.h} L ${x} ${lowerLaneY} L ${queuedX} ${lowerLaneY} L ${queuedX} ${bQueued.y + bQueued.h + 6}`} fill="none" strokeWidth={1.75} strokeDasharray="6 5" stroke={EDGE_STYLE.stroke} markerEnd="url(#flow-arrow)" className={(counts[to] ?? 0) > 0 ? 'flow-edge-animated' : undefined} data-animated={(counts[to] ?? 0) > 0 ? 'true' : undefined} />;
+        return <path key={`lower-retry-${to}`} d={`M ${x} ${b.y + b.h} L ${x} ${lowerLaneY} L ${queuedX} ${lowerLaneY} L ${queuedX} ${bQueued.y + bQueued.h + 6}`} fill="none" strokeWidth={1.75} strokeDasharray="6 5" stroke={EDGE_STYLE.stroke} markerEnd="url(#flow-arrow)" className={(counts[to] ?? 0) > 0 ? 'flow-edge-animated' : undefined} data-animated={(counts[to] ?? 0) > 0 ? 'true' : undefined} data-edge="retry-lower" />;
       })}
       <text x={queuedX + 10} y={upperLaneY - 8} fontSize={11.5} textAnchor="start" className="select-none fill-[var(--t-text-3)] font-medium">{t('tasks.flow.edgeRetry')}</text>
       <text x={queuedX + 10} y={lowerLaneY + 16} fontSize={11.5} textAnchor="start" className="select-none fill-[var(--t-text-3)] font-medium">{t('tasks.flow.edgeRetry')}</text>
@@ -1192,7 +1196,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
       >
         <div
           ref={boardRef}
-          className="relative min-w-[1360px] min-h-[max(480px,calc(100vh-280px))]"
+          className="relative min-w-[1360px] min-h-[max(480px,calc(100vh-280px))] pt-12 pb-12"
           role="group"
           aria-label={t('tasks.flow.ariaLabel')}
         >

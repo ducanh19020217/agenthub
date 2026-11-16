@@ -207,6 +207,7 @@ export const en: typeof vi = {
       edgeQuota: 'Out of quota',
       edgeFailed: 'Checks failed',
       edgeBlocked: 'Needs attention',
+      edgeApproval: 'approved',
       edgeRetry: 'Retry / resume',
       edgeRework: 'Reviewer requests changes',
       edgeAutoMergePush: 'Auto-merge + push',

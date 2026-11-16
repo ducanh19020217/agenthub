@@ -205,6 +205,7 @@ export const vi = {
       edgeQuota: 'Hết quota',
       edgeFailed: 'Check lỗi',
       edgeBlocked: 'Cần can thiệp',
+      edgeApproval: 'duyệt xong',
       edgeRetry: 'Chạy lại / tiếp tục',
       edgeRework: 'Reviewer yêu cầu sửa',
       edgeAutoMergePush: 'Tự merge + push',

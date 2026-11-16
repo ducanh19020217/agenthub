@@ -144,8 +144,8 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     // cạnh vào/ra nó có data-animated="true"
     const edgesGroup = screen.getByTestId('flow-edges');
     const animatedEdges = edgesGroup.querySelectorAll('[data-animated="true"]');
-    // 3 edges: queued -> running (vào), running -> checking (ra), running -> waiting_quota (ra)
-    expect(animatedEdges.length).toBe(3);
+    // 2 edges: queued -> running (vào), running -> checking (ra). Error wires animate only when the error node has tasks.
+    expect(animatedEdges.length).toBe(2);
   });
 
   it('(b) no active nodes or animated edges when no tasks are running', async () => {
@@ -393,17 +393,18 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     expect(reviewNode.querySelector('svg.flow-icon-review')).toBeNull();
   });
 
-  it('(i) uses viewport-based minimum height and content-between layout', async () => {
+  it('(i) uses the U-shaped five-column layout with a scrollable minimum width', async () => {
     renderPage('/tasks?view=flow');
     const wrapper = await screen.findByTestId('flow-view-wrapper');
     const board = wrapper.querySelector('[role="group"]');
     expect(board).not.toBeNull();
+    expect(board?.className).toContain('min-w-[1360px]');
     expect(board?.className).toContain('min-h-[max(480px,calc(100vh-280px))]');
 
     const grid = board?.querySelector('.grid');
     expect(grid).not.toBeNull();
-    expect(grid?.className).toContain('content-between');
-    expect(grid?.className).toContain('min-h-[max(480px,calc(100vh-280px))]');
+    expect(grid?.className).toContain('grid-cols-[repeat(5,minmax(216px,1fr))]');
+    expect(grid?.className).toContain('grid-rows-[60px_minmax(124px,auto)_72px_minmax(124px,auto)_60px]');
   });
 
   it('does not cause an infinite render loop when getBoundingClientRect returns non-zero dimensions', async () => {
@@ -464,18 +465,11 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     }
   });
 
-  it('renders merge label in an area not covered by nodes (above node boundary)', async () => {
+  it('renders the approval turn label between the two rows', async () => {
     renderPage('/tasks?view=flow');
-    const label = await screen.findByTestId('flow-merge-label');
-    expect(label).toBeInTheDocument();
-    expect(label).toHaveAttribute('data-placement', 'above-node');
-
-    // Label should be positioned above node top boundary (in fallback box, row 1 node y is 52)
-    const yAttr = Number(label.getAttribute('y'));
-    expect(yAttr).toBeLessThan(52);
-
-    // Label text is visible in both vi and en
-    expect(label.textContent).toMatch(/merge.*push/i);
+    const edges = await screen.findByTestId('flow-edges');
+    expect(within(edges).getByText('duyệt xong')).toBeInTheDocument();
+    expect(screen.getByTestId('flow-node-auditing')).toHaveTextContent('rà soát git diff');
   });
 
   it('pressing Enter on a running task link does not open the status modal', async () => {
@@ -507,14 +501,14 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
   });
 
-  it('enforces min-w-[1360px] and minmax(140px, 1fr) column width for flow nodes', async () => {
+  it('enforces min-w-[1360px] and five wide columns for flow nodes', async () => {
     renderPage('/tasks?view=flow');
     const wrapper = await screen.findByTestId('flow-view-wrapper');
     const board = wrapper.querySelector('[role="group"]');
     expect(board?.className).toContain('min-w-[1360px]');
 
     const grid = board?.querySelector('.grid');
-    expect(grid?.className).toContain('grid-cols-[repeat(8,minmax(140px,1fr))]');
+    expect(grid?.className).toContain('grid-cols-[repeat(5,minmax(216px,1fr))]');
   });
 
   it('renders merge_failed and push_failed nodes with correct counts and warning badges', async () => {

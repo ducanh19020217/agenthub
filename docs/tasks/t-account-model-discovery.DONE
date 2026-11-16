@@ -3,7 +3,7 @@
 ## 1. Tóm tắt việc đã làm
 
 1. **Khám phá model theo từng profile (Backend Discovery)**:
-   - Tạo `ProfileModelRepo` và migration 76 (`profile_models`) giữ nguyên định nghĩa đã phát hành. Bổ sung migration 77 ở cuối danh sách migrations chuyển đổi cấu trúc bảng an toàn và mở rộng khóa chính thành `PRIMARY KEY (profileName, engine, modelId)`.
+   - Tạo `ProfileModelRepo` và migration 77 (`profile_models`) với khóa chính `PRIMARY KEY (profileName, engine, modelId)`. Migration 76 được giữ nguyên từ main (`health_issue_cooldowns`), và migration 77 hỗ trợ tạo mới hoặc chuyển đổi an toàn từ schema cũ nếu có.
    - Cập nhật migration hash vào `test/fixtures/migrations.lock` theo quy tắc append-only.
    - Triển khai bộ phân tích và hàm khám phá độc lập cho từng engine (`src/models/discovery.ts`):
      - **Antigravity (agy)**: Thực thi binary CLI trong môi trường sandbox cô lập qua thư mục tạm, bóc tách danh sách model từ output (loại bỏ spinner ANSI, ký tự thừa).
@@ -20,7 +20,7 @@
 3. **API `/api/models` & Schema Cấu hình Backend (`src/services/index.ts`)**:
    - Trả về danh sách model hợp nhất theo cặp khóa duy nhất `(engine, modelId)`, ngăn ngừa xung đột gán profile chéo giữa các engine có chung model ID.
    - Mỗi model trả về gồm: `id`, `engine`, `name`, `profiles` (danh sách tên profile đang bật và đăng nhập thực sự có model), `available` (chỉ `true` khi có ít nhất một profile đăng nhập cung cấp), và `verified`.
-   - Tự động thu thập toàn bộ các model đang cấu hình trên hệ thống (chuỗi HARD/EASY, reviewer chain, project reviewer fallback, brain model, brain fallback models, chat model); nếu model đang cấu hình mà không có tài khoản nào cung cấp, model đó được đưa vào danh sách kèm nhãn cảnh báo `available: false` và `configured: true`.
+   - Tự động thu thập toàn bộ các model đang cấu hình trên hệ thống (chuỗi HARD/EASY, reviewer chain, project reviewer fallback, brain model, brain fallback models, chat model, arbiter) cả ở cấu hình hệ thống và cấu hình riêng của từng dự án qua `projectRepo`; nếu model đang cấu hình mà không có tài khoản nào cung cấp, model đó được đưa vào danh sách kèm nhãn cảnh báo `available: false` và `configured: true`.
    - Chuẩn hóa tiền tố `codex:` cho brain model để đồng bộ namespace và loại bỏ cảnh báo giả / trùng lặp.
    - `UpdateConfigSchema` (`src/services/index.ts`): Cập nhật `chat.model`, `chat.models[]` và `brain.model` từ enum cố định sang chuỗi đã trim không chứa khoảng trắng; `chat.model` và `brain.model` nhận chuỗi rỗng `''`. Giữ đúng quy tắc của `ChatService.validateSessionOptions`. Trả về `model: this.config.brain.model` trong `getConfig()`.
    - Cập nhật `ChatService.validateSessionOptions()`: Cho phép model hợp lệ không khoảng trắng nhất quán với backend và UI.
@@ -31,85 +31,62 @@
    - Khi chọn profile thực thi task, chỉ xét các profile thực sự cung cấp model và đang đăng nhập (`profileHasModel`), tránh phân bổ task vào profile không hỗ trợ.
 
 5. **Giao diện Web (`web/src/...`)**:
-   - Mọi ô chọn model (Cài đặt chuỗi HARD/EASY, Reviewer chain, Brain model trong ProjectSettingsDrawer và DepartmentsPage, NewSessionModal, ChatPage, CreateTaskPage, TaskDetailPage, SettingsPage chat model và global reviewer) sử dụng dữ liệu từ `/api/models`.
-   - `SettingsPage`: Ô Claude reviewer toàn cục đổi sang `SelectOrCustomInput`, options chỉ lấy model Claude khả dụng từ `/api/models`, bật `showCustomWarning`, và hiện `model-unavailable-warning` khi model đang cấu hình không còn khả dụng.
+   - Mọi ô chọn model (Cài đặt chuỗi HARD/EASY, Reviewer chain, Brain model trong ProjectSettingsDrawer và DepartmentsPage, NewSessionModal, ChatPage, CreateTaskPage, TaskDetailPage, SettingsPage chat model, global reviewer, và arbiter) sử dụng dữ liệu từ `/api/models`.
+   - `SettingsPage`: Ô Claude reviewer toàn cục, arbiter, global reviewer đổi sang `SelectOrCustomInput`, options chỉ lấy model khả dụng từ `/api/models`, bật `showCustomWarning`, và hiện `model-unavailable-warning` khi model đang cấu hình không còn khả dụng.
    - `SettingsPage`: `chatModel`, `newChatModel` và `fallback` model bước model chỉ chứa options là model khả dụng từ discovery. Các model trong `chatModels` và `fallback` đã cấu hình mà không còn khả dụng được tách riêng kèm cảnh báo đỏ `model-unavailable-warning`, không trộn vào options thông thường.
    - `DepartmentsPage`: Ô brain model đổi sang `SelectOrCustomInput` hỗ trợ nhập custom kèm cảnh báo; model đang cấu hình nhưng không còn khả dụng hiển thị cảnh báo đỏ `model-unavailable-warning` và không bị trộn vào options thông thường; loại bỏ fallback chèn `DEFAULT_CLAUDE_MODELS`/`DEFAULT_CODEX_MODELS`.
    - `TaskDetailPage`: Ô thêm model khi sửa task đổi sang `SelectOrCustomInput` với options là model khả dụng từ discovery, hỗ trợ nhập custom model kèm cảnh báo.
    - `NewSessionModal` & `ChatPage`: Sử dụng `SelectOrCustomInput` hỗ trợ custom model và cảnh báo model không khả dụng.
-   - Cập nhật `validateChatModelSyntax(model, t, knownModels?)` trong `web/src/utils/models.ts` và truyền `availableChatModels` vào validator xuyên suốt `SettingsPage`.
+   - Cập nhật `validateChatModelSyntax(model, t, knownModels?)` và `validateReviewerModelSyntax(model, engine, t, knownModels?)` trong `web/src/utils/models.ts` cho phép chuỗi trimmed không chứa khoảng trắng, hiển thị custom-warning trực quan mà không chặn lưu cấu hình.
    - Loại bỏ toàn bộ fallback chèn model hardcode vào danh sách gợi ý dropdown / datalist (`CreateTaskPage`, `ProjectSettingsDrawer`, `SettingsPage`, `DepartmentsPage`) khi danh sách model discovery trống hoặc model chưa xác minh.
    - Đề xuất model nhóm trực quan theo engine, hiển thị số lượng tài khoản khả dụng; hiển thị cảnh báo đỏ nổi bật (`data-testid="model-unavailable-warning"`).
    - Project reviewer-chain validator (`validateReviewerModelSyntax` và `validateReviewChainReviewerSyntax`) nhận danh sách model discovery khả dụng/đã cấu hình.
    - Preset và quick-fix không còn chèn `codex:gpt-5.6-luna` khi không có tài khoản Codex khả dụng.
-   - Revert thay đổi ngoài phạm vi task tại `test/publish.test.ts`.
+   - Giữ nguyên toàn bộ tính năng và mã nguồn mới từ nhánh `main`: `health_issue_cooldowns` (migration 76), Health Sweep service (DEC-032), tailPrefixOverlap log streaming trên `TaskDetailPage`, timeout resume, và timeline streaming.
 
 ## 2. Kết quả kiểm tra & nghiệm thu
 
-- `npm run lint`: Đạt (0 errors, 136 baseline warnings).
+- `npm run lint`: Đạt (0 errors, 150 warnings).
 - `npm run typecheck` (`tsc --noEmit -p .`): Đạt (0 errors).
 - `npm --prefix web run typecheck` (`tsc --noEmit -p web`): Đạt (0 errors).
 - `npm run build`: Đạt (tsc và copy protocol.md thành công).
-- `npm run build:web`: Đạt (Vite production build thành công trong 4.91s).
-- `npm run test:web -- --run`: Đạt 74/74 test files, 695/695 tests passed (100%).
-  - `web/src/test/settingsSelectInputs.test.tsx`: 47/47 tests passed (thêm kiểm thử cho Claude reviewer select, chat model / fallback model isolation, và DepartmentsPage brain model warning).
-  - `web/src/test/taskDetailPage.test.tsx`: 35/35 tests passed (thêm kiểm thử cho ô thêm model trong modal sửa dùng SelectOrCustomInput cho phép nhập custom kèm cảnh báo).
-  - `web/src/test/departmentsPage.test.tsx`: 10/10 tests passed.
-  - `web/src/test/reviewerFallbackWeb.test.tsx`: 5/5 tests passed.
-  - `web/src/test/createTaskPage.test.tsx`: 11/11 tests passed.
-  - `web/src/test/chat.test.tsx`: 7/7 tests passed.
-- Backend test (`npm run test -- --run`): Đạt 145/145 test files, 1,838/1,838 tests passed (100%).
-  - `test/api-extra.test.ts`: 45/45 tests passed (thêm kiểm thử PUT /api/config lưu claude-sonnet-5-5, model custom, cho phép chuỗi rỗng và từ chối tên có khoảng trắng).
-  - `test/model-discovery.test.ts`: 23/23 tests passed.
-  - `test/publish.test.ts`: 40/40 tests passed.
-  - `test/scheduler.test.ts`: 150/150 tests passed.
-  - `test/chat.test.ts`: 46/46 tests passed.
-  - `test/migrations-append-only.test.ts`: 1/1 passed.
-- Tổng cộng tests: 2,533/2,533 tests passed (0 failed).
+- `npm run build:web`: Đạt (Vite production build thành công trong 5.86s).
+- `npm run test:web`: Đạt 75/75 test files, 707/707 tests passed (100%).
+- `npm test`: Đạt 148/148 test files, 1905/1905 tests passed (100%).
+- `test/migrations-append-only.test.ts`: Đạt (1/1 tests passed, hash lock khớp 78 migration).
+- `test/model-discovery.test.ts`: Đạt (24/24 tests passed).
 
-## 3. Việc chưa làm được / Ghi chú thiết kế
+## 3. Việc chưa làm được
+Không có. Toàn bộ các yêu cầu chức năng và các điểm phản hồi từ các vòng review (P1/P2) đã được giải quyết triệt để.
 
-- Không có việc tồn đọng.
-- Đã tự động giải quyết xung đột merge lần 1 với base `agenthub/integration`:
-  - `docs/DECISIONS.md`: Bảo toàn DEC-028..DEC-031 từ base và đánh số quyết định của model discovery thành DEC-032.
-  - `src/scheduler/index.ts`: Giữ cả import `isProfileLoggedIn` và `markClaudeProfileAuthExpired`.
-  - `web/src/pages/TaskDetailPage.tsx`: Giữ `TERMINAL_STATUSES` phục vụ timeline của task kết thúc, loại bỏ `VALID_MODELS` cứng để dùng model discovery và `SelectOrCustomInput`.
-  - `test/model-discovery.test.ts`: Bổ sung kiểm tra và cột task counters (`runCount`, `consecutiveCrashes`) trước migration 73 khi replay schema.
-- Tất cả các yêu cầu từ đề bài ban đầu và các phản hồi review P1/P2 qua tất cả các vòng review đều đã được giải quyết trọn vẹn và kiểm tra nghiêm ngặt.
-
-## 4. Danh sách commits trên nhánh
-
-- `0fc59b6a`: `Merge branch 'agenthub/integration' into agenthub/t-account-model-discovery`
-- `09afc4c6`: `feat(web): use SelectOrCustomInput with unavailable warnings across reviewer, brain, and task selectors`
-- `a9377cd6`: `fix(backend): allow trimmed non-whitespace custom and discovered models in UpdateConfigSchema`
-- `a2503523`: `docs(tasks): update completion report for custom chat models in settings`
-- `4a078d1c`: `feat(web): support custom chat models and pass discovered claude models to syntax validator in settings`
-- `0c8cd23a`: `docs(tasks): update completion report for round 6 review fixes`
-- `7a329ed8`: `feat(chat): support custom model input with warnings in chat selectors and accept valid syntax in backend`
-- `524dc427`: `fix(scheduler): restrict codex model fallback to defined models in isKnownModel and profile selection`
-- `cafbb90e`: `fix(db): add migration 77 to expand profile_models primary key to engine and modelId`
-- `609e9578`: `docs(tasks): update completion report for round 5 review fixes`
-- `9442ce59`: `fix(web): exclude unavailable models from project drawer reviewer suggestions and show warning badge`
-- `c4b52935`: `fix(web): only propose discovered available models in CreateTaskPage datalist`
-- `e1f8e150`: `fix(db): include engine in profile_models primary key`
-- `fba07681`: `docs(tasks): update completion report for round 4 review fixes`
-- `d8f1a65c`: `test(web): fix ModelOptions and DiscoveredModel mock types`
-- `e6769ea9`: `fix(web): pass discovered models to drawer reviewer validation and prevent hardcoded codex fallbacks`
-- `283ce923`: `revert(test): revert out-of-scope publish audit test change`
-- `91e2d58c`: `docs(tasks): add completion report for t-account-model-discovery`
-- `5bb48b6d`: `fix(test): stabilize publish audit maxTasks test against timestamp race`
-- `0341fe7d`: `fix(web): use discovered models in chat selectors and remove unverified defaults from brain selectors`
-- `ded920ec`: `feat(models): merge models by engine and ID and validate chat models from discovery`
-- `4b12f032`: `fix(web): prevent inserting fallback models as new suggestions when all models are unavailable`
-- `ed49190f`: `fix(models): treat logged-out profiles as unavailable in discovery cache, API, and scheduler`
-- `31af4101`: `fix(scheduler): fallback to engine syntax in isKnownModel for unrepresented engines`
-- `4736d49a`: `fix(models): resolve lint and typecheck issues in services and components`
-- `ce2cc60b`: `fix(web): exclude unavailable models from suggestions and use discovered models across all selectors`
-- `9a66609c`: `feat(scheduler): merge discovered models with fallback for profiles lacking discovery cache`
-- `7b643aee`: `fix(models): bypass codex cache on refresh, guard fallback availability, and track brain fallback models`
-- `a11490ca`: `feat(web): display discovered models grouped by engine with account counts and warnings`
-- `7e2a8365`: `fix(models): avoid executing real agy or codex binaries during tests`
-- `01f47eca`: `feat(scheduler): filter model chains and profile selection using discovered models`
-- `6e4c2772`: `feat(api): update /api/models and add POST /api/models/refresh with DB caching`
-- `53f72044`: `feat(models): implement model discovery per profile for agy, codex, and claude`
-- `111a3abd`: `feat(db): add profile_models migration and ProfileModelRepo`
+## 4. Danh sách commit tiêu biểu
+- `c2466548` Merge branch 'main' into agenthub/t-account-model-discovery
+- `639b1bfb` test(review): update project-settings test to assert rejection of whitespace models in reviewer order
+- `06ad2cfd feat(models): include project-level configured models and set configured flag in getModelOptions
+- `2b44bb30 fix(web): exclude unavailable models from reviewer options and add unavailable warnings
+- `fe40319c feat(models): support custom reviewer and arbiter models with live warning
+- `0fc59b6a Merge branch 'agenthub/integration' into agenthub/t-account-model-discovery
+- `09afc4c6 feat(web): use SelectOrCustomInput with unavailable warnings across reviewer, brain, and task selectors
+- `a9377cd6 fix(backend): allow trimmed non-whitespace custom and discovered models in UpdateConfigSchema
+- `4a078d1c feat(web): support custom chat models and pass discovered claude models to syntax validator in settings
+- `7a329ed8 feat(chat): support custom model input with warnings in chat selectors and accept valid syntax in backend
+- `524dc427 fix(scheduler): restrict codex model fallback to defined models in isKnownModel and profile selection
+- `cafbb90e fix(db): add migration 77 to expand profile_models primary key to engine and modelId
+- `9442ce59 fix(web): exclude unavailable models from project drawer reviewer suggestions and show warning badge
+- `c4b52935 fix(web): only propose discovered available models in CreateTaskPage datalist
+- `e1f8e150 fix(db): include engine in profile_models primary key
+- `e6769ea9 fix(web): pass discovered models to drawer reviewer validation and prevent hardcoded codex fallbacks
+- `283ce923 revert(test): revert out-of-scope publish audit test change
+- `0341fe7d fix(web): use discovered models in chat selectors and remove unverified defaults from brain selectors
+- `ded920ec feat(models): merge models by engine and ID and validate chat models from discovery
+- `4b12f032 fix(web): prevent inserting fallback models as new suggestions when all models are unavailable
+- `ed49190f fix(models): treat logged-out profiles as unavailable in discovery cache, API, and scheduler
+- `ce2cc60b fix(web): exclude unavailable models from suggestions and use discovered models across all selectors
+- `9a66609c feat(scheduler): merge discovered models with fallback for profiles lacking discovery cache
+- `7b643aee fix(models): bypass codex cache on refresh, guard fallback availability, and track brain fallback models
+- `a11490ca feat(web): display discovered models grouped by engine with account counts and warnings
+- `7e2a8365 fix(models): avoid executing real agy or codex binaries during tests
+- `01f47eca feat(scheduler): filter model chains and profile selection using discovered models
+- `6e4c2772 feat(api): update /api/models and add POST /api/models/refresh with DB caching
+- `53f72044 feat(models): implement model discovery per profile for agy, codex, and claude
+- `111a3abd feat(db): add profile_models migration and ProfileModelRepo

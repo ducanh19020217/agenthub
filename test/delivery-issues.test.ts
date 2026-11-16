@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -8,6 +8,8 @@ import { createContext } from '../src/daemon.js';
 import { createServer } from '../src/api/server.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
+import { HttpError } from '../src/errors.js';
+import * as mergeModule from '../src/merge.js';
 import { isGitAncestor, isGitPushed, computeDeliveryIssue, clearGitCheckCache, clearGitCheckCacheForTask } from '../src/services/delivery-issues.js';
 
 let tmpDir: string;
@@ -412,6 +414,61 @@ describe('Delivery issues (merge_failed & push_failed)', () => {
       clearGitCheckCache();
       issue2 = computeDeliveryIssue(ctx.taskRepo.get(taskId2)!, ctx.eventRepo.getByTask(taskId2), projectWithInt);
       expect(issue2).toBeNull();
+
+      // 3. Project without integration and custom settings.publish.branch:
+      // Target is task.baseRef || defaultBranch (main), NOT settings.publish.branch (release)
+      git(repoPath, 'checkout', 'main');
+      git(repoPath, 'branch', 'release');
+
+      const branchNoIntPublish = 'agenthub/t-test-no-int-pub';
+      git(repoPath, 'checkout', '-b', branchNoIntPublish);
+      fs.writeFileSync(path.join(repoPath, 'file3.txt'), 'no int publish test\n');
+      git(repoPath, 'add', 'file3.txt');
+      git(repoPath, 'commit', '-m', 'Task no int publish commit');
+      git(repoPath, 'checkout', 'main');
+
+      ctx.projectRepo.insert({
+        id: 'proj-no-int-publish',
+        name: 'Project No Int Custom Publish',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ integration: { enabled: false }, publish: { branch: 'release' } }),
+      });
+
+      const taskId3 = 'task-no-int-publish';
+      ctx.taskRepo.insert({
+        id: taskId3,
+        projectId: 'proj-no-int-publish',
+        slug: 't-test-no-int-pub',
+        branch: branchNoIntPublish,
+        title: 'Task no int custom publish',
+        status: 'done',
+      });
+      ctx.eventRepo.insert('merge.conflict', taskId3, {
+        actor: 'auto-merge',
+        message: 'Xung đột merge ở: file3.txt',
+      });
+
+      const projectNoIntPublish = ctx.projectRepo.get('proj-no-int-publish')!;
+
+      // Merge into release (publish branch) but NOT main
+      git(repoPath, 'checkout', 'release');
+      git(repoPath, 'merge', '--no-ff', branchNoIntPublish, '-m', 'Manual merge into release');
+      git(repoPath, 'checkout', 'main');
+
+      clearGitCheckCache();
+      // Even though branchNoIntPublish is merged into publish.branch (release), the merge target for non-integration is defaultBranch (main).
+      // So merge_failed must NOT be cleared.
+      let issue3 = computeDeliveryIssue(ctx.taskRepo.get(taskId3)!, ctx.eventRepo.getByTask(taskId3), projectNoIntPublish);
+      expect(issue3).not.toBeNull();
+      expect(issue3?.kind).toBe('merge_failed');
+
+      // Now merge into main (the actual merge target)
+      git(repoPath, 'merge', '--no-ff', branchNoIntPublish, '-m', 'Manual merge into main');
+      clearGitCheckCache();
+      issue3 = computeDeliveryIssue(ctx.taskRepo.get(taskId3)!, ctx.eventRepo.getByTask(taskId3), projectNoIntPublish);
+      expect(issue3).toBeNull();
     } finally {
       fs.rmSync(repoPath, { recursive: true, force: true });
     }
@@ -609,6 +666,60 @@ describe('Delivery issues (merge_failed & push_failed)', () => {
       expect(body.error).toBe('environment_error');
       expect(body.message).toMatch(/(?:Worktree tích hợp thiếu dependency|Checks sau merge thất bại do lỗi môi trường)/);
       expect(body.files).toBeUndefined();
+    } finally {
+      fs.rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it('POST /api/tasks/:id/merge/retry preserves 409 HttpError when error code is not conflict and does not classify as conflict', async () => {
+    const { repoPath, taskBranch } = setupGitRepo();
+    try {
+      const intWorktree = path.join(tmpDir, 'int-worktree-409-non-conflict');
+      git(repoPath, 'worktree', 'add', intWorktree, 'agenthub/integration');
+
+      ctx.projectRepo.insert({
+        id: 'proj-409-non-conflict',
+        name: 'Project 409 Non Conflict',
+        path: repoPath,
+        defaultBranch: 'main',
+        maxParallel: 1,
+        settings: JSON.stringify({ publish: { enabled: false } }),
+        merge: JSON.stringify({
+          enabled: true,
+          worktrees: { 'agenthub/integration': intWorktree, 'main': intWorktree },
+        }),
+      });
+
+      const taskId = 'task-409-non-conflict';
+      ctx.taskRepo.insert({
+        id: taskId,
+        projectId: 'proj-409-non-conflict',
+        slug: 't-409-non-conflict',
+        branch: taskBranch,
+        title: 'Task 409 non conflict test',
+        status: 'review',
+      });
+
+      const spy = vi.spyOn(mergeModule, 'mergeTaskIntoBase').mockRejectedValueOnce(
+        new HttpError(409, 'state_conflict', 'Task state conflict')
+      );
+
+      const resRetry = await server.inject({
+        method: 'POST',
+        url: `/api/tasks/${taskId}/merge/retry`,
+        headers: authHeaders(),
+      });
+      expect(resRetry.statusCode).toBe(409);
+      const body = resRetry.json();
+      expect(body.error).toBe('state_conflict');
+      expect(body.message).toBe('Task state conflict');
+      expect(body.files).toBeUndefined();
+
+      const events = ctx.eventRepo.getByTask(taskId);
+      expect(events.some((e) => e.type === 'merge.conflict')).toBe(false);
+      expect(events.some((e) => e.type === 'merge.failed')).toBe(true);
+
+      spy.mockRestore();
     } finally {
       fs.rmSync(repoPath, { recursive: true, force: true });
     }

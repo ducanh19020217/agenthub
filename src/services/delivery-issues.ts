@@ -396,7 +396,7 @@ export function computeDeliveryIssue(
         if (settings.integration.enabled) {
           candidates.push(settings.integration.branch || 'agenthub/integration');
         } else {
-          candidates.push(settings.publish?.branch || task.baseRef || project.defaultBranch || 'main');
+          candidates.push(task.baseRef || project.defaultBranch || 'main');
         }
         const taskRef = resolveTaskGitRef(task, project.path);
         if (taskRef) {

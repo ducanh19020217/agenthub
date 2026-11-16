@@ -68,7 +68,7 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
   );
 
   it('covers every Kanban status with exactly one node', () => {
-    expect([...FLOW_STATUSES].sort()).toEqual([...KANBAN_STATUSES, 'merge_failed', 'push_failed'].sort());
+    expect([...FLOW_STATUSES].sort()).toEqual([...KANBAN_STATUSES, 'merge_failed', 'push_failed', 'auditing', 'audit_failed'].sort());
   });
 
   it('switches to the workflow view and shows the task count of each status', async () => {
@@ -507,14 +507,14 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
   });
 
-  it('enforces min-w-[1240px] and minmax(150px, 1fr) column width for flow nodes', async () => {
+  it('enforces min-w-[1360px] and minmax(140px, 1fr) column width for flow nodes', async () => {
     renderPage('/tasks?view=flow');
     const wrapper = await screen.findByTestId('flow-view-wrapper');
     const board = wrapper.querySelector('[role="group"]');
-    expect(board?.className).toContain('min-w-[1240px]');
+    expect(board?.className).toContain('min-w-[1360px]');
 
     const grid = board?.querySelector('.grid');
-    expect(grid?.className).toContain('grid-cols-[repeat(7,minmax(150px,1fr))]');
+    expect(grid?.className).toContain('grid-cols-[repeat(8,minmax(140px,1fr))]');
   });
 
   it('renders merge_failed and push_failed nodes with correct counts and warning badges', async () => {
@@ -641,5 +641,138 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     const pushBtn = within(dialog).getByTestId('btn-retry-push');
     fireEvent.click(pushBtn);
     expect(publishSpy).toHaveBeenCalledWith('p1/task-push-err');
+  });
+
+  it('renders auditing and audit_failed nodes with visual indicators', async () => {
+    const auditingTask: Task = {
+      ...makeTask('task-auditing-1', 'done'),
+      audit: {
+        state: 'auditing',
+        rounds: 1,
+        maxRounds: 3,
+        summary: 'AI is reviewing git diff',
+        findings: [],
+      },
+    };
+    const auditFailedTask: Task = {
+      ...makeTask('task-audit-fail-1', 'done'),
+      audit: {
+        state: 'audit_failed',
+        substate: 'blocked',
+        rounds: 3,
+        maxRounds: 3,
+        summary: 'Critical security issue detected',
+        findings: [
+          { severity: 'P1', kind: 'security', file: 'auth.ts', line: 42, detail: 'Hardcoded secret' },
+        ],
+      },
+    };
+
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      if (params?.status === 'auditing' || params?.derived === 'auditing') {
+        return { items: [auditingTask], total: 1, nextCursor: null };
+      }
+      if (params?.status === 'audit_failed' || params?.derived === 'audit_failed') {
+        return { items: [auditFailedTask], total: 1, nextCursor: null };
+      }
+      return { items: [], total: 0, nextCursor: null };
+    });
+
+    renderPage('/tasks?view=flow');
+
+    const auditNode = await screen.findByTestId('flow-node-auditing');
+    const auditFailNode = await screen.findByTestId('flow-node-audit_failed');
+
+    await waitFor(() => {
+      expect(auditNode).toHaveAttribute('data-count', '1');
+      expect(auditFailNode).toHaveAttribute('data-count', '1');
+    });
+
+    expect(auditNode).toHaveAttribute('data-active', 'true');
+    expect(auditFailNode).toHaveAttribute('data-has-issues', 'true');
+    expect(within(auditFailNode).getByTestId('badge-audit_failed')).toBeInTheDocument();
+  });
+
+  it('dims auditing node and shows badge when project disables publish audit', async () => {
+    const disabledProject: Project = {
+      ...project,
+      settings: {
+        preset: 'custom',
+        publish: {
+          enabled: true,
+          remote: 'origin',
+          pushIntegrationBranch: false,
+          audit: { enabled: false },
+        },
+      } as any,
+    };
+
+    vi.spyOn(client, 'getProjects').mockResolvedValue([disabledProject]);
+    vi.spyOn(client, 'getTasksPage').mockResolvedValue({ items: [], total: 0, nextCursor: null });
+
+    renderPage('/tasks?view=flow&project=p1');
+
+    const auditNode = await screen.findByTestId('flow-node-auditing');
+    await waitFor(() => {
+      expect(auditNode).toHaveAttribute('data-disabled', 'true');
+    });
+
+    expect(within(auditNode).getByTestId('badge-audit-disabled')).toHaveTextContent('Đã tắt');
+  });
+
+  it('opens modal for audit_failed, displays findings and triggers actions', async () => {
+    const auditFailedTask: Task = {
+      ...makeTask('task-audit-fail-1', 'done'),
+      audit: {
+        state: 'audit_failed',
+        substate: 'blocked',
+        rounds: 2,
+        maxRounds: 3,
+        summary: 'Regression detected in payment flow',
+        findings: [
+          { severity: 'P1', kind: 'logic_regression', file: 'pay.ts', line: 105, detail: 'Missing currency validation' },
+          { severity: 'P2', kind: 'perf', file: 'cache.ts', line: 20, detail: 'Unbounded map' },
+        ],
+      },
+    };
+
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      if (params?.status === 'audit_failed' || params?.derived === 'audit_failed') {
+        return { items: [auditFailedTask], total: 1, nextCursor: null };
+      }
+      return { items: [], total: 0, nextCursor: null };
+    });
+
+    const publishSpy = vi.spyOn(client, 'publishTask').mockResolvedValue({ ok: true, started: true });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    renderPage('/tasks?view=flow');
+
+    const auditFailNode = await screen.findByTestId('flow-node-audit_failed');
+    await waitFor(() => expect(auditFailNode).toHaveAttribute('data-count', '1'));
+    fireEvent.click(auditFailNode);
+
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('task-audit-fail-1')).toBeInTheDocument();
+    expect(within(dialog).getByTestId('audit-round-badge')).toHaveTextContent('Vòng 2/3');
+    expect(within(dialog).getByTestId('audit-substate-badge')).toHaveTextContent('Bị chặn');
+    expect(within(dialog).getByTestId('audit-summary')).toHaveTextContent('Regression detected in payment flow');
+
+    // Check findings list
+    const findingsList = within(dialog).getByTestId('audit-findings-list');
+    expect(findingsList).toHaveTextContent('Missing currency validation');
+    expect(findingsList).toHaveTextContent('Unbounded map');
+
+    // Click Publish lại
+    const retryBtn = within(dialog).getByTestId('btn-retry-publish');
+    fireEvent.click(retryBtn);
+    expect(publishSpy).toHaveBeenCalledWith('p1/task-audit-fail-1');
+
+    await waitFor(() => expect(retryBtn).not.toBeDisabled());
+
+    // Click Bỏ qua chặn
+    const bypassBtn = within(dialog).getByTestId('btn-bypass-audit');
+    fireEvent.click(bypassBtn);
+    expect(publishSpy).toHaveBeenCalledWith('p1/task-audit-fail-1', { skipAudit: true });
   });
 });

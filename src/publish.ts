@@ -268,20 +268,17 @@ export async function isAncestor(
 
 /**
  * Checks if a commit is in the first-parent lineage of a base ref.
+ * Throws on any fatal git error or execution failure (fail closed).
  */
-async function isFirstParentAncestor(
+export async function isFirstParentAncestor(
   repoPath: string,
   commit: string,
   base: string,
   env: NodeJS.ProcessEnv,
 ): Promise<boolean> {
-  try {
-    const list = await runGit(['-C', repoPath, 'rev-list', '--first-parent', base], repoPath, env);
-    const hashes = new Set(list.split('\n').map((h) => h.trim()).filter(Boolean));
-    return hashes.has(commit);
-  } catch {
-    return false;
-  }
+  const list = await runGit(['-C', repoPath, 'rev-list', '--first-parent', base], repoPath, env);
+  const hashes = new Set(list.split('\n').map((h) => h.trim()).filter(Boolean));
+  return hashes.has(commit);
 }
 
 /**
@@ -453,23 +450,27 @@ export async function findForwardMergeCommitsForTask(
           // When task branch does not exist locally, recover structural parent check from commit data:
           // In a reverse merge (target merged into task), p2 is on the destination/target branch first-parent
           // lineage while p1 is on the task branch.
-          try {
-            let p2OnDest = false;
-            let p1OnDest = false;
-            const targetRefs = destRefs.filter((d) => d !== hash && d !== p1 && d !== p2);
-            for (const d of targetRefs) {
-              if (await isFirstParentAncestor(repoPath, p2, d, env)) {
-                p2OnDest = true;
-              }
-              if (await isFirstParentAncestor(repoPath, p1, d, env)) {
-                p1OnDest = true;
-              }
-            }
-            if (p2OnDest && !p1OnDest) {
-              isP1OnTask = true;
-            }
-          } catch {
+          const targetRefs = destRefs.filter((d) => d !== hash && d !== p1 && d !== p2);
+          if (targetRefs.length === 0) {
             ancestryVerificationFailed = true;
+          } else {
+            try {
+              let p2OnDest = false;
+              let p1OnDest = false;
+              for (const d of targetRefs) {
+                if (await isFirstParentAncestor(repoPath, p2, d, env)) {
+                  p2OnDest = true;
+                }
+                if (await isFirstParentAncestor(repoPath, p1, d, env)) {
+                  p1OnDest = true;
+                }
+              }
+              if (p2OnDest && !p1OnDest) {
+                isP1OnTask = true;
+              }
+            } catch {
+              ancestryVerificationFailed = true;
+            }
           }
         }
 
@@ -491,7 +492,8 @@ export async function findForwardMergeCommitsForTask(
                 (await isAncestor(repoPath, branchRef, p2, env));
             }
           } catch {
-            isP2OnTask = false;
+            ancestryVerificationFailed = true;
+            continue;
           }
         } else {
           // Task branch ref doesn't exist locally: verify ancestry / parent structure from commit data.
@@ -499,8 +501,12 @@ export async function findForwardMergeCommitsForTask(
           // 1. p1 must be on destination (targetRefs) first-parent lineage.
           // 2. p2 must NOT be an ancestor of p1 (feature commits).
           // 3. Commits in p1..p2 or commit subject must match the task.
+          const targetRefs = destRefs.filter((d) => d !== hash && d !== p1 && d !== p2);
+          if (targetRefs.length === 0) {
+            ancestryVerificationFailed = true;
+            continue;
+          }
           try {
-            const targetRefs = destRefs.filter((d) => d !== hash && d !== p1 && d !== p2);
             let p1OnDest = false;
             for (const d of targetRefs) {
               if (await isFirstParentAncestor(repoPath, p1, d, env)) {
@@ -526,7 +532,8 @@ export async function findForwardMergeCommitsForTask(
               }
             }
           } catch {
-            isP2OnTask = false;
+            ancestryVerificationFailed = true;
+            continue;
           }
         }
 
@@ -640,53 +647,69 @@ export async function getTaskDiff(
   let usedMergeDiff = false;
 
   if (forwardMerges.length > 0) {
+    const latestMerge = forwardMerges[0];
+    commitSha = latestMerge;
+
+    let taskTip: string;
     try {
-      const latestMerge = forwardMerges[0];
-      const earliestMerge = forwardMerges[forwardMerges.length - 1];
-      commitSha = latestMerge;
+      taskTip = (await runGit(['-C', repoPath, 'rev-parse', `${latestMerge}^2`], repoPath, env)).trim();
+    } catch {
+      taskTip = latestMerge;
+    }
+    branchSha = taskTip;
 
-      let taskTip: string;
-      try {
-        taskTip = (await runGit(['-C', repoPath, 'rev-parse', `${latestMerge}^2`], repoPath, env)).trim();
-      } catch {
-        taskTip = latestMerge;
-      }
-      branchSha = taskTip;
+    // Base commit:
+    // Always use remote base before publish (baseRef / prevRemoteSha / origin/<targetBranch>).
+    // Never fall back to earliest merge parent or parent merge.
+    // If remote base cannot be resolved, fail closed (throw).
+    let baseCommit: string | null = null;
+    const candidatesToResolve: string[] = [];
+    if (baseRef) candidatesToResolve.push(baseRef);
+    if (targetBranch) {
+      candidatesToResolve.push(`refs/remotes/origin/${targetBranch}`);
+      candidatesToResolve.push(`origin/${targetBranch}`);
+    }
+    if (task.baseRef && task.baseRef !== targetBranch) {
+      candidatesToResolve.push(`refs/remotes/origin/${task.baseRef}`);
+      candidatesToResolve.push(`origin/${task.baseRef}`);
+    }
 
-      let earliestMergeP1: string;
-      try {
-        earliestMergeP1 = (await runGit(['-C', repoPath, 'rev-parse', `${earliestMerge}^1`], repoPath, env)).trim();
-      } catch {
-        earliestMergeP1 = earliestMerge;
-      }
-
-      // Base commit:
-      // Always prioritize remote base (baseRef / prevRemoteSha / origin/<target>) before publish.
-      // Remote base is always used directly as baseCommit when available.
-      let baseCommit = earliestMergeP1;
-      if (baseRef && (await refExists(repoPath, baseRef, env))) {
+    for (const ref of candidatesToResolve) {
+      if (await refExists(repoPath, ref, env)) {
         try {
-          baseCommit = (await runGit(['-C', repoPath, 'rev-parse', baseRef], repoPath, env)).trim();
+          baseCommit = (await runGit(['-C', repoPath, 'rev-parse', `${ref}^{commit}`], repoPath, env)).trim();
+          if (baseCommit) break;
         } catch {
-          baseCommit = earliestMergeP1;
+          // ignore and try next candidate
+        }
+      } else if (/^[0-9a-f]{40}$/i.test(ref)) {
+        try {
+          baseCommit = (await runGit(['-C', repoPath, 'rev-parse', `${ref}^{commit}`], repoPath, env)).trim();
+          if (baseCommit) break;
+        } catch {
+          // ignore and try next candidate
         }
       }
-
-      let mb = '';
-      try {
-        mb = (await runGit(['-C', repoPath, 'merge-base', baseCommit, taskTip], repoPath, env)).trim();
-      } catch {
-        mb = baseCommit;
-      }
-
-      auditRange = `${mb}..${taskTip}`;
-      diff = await runGit(['-C', repoPath, 'diff', auditRange], repoPath, env);
-      const filesOut = await runGit(['-C', repoPath, 'diff', '--name-only', auditRange], repoPath, env);
-      changedFiles = filesOut.split('\n').map((s) => s.trim()).filter(Boolean);
-      usedMergeDiff = true;
-    } catch {
-      usedMergeDiff = false;
     }
+
+    if (!baseCommit) {
+      throw new Error(
+        `Failed to resolve remote base commit for audit diff (baseRef: "${baseRef}", targetBranch: "${targetBranch}"). Remote base is required and cannot fall back to merge parent.`,
+      );
+    }
+
+    let mb = '';
+    try {
+      mb = (await runGit(['-C', repoPath, 'merge-base', baseCommit, taskTip], repoPath, env)).trim();
+    } catch {
+      mb = baseCommit;
+    }
+
+    auditRange = `${mb}..${taskTip}`;
+    diff = await runGit(['-C', repoPath, 'diff', auditRange], repoPath, env);
+    const filesOut = await runGit(['-C', repoPath, 'diff', '--name-only', auditRange], repoPath, env);
+    changedFiles = filesOut.split('\n').map((s) => s.trim()).filter(Boolean);
+    usedMergeDiff = true;
   }
 
   // 2. If no forward merge commit was found, use snapshot commit or branch

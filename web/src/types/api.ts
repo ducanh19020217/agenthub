@@ -391,6 +391,13 @@ export interface TaskTimelineItem {
   estimated?: boolean;
 }
 
+export interface DeliveryIssue {
+  kind: 'merge_failed' | 'push_failed';
+  error: string;
+  failedAt: string;
+  files?: string[];
+}
+
 export interface Task {
   id: string; // project~slug or project/slug
   projectId: string;
@@ -435,6 +442,7 @@ export interface Task {
   statusChangedAt?: string | null;
   statusChangedAtEstimated?: boolean;
   timeline?: TaskTimelineItem[];
+  deliveryIssue?: DeliveryIssue | null;
   pushedAt?: string | null;
   pushResult?: string | null | {
     remote?: string;

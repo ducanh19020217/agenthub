@@ -68,7 +68,7 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
   );
 
   it('covers every Kanban status with exactly one node', () => {
-    expect([...FLOW_STATUSES].sort()).toEqual([...KANBAN_STATUSES].sort());
+    expect([...FLOW_STATUSES].sort()).toEqual([...KANBAN_STATUSES, 'merge_failed', 'push_failed'].sort());
   });
 
   it('switches to the workflow view and shows the task count of each status', async () => {
@@ -515,5 +515,131 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
 
     const grid = board?.querySelector('.grid');
     expect(grid?.className).toContain('grid-cols-[repeat(7,minmax(150px,1fr))]');
+  });
+
+  it('renders merge_failed and push_failed nodes with correct counts and warning badges', async () => {
+    const taskMergeFailed: Task = {
+      ...makeTask('task-merge-err', 'done'),
+      deliveryIssue: {
+        kind: 'merge_failed',
+        error: 'CONFLICT: Merge conflict in docs/DECISIONS.md',
+        failedAt: '2026-11-13T10:00:00Z',
+        files: ['docs/DECISIONS.md'],
+      },
+    };
+    const taskPushFailed: Task = {
+      ...makeTask('task-push-err', 'done'),
+      deliveryIssue: {
+        kind: 'push_failed',
+        error: 'remote rejected: protected branch',
+        failedAt: '2026-11-13T10:05:00Z',
+      },
+    };
+
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      if (params?.status === 'merge_failed' || params?.derived === 'merge_failed') {
+        return { items: [taskMergeFailed], total: 1, nextCursor: null };
+      }
+      if (params?.status === 'push_failed' || params?.derived === 'push_failed') {
+        return { items: [taskPushFailed], total: 1, nextCursor: null };
+      }
+      return { items: [], total: 0, nextCursor: null };
+    });
+
+    renderPage('/tasks?view=flow');
+
+    const mergeNode = await screen.findByTestId('flow-node-merge_failed');
+    const pushNode = await screen.findByTestId('flow-node-push_failed');
+
+    await waitFor(() => {
+      expect(mergeNode).toHaveAttribute('data-count', '1');
+      expect(pushNode).toHaveAttribute('data-count', '1');
+    });
+
+    expect(mergeNode).toHaveAttribute('data-has-issues', 'true');
+    expect(pushNode).toHaveAttribute('data-has-issues', 'true');
+    expect(within(mergeNode).getByTestId('badge-merge_failed')).toBeInTheDocument();
+    expect(within(pushNode).getByTestId('badge-push_failed')).toBeInTheDocument();
+  });
+
+  it('opens modal for merge_failed and triggers retryTaskMerge and assignWorker', async () => {
+    const taskMergeFailed: Task = {
+      ...makeTask('task-merge-err', 'done'),
+      deliveryIssue: {
+        kind: 'merge_failed',
+        error: 'CONFLICT: Merge conflict in docs/DECISIONS.md',
+        failedAt: '2026-11-13T10:00:00Z',
+        files: ['docs/DECISIONS.md'],
+      },
+    };
+
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      if (params?.status === 'merge_failed' || params?.derived === 'merge_failed') {
+        return { items: [taskMergeFailed], total: 1, nextCursor: null };
+      }
+      return { items: [], total: 0, nextCursor: null };
+    });
+
+    const retrySpy = vi.spyOn(client, 'retryTaskMerge').mockResolvedValue({ ok: true, mergeCommit: 'abc1234' });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    renderPage('/tasks?view=flow');
+
+    const mergeNode = await screen.findByTestId('flow-node-merge_failed');
+    await waitFor(() => expect(mergeNode).toHaveAttribute('data-count', '1'));
+    fireEvent.click(mergeNode);
+
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('task-merge-err')).toBeInTheDocument();
+    expect(within(dialog).getByTestId('delivery-error')).toHaveTextContent('CONFLICT: Merge conflict in docs/DECISIONS.md');
+    expect(within(dialog).getByTestId('conflict-files')).toHaveTextContent('docs/DECISIONS.md');
+
+    // Click Merge lại
+    const retryBtn = within(dialog).getByTestId('btn-retry-merge');
+    fireEvent.click(retryBtn);
+    expect(retrySpy).toHaveBeenCalledWith('p1/task-merge-err', { assignWorker: false });
+
+    await waitFor(() => expect(retryBtn).not.toBeDisabled());
+
+    // Click Giao worker xử lý
+    const assignBtn = within(dialog).getByTestId('btn-assign-worker');
+    fireEvent.click(assignBtn);
+    expect(retrySpy).toHaveBeenCalledWith('p1/task-merge-err', { assignWorker: true });
+  });
+
+  it('opens modal for push_failed and calls publishTask on Retry Push', async () => {
+    const taskPushFailed: Task = {
+      ...makeTask('task-push-err', 'done'),
+      deliveryIssue: {
+        kind: 'push_failed',
+        error: 'remote rejected: protected branch hook failed',
+        failedAt: '2026-11-13T10:05:00Z',
+      },
+    };
+
+    vi.spyOn(client, 'getTasksPage').mockImplementation(async (params?: client.TaskQuery) => {
+      if (params?.status === 'push_failed' || params?.derived === 'push_failed') {
+        return { items: [taskPushFailed], total: 1, nextCursor: null };
+      }
+      return { items: [], total: 0, nextCursor: null };
+    });
+
+    const publishSpy = vi.spyOn(client, 'publishTask').mockResolvedValue({ ok: true, started: true });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    renderPage('/tasks?view=flow');
+
+    const pushNode = await screen.findByTestId('flow-node-push_failed');
+    await waitFor(() => expect(pushNode).toHaveAttribute('data-count', '1'));
+    fireEvent.click(pushNode);
+
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('task-push-err')).toBeInTheDocument();
+    expect(within(dialog).getByTestId('delivery-error')).toHaveTextContent('remote rejected: protected branch hook failed');
+
+    // Click Push lại
+    const pushBtn = within(dialog).getByTestId('btn-retry-push');
+    fireEvent.click(pushBtn);
+    expect(publishSpy).toHaveBeenCalledWith('p1/task-push-err');
   });
 });

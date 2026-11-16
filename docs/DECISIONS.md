@@ -509,7 +509,32 @@
      - `SortableModelList`: Cảnh báo và đánh dấu viền đỏ cho các model trong cấu hình không còn khả dụng trên bất kỳ tài khoản kích hoạt nào.
      - `SettingsPage`: Nút "Làm mới danh sách model" với animation xoay, tooltip hiển thị số tài khoản hỗ trợ từng model.
 
-## DEC-034: Xác định diff audit trước khi publish theo mốc remote và hỗ trợ nhiều lần merge
+## DEC-034: Trạng thái dẫn xuất merge_failed và push_failed trên sơ đồ quy trình TaskFlow
+
+- **Bối cảnh**:
+  - Khi task merge vào integration bị xung đột (`merge.conflict` / `review.auto_merge_skipped` với `reason: merge_failed`) hoặc publish lên nhánh đích thất bại (`task.push_failed`, `tasks.pushResult` có `state: push_failed` hoặc `error`), task vẫn giữ trạng thái `done` (hoặc `review`).
+  - Trên sơ đồ Quy trình (`TaskFlow.tsx`), task vẫn hiển thị ở ô "Hoàn thành", khiến người dùng không biết task nào chưa được gộp vào git (sự cố ngày 2026-11-13 với `t-publish-race-fix-2`, `t-status-timestamps-fix`, `t-drain-stuck-checking`).
+- **Quyết định thiết kế**:
+  1. **Trạng thái dẫn xuất (Derived Status) ở tầng Service, không đổi schema DB**:
+     - Không thêm giá trị mới vào `tasks.status` trong SQLite để tránh phải rebuild bảng hay migration dữ liệu phức tạp.
+     - `merge_failed`: Task không ở trạng thái kết thúc khác (`pushed`, `cancelled`, `failed`), có lần merge thất bại gần nhất (sự kiện `merge.conflict`, `merge.failed`, hoặc `review.auto_merge_skipped` với `merge_failed`), chưa có sự kiện `task.merged` sau đó, và nhánh task thực sự chưa được merge vào nhánh integration (khi bật integration) hoặc nhánh đích thực tế (`task.baseRef || project.defaultBranch`, khi không dùng integration) (xác minh qua `git merge-base --is-ancestor`).
+     - `push_failed`: Task `done` có `pushResult` lỗi gần nhất hoặc sự kiện `task.push_failed`, chưa có sự kiện `task.pushed` hay `pushedAt`, và commit của task chưa có trên nhánh đích (cả local và remote qua `git merge-base --is-ancestor`).
+     - Tự động xóa trạng thái dẫn xuất ngay khi merge hoặc push thành công sau đó.
+  2. **Tối ưu hóa và cache gọi Git (Zero git overhead cho luồng chuẩn)**:
+     - 99% task không có sự kiện lỗi merge hay push sẽ không bao giờ gọi lệnh git.
+     - Với các task ứng viên, kết quả kiểm tra `isAncestor` được cache trong bộ nhớ với TTL ngắn (15s); nếu git xác nhận đã là ancestor (đã gộp tay), kết quả được cache dài hạn (1h).
+     - Cache tự động bị xóa (invalidation) theo repo/ref cụ thể, theo taskId (thông qua bảng ánh xạ `taskKeyMap`), và xóa toàn bộ khi có sự kiện merge/push/publish mới (`task.merged`, `task.pushed`, `task.push_failed`, `merge.conflict`, `merge.failed`) hoặc khi gọi retry/publish, đảm bảo trạng thái dẫn xuất luôn cập nhật tức thì.
+  3. **API hỗ trợ thao tác và phân trang**:
+     - `GET /api/tasks`: Hỗ trợ filter `?derived=merge_failed|push_failed` (và tương thích `?status=merge_failed|push_failed`).
+     - `GET /api/tasks/:id`: Trả thêm trường `deliveryIssue: { kind, error, failedAt, files? }`.
+     - `POST /api/tasks/:id/merge/retry`: Chạy lại luồng auto-merge hiện có (`mergeTaskIntoBase`). Nếu thành công trả 200 kèm `mergeCommit`; nếu còn xung đột trả 409 Conflict kèm danh sách `files`. Nếu lỗi kiểm tra sau merge hoặc lỗi khác (như `MergeError` 422 `unprocessable_entity`, 503 `environment_error`, hoặc `HttpError` 409 có error code không phải conflict), giữ nguyên mã và semantics lỗi gốc mà không biến thành conflict hay trả danh sách file. Hỗ trợ body `{ assignWorker: true }` để chuyển task về `queued`, bổ sung ghi chú danh sách file xung đột vào body để worker giải quyết.
+  4. **Hiển thị trực quan trên TaskFlow và TaskDetailPage**:
+     - Bổ sung 2 node ở hàng nhánh lỗi (row 2): "Merge lỗi" (dưới cột done) và "Push lỗi" (dưới cột pushed) với mũi tên kết nối và nhãn "xung đột" / "push lỗi".
+     - Màu cảnh báo nổi bật theo token CSS (`--t-crit`) khi số lượng > 0.
+     - Modal danh sách (`FlowTaskList`) hiển thị danh sách task có delivery issue kèm các nút thao tác (Merge lại, Push lại, Giao worker xử lý) với confirm và toast thông báo kết quả.
+     - `TaskDetailPage`: Hiển thị banner cảnh báo lỗi giao hàng kèm các nút xử lý, và bước lỗi trên timeline với mốc thời gian.
+
+## DEC-035: Xác định diff audit trước khi publish theo mốc remote và hỗ trợ nhiều lần merge
 
 - **Bối cảnh**:
   - Ghi nhận sự cố tại repo `dev-insight-rust` (task `ui-dashboard`): pre-publish audit thất bại do diff bị phình to 1867 dòng ngoài phạm vi (chứa toàn bộ code của task approvals đã push lên remote trước đó).
@@ -519,20 +544,22 @@
     3. Lệnh `git diff merge^1 merge` so sánh nhánh task trước và sau khi reverse merge `master`, khiến diff audit chứa toàn bộ lịch sử commit của `master` thay vì code của task.
     4. Ngoài ra, việc dùng `--reverse` chỉ lấy merge commit đầu tiên khiến các lần merge tiếp theo (khi task được merge vào target/integration nhiều lần) bị bỏ sót khỏi diff audit.
 - **Quyết định thiết kế**:
-  1. **Loại trừ tuyệt đối Reverse Merge**:
+  1. **Loại trừ tuyệt đối Reverse Merge và Fail-closed**:
      - Loại bỏ các nhánh trùng với nhánh task (`taskBranch`, `refs/heads/${taskBranch}`, SHA của task branch) khỏi danh sách tìm kiếm candidate branches của nhánh đích.
      - Kiểm tra tiêu đề commit bằng regex: loại bỏ bất kỳ commit nào có dạng `into ... <taskBranch>`.
      - Kiểm tra cấu trúc parent và ancestry nghiêm ngặt: parent đầu (`p1`) không bao giờ được phép thuộc nhánh task (loại bỏ nếu `p1 === branchSha`, `isAncestor(branchRef, p1)`, hoặc `isAncestor(p1, branchRef) && !isAncestor(p1, p2)`). Hàm `isAncestor` chỉ coi exit code 1 là không phải tổ tiên; mọi lỗi thực thi git hoặc ref không hợp lệ đều ném lỗi. Bất kỳ lỗi hoặc sự cố nào trong quá trình kiểm tra ancestry của `p1` đều bắt buộc fail-closed và loại bỏ merge commit (không chấp nhận theo message).
      - Khi nhánh task không còn tồn tại cục bộ (`hasBranch === false`), khôi phục kiểm tra cấu trúc parent từ dữ liệu commit qua chuỗi `first-parent`: nếu `p2` thuộc first-parent lineage của nhánh đích (`destRefs`) trong khi `p1` không thuộc, commit đó là reverse merge và bắt buộc bị loại bỏ. Hàm `isFirstParentAncestor` ném lỗi khi git gặp sự cố (fail closed, không nuốt lỗi trả `false`). Khi bất kỳ kiểm tra ancestry nào thất bại hoặc không có `targetRefs` để xác minh, bắt buộc fail-closed loại bỏ merge commit, tuyệt đối không chấp nhận merge chỉ dựa vào commit message.
+     - Khi kiểm tra commit log của `p2`, chỉ coi `p2` thuộc task khi commit log thực sự khớp với task pattern hoặc task title; tuyệt đối không chấp nhận chỉ dựa trên message của merge commit (`isMsgForward`).
      - Chỉ chấp nhận forward merge: commit message có dạng `Merge branch '<taskBranch>'`, parent 2 (`p2`) thuộc nhánh task / là tổ tiên của task tip, và `p2` không phải là tổ tiên của `p1`. Bất kỳ lỗi kiểm tra ancestry nào ở bước này cũng loại bỏ candidate ngay lập tức (fail-closed).
   2. **Hỗ trợ đầy đủ nhiều lần merge vào integration / target branch**:
      - Bổ sung hàm `findForwardMergeCommitsForTask` trả về toàn bộ danh sách commit forward merge của task trên `--first-parent` của candidate branch (sắp xếp từ mới nhất đến cũ nhất).
      - Khi tính diff (`getTaskDiff`):
-       - Tip của task lấy từ parent 2 của merge commit mới nhất (`latestMerge^2`).
-       - Mốc base: luôn luôn sử dụng remote base (`baseRef` / `prevRemoteSha` / `origin/<targetBranch>`) của snapshot publish trên nhánh đích làm `baseCommit`. Tuyệt đối không thay thế remote base bằng `earliestMergeP1` hay parent merge. Nếu remote base không tồn tại hoặc `rev-parse` lỗi, `getTaskDiff` bắt buộc fail-closed ném lỗi, không rơi xuống snapshot fallback.
-       - Dải diff audit được tính qua `mb = git merge-base(baseCommit, taskTip)` và diff theo dải `mb..taskTip`.
+       - Tip của task lấy từ parent 2 của merge commit mới nhất (`latestMerge^2`). Nếu đọc parent 2 lỗi, bắt buộc fail-closed ném lỗi, không thay bằng chính merge commit.
+       - Mốc base: luôn luôn sử dụng remote base (`baseRef` / `prevRemoteSha` / `origin/<targetBranch>`) của snapshot publish trên nhánh đích làm `baseCommit`. Tuyệt đối không thay thế remote base bằng `earliestMergeP1` hay parent merge. Nếu remote base không tồn tại hoặc `rev-parse` lỗi (`resolveRemoteAuditBase`), `getTaskDiff` bắt buộc fail-closed ném lỗi, không rơi xuống snapshot fallback hay dùng ref local ngoài remote.
+       - Dải diff audit được tính qua `mb = git merge-base(baseCommit, taskTip)` và diff theo dải `mb..taskTip`. Nếu tính `merge-base` thất bại, bắt buộc fail-closed ném lỗi thay vì dùng `baseCommit`.
        - Cơ chế này bao trọn toàn bộ các commit của task qua tất cả các lần merge, đồng thời tự động loại trừ mọi thay đổi đã có sẵn trên remote hoặc nhánh đích.
        - Khi merge commit có diff hợp lệ rỗng, giữ nguyên range đã xác định (`auditRange = mb..taskTip`, `diff = ""`, `changedFiles = []`) và tuyệt đối không rơi xuống snapshot fallback để tránh kéo diff không thuộc task vào audit.
+       - Khi không tìm thấy merge commit và phải dùng snapshot fallback, mốc base vẫn bắt buộc resolve từ remote qua `resolveRemoteAuditBase`, loại bỏ hoàn toàn các fallback về nhánh local / HEAD không an toàn.
   3. **Ghi nhận `auditRange` vào `pushResult` và các sự kiện audit**:
      - Mở rộng interface `PublishSuccessResult` và `PublishFailedResult` bổ sung trường `auditRange?: string` (định dạng `base..tip`).
      - Ghi nhận `auditRange` vào `pushResult` (trạng thái `pushed`, `audit_failed`, `push_failed`).

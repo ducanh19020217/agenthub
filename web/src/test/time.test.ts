@@ -310,6 +310,15 @@ describe('API time helpers', () => {
       expect(formatStatusTimeLabel('pushed', threeHoursAgo, 'en', now)).toBe('Pushed to git 3h ago');
     });
 
+    it('formats merge_failed and push_failed statuses with contextual time in vi and en', () => {
+      const tenAm = Date.parse('2026-11-12T03:05:00Z');
+      expect(formatStatusTimeLabel('merge_failed', tenAm, 'vi', now)).toBe('Merge lỗi 10:05');
+      expect(formatStatusTimeLabel('merge_failed', tenAm, 'en', now)).toBe('Merge failed 10:05');
+
+      expect(formatStatusTimeLabel('push_failed', tenAm, 'vi', now)).toBe('Push lỗi 10:05');
+      expect(formatStatusTimeLabel('push_failed', tenAm, 'en', now)).toBe('Push failed 10:05');
+    });
+
     it('supports custom translation function t if provided', () => {
       const tenAm = Date.parse('2026-11-12T03:05:00Z');
       const mockT = (key: string, params?: Record<string, string | number>) => {

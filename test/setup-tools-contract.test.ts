@@ -22,7 +22,7 @@ function fixture() {
     applyPreset: vi.fn(({ dryRun }: { dryRun: boolean }) => ({ applied: !dryRun, diff: { before: { old: true }, after: { old: false } } })),
     getProject: vi.fn(() => ({ path: home, defaultBranch: 'main', settings: JSON.stringify({ brain: { mode: 'inherit' }, review: { autoMerge: false } }), checks: JSON.stringify([]), reviewChain: JSON.stringify([]) })),
     updateProject: vi.fn((_, input) => ({ ...input, settings: { ...input.settings }, checks: input.checks || [], reviewChain: input.reviewChain || [] })),
-    getConfig: vi.fn(() => ({ brain: { mode: 'auto', model: 'sonnet' }, notifications: { desktop: true } })),
+    getConfig: vi.fn(() => ({ brain: { mode: 'auto', model: 'sonnet' }, notifications: { desktop: true }, scheduler: { maxRunsPerTask: 15, maxConsecutiveCrashesPerTask: 3, maxTimeoutResumes: 2 } })),
     updateConfig: vi.fn((input) => input),
   };
   const tools = new SetupTools(config, db, { emit: (type, _task, payload) => { events.push({ type, payload }); return true; } } as never, () => service);
@@ -45,6 +45,25 @@ describe('setup MCP tool contracts', () => {
     expect(() => tools.configSet('notifications.telegram.botToken', 'secret')).toThrow();
     expect(() => tools.configSet('scheduler.secret', 'secret')).toThrow();
     expect(service.updateConfig).not.toHaveBeenCalled();
+  });
+
+  it('supports scheduler.maxTimeoutResumes via configSet in dry-run and write mode', () => {
+    const { tools, service } = fixture();
+    const dryRun = tools.configSet('scheduler.maxTimeoutResumes', 0, true);
+    expect(dryRun.dryRun).toBe(true);
+    expect(dryRun.diff).toMatchObject({
+      changed: true,
+      after: expect.objectContaining({
+        scheduler: expect.objectContaining({ maxTimeoutResumes: 0 }),
+      }),
+    });
+    expect(service.updateConfig).not.toHaveBeenCalled();
+
+    const write = tools.configSet('scheduler.maxTimeoutResumes', 0, false);
+    expect(write.dryRun).toBe(false);
+    expect(service.updateConfig).toHaveBeenCalledWith({
+      scheduler: { maxTimeoutResumes: 0 },
+    });
   });
 
   it('waits for secret configuration and never places the value in event or result', async () => {

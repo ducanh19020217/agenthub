@@ -46,6 +46,7 @@ import type { GiteaSyncService } from '../integrations/gitea/service.js';
 import { isGiteaTokenConfigured, saveGiteaToken } from '../integrations/gitea/secrets.js';
 import { parseRemote } from '../integrations/gitea/client.js';
 import { BulletinService } from '../bulletin.js';
+import type { HealthSweepService, HealthSweepResult } from '../health/sweep.js';
 import { parseCodexTokenItem, writeCodexAuthFile } from '../profiles/codexToken.js';
 import { parseClaudeTokenItem, readClaudeOAuthAccessToken, verifyClaudeOAuthToken, writeClaudeIsolatedFiles, type ClaudeVerifyResult } from '../profiles/claudeToken.js';
 import {
@@ -562,6 +563,13 @@ export const UpdateConfigSchema = z.object({
     requireApproval: z.boolean().optional(),
     approvalMinTasks: z.number().int().min(0).max(100).optional(),
   }).optional(),
+  scheduler: z.object({
+    maxRunsPerTask: z.number().int().positive().optional(),
+    maxConsecutiveCrashesPerTask: z.number().int().positive().optional(),
+    maxPausedMin: z.number().int().positive().optional(),
+    maxCheckingMin: z.number().int().positive().optional(),
+    maxTimeoutResumes: z.number().int().min(0).optional(),
+  }).optional(),
   watchdog: z.object({
     stallMinutes: z.number().positive().optional(),
     waitingMinutes: z.number().positive().optional(),
@@ -723,6 +731,7 @@ export const UpdateConfigSchema = z.object({
       taskDone: z.boolean().optional(),
       projectIdle: z.boolean().optional(),
       interrupted: z.boolean().optional(),
+      healthIssue: z.boolean().optional(),
     }).optional(),
   }).optional(),
   updates: z.object({
@@ -743,6 +752,21 @@ export const UpdateConfigSchema = z.object({
         intervalMinutes: z.number().positive().optional(),
         engines: z.array(z.enum(['antigravity', 'codex', 'claude'])).optional(),
       }).optional(),
+    }).optional(),
+  }).optional(),
+  healthSweep: z.object({
+    enabled: z.boolean().optional(),
+    intervalMinutes: z.number().int().positive().optional(),
+    cooldownMinutes: z.number().int().positive().optional(),
+    rules: z.object({
+      checkingOrphanMin: z.number().int().positive().optional(),
+      reviewOrphanMin: z.number().int().positive().optional(),
+      queuedStarvedMin: z.number().int().positive().optional(),
+      runningNoProgressMin: z.number().int().positive().optional(),
+      churnWorkerRuns: z.number().int().positive().optional(),
+      churnEscalations: z.number().int().positive().optional(),
+      failoverChurnCount: z.number().int().positive().optional(),
+      failoverChurnWindowMin: z.number().int().positive().optional(),
     }).optional(),
   }).optional(),
 });
@@ -877,6 +901,10 @@ export function formatEventSummary(
       if (reason === 'retry') {
         return `${taskLabel} được đưa vào hàng đợi để thử lại`;
       }
+      if (reason === 'timeout_resume') {
+        const attempt = typeof p.attempt === 'number' ? ` (lần ${p.attempt})` : '';
+        return `${taskLabel} được đưa vào hàng đợi để làm tiếp sau khi quá thời gian${attempt}`;
+      }
       return `${taskLabel} được đưa vào hàng đợi`;
     }
 
@@ -898,8 +926,12 @@ export function formatEventSummary(
     case 'task.blocked':
       return `${taskLabel} bị chặn`;
 
-    case 'task.failed':
+    case 'task.failed': {
+      if (p.reason === 'timeout') {
+        return `${taskLabel} thất bại do quá thời gian`;
+      }
       return `${taskLabel} thất bại`;
+    }
 
     case 'task.done':
       return p.reason === 'merged_elsewhere'
@@ -1102,6 +1134,7 @@ export class AppService {
   public dailyReportService?: DailyReportService;
   public timesheetService?: OpenProjectTimesheetService;
   public giteaSyncService?: GiteaSyncService;
+  public healthSweepService?: HealthSweepService;
   private perfCollector?: PerfCollector;
   private profileChecks = new Set<string>();
   private reviewingTasks = new Set<string>();
@@ -6696,6 +6729,7 @@ export class AppService {
       slotsPerAgyProfile: this.config.slotsPerAgyProfile,
       multiplePerProvider: this.config.multiplePerProvider,
       planning: this.config.planning,
+      scheduler: this.config.scheduler,
       slotsPerCodexProfile: this.config.slotsPerCodexProfile,
       watchdog: this.config.watchdog,
       autoFixOnFail: this.config.autoFixOnFail,
@@ -6862,5 +6896,19 @@ export class AppService {
 
   getEffectiveConfig(projectId: string) {
     return computeEffectiveConfig(this, projectId);
+  }
+
+  getHealthSweepStatus(): HealthSweepResult {
+    if (!this.healthSweepService) {
+      return { timestamp: null, issues: [] };
+    }
+    return this.healthSweepService.getStatus();
+  }
+
+  async runHealthSweep(): Promise<HealthSweepResult> {
+    if (!this.healthSweepService) {
+      return { timestamp: null, issues: [] };
+    }
+    return this.healthSweepService.runSweep();
   }
 }

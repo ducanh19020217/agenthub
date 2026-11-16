@@ -365,6 +365,8 @@ export class TelegramBotService {
   private notificationDedupProjectId: string | null = null;
   /** Maps bot reply message ID to brain session ID for continuing conversation on reply (max 200 items). */
   private askReplySessions = new Map<number, string>();
+  private healthIssueQueue: Array<{ taskId: string; payload: Record<string, unknown> }> = [];
+  private healthIssueTimer?: NodeJS.Timeout;
 
   constructor(opts: TelegramServiceOptions) {
     this.config = opts.config;
@@ -733,6 +735,10 @@ export class TelegramBotService {
     if (this.waitingQuotaCheckTimer) {
       clearTimeout(this.waitingQuotaCheckTimer);
       this.waitingQuotaCheckTimer = undefined;
+    }
+    if (this.healthIssueTimer) {
+      clearTimeout(this.healthIssueTimer);
+      this.healthIssueTimer = undefined;
     }
 
     if (this.pollAbortController) {
@@ -4232,6 +4238,7 @@ export class TelegramBotService {
         (type === 'task.pushed' && this.config.telegram.notify.taskDone !== false) ||
         (type === 'task.push_failed' && this.config.telegram.notify.failed !== false) ||
         (type === 'task.audit_failed' && this.config.telegram.notify.failed !== false) ||
+        (type === 'task.health_issue' && this.config.telegram.notify.healthIssue !== false) ||
         (TelegramBotService.INTERRUPT_EVENTS.has(type) && this.config.telegram.notify.interrupted !== false);
 
         if (!isAllowedInAuto) {
@@ -4545,6 +4552,20 @@ export class TelegramBotService {
           `${prefix}${head}\nID: <code>${taskId}</code>${minimal ? '' : `\nTiêu đề: <b>${this.escapeHtml(title)}</b>`}${detail ? `\n${detail}` : ''}`,
           keyboard.length ? { inline_keyboard: keyboard } : undefined,
         );
+        break;
+      }
+
+      case 'task.health_issue': {
+        const notify = this.config.telegram.notify;
+        if (notify.healthIssue === false) return;
+        if (notify.interrupted === false && notify.healthIssue === undefined) return;
+        this.healthIssueQueue.push({ taskId: taskId || '', payload: p });
+        if (!this.healthIssueTimer) {
+          this.healthIssueTimer = setTimeout(() => {
+            this.flushHealthIssues();
+          }, 1000);
+          this.healthIssueTimer.unref?.();
+        }
         break;
       }
 
@@ -5170,6 +5191,44 @@ export class TelegramBotService {
       const time = until ? new Date(until * 1000).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : 'sớm';
       this.broadcastMessage(`⏳ <b>${waiting.length} task đang chờ quota</b>\nSớm nhất mở lại lúc <b>${time}</b>.`);
     }, WAITING_QUOTA_BATCH_DELAY_MS);
+  }
+
+  private flushHealthIssues(): void {
+    if (this.healthIssueTimer) {
+      clearTimeout(this.healthIssueTimer);
+      this.healthIssueTimer = undefined;
+    }
+    const issues = this.healthIssueQueue.splice(0);
+    if (issues.length === 0) return;
+
+    const ruleLabels: Record<string, string> = {
+      checking_orphan: 'kẹt kiểm tra',
+      review_orphan: 'kẹt review',
+      queued_starved: 'kẹt hàng đợi',
+      running_no_progress: 'chạy không tiến triển',
+      churn: 'churn nhiều vòng sửa',
+      failover_churn: 'failover liên tục',
+      stale_run: 'run mồ côi',
+    };
+
+    const lines = issues.map((item) => {
+      const p = item.payload;
+      const rule = typeof p.rule === 'string' ? p.rule : '';
+      const ruleLabel = ruleLabels[rule] || rule || 'bất thường';
+      const timeStr = typeof p.sinceMinutes === 'number' ? ` (${Math.round(p.sinceMinutes)}m)` : '';
+      const statusStr = typeof p.status === 'string' ? ` [${p.status}]` : '';
+      const suggest = typeof p.suggestion === 'string' && p.suggestion ? `\n  ↳ <i>${this.escapeHtml(p.suggestion)}</i>` : '';
+      return `• <code>${this.escapeHtml(item.taskId)}</code>${statusStr} [${ruleLabel}]${timeStr}${suggest}`;
+    });
+
+    const header = `🏥 <b>Cảnh báo sức khoẻ định kỳ (${issues.length} vấn đề)</b>`;
+    const message = `${header}\n${lines.join('\n')}`;
+
+    const keyboard: InlineKeyboardButton[][] = issues.length === 1 && issues[0].taskId
+      ? [[{ text: '🌐 Xem task', url: this.getDashboardUrl(`#/tasks/${toRouteId(issues[0].taskId)}`) }]]
+      : [[{ text: '🌐 Xem bảng task', url: this.getDashboardUrl('#/tasks') }]];
+
+    this.broadcastMessage(message, { inline_keyboard: keyboard });
   }
 
   broadcastMessage(

@@ -29,7 +29,9 @@ import {
   TimesheetEntryRepo,
   TimesheetManualEntryRepo,
   TimesheetDayOverrideRepo,
+  HealthIssueCooldownRepo,
 } from './db/index.js';
+import { HealthSweepService } from './health/sweep.js';
 import { CiWatchService } from './ci.js';
 import { OpenProjectIntakeService } from './integrations/openproject/intake.js';
 import { DailyReportService, parseDateNoon } from './integrations/openproject/daily-report.js';
@@ -121,6 +123,7 @@ export interface DaemonContext {
   dailyReportService: DailyReportService;
   timesheetService: OpenProjectTimesheetService;
   giteaSyncService: GiteaSyncService;
+  healthSweepService: HealthSweepService;
   perfCollector: PerfCollector;
   userShutdownRequested?: boolean;
 }
@@ -464,6 +467,21 @@ export function createContext(
   });
   service.setTelegramBotService(telegramService);
 
+  const cooldownRepo = new HealthIssueCooldownRepo(db);
+  const healthSweepService = new HealthSweepService({
+    db,
+    taskRepo,
+    runRepo,
+    projectRepo,
+    reviewRepo,
+    eventRepo,
+    cooldownRepo,
+    scheduler,
+    eventBus: scheduler.getEventBus(),
+    getConfig: () => config.healthSweep,
+  });
+  service.healthSweepService = healthSweepService;
+
   return {
     config,
     db,
@@ -512,6 +530,7 @@ export function createContext(
     timesheetEntryRepo,
     timesheetManualRepo,
     giteaSyncService,
+    healthSweepService,
     perfCollector,
     userShutdownRequested: false,
   };
@@ -520,6 +539,11 @@ export function createContext(
 export function closeContext(ctx: DaemonContext, _preserveWorkerProcesses = false): void {
   try {
     ctx.perfCollector?.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    ctx.healthSweepService?.stop();
   } catch {
     // ignore
   }
@@ -668,6 +692,7 @@ export async function startDaemon(
   ctx.timesheetService.start();
   ctx.giteaSyncService.start();
   ctx.perfCollector.start();
+  ctx.healthSweepService.start();
 
   // Start Telegram bot if enabled
   if (config.telegram?.enabled) {

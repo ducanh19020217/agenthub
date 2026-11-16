@@ -584,6 +584,11 @@ async function main() {
       await cmdDoctor(config, args.slice(1));
       break;
 
+    case 'health':
+    case 'health-sweep':
+      await cmdHealthSweep(config, args.slice(1));
+      break;
+
     case 'perf':
       await cmdPerf(args.slice(1));
       break;
@@ -682,7 +687,54 @@ Cách dùng:
   agenthub claude-failover [status|clear] Xem hoặc tắt failover Claude
   agenthub note "<nội dung>"          Gửi ghi chú từ task đang chạy
   agenthub notes [--since <id>]       Xem ghi chú của các task đang chạy cùng project
+  agenthub health [--run]             Xem kết quả hoặc chạy quét sức khoẻ định kỳ
 `);
+  }
+}
+
+export async function cmdHealthSweep(config: ReturnType<typeof loadConfig>, extraArgs: string[]): Promise<void> {
+  const runNow = extraArgs.includes('--run') || extraArgs.includes('-r') || extraArgs.includes('run');
+  const token = readExistingToken(config.tokenPath || path.join(config.hubHome, 'token'));
+  if (!token) {
+    console.error('Không tìm thấy token của daemon. Hãy đảm bảo daemon đang chạy.');
+    process.exit(1);
+  }
+  const port = process.env.AGENTHUB_PORT ? parseInt(process.env.AGENTHUB_PORT, 10) : (config.port || 7700);
+  const method = runNow ? 'POST' : 'GET';
+  const url = `http://127.0.0.1:${port}/api/health/sweep`;
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`Lỗi API (${res.status}): ${text}`);
+      process.exit(1);
+    }
+    const data = (await res.json()) as {
+      timestamp: string | null;
+      issues: Array<{ rule: string; taskId: string; status: string; sinceMinutes: number; suggestion: string }>;
+    };
+    if (!data.timestamp) {
+      console.log('Chưa có kết quả quét sức khoẻ nào. Dùng `agenthub health --run` để quét ngay.');
+      return;
+    }
+    console.log(`Lượt quét sức khoẻ: ${data.timestamp}`);
+    if (data.issues.length === 0) {
+      console.log('✓ Không phát hiện bất thường nào.');
+    } else {
+      console.log(`⚠️ Phát hiện ${data.issues.length} vấn đề:`);
+      for (const issue of data.issues) {
+        console.log(`- [${issue.rule}] ${issue.taskId} (${issue.status}, ${issue.sinceMinutes}m): ${issue.suggestion}`);
+      }
+    }
+  } catch (err) {
+    console.error(`Không thể kết nối tới daemon: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
   }
 }
 

@@ -425,7 +425,68 @@
      - Scheduler phát sự kiện `task.checking_recovered` để dễ dàng quan sát/giám sát và gọi lại `runChecksForTask`.
      - Lưới an toàn hoàn toàn không can thiệp khi scheduler đang ở trạng thái drain (`this.restartState.draining === true`).
 
-## DEC-031: Trạng thái dẫn xuất merge_failed và push_failed trên sơ đồ quy trình TaskFlow
+## DEC-031: Tự động resume task khi worker timeout nếu có tiến độ và phát sự kiện task.failed
+
+- **Bối cảnh**:
+  - Khi worker run kết thúc với outcome `timeout` trong `src/scheduler/index.ts`, scheduler trước đây chuyển task sang `failed` ngay lập tức và chỉ phát sự kiện `task.timeout`.
+  - Hai vấn đề thực tế phát sinh (ghi nhận ngày 2026-11-13 với các task `t-flow-merge-push-failed-nodes` và `t-health-sweep-brain`):
+    1. Task đã có tiến độ thật (có từ 2–5 commit hợp lệ trong phiên chạy) nhưng hết giới hạn thời gian (ví dụ 3 tiếng) vẫn bị đánh dấu `failed`, buộc người vận hành phải retry thủ công.
+    2. Code chỉ phát `task.timeout`, không phát `task.failed`. Do `task.timeout` không nằm trong danh sách đánh thức mặc định (`DEFAULT_BRAIN_WAKEUP_EVENTS`), Brain không được đánh thức khi task timeout thất bại.
+- **Quyết định thiết kế**:
+  1. **Cơ chế timeout resume dựa trên tiến độ và số lần timeout liên tiếp**:
+     - Khi worker run bị timeout, scheduler kiểm tra tiến độ bằng hàm `hasCommitAfter(task, startedAtMs)` sẵn có (xem worktree HEAD có commit mới sau mốc bắt đầu của run hay không). Mốc `startedAtMs` sử dụng trực tiếp giá trị hợp lệ từ `run.startedAt` trong DB (fallback về `rt.startTime` nếu không hợp lệ), không dùng `Math.min` để tránh lùi mốc thời gian và nhận diện nhầm commit trước run là tiến độ.
+     - Đếm số lần timeout liên tiếp dựa trên số run worker có outcome `timeout` liên tiếp ở cuối danh sách runs của task (`getConsecutiveTimeoutCount`), không cần thêm cột DB mới.
+     - Cấu hình `scheduler.maxTimeoutResumes` (mặc định 2, đặt 0 để tắt) giới hạn số lần resume liên tiếp do timeout; hỗ trợ cấu hình qua file `config.json`, schema `UpdateConfigSchema` (`PUT /api/config`), và công cụ `SetupTools.configSet` (`POST /api/setup/config-set`).
+     - Phát sự kiện `task.timeout` cho mọi outcome timeout (kể cả khi requeue lẫn khi fail) để Telegram và các thành phần hiện tại tiếp tục hoạt động không đổi.
+     - Nếu có tiến độ và số lần timeout liên tiếp chưa vượt `maxTimeoutResumes`:
+       - Task được chuyển về `queued` với cờ `resume: 1`.
+       - Ghi chú `TIMEOUT_RESUME_NOTE` ("Lượt trước bị timeout nhưng đã có tiến độ. Kiểm tra git log/status rồi làm tiếp, không làm lại, và commit thường xuyên.") vào `.agenthub/task.md` của worktree và `task.body`.
+       - Phát sự kiện `task.queued` với `{ reason: 'timeout_resume', attempt: consecutiveTimeouts }`.
+     - Nếu không có tiến độ hoặc đã vượt quá `maxTimeoutResumes`:
+       - Chuyển task sang `failed`.
+       - Phát sự kiện `task.failed` với `{ reason: 'timeout', progress: boolean, timeoutResumes: number }` để kích hoạt đánh thức Brain.
+  2. **Bảo toàn hành vi cho các luồng khác**:
+     - Giữ nguyên toàn bộ hành vi khi task bị cancel, stall, hoặc quota; không thay đổi logic xử lý reviewer timeout.
+
+## DEC-032: Lượt quét sức khoẻ định kỳ (Health Sweep) và đánh thức Brain
+
+- **Bối cảnh**:
+  - Brain trước đây chỉ thức dậy theo sự kiện đột xuất từ daemon.
+  - Watchdog chỉ bắt worker im lặng log, còn `task.no_commit`/`task.looping` chỉ gửi thông báo Telegram mà không đánh thức Brain.
+  - Các sự cố task kẹt mồ côi (như `checking` mồ côi không có process chạy, `review` mồ côi khi auto-review bật nhưng không có reviewer, `queued_starved` có slot nhưng không chạy, `running_no_progress`, worker loop/churn nhiều lượt, quota failover dồn dập, `stale_run` DB chưa kết thúc nhưng tiến trình đã chết) không có cơ chế phát hiện tự động để kích hoạt Brain can thiệp.
+- **Quyết định thiết kế**:
+  1. **Dịch vụ Health Sweep định kỳ (`src/health/sweep.ts`)**:
+     - Chạy định kỳ `healthSweep.intervalMinutes` (mặc định 10 phút) dưới dạng deterministic code (không gọi LLM tốn token/quota).
+     - Không chạy khi daemon đang drain restart hoặc scheduler đã dừng (`isDraining()` hoặc `isStopped()`).
+     - Triển khai 7 luật phát hiện với ngưỡng cấu hình linh hoạt trong `config.healthSweep.rules`:
+       - `checking_orphan`: checking > 20 phút không có check active/queued và không có run đang chạy.
+       - `review_orphan`: review > 30 phút, đủ điều kiện auto-review nhưng không có reviewer chạy và không bị chặn bởi quota hay backoff. Với task đã leo thang (`reviewerEscalated`), đối chiếu chính xác khả năng chạy của arbiter (`canStartEscalationArbiter`) thay vì rơi xuống reviewer thông thường, và trả về false khi đã có review tự động duyệt (`approved`) giải quyết leo thang trong trạng thái chuyển tiếp, tránh báo nhầm khi arbiter đang bị quota/backoff hợp lệ hoặc task đã được duyệt.
+       - `queued_starved`: queued > 60 phút, không chờ quota, không có dependency chưa xong, không có notBefore tương lai, project còn slot song song.
+       - `running_no_progress`: worker chạy > 90 phút không có commit mới và không đổi file trong worktree. Coi là có tiến độ khi lần thay đổi gần nhất (max của `cachedWorktreeMtime`, mtime `.git/index` kể cả git worktree, và thời điểm commit thực tế) nằm trong cửa sổ `now - runningNoProgressMin * 60_000`. Không dùng `lastCommitCheckAt` làm bằng chứng có commit vì đó chỉ là thời điểm watchdog kiểm tra, tránh bỏ sót worker bị treo khi `runningNoProgressMin` nhỏ hơn `stall.noCommitMin` của watchdog. Fallback lấy commit thực tế từ `rt.lastCommitAt`, git log worktree hoặc mặc định là `rt.startTime`.
+       - `churn`: worker runs >= 8 hoặc review.escalated >= 2 lần.
+       - `failover_churn`: failover / quota_retry >= 4 lần trong 2 giờ.
+       - `stale_run`: run DB có `outcome IS NULL` nhưng PID không còn sống và không có trong memory.
+  2. **Tự sửa an toàn (Self-repair) cho lỗi trạng thái nội bộ**:
+     - `checking_orphan`: Tự động gọi lại `scheduler.runChecksForTask(...)` để chạy lại kiểm tra.
+     - `stale_run`: Đánh dấu run là `crashed`, tự động đưa task trở lại `queued` với `resume = 1`.
+     - Vẫn phát event `task.health_issue` kèm chi tiết tự sửa để Brain và người dùng nắm thông tin.
+     - Các luật khác chỉ phát cảnh báo để Brain quyết định, không tự ý can thiệp sai luồng.
+  3. **Chống spam cảnh báo bằng Cooldown bảng SQLite (Migration 76)**:
+     - Tạo bảng `health_issue_cooldowns (taskId, rule, lastEmittedAt, taskStatus)`.
+     - Cooldown mặc định 120 phút. Nếu trạng thái task thay đổi rồi lại vi phạm, cooldown được bỏ qua để kịp thời báo cáo tình trạng mới.
+     - Cooldown được lưu bền vững qua các lần khởi động lại daemon.
+  4. **Đánh thức Brain theo lô (Single Turn Batching) và hướng dẫn hành động**:
+     - Đưa `task.health_issue` vào `DEFAULT_BRAIN_WAKEUP_EVENTS`.
+     - Phân loại `churn`, `queued_starved`, `review_orphan` vào nhóm sự kiện ưu tiên (`isPriorityEvent`).
+     - Gom toàn bộ issue trong cùng một lượt sweep thành 1 lượt chạy duy nhất của Brain (`debounceMs`), tránh spam N lượt Brain.
+     - Cung cấp prompt hướng dẫn cụ thể các thao tác Brain được phép làm bằng công cụ sẵn có: retry, cancel, ghi chú/chỉ dẫn cho task, đổi chuỗi model, tách task, hoặc thông báo qua `brain.notify`.
+  5. **Quan sát và tích hợp**:
+     - Telegram: Thông báo gọn gàng gộp trong một tin nhắn mỗi lượt sweep, tôn trọng cài đặt thông báo (`telegram.notify.healthIssue`).
+     - HTTP API: `GET /api/health/sweep` xem kết quả quét gần nhất, `POST /api/health/sweep` kích hoạt quét tức thì.
+     - CLI & MCP: `agenthub health [--run]` và MCP tool `hub_health_sweep`.
+     - Logic an toàn cho `checking` mồ côi được tích hợp hoàn toàn trong sweep, không chạy song song trùng lặp.
+
+## DEC-033: Trạng thái dẫn xuất merge_failed và push_failed trên sơ đồ quy trình TaskFlow
 
 - **Bối cảnh**:
   - Khi task merge vào integration bị xung đột (`merge.conflict` / `review.auto_merge_skipped` với `reason: merge_failed`) hoặc publish lên nhánh đích thất bại (`task.push_failed`, `tasks.pushResult` có `state: push_failed` hoặc `error`), task vẫn giữ trạng thái `done` (hoặc `review`).
@@ -448,4 +509,3 @@
      - Màu cảnh báo nổi bật theo token CSS (`--t-crit`) khi số lượng > 0.
      - Modal danh sách (`FlowTaskList`) hiển thị danh sách task có delivery issue kèm các nút thao tác (Merge lại, Push lại, Giao worker xử lý) với confirm và toast thông báo kết quả.
      - `TaskDetailPage`: Hiển thị banner cảnh báo lỗi giao hàng kèm các nút xử lý, và bước lỗi trên timeline với mốc thời gian.
-

@@ -14,6 +14,7 @@ import {
   cmdStart,
   cmdStatus,
   cleanRemainingProcesses,
+  cmdHealthSweep,
 } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
 import { getOrCreateToken } from '../src/auth.js';
@@ -440,6 +441,235 @@ exit 4
       if (prevBin !== undefined) process.env.AGENTHUB_SYSTEMCTL_BIN = prevBin;
       else delete process.env.AGENTHUB_SYSTEMCTL_BIN;
       consoleSpy.mockRestore();
+    }
+  });
+});
+
+describe('agenthub health CLI command (cmdHealthSweep)', () => {
+  let tmpHome: string;
+  let token: string;
+
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-cli-health-'));
+    process.env.AGENTHUB_HOME = path.join(tmpHome, '.agenthub');
+    const tokenPath = path.join(process.env.AGENTHUB_HOME, 'token');
+    fs.mkdirSync(process.env.AGENTHUB_HOME, { recursive: true });
+    token = getOrCreateToken(tokenPath);
+  });
+
+  afterEach(() => {
+    try {
+      fs.rmSync(tmpHome, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+    delete process.env.AGENTHUB_HOME;
+    delete process.env.AGENTHUB_PORT;
+  });
+
+  it('báo lỗi và thoát khi không tìm thấy token', async () => {
+    const config = loadConfig(process.env.AGENTHUB_HOME);
+    fs.rmSync(config.tokenPath, { force: true });
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined) => {
+      throw new Error(`process.exit: ${code}`);
+    });
+
+    try {
+      await expect(cmdHealthSweep(config, [])).rejects.toThrow('process.exit: 1');
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Không tìm thấy token của daemon. Hãy đảm bảo daemon đang chạy.',
+      );
+    } finally {
+      consoleErrorSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('nhánh GET: hiển thị hướng dẫn khi chưa có kết quả quét nào (timestamp null)', async () => {
+    let requestedMethod = '';
+    let authHeader = '';
+    const testServer = http.createServer((req, res) => {
+      if (req.url === '/api/health/sweep') {
+        requestedMethod = req.method || '';
+        authHeader = req.headers.authorization || '';
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ timestamp: null, issues: [] }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    await new Promise<void>((resolve) => testServer.listen(0, '127.0.0.1', resolve));
+    const port = (testServer.address() as { port: number }).port;
+    process.env.AGENTHUB_PORT = String(port);
+
+    const config = loadConfig(process.env.AGENTHUB_HOME);
+    config.port = port;
+
+    const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      await cmdHealthSweep(config, []);
+      expect(requestedMethod).toBe('GET');
+      expect(authHeader).toBe(`Bearer ${token}`);
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        'Chưa có kết quả quét sức khoẻ nào. Dùng `agenthub health --run` để quét ngay.',
+      );
+    } finally {
+      testServer.close();
+      consoleLogSpy.mockRestore();
+    }
+  });
+
+  it('nhánh GET: hiển thị thông báo bình thường khi không có issue', async () => {
+    const testServer = http.createServer((req, res) => {
+      if (req.url === '/api/health/sweep') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ timestamp: '2026-11-13T20:00:00.000Z', issues: [] }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    await new Promise<void>((resolve) => testServer.listen(0, '127.0.0.1', resolve));
+    const port = (testServer.address() as { port: number }).port;
+    process.env.AGENTHUB_PORT = String(port);
+
+    const config = loadConfig(process.env.AGENTHUB_HOME);
+    config.port = port;
+
+    const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      await cmdHealthSweep(config, []);
+      expect(consoleLogSpy).toHaveBeenCalledWith('Lượt quét sức khoẻ: 2026-11-13T20:00:00.000Z');
+      expect(consoleLogSpy).toHaveBeenCalledWith('✓ Không phát hiện bất thường nào.');
+    } finally {
+      testServer.close();
+      consoleLogSpy.mockRestore();
+    }
+  });
+
+  it('nhánh POST (--run, -r, run): gửi POST và định dạng danh sách issue phát hiện', async () => {
+    let callCount = 0;
+    const methods: string[] = [];
+
+    const testServer = http.createServer((req, res) => {
+      if (req.url === '/api/health/sweep') {
+        callCount++;
+        methods.push(req.method || '');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            timestamp: '2026-11-13T21:15:00.000Z',
+            issues: [
+              {
+                rule: 'churn',
+                taskId: 'p1/t-churn',
+                status: 'queued',
+                sinceMinutes: 12,
+                suggestion: 'Tách nhỏ task hoặc đổi model chain',
+              },
+              {
+                rule: 'review_orphan',
+                taskId: 'p1/t-review',
+                status: 'review',
+                sinceMinutes: 35,
+                suggestion: 'Phát review_ready hoặc duyệt thủ công',
+              },
+            ],
+          }),
+        );
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    await new Promise<void>((resolve) => testServer.listen(0, '127.0.0.1', resolve));
+    const port = (testServer.address() as { port: number }).port;
+    process.env.AGENTHUB_PORT = String(port);
+
+    const config = loadConfig(process.env.AGENTHUB_HOME);
+    config.port = port;
+
+    const logs: string[] = [];
+    const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation((...args) => {
+      logs.push(args.map(String).join(' '));
+    });
+
+    try {
+      await cmdHealthSweep(config, ['--run']);
+      expect(methods[0]).toBe('POST');
+      expect(logs).toContain('Lượt quét sức khoẻ: 2026-11-13T21:15:00.000Z');
+      expect(logs).toContain('⚠️ Phát hiện 2 vấn đề:');
+      expect(logs).toContain('- [churn] p1/t-churn (queued, 12m): Tách nhỏ task hoặc đổi model chain');
+      expect(logs).toContain('- [review_orphan] p1/t-review (review, 35m): Phát review_ready hoặc duyệt thủ công');
+
+      // Test aliases -r and run
+      await cmdHealthSweep(config, ['-r']);
+      expect(methods[1]).toBe('POST');
+
+      await cmdHealthSweep(config, ['run']);
+      expect(methods[2]).toBe('POST');
+      expect(callCount).toBe(3);
+    } finally {
+      testServer.close();
+      consoleLogSpy.mockRestore();
+    }
+  });
+
+  it('xử lý lỗi khi API trả về non-200 (HTTP 500)', async () => {
+    const testServer = http.createServer((req, res) => {
+      if (req.url === '/api/health/sweep') {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Database connection dropped');
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    await new Promise<void>((resolve) => testServer.listen(0, '127.0.0.1', resolve));
+    const port = (testServer.address() as { port: number }).port;
+    process.env.AGENTHUB_PORT = String(port);
+
+    const config = loadConfig(process.env.AGENTHUB_HOME);
+    config.port = port;
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined) => {
+      throw new Error(`process.exit: ${code}`);
+    });
+
+    try {
+      await expect(cmdHealthSweep(config, ['--run'])).rejects.toThrow('process.exit: 1');
+      expect(consoleErrorSpy).toHaveBeenCalledWith('Lỗi API (500): Database connection dropped');
+    } finally {
+      testServer.close();
+      consoleErrorSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('xử lý lỗi khi không kết nối được tới daemon (network failure)', async () => {
+    process.env.AGENTHUB_PORT = '65431';
+    const config = loadConfig(process.env.AGENTHUB_HOME);
+    config.port = 65431;
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined) => {
+      throw new Error(`process.exit: ${code}`);
+    });
+
+    try {
+      await expect(cmdHealthSweep(config, [])).rejects.toThrow('process.exit: 1');
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Không thể kết nối tới daemon:'),
+      );
+    } finally {
+      consoleErrorSpy.mockRestore();
+      exitSpy.mockRestore();
     }
   });
 });

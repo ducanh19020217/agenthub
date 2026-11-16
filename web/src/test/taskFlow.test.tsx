@@ -393,21 +393,17 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     expect(reviewNode.querySelector('svg.flow-icon-review')).toBeNull();
   });
 
-  it('(i) uses compact rows with fixed spacing and no viewport-based minimum height', async () => {
+  it('(i) uses viewport-based minimum height and content-between layout', async () => {
     renderPage('/tasks?view=flow');
     const wrapper = await screen.findByTestId('flow-view-wrapper');
     const board = wrapper.querySelector('[role="group"]');
     expect(board).not.toBeNull();
-    expect(board?.className).toContain('min-w-[1240px]');
-    expect(board?.className).not.toContain('min-h-');
+    expect(board?.className).toContain('min-h-[max(480px,calc(100vh-280px))]');
 
     const grid = board?.querySelector('.grid');
     expect(grid).not.toBeNull();
-    expect(grid?.className).toContain('gap-y-24');
-    expect(grid?.className).toContain('pt-14');
-    expect(grid?.className).toContain('pb-16');
-    expect(grid?.className).not.toContain('content-between');
-    expect(grid?.className).not.toContain('min-h-');
+    expect(grid?.className).toContain('content-between');
+    expect(grid?.className).toContain('min-h-[max(480px,calc(100vh-280px))]');
   });
 
   it('does not cause an infinite render loop when getBoundingClientRect returns non-zero dimensions', async () => {

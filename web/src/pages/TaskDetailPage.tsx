@@ -29,7 +29,7 @@ import {
   retryTaskMerge,
   getProject,
 } from '../api/client';
-import { TaskLevel, EventItem, TaskTimelineItem, TaskStatus } from '../types/api';
+import { TaskLevel, EventItem, TaskTimelineItem, TaskStatus, TaskAuditFinding, TaskAuditInfo } from '../types/api';
 import { subscribeToRunOutput, subscribeToEvents } from '../api/sse';
 import { formatDateTime, formatIsoTitle, parseApiTime, formatShortContextualTime, formatDuration } from '../lib/time';
 import { CheckResults } from '../components/CheckResults';
@@ -68,6 +68,8 @@ import {
   GitFork,
   UploadCloud,
   UserCheck,
+  ShieldAlert,
+  ShieldCheck,
 } from 'lucide-react';
 import { useToasts, ToastViewport } from '../components/ui/Toast';
 
@@ -331,6 +333,32 @@ export const TaskDetailPage: React.FC = () => {
     }
   }, [task?.pushResult]);
 
+  const auditInfo: TaskAuditInfo | null = useMemo(() => {
+    if (task?.audit) return task.audit;
+    if (parsedPushResult?.auditPassed || parsedPushResult?.auditFailed || parsedPushResult?.findings || parsedPushResult?.auditSkipped || parsedPushResult?.state === 'auditing') {
+      return {
+        state: (parsedPushResult?.auditPassed
+          ? 'audit_passed'
+          : parsedPushResult?.auditFailed
+            ? 'audit_failed'
+            : parsedPushResult?.auditSkipped
+              ? 'audit_skipped'
+              : 'auditing') as 'auditing' | 'audit_passed' | 'audit_failed' | 'audit_skipped',
+        rounds: parsedPushResult?.round || 1,
+        maxRounds: parsedPushResult?.maxRounds || 3,
+        summary: parsedPushResult?.summary || null,
+        findings: (parsedPushResult?.findings || []) as TaskAuditFinding[],
+        startedAt: parsedPushResult?.auditStartedAt || null,
+        finishedAt: parsedPushResult?.auditFinishedAt || null,
+        model: parsedPushResult?.model || null,
+        engine: parsedPushResult?.engine || null,
+      };
+    }
+    return null;
+  }, [task?.audit, parsedPushResult]);
+
+  const showAuditCard = Boolean(auditInfo);
+
   const { data: projectNotes = [], refetch: refetchNotes } = useQuery({
     queryKey: ['projectNotes', task?.projectId],
     queryFn: () => (task?.projectId ? getProjectNotes(task.projectId) : Promise.resolve([])),
@@ -558,7 +586,19 @@ export const TaskDetailPage: React.FC = () => {
     },
   });
 
-  const isPublishing = publishMutation.isPending || parsedPushResult?.state === 'auditing' || parsedPushResult?.state === 'pushing';
+  const isPublishing = publishMutation.isPending || parsedPushResult?.state === 'auditing' || parsedPushResult?.state === 'pushing' || task?.audit?.state === 'auditing';
+
+  const handleRetryPublishAudit = () => {
+    if (window.confirm(t('taskDetail.confirmRetryPublishAudit'))) {
+      publishMutation.mutate();
+    }
+  };
+
+  const handleBypassAudit = () => {
+    if (window.confirm(t('taskDetail.confirmBypassAudit'))) {
+      publishMutation.mutate({ skipAudit: true });
+    }
+  };
 
   const rerunChecksMutation = useMutation({
     mutationFn: () => rerunChecks(id),
@@ -1219,6 +1259,199 @@ export const TaskDetailPage: React.FC = () => {
         </div>
       ) : null}
 
+      {/* Khối AI Audit */}
+      {showAuditCard && auditInfo && (
+        <section
+          data-testid="ai-audit-card"
+          className="bg-[var(--t-surface)] rounded-xl border border-[var(--t-border)] p-5 shadow-xs space-y-4"
+        >
+          {/* Header */}
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              {auditInfo.state === 'audit_failed' ? (
+                <ShieldAlert className="w-5 h-5 text-[var(--t-crit)] shrink-0" />
+              ) : (
+                <ShieldCheck className="w-5 h-5 text-[var(--status-auditing-color)] shrink-0" />
+              )}
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-[var(--t-text-3)]">
+                {t('taskDetail.aiAuditTitle')}
+              </h2>
+              <StatusBadge status={auditInfo.state} round={auditInfo.rounds} size="sm" />
+              {auditInfo.state === 'audit_failed' && auditInfo.substate && (
+                <span
+                  data-testid="audit-substate-badge"
+                  className={`rounded-full px-2 py-0.5 text-xs font-bold ${
+                    auditInfo.substate === 'blocked'
+                      ? 'bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)]'
+                      : 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)]'
+                  }`}
+                >
+                  {auditInfo.substate === 'blocked' ? t('taskDetail.auditBlocked') : t('taskDetail.auditReturnedToWorker')}
+                </span>
+              )}
+            </div>
+
+            {/* Quick Actions */}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                data-testid="btn-retry-publish-audit"
+                onClick={handleRetryPublishAudit}
+                disabled={isPublishing}
+                className="px-3 py-1.5 rounded-lg bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>{isPublishing ? t('taskDetail.publishing') : t('taskDetail.btnRetryPublishAudit')}</span>
+              </button>
+              {auditInfo.state === 'audit_failed' && auditInfo.substate === 'blocked' && (
+                <button
+                  type="button"
+                  data-testid="btn-bypass-audit"
+                  onClick={handleBypassAudit}
+                  disabled={isPublishing}
+                  className="px-3 py-1.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] hover:bg-[var(--t-surface-3)] text-[var(--t-crit)] text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                >
+                  <span>{t('taskDetail.btnBypassAudit')}</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Description */}
+          <p className="text-xs text-[var(--t-text-3)]">{t('taskDetail.aiAuditDesc')}</p>
+
+          {/* Metadata Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+              <span className="text-[var(--t-text-3)] block">{t('taskDetail.auditRounds')}</span>
+              <span className="font-mono font-medium text-[var(--t-text)]">
+                {auditInfo.rounds} / {auditInfo.maxRounds}
+              </span>
+            </div>
+            <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+              <span className="text-[var(--t-text-3)] block">{t('taskDetail.auditModel')}</span>
+              <span className="font-mono font-medium text-[var(--t-text)]">
+                {auditInfo.model || '—'}
+              </span>
+            </div>
+            <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+              <span className="text-[var(--t-text-3)] block">{t('taskDetail.auditStartedAt')}</span>
+              <span className="font-medium text-[var(--t-text)]" title={formatIsoTitle(auditInfo.startedAt)}>
+                {auditInfo.startedAt ? formatDateTime(auditInfo.startedAt, locale) : '—'}
+              </span>
+            </div>
+            <div className="p-2.5 rounded-lg bg-[var(--t-surface-2)] space-y-0.5">
+              <span className="text-[var(--t-text-3)] block">{t('taskDetail.auditFinishedAt')}</span>
+              <span className="font-medium text-[var(--t-text)]" title={formatIsoTitle(auditInfo.finishedAt)}>
+                {auditInfo.finishedAt ? formatDateTime(auditInfo.finishedAt, locale) : '—'}
+              </span>
+            </div>
+          </div>
+
+          {/* Summary */}
+          {auditInfo.summary && (
+            <div className="space-y-1">
+              <span className="text-xs font-semibold text-[var(--t-text-3)] uppercase tracking-wider">{t('taskDetail.auditSummary')}</span>
+              <div
+                data-testid="ai-audit-summary"
+                className="rounded-lg bg-[var(--t-surface-2)] border border-[var(--t-border)] p-3 text-xs text-[var(--t-text)] whitespace-pre-wrap leading-relaxed"
+              >
+                {auditInfo.summary}
+              </div>
+            </div>
+          )}
+
+          {/* Findings */}
+          <div data-testid="ai-audit-findings" className="space-y-2">
+            <span className="text-xs font-semibold text-[var(--t-text-3)] uppercase tracking-wider">
+              {t('taskDetail.auditFindings', { count: auditInfo.findings?.length || 0 })}
+            </span>
+            {(!auditInfo.findings || auditInfo.findings.length === 0) ? (
+              <p className="text-xs text-[var(--t-text-3)] italic rounded-lg bg-[var(--t-surface-2)] p-3 border border-[var(--t-border)]">
+                {t('taskDetail.noAuditFindings')}
+              </p>
+            ) : (
+              <div className="overflow-x-auto rounded-lg border border-[var(--t-border)]">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-[var(--t-surface-2)] text-[var(--t-text-3)] border-b border-[var(--t-border)] font-semibold">
+                    <tr>
+                      <th className="py-2 px-3">{t('taskDetail.findingSeverity')}</th>
+                      <th className="py-2 px-3">{t('taskDetail.findingKind')}</th>
+                      <th className="py-2 px-3">{t('taskDetail.findingLocation')}</th>
+                      <th className="py-2 px-3">{t('taskDetail.findingDetail')}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--t-border)]">
+                    {auditInfo.findings.map((f, i) => (
+                      <tr key={i} data-testid={`audit-finding-row-${i}`} className="hover:bg-[var(--t-surface-2)]">
+                        <td className="py-2 px-3 shrink-0">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
+                            f.severity === 'P0' || f.severity === 'P1'
+                              ? 'bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)]'
+                              : f.severity === 'P2'
+                                ? 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)]'
+                                : 'bg-[color-mix(in_srgb,var(--t-accent)_15%,transparent)] text-[var(--t-accent)]'
+                          }`}>
+                            {f.severity}
+                          </span>
+                        </td>
+                        <td className="py-2 px-3 font-semibold text-[var(--t-text-2)]">{f.kind}</td>
+                        <td className="py-2 px-3 font-mono text-[var(--t-accent)]">{f.file}:{f.line}</td>
+                        <td className="py-2 px-3 text-[var(--t-text)]">{f.detail}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Round History */}
+          {auditInfo.history && auditInfo.history.length > 1 && (
+            <div data-testid="ai-audit-history" className="space-y-2 pt-2 border-t border-[var(--t-border)]">
+              <span className="text-xs font-semibold text-[var(--t-text-3)] uppercase tracking-wider">
+                {t('taskDetail.auditHistory')}
+              </span>
+              <div className="space-y-2">
+                {auditInfo.history.map((h, i) => (
+                  <div key={i} data-testid={`audit-history-round-${h.round}`} className="p-3 rounded-lg bg-[var(--t-surface-2)] border border-[var(--t-border)] text-xs space-y-1.5">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-[var(--t-text)]">
+                          {t('taskDetail.roundNumber', { round: h.round })}
+                        </span>
+                        <StatusBadge status={h.state} round={h.round} size="sm" />
+                        {h.substate && (
+                          <span className={`rounded-full px-1.5 py-0.2 text-[10px] font-bold ${
+                            h.substate === 'blocked'
+                              ? 'bg-[color-mix(in_srgb,var(--t-crit)_15%,transparent)] text-[var(--t-crit)]'
+                              : 'bg-[color-mix(in_srgb,var(--t-warn)_15%,transparent)] text-[var(--t-warn)]'
+                          }`}>
+                            {h.substate === 'blocked' ? t('taskDetail.auditBlocked') : t('taskDetail.auditReturnedToWorker')}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 text-[var(--t-text-3)] font-mono text-[11px]">
+                        {h.model && <span>{h.model}</span>}
+                        {h.finishedAt && <span>{formatDateTime(h.finishedAt, locale)}</span>}
+                      </div>
+                    </div>
+                    {h.summary && (
+                      <p className="text-[var(--t-text-2)] whitespace-pre-wrap">{h.summary}</p>
+                    )}
+                    {h.findings && h.findings.length > 0 && (
+                      <div className="text-[11px] text-[var(--t-crit)] font-medium">
+                        {t('tasks.flow.findingsCount', { count: String(h.findings.length) })}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
       {/* Khối Đẩy lên git */}
       {(task.status === 'pushed' || parsedPushResult || (task.status === 'done' && project?.settings?.publish?.enabled)) && (
         <section data-testid="task-publish-section" className="bg-[var(--t-surface)] rounded-xl border border-[var(--t-border)] p-5 shadow-xs space-y-3">
@@ -1442,7 +1675,12 @@ export const TaskDetailPage: React.FC = () => {
                 />
 
                 <div className="flex items-center gap-2 flex-wrap">
-                  <StatusBadge status={statusKey} size="sm" />
+                  <StatusBadge
+                    status={statusKey}
+                    round={item.round}
+                    label={item.status === 'auditing' ? t('status.audit_started') : undefined}
+                    size="sm"
+                  />
 
                   {item.at && (
                     <span

@@ -284,7 +284,7 @@ describe('project settings through the service', () => {
     expect(() => ctx.service.createProject({
       name: 'bad8',
       path: path.join(tmpDir, 'repo'),
-      settings: { review: { order: [{ engine: 'claude', model: 'gpt-5.6-luna' }] } },
+      settings: { review: { order: [{ engine: 'claude', model: 'invalid model with space' }] } },
     })).toThrow();
     expect(() => ctx.service.createProject({
       name: 'bad9',

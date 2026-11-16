@@ -37,7 +37,9 @@ import {
   CiRepo,
   BlockingDiskInfo,
   TrackerItemRepo,
+  ProfileModelRepo,
 } from '../db/index.js';
+import { ModelDiscoveryService, getDefaultModelsForEngine } from '../models/index.js';
 import type { CiWatchService } from '../ci.js';
 import type { OpenProjectIntakeService } from '../integrations/openproject/intake.js';
 import type { DailyReportService } from '../integrations/openproject/daily-report.js';
@@ -590,8 +592,8 @@ export const UpdateConfigSchema = z.object({
       idleTimeoutSec: z.number().int().positive().optional(),
       permissionTimeoutSec: z.number().int().positive().optional(),
       claudeProfile: z.string().optional(),
-      model: z.enum(['', 'opus', 'sonnet', 'haiku']).optional(),
-      models: z.array(z.enum(['opus', 'sonnet', 'haiku'])).min(1).optional(),
+      model: z.string().trim().refine((val) => !/\s/.test(val), 'Tên model chat không được chứa khoảng trắng').optional(),
+      models: z.array(z.string().trim().min(1, 'Tên model không được để trống').refine((val) => !/\s/.test(val), 'Tên model chat không được chứa khoảng trắng')).min(1).optional(),
       autoCompactPercent: z.number().min(0).max(100).optional(),
     })
     .optional(),
@@ -623,7 +625,7 @@ export const UpdateConfigSchema = z.object({
     claudeProfile: z.string().optional(),
     codexProfile: z.string().min(1).optional(),
     codexModel: z.string().trim().min(1).optional(),
-    model: z.enum(['', 'opus', 'sonnet', 'haiku']).optional(),
+    model: z.string().trim().refine((val) => !/\s/.test(val), 'Tên model không được chứa khoảng trắng').optional(),
     mode: z.enum(['off', 'suggest', 'auto']).optional(),
     permissions: z.enum(['standard', 'trusted', 'full']).optional(),
     maxConcurrent: z.number().int().positive().optional(),
@@ -1120,6 +1122,23 @@ export interface TokenImportResult {
   }>;
 }
 
+export interface DiscoveredModelApiItem {
+  id: string;
+  engine: 'agy' | 'codex' | 'claude';
+  name: string;
+  profiles: string[];
+  verified: boolean;
+  available: boolean;
+  configured?: boolean;
+  warning?: string | null;
+}
+
+export interface ModelOptionsResponse {
+  models: DiscoveredModelApiItem[];
+  suggestions: string[];
+  configured: string[];
+}
+
 export class AppService {
   private restartHandler?: () => void;
   private userShutdownRequested = false;
@@ -1176,7 +1195,19 @@ export class AppService {
     public directiveRepo?: BrainDirectiveRepo,
     public departmentRepo?: DepartmentRepo,
     public setupTools?: SetupTools,
+    public profileModelRepo?: ProfileModelRepo,
+    public modelDiscoveryService?: ModelDiscoveryService,
   ) {
+    if (!this.profileModelRepo && this.scheduler?.getDatabase?.()) {
+      const db = this.scheduler.getDatabase();
+      if (db) this.profileModelRepo = new ProfileModelRepo(db);
+    }
+    if (this.chatService && this.profileModelRepo) {
+      this.chatService.setProfileModelRepo(this.profileModelRepo);
+    }
+    if (!this.modelDiscoveryService && this.profileModelRepo) {
+      this.modelDiscoveryService = new ModelDiscoveryService(this.profileRepo, this.profileModelRepo);
+    }
     this.avatarService = new AvatarService(this.config.hubHome, this.profileRepo);
     this.migrateProjectMergeMappings();
     this.claudeAuthRecoveryTimer = setInterval(() => void this.recheckExpiredClaudeProfiles(), 5 * 60_000);
@@ -6834,6 +6865,7 @@ export class AppService {
         claudeProfile: this.config.brain.claudeProfileExplicit ? this.config.brain.claudeProfile : '',
         codexProfile: this.config.brain.codexProfile,
         codexModel: this.config.brain.codexModel,
+        model: this.config.brain.model,
         turnTimeoutSec: this.config.brain.turnTimeoutSec,
         director: this.config.brain.director,
       },
@@ -6887,23 +6919,258 @@ export class AppService {
     return { focus, ...changes };
   }
 
-  getModelOptions() {
-    const profiles = this.profileRepo.getAll().filter((profile) => Boolean(profile.enabled));
-    const suggestions = new Set<string>();
-    for (const profile of profiles) {
-      if (profile.engine === 'agy') {
-        for (const model of VALID_AGY_MODELS) suggestions.add(model);
-      } else if (profile.engine === 'codex') {
-        suggestions.add('codex:gpt-5.6-luna');
+  getModelOptions(): { models: DiscoveredModelApiItem[]; suggestions: string[]; configured: string[] } {
+    const enabledProfiles = this.profileRepo.getAll().filter((profile) => Boolean(profile.enabled) && !profile.deletedAt);
+    const modelMap = new Map<string, DiscoveredModelApiItem>();
+
+    // 1. Collect verified models from enabled and logged-in profiles that actually have discovery records
+    for (const profile of enabledProfiles) {
+      if (!isProfileLoggedIn(profile)) continue;
+      if (!this.profileModelRepo) continue;
+      const rows = this.profileModelRepo.getForProfile(profile.name);
+      for (const r of rows) {
+        if (!r.verified) continue; // Only verified models are considered available on the account
+        const key = `${r.engine}:${r.modelId}`;
+        const existing = modelMap.get(key);
+        if (existing) {
+          if (!existing.profiles.includes(profile.name)) {
+            existing.profiles.push(profile.name);
+          }
+          existing.verified = true;
+          existing.available = true;
+        } else {
+          modelMap.set(key, {
+            id: r.modelId,
+            engine: r.engine as 'agy' | 'codex' | 'claude',
+            name: r.modelName || r.modelId,
+            profiles: [profile.name],
+            verified: true,
+            available: true,
+            configured: false,
+            warning: null,
+          });
+        }
       }
     }
-    const configured = [
-      ...this.config.defaultModelChains.hard,
-      ...this.config.defaultModelChains.easy,
-      ...this.config.reviewer.order.map((item) => `${item.engine}:${item.model}`),
-    ];
-    const configuredModels = [...new Set(configured.filter(Boolean))];
-    return { suggestions: [...suggestions].sort(), configured: configuredModels };
+
+    // 2. For any enabled engine with no verified models (or all engines if none enabled),
+    // provide fallback default models marked verified: false, available: false, profiles: []
+    const enabledEngines = new Set(enabledProfiles.map((p) => p.engine));
+    const enginesToCheck = enabledEngines.size > 0 ? enabledEngines : new Set(['agy', 'codex', 'claude']);
+    for (const engine of enginesToCheck) {
+      const hasVerifiedForEngine = Array.from(modelMap.values()).some((m) => m.engine === engine && m.verified);
+      if (!hasVerifiedForEngine) {
+        const defaults = getDefaultModelsForEngine(engine);
+        for (const item of defaults) {
+          const key = `${item.engine}:${item.id}`;
+          if (!modelMap.has(key)) {
+            modelMap.set(key, {
+              id: item.id,
+              engine: item.engine,
+              name: item.name,
+              profiles: [],
+              verified: false,
+              available: false,
+              configured: false,
+              warning: 'Chưa xác minh qua tài khoản',
+            });
+          }
+        }
+      }
+    }
+
+    const arbiterModel = this.config.reviewer.arbiter?.model
+      ? (this.config.reviewer.arbiter.engine === 'codex'
+        ? (this.config.reviewer.arbiter.model.startsWith('codex:') ? this.config.reviewer.arbiter.model : `codex:${this.config.reviewer.arbiter.model}`)
+        : this.config.reviewer.arbiter.model)
+      : null;
+
+    const brainFallbackModels = (this.config.brain?.fallback || [])
+      .filter((step): step is { type: 'model'; model: string } => step.type === 'model' && Boolean(step.model))
+      .map((step) => step.model);
+
+    const brainCodexModel = this.config.brain?.codexModel
+      ? (this.config.brain.codexModel.startsWith('codex:') ? this.config.brain.codexModel : `codex:${this.config.brain.codexModel}`)
+      : null;
+
+    const configuredItems: Array<{ model: string; engine?: 'agy' | 'codex' | 'claude' }> = [
+      ...this.config.defaultModelChains.hard.map((m) => ({ model: m })),
+      ...this.config.defaultModelChains.easy.map((m) => ({ model: m })),
+      ...this.config.reviewer.order.map((item) => ({
+        model: item.engine === 'codex' ? (item.model.startsWith('codex:') ? item.model : `codex:${item.model}`) : item.model,
+        engine: item.engine as 'agy' | 'codex' | 'claude',
+      })),
+      ...(arbiterModel ? [{
+        model: arbiterModel,
+        engine: this.config.reviewer.arbiter?.engine as 'agy' | 'codex' | 'claude',
+      }] : []),
+      ...(this.config.brain?.model ? [{ model: this.config.brain.model }] : []),
+      ...(brainCodexModel ? [{ model: brainCodexModel, engine: 'codex' as const }] : []),
+      ...(this.config.brain?.director?.model ? [{ model: this.config.brain.director.model }] : []),
+      ...brainFallbackModels.map((m) => ({ model: m })),
+      ...(this.config.chat?.model ? [{ model: this.config.chat.model, engine: 'claude' as const }] : []),
+      ...(this.config.chat?.models || []).map((m) => ({ model: m, engine: 'claude' as const })),
+    ].filter((item) => Boolean(item.model));
+
+    if (this.projectRepo?.getAll) {
+      for (const project of this.projectRepo.getAll()) {
+        const settings = projectSettings(project);
+        // 1. review chain
+        const chainRaw: Array<{ reviewer?: string }> = [];
+        if (project.reviewChain) {
+          try {
+            const parsed = JSON.parse(project.reviewChain);
+            if (Array.isArray(parsed)) chainRaw.push(...parsed);
+          } catch { /* ignore */ }
+        }
+        if (project.review) {
+          try {
+            const parsedReview = JSON.parse(project.review);
+            if (Array.isArray(parsedReview.chain)) {
+              chainRaw.push(...parsedReview.chain);
+            }
+          } catch { /* ignore */ }
+        }
+        for (const step of chainRaw) {
+          if (!step || typeof step !== 'object') continue;
+          const reviewer = typeof step.reviewer === 'string' ? step.reviewer.trim() : '';
+          if (!reviewer || reviewer === 'claude') continue;
+          if (reviewer.startsWith('codex:')) {
+            configuredItems.push({ model: reviewer, engine: 'codex' });
+          } else if (reviewer.startsWith('claude:')) {
+            configuredItems.push({ model: reviewer, engine: 'claude' });
+          } else {
+            configuredItems.push({ model: reviewer });
+          }
+        }
+
+        // 2. reviewer order
+        if (Array.isArray(settings.review?.order)) {
+          for (const item of settings.review.order) {
+            if (item && item.model) {
+              const model = item.engine === 'codex'
+                ? (item.model.startsWith('codex:') ? item.model : `codex:${item.model}`)
+                : item.model;
+              configuredItems.push({ model, engine: item.engine as 'agy' | 'codex' | 'claude' });
+            }
+          }
+        }
+
+        // 3. arbiter
+        const projArbiter = (settings.review as any)?.arbiter || (settings as any).arbiter;
+        if (projArbiter && projArbiter.model) {
+          const model = projArbiter.engine === 'codex'
+            ? (projArbiter.model.startsWith('codex:') ? projArbiter.model : `codex:${projArbiter.model}`)
+            : projArbiter.model;
+          configuredItems.push({ model, engine: projArbiter.engine as 'agy' | 'codex' | 'claude' });
+        }
+
+        // 4. brain model & fallback
+        if (settings.brain?.model && settings.brain.model !== 'inherit') {
+          const engine = settings.brain.engine === 'codex'
+            ? 'codex'
+            : (settings.brain.engine === 'claude' ? 'claude' : undefined);
+          configuredItems.push({ model: settings.brain.model, engine });
+        }
+        const projBrainCodex = (settings.brain as any)?.codexModel;
+        if (projBrainCodex) {
+          const model = projBrainCodex.startsWith('codex:') ? projBrainCodex : `codex:${projBrainCodex}`;
+          configuredItems.push({ model, engine: 'codex' });
+        }
+        if ((settings.brain as any)?.director?.model) {
+          configuredItems.push({ model: (settings.brain as any).director.model });
+        }
+        if (Array.isArray((settings.brain as any)?.fallback)) {
+          for (const step of (settings.brain as any).fallback) {
+            if (step && step.type === 'model' && step.model) {
+              configuredItems.push({ model: step.model });
+            }
+          }
+        }
+
+        // 5. model chain HARD/EASY if any
+        const projHard = (settings as any).modelChainHard || (settings as any).modelChains?.hard || (project as any).modelChainHard;
+        if (Array.isArray(projHard)) {
+          for (const m of projHard) {
+            if (typeof m === 'string' && m.trim()) configuredItems.push({ model: m.trim() });
+          }
+        }
+        const projEasy = (settings as any).modelChainEasy || (settings as any).modelChains?.easy || (project as any).modelChainEasy;
+        if (Array.isArray(projEasy)) {
+          for (const m of projEasy) {
+            if (typeof m === 'string' && m.trim()) configuredItems.push({ model: m.trim() });
+          }
+        }
+      }
+    }
+
+    const configuredModels = [...new Set(configuredItems.map((item) => item.model))];
+
+    for (const item of configuredItems) {
+      let engine: 'agy' | 'codex' | 'claude' = item.engine || 'agy';
+      if (!item.engine) {
+        if (item.model.startsWith('codex:') || (item.model.startsWith('gpt-') && !item.model.startsWith('gpt-oss-'))) {
+          engine = 'codex';
+        } else if (item.model.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(item.model)) {
+          engine = 'claude';
+        } else {
+          for (const eng of ['agy', 'codex', 'claude'] as const) {
+            const entry = modelMap.get(`${eng}:${item.model}`);
+            if (entry && entry.available) {
+              engine = eng;
+              break;
+            }
+          }
+        }
+      }
+
+      const key = `${engine}:${item.model}`;
+      const existing = modelMap.get(key);
+      if (!existing) {
+        modelMap.set(key, {
+          id: item.model,
+          engine,
+          name: item.model,
+          profiles: [],
+          verified: false,
+          available: false,
+          configured: true,
+          warning: 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp',
+        });
+      } else {
+        existing.configured = true;
+        if (existing.profiles.length === 0) {
+          existing.available = false;
+          existing.warning = 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp';
+        }
+      }
+    }
+
+    const engineOrder: Record<string, number> = { agy: 0, codex: 1, claude: 2 };
+    const allModels = Array.from(modelMap.values()).sort((a, b) => {
+      if (a.available !== b.available) return a.available ? -1 : 1;
+      const eo = (engineOrder[a.engine] ?? 9) - (engineOrder[b.engine] ?? 9);
+      if (eo !== 0) return eo;
+      return a.id.localeCompare(b.id);
+    });
+
+    const suggestions = [...new Set(allModels.filter((m) => m.available).map((m) => m.id))];
+
+    return {
+      models: allModels,
+      suggestions,
+      configured: configuredModels,
+    };
+  }
+
+  async refreshModels(): Promise<{ models: DiscoveredModelApiItem[]; suggestions: string[]; configured: string[] }> {
+    if (!this.modelDiscoveryService && this.profileModelRepo) {
+      this.modelDiscoveryService = new ModelDiscoveryService(this.profileRepo, this.profileModelRepo);
+    }
+    if (this.modelDiscoveryService) {
+      await this.modelDiscoveryService.discoverAll({ force: true });
+    }
+    return this.getModelOptions();
   }
 
   updateConfig(raw: unknown) {

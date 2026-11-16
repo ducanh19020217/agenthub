@@ -40,6 +40,16 @@ describe('Reviewer Fallback Web Controls & Badges (b8-claude-review-fallback)', 
       { name: 'claude-primary', engine: 'claude', kind: 'isolated', home: '/home/claude1', email: null, enabled: 1 } as any,
       { name: 'claude-backup', engine: 'claude', kind: 'isolated', home: '/home/claude2', email: null, enabled: 1 } as any,
     ]);
+
+    vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+      suggestions: ['sonnet', 'opus', 'haiku'],
+      configured: [],
+      models: [
+        { id: 'sonnet', engine: 'claude', profiles: ['claude-primary'], verified: true, available: true },
+        { id: 'opus', engine: 'claude', profiles: ['claude-primary'], verified: true, available: true },
+        { id: 'haiku', engine: 'claude', profiles: ['claude-primary'], verified: true, available: true },
+      ],
+    });
   });
 
   describe('1. SettingsPage Review section', () => {

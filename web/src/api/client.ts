@@ -65,6 +65,10 @@ export async function getModelOptions(): Promise<ModelOptions> {
   return apiFetch<ModelOptions>('/api/models');
 }
 
+export async function refreshModels(): Promise<ModelOptions> {
+  return apiFetch<ModelOptions>('/api/models/refresh', { method: 'POST' });
+}
+
 export interface SetupStatus {
   node: { version: string; ok: boolean };
   git: { version: string | null; installed: boolean };

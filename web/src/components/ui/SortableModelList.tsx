@@ -1,13 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { ArrowUp, ArrowDown, Trash2, Plus, GripVertical, AlertCircle } from 'lucide-react';
 import { useLocale } from '../../context/LocaleContext';
-import { SelectOrCustomInput } from './SelectOrCustomInput';
+import { SelectOrCustomInput, SelectOrCustomOption } from './SelectOrCustomInput';
 import { validateModelSyntax } from '../../utils/models';
 
 export interface SortableModelListProps {
   models: string[];
   onChange: (models: string[]) => void;
-  availableOptions: string[];
+  availableOptions: (string | SelectOrCustomOption)[];
+  unavailableModels?: Set<string> | string[];
   title?: string;
   hint?: string;
   infoTooltip?: React.ReactNode;
@@ -21,6 +22,7 @@ export const SortableModelList: React.FC<SortableModelListProps> = ({
   models,
   onChange,
   availableOptions,
+  unavailableModels,
   title,
   hint,
   infoTooltip,
@@ -31,13 +33,29 @@ export const SortableModelList: React.FC<SortableModelListProps> = ({
 }) => {
   const { t } = useLocale();
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
-  const [modelToAdd, setModelToAdd] = useState<string>(availableOptions[0] || '');
+  const [modelToAdd, setModelToAdd] = useState<string>(() => {
+    const first = availableOptions[0];
+    return typeof first === 'string' ? first : first?.value || '';
+  });
 
   useEffect(() => {
     if (!modelToAdd && availableOptions[0]) {
-      setModelToAdd(availableOptions[0]);
+      const first = availableOptions[0];
+      setModelToAdd(typeof first === 'string' ? first : first.value);
     }
   }, [availableOptions, modelToAdd]);
+
+  const unavailableSet = useMemo(() => {
+    if (unavailableModels instanceof Set) return unavailableModels;
+    if (Array.isArray(unavailableModels)) return new Set(unavailableModels);
+    const set = new Set<string>();
+    for (const opt of availableOptions) {
+      if (typeof opt !== 'string' && opt.available === false) {
+        set.add(opt.value);
+      }
+    }
+    return set;
+  }, [unavailableModels, availableOptions]);
 
   const moveModel = (index: number, direction: -1 | 1) => {
     const target = index + direction;
@@ -104,6 +122,7 @@ export const SortableModelList: React.FC<SortableModelListProps> = ({
       <div className="space-y-2" aria-label={ariaLabel || title}>
         {models.map((model, index) => {
           const itemError = validate ? validate(model) : validateModelSyntax(model, t);
+          const isUnavailable = unavailableSet.has(model);
           return (
             <div
               key={`${model}-${index}`}
@@ -111,7 +130,11 @@ export const SortableModelList: React.FC<SortableModelListProps> = ({
               onDragStart={() => handleDragStart(index)}
               onDragOver={handleDragOver}
               onDrop={() => handleDrop(index)}
-              className="flex flex-col p-2.5 rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] gap-1.5 transition-colors"
+              className={`flex flex-col p-2.5 rounded-lg border gap-1.5 transition-colors ${
+                isUnavailable
+                  ? 'border-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_8%,transparent)]'
+                  : 'border-[var(--t-border)] bg-[var(--t-surface-2)]'
+              }`}
             >
               <div className="flex items-center gap-2">
                 <span
@@ -130,6 +153,7 @@ export const SortableModelList: React.FC<SortableModelListProps> = ({
                     options={availableOptions}
                     validate={validate ? validate : (val) => validateModelSyntax(val, t)}
                     ariaLabel={`${ariaLabel || title || 'Model'} ${index + 1}`}
+                    showCustomWarning={true}
                   />
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
@@ -164,6 +188,12 @@ export const SortableModelList: React.FC<SortableModelListProps> = ({
                   </button>
                 </div>
               </div>
+              {isUnavailable && (
+                <div className="pl-9 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium" data-testid="model-unavailable-warning">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{t('models.unavailableWarning')}</span>
+                </div>
+              )}
               {itemError && (
                 <div className="pl-9 text-xs text-[var(--t-crit)] flex items-center gap-1">
                   <AlertCircle className="w-3.5 h-3.5 shrink-0" />
@@ -184,6 +214,7 @@ export const SortableModelList: React.FC<SortableModelListProps> = ({
             validate={validate ? validate : (val) => validateModelSyntax(val, t)}
             ariaLabel={t('settings.addModelToChain')}
             placeholder={t('settings.selectModelPlaceholder')}
+            showCustomWarning={true}
           />
         </div>
         <button

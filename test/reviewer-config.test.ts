@@ -49,37 +49,37 @@ describe('reviewer order configuration', () => {
     expect(ReviewerOrderItemSchema.safeParse({ engine: 'claude', model: 'haiku', profiles: [] }).success).toBe(true);
     expect(ReviewerOrderItemSchema.safeParse({ engine: 'claude', model: 'claude-sonnet-4-6', profiles: [] }).success).toBe(true);
     expect(ReviewerOrderItemSchema.safeParse({ engine: 'claude', model: 'claude:sonnet', profiles: [] }).success).toBe(true);
-
-    // Invalid Claude models
-    expect(ReviewerOrderItemSchema.safeParse({ engine: 'claude', model: 'gpt-5.6-luna', profiles: [] }).success).toBe(false);
-    expect(ReviewerOrderItemSchema.safeParse({ engine: 'claude', model: 'gemini-3.8-flash-high', profiles: [] }).success).toBe(false);
-    expect(ReviewerOrderItemSchema.safeParse({ engine: 'claude', model: 'claude:', profiles: [] }).success).toBe(false);
+    expect(ReviewerOrderItemSchema.safeParse({ engine: 'claude', model: 'my-model', profiles: [] }).success).toBe(true);
 
     // Valid Codex models
     expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: 'gpt-5.6-luna', profiles: [] }).success).toBe(true);
     expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: 'gpt-5.6-turbo', profiles: [] }).success).toBe(true);
     expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: 'codex:gpt-5.6-luna', profiles: [] }).success).toBe(true);
     expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: 'gpt-4o', profiles: [] }).success).toBe(true);
+    expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: 'my-model', profiles: [] }).success).toBe(true);
 
-    // Invalid Codex models
-    expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: 'sonnet', profiles: [] }).success).toBe(false);
-    expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: 'codex:', profiles: [] }).success).toBe(false);
-    expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: 'codex: ', profiles: [] }).success).toBe(false);
-    expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: 'codex:x', profiles: [] }).success).toBe(false);
-    expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: 'x', profiles: [] }).success).toBe(false);
-
-    // Common invalid: empty or whitespace
+    // Invalid: empty or whitespace or invalid prefix-only
     expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: '', profiles: [] }).success).toBe(false);
+    expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: '   ', profiles: [] }).success).toBe(false);
     expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: 'gpt 5.6', profiles: [] }).success).toBe(false);
+    expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: 'codex: a', profiles: [] }).success).toBe(false);
+    expect(ReviewerOrderItemSchema.safeParse({ engine: 'codex', model: 'codex:', profiles: [] }).success).toBe(false);
+    expect(ReviewerOrderItemSchema.safeParse({ engine: 'claude', model: 'claude:', profiles: [] }).success).toBe(false);
+    expect(ReviewerOrderItemSchema.safeParse({ engine: 'claude', model: 'my model', profiles: [] }).success).toBe(false);
   });
 
   it('validates reviewer arbiter according to engine syntax', () => {
     expect(ReviewerArbiterSchema.safeParse({ engine: 'claude', model: 'opus' }).success).toBe(true);
     expect(ReviewerArbiterSchema.safeParse({ engine: 'codex', model: 'gpt-5.6-luna' }).success).toBe(true);
-    expect(ReviewerArbiterSchema.safeParse({ engine: 'claude', model: 'gpt-5.6-luna' }).success).toBe(false);
-    expect(ReviewerArbiterSchema.safeParse({ engine: 'codex', model: 'sonnet' }).success).toBe(false);
+    expect(ReviewerArbiterSchema.safeParse({ engine: 'claude', model: 'my-model' }).success).toBe(true);
+    expect(ReviewerArbiterSchema.safeParse({ engine: 'codex', model: 'my-model' }).success).toBe(true);
+
+    // Invalid: empty or whitespace or invalid prefix-only
+    expect(ReviewerArbiterSchema.safeParse({ engine: 'claude', model: '' }).success).toBe(false);
+    expect(ReviewerArbiterSchema.safeParse({ engine: 'claude', model: 'opus thinking' }).success).toBe(false);
+    expect(ReviewerArbiterSchema.safeParse({ engine: 'codex', model: 'gpt 5.6' }).success).toBe(false);
     expect(ReviewerArbiterSchema.safeParse({ engine: 'codex', model: 'codex:' }).success).toBe(false);
-    expect(ReviewerArbiterSchema.safeParse({ engine: 'codex', model: 'codex:x' }).success).toBe(false);
+    expect(ReviewerArbiterSchema.safeParse({ engine: 'claude', model: 'claude:' }).success).toBe(false);
   });
 
   it('validates modelValidator and reviewerModelValidator with engine rules', () => {

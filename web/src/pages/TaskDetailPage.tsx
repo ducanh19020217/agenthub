@@ -34,6 +34,7 @@ import { subscribeToRunOutput, subscribeToEvents } from '../api/sse';
 import { formatDateTime, formatIsoTitle, parseApiTime, formatShortContextualTime, formatDuration } from '../lib/time';
 import { CheckResults } from '../components/CheckResults';
 import { StatusBadge } from '../components/StatusBadge';
+import { SelectOrCustomInput } from '../components/ui/SelectOrCustomInput';
 import { SilentRunIndicator } from '../components/SilentRunIndicator';
 import { ModelBadge } from '../components/ModelBadge';
 import { useLocale } from '../context/LocaleContext';
@@ -70,18 +71,7 @@ import {
 } from 'lucide-react';
 import { useToasts, ToastViewport } from '../components/ui/Toast';
 
-const VALID_MODELS = [
-  'gemini-3.8-flash-high',
-  'gemini-3.8-flash-medium',
-  'gemini-3.8-flash-low',
-  'claude-sonnet-4-6',
-  'claude-opus-4-6-thinking',
-  'codex:gpt-5.6-luna',
-  'gpt-oss-120b-medium',
-];
-
 const TERMINAL_STATUSES = new Set<string>(['done', 'merged', 'pushed', 'cancelled', 'failed', 'merge_failed', 'push_failed']);
-
 function tailPrefixOverlap(snapshot: string, stream: string): number {
   const length = Math.min(snapshot.length, stream.length);
   if (length === 0) return 0;
@@ -102,7 +92,6 @@ function tailPrefixOverlap(snapshot: string, stream: string): number {
   }
   return matched;
 }
-
 export const TaskDetailPage: React.FC = () => {
   const { t, locale } = useLocale();
   const { id = '' } = useParams<{ id: string }>();
@@ -132,7 +121,7 @@ export const TaskDetailPage: React.FC = () => {
   const [editLevel, setEditLevel] = useState<TaskLevel>('easy');
   const [modelChain, setModelChain] = useState<string[]>([]);
   const [selectedDeps, setSelectedDeps] = useState<string[]>([]);
-  const [selectedModelToAdd, setSelectedModelToAdd] = useState(VALID_MODELS[0]);
+  const [selectedModelToAdd, setSelectedModelToAdd] = useState('');
   const [editError, setEditError] = useState<string | null>(null);
   const [retryWithDifferentModel, setRetryWithDifferentModel] = useState(false);
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
@@ -615,7 +604,28 @@ export const TaskDetailPage: React.FC = () => {
     enabled: showEditModal && !!task?.projectId,
   });
   const { data: modelOptions } = useQuery({ queryKey: ['model-options'], queryFn: getModelOptions });
-  const modelSuggestions = modelOptions?.suggestions?.length ? modelOptions.suggestions : VALID_MODELS;
+  const modelSuggestions = React.useMemo(() => {
+    if (modelOptions?.models) {
+      return modelOptions.models.filter((m) => m.available).map((m) => m.id);
+    }
+    return modelOptions?.suggestions?.length ? modelOptions.suggestions : [];
+  }, [modelOptions]);
+
+  const unavailableModels = React.useMemo(() => {
+    const set = new Set<string>();
+    if (modelOptions?.models) {
+      for (const m of modelOptions.models) {
+        if (!m.available) set.add(m.id);
+      }
+    }
+    return set;
+  }, [modelOptions]);
+
+  React.useEffect(() => {
+    if (!selectedModelToAdd && modelSuggestions.length > 0) {
+      setSelectedModelToAdd(modelSuggestions[0]);
+    }
+  }, [modelSuggestions, selectedModelToAdd]);
 
   const editMutation = useMutation({
     mutationFn: (data: { modelChain: string[]; dependsOn: string[]; level: TaskLevel }) => updateTask(id, data),
@@ -664,7 +674,7 @@ export const TaskDetailPage: React.FC = () => {
     setModelChain(initialChain);
     setSelectedDeps(initialDeps);
     setEditLevel(task.level || 'easy');
-    setSelectedModelToAdd(modelSuggestions[0] || VALID_MODELS[0]);
+    setSelectedModelToAdd(modelSuggestions[0] || '');
     setEditError(null);
     setShowEditModal(true);
   };
@@ -2055,23 +2065,23 @@ export const TaskDetailPage: React.FC = () => {
                   {t('taskDetail.modelChainLabel')}
                 </label>
                 <div className="flex gap-2">
-                  <select
-                    data-testid="add-model-select"
+                  <SelectOrCustomInput
+                    testId="add-model-select"
                     value={selectedModelToAdd}
-                    onChange={(e) => setSelectedModelToAdd(e.target.value)}
-                    className="flex-1 text-xs rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-2.5 py-1.5 text-[var(--t-text)] focus:outline-none focus:ring-2 focus:ring-[var(--t-accent)]"
-                  >
-                    {modelSuggestions.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setSelectedModelToAdd}
+                    options={modelSuggestions}
+                    placeholder="—"
+                    showCustomWarning={true}
+                    className="flex-1"
+                    selectClassName="text-xs py-1.5 px-2.5"
+                    inputClassName="text-xs py-1.5 px-2.5"
+                  />
                   <button
                     type="button"
                     data-testid="add-model-btn"
                     onClick={addModel}
-                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] inline-flex items-center gap-1 cursor-pointer"
+                    disabled={!selectedModelToAdd.trim()}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--t-accent)] hover:bg-[var(--t-accent-hover)] text-[var(--t-on-accent)] inline-flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
                   >
                     <Plus className="w-3.5 h-3.5" />
                     <span>{t('taskDetail.addModelBtn')}</span>
@@ -2091,6 +2101,15 @@ export const TaskDetailPage: React.FC = () => {
                         <div className="flex items-center gap-2 truncate">
                           <ModelBadge model={model} />
                           <span className="font-mono text-[var(--t-text)] truncate">{model}</span>
+                          {unavailableModels.has(model) && (
+                            <span
+                              className="inline-flex items-center gap-1 text-[10px] text-[var(--t-crit)] bg-[color-mix(in_srgb,var(--t-crit)_10%,transparent)] px-1.5 py-0.5 rounded border border-[color-mix(in_srgb,var(--t-crit)_30%,transparent)] shrink-0"
+                              title={t('models.unavailableWarning')}
+                            >
+                              <AlertCircle className="w-3 h-3" />
+                              <span>{t('models.unavailableWarning')}</span>
+                            </span>
+                          )}
                         </div>
                         <div className="flex items-center gap-1">
                           <button

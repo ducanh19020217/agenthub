@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getRestartState, requestRestart, cancelRestart, getProfiles, getModelOptions, getPresets, applyPreset, getCurrentPreset } from '../api/client';
+import { getConfig, updateConfig, uploadBrandingLogo, getClaudeApiKeyStatus, setClaudeApiKey, getStatus, shutdownHub, getRestartState, requestRestart, cancelRestart, getProfiles, getModelOptions, refreshModels, getPresets, applyPreset, getCurrentPreset } from '../api/client';
 import type { ReviewerFallback, ReviewerOrderItem, PresetLevel, ApplyPresetResult, GlobalPresetField } from '../types/api';
-import { Save, CheckCircle2, AlertCircle, Info, MessageSquare, Bell, ArrowUp, ArrowDown, Plus, Trash2 } from 'lucide-react';
+import { Save, CheckCircle2, AlertCircle, Info, MessageSquare, Bell, ArrowUp, ArrowDown, Plus, Trash2, RefreshCw } from 'lucide-react';
 import { useLocale } from '../context/LocaleContext';
 import { TelegramCard } from '../components/TelegramCard';
 import { OpenProjectSettings } from '../components/OpenProjectSettings';
@@ -13,9 +13,7 @@ import { SetupChatButton } from '../components/SetupChatButton';
 import { ToastViewport, useToasts } from '../components/ui/Toast';
 import { DataTable, SelectOrCustomInput, SortableModelList } from '../components/ui';
 import {
-  DEFAULT_CLAUDE_MODELS,
-  DEFAULT_CODEX_MODELS,
-  DEFAULT_VALID_MODELS,
+  formatDiscoveredModelOptions,
   getModelsForProvider,
   validateModelSyntax,
   validateChatModelSyntax,
@@ -153,12 +151,41 @@ export const SettingsPage: React.FC = () => {
     queryFn: getModelOptions,
   });
 
+  const refreshModelsMutation = useMutation({
+    mutationFn: refreshModels,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['model-options'] });
+      pushToast({ kind: 'success', title: t('models.refreshed') });
+    },
+    onError: (err: any) => {
+      pushToast({ kind: 'error', title: t('common.error'), message: err.message });
+    },
+  });
+
+  const unavailableModels = useMemo(() => {
+    const set = new Set<string>();
+    if (modelOptions?.models) {
+      for (const m of modelOptions.models) {
+        if (!m.available) {
+          set.add(m.id);
+        }
+      }
+    }
+    return set;
+  }, [modelOptions]);
+
+  const knownDiscovered = useMemo(() => {
+    return modelOptions?.models ? modelOptions.models.map((m) => m.id) : undefined;
+  }, [modelOptions]);
+
   const availableWorkerModels = useMemo(() => {
-    const fromApi = modelOptions?.suggestions || DEFAULT_VALID_MODELS;
-    const fromConfig = modelOptions?.configured || [];
-    const set = new Set([...fromApi, ...fromConfig, ...hardChainModels, ...easyChainModels]);
+    if (modelOptions?.models) {
+      return formatDiscoveredModelOptions(modelOptions.models, t, undefined, true);
+    }
+    const fromApi = modelOptions?.suggestions || [];
+    const set = new Set([...fromApi]);
     return Array.from(set).filter(Boolean);
-  }, [modelOptions, hardChainModels, easyChainModels]);
+  }, [modelOptions, t]);
 
   const availableClaudeProfiles = useMemo(
     () => allProfiles.filter((p) => p.engine === 'claude'),
@@ -192,36 +219,51 @@ export const SettingsPage: React.FC = () => {
     });
   }, [availableClaudeProfiles, claudeProfiles, fallback, t]);
 
+  const getModelOptionValue = (opt: string | { value: string } | undefined): string => {
+    return typeof opt === 'string' ? opt : opt?.value || '';
+  };
+
   const availableCodexReviewerModels = useMemo(() => {
-    const sourceModels = modelOptions
-      ? [...modelOptions.suggestions, ...modelOptions.configured]
-      : DEFAULT_CODEX_MODELS.map((model) => `codex:${model}`);
-    const reviewerModels = reviewOrder.filter((r) => r.engine === 'codex').map((r) => r.model);
-    const arbiterModel = arbiter.engine === 'codex' && arbiter.model ? [arbiter.model] : [];
-    const chainCodex = [...hardChainModels, ...easyChainModels];
-    return getModelsForProvider([
-      ...getModelsForProvider(sourceModels, 'codex'),
-      ...reviewerModels,
-      ...arbiterModel,
-      ...chainCodex,
-    ], 'codex');
-  }, [modelOptions, reviewOrder, arbiter, hardChainModels, easyChainModels]);
+    if (modelOptions?.models) {
+      return formatDiscoveredModelOptions(modelOptions.models, t, 'codex', true);
+    }
+    if (modelOptions?.suggestions) {
+      const fromApi = modelOptions.suggestions.filter(
+        (m) => m.startsWith('codex:') || (m.startsWith('gpt-') && !m.startsWith('gpt-oss-')),
+      );
+      return getModelsForProvider(fromApi, 'codex');
+    }
+    return [];
+  }, [modelOptions, t]);
 
   const availableClaudeReviewerModels = useMemo(() => {
-    const fromChat = getModelsForProvider(chatModels, 'claude');
-    const sourceModels = modelOptions
-      ? [...modelOptions.suggestions, ...modelOptions.configured]
-      : DEFAULT_CLAUDE_MODELS;
-    const reviewerModels = reviewOrder.filter((r) => r.engine === 'claude').map((r) => r.model);
-    const arbiterModel = arbiter.engine === 'claude' && arbiter.model ? [arbiter.model] : [];
-    return getModelsForProvider([
-      ...DEFAULT_CLAUDE_MODELS,
-      ...fromChat,
-      ...getModelsForProvider(sourceModels, 'claude'),
-      ...reviewerModels,
-      ...arbiterModel,
-    ], 'claude');
-  }, [modelOptions, reviewOrder, arbiter, chatModels]);
+    if (modelOptions?.models) {
+      return formatDiscoveredModelOptions(modelOptions.models, t, 'claude', true);
+    }
+    if (modelOptions?.suggestions) {
+      const fromApi = modelOptions.suggestions.filter(
+        (m) => m.startsWith('claude-') || ['sonnet', 'opus', 'haiku'].includes(m),
+      );
+      return getModelsForProvider(fromApi, 'claude');
+    }
+    return [];
+  }, [modelOptions, t]);
+
+  const availableChatModels = useMemo(() => {
+    if (modelOptions?.models) {
+      return modelOptions.models
+        .filter((m) => m.engine === 'claude' && m.available)
+        .map((m) => m.id);
+    }
+    return [];
+  }, [modelOptions]);
+
+  const availableDiscoveredClaudeModels = useMemo(() => {
+    if (modelOptions?.models) {
+      return formatDiscoveredModelOptions(modelOptions.models, t, 'claude', true);
+    }
+    return [];
+  }, [modelOptions, t]);
 
   useEffect(() => {
     if (config) {
@@ -362,25 +404,25 @@ export const SettingsPage: React.FC = () => {
       return;
     }
 
-    const invalidHard = hardModels.find((m) => validateModelSyntax(m, t));
+    const invalidHard = hardModels.find((m) => validateModelSyntax(m, t, knownDiscovered));
     if (invalidHard) {
-      failValidation(`${t('settings.hardChainLabel')}: ${validateModelSyntax(invalidHard, t)} ("${invalidHard}")`);
+      failValidation(`${t('settings.hardChainLabel')}: ${validateModelSyntax(invalidHard, t, knownDiscovered)} ("${invalidHard}")`);
       return;
     }
-    const invalidEasy = easyModels.find((m) => validateModelSyntax(m, t));
+    const invalidEasy = easyModels.find((m) => validateModelSyntax(m, t, knownDiscovered));
     if (invalidEasy) {
-      failValidation(`${t('settings.easyChainLabel')}: ${validateModelSyntax(invalidEasy, t)} ("${invalidEasy}")`);
+      failValidation(`${t('settings.easyChainLabel')}: ${validateModelSyntax(invalidEasy, t, knownDiscovered)} ("${invalidEasy}")`);
       return;
     }
 
-    const invalidChat = validateChatModelSyntax(chatModel, t);
+    const invalidChat = validateChatModelSyntax(chatModel, t, availableChatModels);
     if (invalidChat) {
       failValidation(`${t('extra.chatModel')}: ${invalidChat} ("${chatModel}")`);
       return;
     }
 
     const invalidReviewer = reviewerModel.trim()
-      ? validateReviewerModelSyntax(reviewerModel, reviewerModel.startsWith('claude') ? 'claude' : 'codex', t)
+      ? validateReviewerModelSyntax(reviewerModel, reviewerModel.startsWith('claude') ? 'claude' : 'codex', t, knownDiscovered)
       : null;
     if (invalidReviewer) {
       failValidation(`${t('extra.reviewerModel')}: ${invalidReviewer} ("${reviewerModel}")`);
@@ -388,14 +430,14 @@ export const SettingsPage: React.FC = () => {
     }
 
     for (let i = 0; i < reviewOrder.length; i++) {
-      const err = validateReviewerModelSyntax(reviewOrder[i].model, reviewOrder[i].engine, t);
+      const err = validateReviewerModelSyntax(reviewOrder[i].model, reviewOrder[i].engine, t, knownDiscovered);
       if (err) {
         failValidation(`${t('settings.reviewerOrder')} ${i + 1}: ${err} ("${reviewOrder[i].model}")`);
         return;
       }
     }
 
-    const invalidArbiter = validateReviewerModelSyntax(arbiter.model, arbiter.engine, t);
+    const invalidArbiter = validateReviewerModelSyntax(arbiter.model, arbiter.engine, t, knownDiscovered);
     if (invalidArbiter) {
       failValidation(`${t('settings.arbiter')}: ${invalidArbiter} ("${arbiter.model}")`);
       return;
@@ -749,11 +791,24 @@ export const SettingsPage: React.FC = () => {
               {brainPermissions === 'full' && <p className="text-xs text-[var(--t-crit)]">{t('extra.fullModeWarning')}</p>}
             </div>
             {/* Info notice */}
-            <div className="p-4 rounded-lg bg-[var(--t-accent-bg)] border border-[var(--t-accent)] text-[var(--t-accent)] text-xs flex items-start gap-2.5">
-              <Info className="w-4 h-4 shrink-0 mt-0.5" />
-              <div>
-                {t('settings.infoChain')}
+            <div className="p-4 rounded-lg bg-[var(--t-accent-bg)] border border-[var(--t-accent)] text-[var(--t-accent)] text-xs flex items-start justify-between gap-4">
+              <div className="flex items-start gap-2.5">
+                <Info className="w-4 h-4 shrink-0 mt-0.5" />
+                <div>
+                  {t('settings.infoChain')}
+                </div>
               </div>
+              <button
+                type="button"
+                onClick={() => refreshModelsMutation.mutate()}
+                disabled={refreshModelsMutation.isPending}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--t-border)] bg-[var(--t-surface)] hover:bg-[var(--t-hover)] text-[var(--t-text)] transition-colors cursor-pointer shrink-0 disabled:opacity-50"
+                data-testid="refresh-models-btn"
+                title={t('models.refresh')}
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${refreshModelsMutation.isPending ? 'animate-spin' : ''}`} />
+                <span>{refreshModelsMutation.isPending ? t('models.refreshing') : t('models.refresh')}</span>
+              </button>
             </div>
 
             {/* Hard chain */}
@@ -766,6 +821,8 @@ export const SettingsPage: React.FC = () => {
               models={hardChainModels}
               onChange={setHardChainModels}
               availableOptions={availableWorkerModels}
+              unavailableModels={unavailableModels}
+              validate={(val) => validateModelSyntax(val, t, knownDiscovered)}
               ariaLabel={t('settings.hardChainLabel')}
             />
 
@@ -777,6 +834,8 @@ export const SettingsPage: React.FC = () => {
               models={easyChainModels}
               onChange={setEasyChainModels}
               availableOptions={availableWorkerModels}
+              unavailableModels={unavailableModels}
+              validate={(val) => validateModelSyntax(val, t, knownDiscovered)}
               ariaLabel={t('settings.easyChainLabel')}
             />
 
@@ -887,11 +946,22 @@ export const SettingsPage: React.FC = () => {
                     ariaLabel={t('extra.chatModel')}
                     value={chatModel}
                     onChange={setChatModel}
-                    options={Array.from(new Set([...chatModels, ...DEFAULT_CLAUDE_MODELS]))}
-                    validate={(m) => validateChatModelSyntax(m, t)}
+                    options={availableChatModels}
+                    validate={(m) => validateChatModelSyntax(m, t, availableChatModels)}
                     placeholder="sonnet"
                     className="w-full max-w-sm"
+                    showCustomWarning={true}
                   />
+                  {chatModel && unavailableModels.has(chatModel) && (
+                    <div
+                      className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                      data-testid="model-unavailable-warning"
+                      title={t('models.unavailableWarning')}
+                    >
+                      <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                      <span>{t('models.unavailableWarning')}</span>
+                    </div>
+                  )}
                   <p className="text-[11px] text-[var(--t-text-3)] mt-1">
                     {t('extra.defaultChatModel')} {chatModels.join(', ')}
                   </p>
@@ -908,6 +978,15 @@ export const SettingsPage: React.FC = () => {
                         className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-[var(--t-surface-2)] border border-[var(--t-border)] text-[var(--t-text)]"
                       >
                         <span>{m}</span>
+                        {unavailableModels.has(m) && (
+                          <span
+                            className="text-[var(--t-crit)] flex items-center gap-0.5 font-medium"
+                            data-testid="model-unavailable-warning"
+                            title={t('models.unavailableWarning')}
+                          >
+                            <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                          </span>
+                        )}
                         <button
                           type="button"
                           aria-label={`${t('common.remove')} ${m}`}
@@ -923,15 +1002,16 @@ export const SettingsPage: React.FC = () => {
                     <SelectOrCustomInput
                       value={newChatModel}
                       onChange={setNewChatModel}
-                      options={DEFAULT_CLAUDE_MODELS.filter((m) => !chatModels.includes(m))}
-                      validate={(m) => validateChatModelSyntax(m, t)}
+                      options={availableChatModels.filter((m) => !chatModels.includes(m))}
+                      validate={(m) => validateChatModelSyntax(m, t, availableChatModels)}
                       placeholder="opus"
                       ariaLabel={t('extra.chatModelsLabel')}
                       className="flex-1"
+                      showCustomWarning={true}
                     />
                     <button
                       type="button"
-                      disabled={!newChatModel.trim() || chatModels.includes(newChatModel.trim()) || Boolean(validateChatModelSyntax(newChatModel.trim(), t))}
+                      disabled={!newChatModel.trim() || chatModels.includes(newChatModel.trim()) || Boolean(validateChatModelSyntax(newChatModel.trim(), t, availableChatModels))}
                       onClick={() => {
                         const trimmed = newChatModel.trim();
                         if (trimmed && !chatModels.includes(trimmed)) {
@@ -985,7 +1065,7 @@ export const SettingsPage: React.FC = () => {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setReviewOrder((current) => [...current, { engine: 'codex', model: availableCodexReviewerModels[0] || '', profiles: [] }])}
+                  onClick={() => setReviewOrder((current) => [...current, { engine: 'codex', model: getModelOptionValue(availableCodexReviewerModels[0]), profiles: [] }])}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] text-[var(--t-text)] hover:bg-[var(--t-surface)] cursor-pointer"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -1029,8 +1109,8 @@ export const SettingsPage: React.FC = () => {
                                     ...row,
                                     engine: newEngine,
                                     model: newEngine === 'codex'
-                                      ? (availableCodexReviewerModels[0] || '')
-                                      : (availableClaudeReviewerModels[0] || ''),
+                                      ? getModelOptionValue(availableCodexReviewerModels[0])
+                                      : getModelOptionValue(availableClaudeReviewerModels[0]),
                                     profiles: [],
                                   }
                                 : row,
@@ -1048,9 +1128,20 @@ export const SettingsPage: React.FC = () => {
                           value={item.model}
                           onChange={(val) => setReviewOrder((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, model: val } : row))}
                           options={engineModelOptions}
-                          validate={(val) => validateReviewerModelSyntax(val, item.engine, t)}
+                          validate={(val) => validateReviewerModelSyntax(val, item.engine, t, knownDiscovered)}
                           placeholder={item.engine === 'codex' ? 'codex:model' : 'sonnet'}
+                          showCustomWarning={true}
                         />
+                        {unavailableModels.has(item.model) && (
+                          <div
+                            className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                            data-testid="model-unavailable-warning"
+                            title={t('models.unavailableWarning')}
+                          >
+                            <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                            <span>{t('models.unavailableWarning')}</span>
+                          </div>
+                        )}
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
                         <button
@@ -1131,9 +1222,20 @@ export const SettingsPage: React.FC = () => {
                     value={arbiter.model}
                     onChange={(val) => setArbiter((value) => ({ ...value, model: val }))}
                     options={arbiter.engine === 'codex' ? availableCodexReviewerModels : availableClaudeReviewerModels}
-                    validate={(val) => validateReviewerModelSyntax(val, arbiter.engine, t)}
+                    validate={(val) => validateReviewerModelSyntax(val, arbiter.engine, t, knownDiscovered)}
                     placeholder={arbiter.engine === 'codex' ? 'codex:model' : 'sonnet'}
+                    showCustomWarning={true}
                   />
+                  {arbiter.model && unavailableModels.has(arbiter.model) && (
+                    <div
+                      className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                      data-testid="model-unavailable-warning"
+                      title={t('models.unavailableWarning')}
+                    >
+                      <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                      <span>{t('models.unavailableWarning')}</span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -1146,10 +1248,21 @@ export const SettingsPage: React.FC = () => {
                 value={reviewerModel}
                 onChange={setReviewerModel}
                 options={availableCodexReviewerModels}
-                validate={(val) => validateReviewerModelSyntax(val, val.startsWith('claude') ? 'claude' : 'codex', t)}
+                validate={(val) => validateReviewerModelSyntax(val, val.startsWith('claude') ? 'claude' : 'codex', t, knownDiscovered)}
                 placeholder="codex:model"
+                showCustomWarning={true}
                 className="w-full"
               />
+              {reviewerModel && unavailableModels.has(reviewerModel) && (
+                <div
+                  className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                  data-testid="model-unavailable-warning"
+                  title={t('models.unavailableWarning')}
+                >
+                  <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                  <span>{t('models.unavailableWarning')}</span>
+                </div>
+              )}
             </div>
 
             <div className="pt-2 border-t border-[var(--t-border)] space-y-4">
@@ -1175,17 +1288,28 @@ export const SettingsPage: React.FC = () => {
                 <label htmlFor="claude-model-select" className="block text-xs font-semibold text-[var(--t-text)] mb-1">
                   {t('settings.claudeModel')}
                 </label>
-                <select
+                <SelectOrCustomInput
                   id="claude-model-select"
-                  data-testid="claude-model-select"
+                  testId="claude-model-select"
+                  ariaLabel={t('settings.claudeModel')}
                   value={claudeModel}
-                  onChange={(e) => setClaudeModel(e.target.value)}
-                  className="w-full text-sm rounded-lg border border-[var(--t-border)] bg-[var(--t-surface-2)] px-3 py-2 text-[var(--t-text)]"
-                >
-                  <option value="sonnet">sonnet</option>
-                  <option value="opus">opus</option>
-                  <option value="haiku">haiku</option>
-                </select>
+                  onChange={setClaudeModel}
+                  options={availableDiscoveredClaudeModels}
+                  validate={(val) => validateReviewerModelSyntax(val, 'claude', t, knownDiscovered)}
+                  placeholder="sonnet"
+                  showCustomWarning={true}
+                  className="w-full"
+                />
+                {claudeModel && unavailableModels.has(claudeModel) && (
+                  <div
+                    className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                    data-testid="model-unavailable-warning"
+                    title={t('models.unavailableWarning')}
+                  >
+                    <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                    <span>{t('models.unavailableWarning')}</span>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -1305,11 +1429,22 @@ export const SettingsPage: React.FC = () => {
                     <SelectOrCustomInput
                       value={step.model}
                       onChange={(val) => { const next = [...fallback]; next[index] = { ...step, model: val }; setFallback(next); }}
-                      options={Array.from(new Set([...DEFAULT_CLAUDE_MODELS, ...chatModels, step.model].filter(Boolean)))}
-                      validate={(m) => validateChatModelSyntax(m, t)}
+                      options={availableChatModels}
+                      validate={(m) => validateChatModelSyntax(m, t, availableChatModels)}
                       placeholder="sonnet"
                       ariaLabel={`Fallback model ${index + 1}`}
+                      showCustomWarning={true}
                     />
+                    {step.model && unavailableModels.has(step.model) && (
+                      <div
+                        className="mt-1 text-xs text-[var(--t-crit)] flex items-center gap-1 font-medium"
+                        data-testid="model-unavailable-warning"
+                        title={t('models.unavailableWarning')}
+                      >
+                        <AlertCircle className="w-3.5 h-3.5 text-[var(--t-crit)] shrink-0" />
+                        <span>{t('models.unavailableWarning')}</span>
+                      </div>
+                    )}
                   </div>
                 )}
                 {step.type === 'apiKey' && <input type="number" min={0.01} step={0.01} value={step.dailyCapUSD} onChange={(event) => { const next = [...fallback]; next[index] = { ...step, dailyCapUSD: Number(event.target.value) }; setFallback(next); }} className="w-24 text-xs rounded border border-[var(--t-border)] bg-[var(--t-surface)] p-1.5 text-[var(--t-text)]" />}

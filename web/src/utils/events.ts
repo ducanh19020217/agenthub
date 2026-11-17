@@ -102,6 +102,7 @@ export const ALL_BACKEND_EVENT_TYPES: string[] = [
   'task.looping',
   'task.merged',
   'task.model_skipped',
+  'task.model_unavailable',
   'task.no_commit',
   'task.note',
   'task.overlap',

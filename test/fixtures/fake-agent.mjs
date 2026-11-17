@@ -200,6 +200,12 @@ async function run() {
       break;
     }
 
+    case 'model-not-found':
+      console.log('Prompt echo: if you see model_not_found, do not panic.');
+      console.log('ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The \'gpt-6-luna-wm\' model is not supported when using Codex with a ChatGPT account.","code":"model_not_found"}}');
+      process.exit(1);
+      break;
+
     case 'transient':
       console.log('Fake agent: transient error...');
       console.log('error: failed to send message: UNAVAILABLE (code 503): The service is currently unavailable.');

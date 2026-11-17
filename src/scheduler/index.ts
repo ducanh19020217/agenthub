@@ -281,7 +281,8 @@ const ARBITER_RETRY_MODEL = 'claude-opus-4-6-thinking';
 const MODEL_UNAVAILABLE_BLOCK_MS = 24 * 60 * 60 * 1000;
 
 /**
- * True when the engine's own error output says the model cannot be used by this account.
+ * True when the engine's own error output says the model cannot be used by this account
+ * (e.g. Codex: `ERROR: {... "code":"model_not_found"}` / "The 'x' model is not supported").
  * Only engine ERROR lines count: the run log also echoes the prompt, which may quote these words.
  */
 export function detectModelUnavailable(logTail: string): boolean {
@@ -567,11 +568,16 @@ export class Scheduler {
     return known;
   }
 
+  /** Remember that the provider rejected this model for this profile, so selection moves on. */
+  markModelUnavailable(profileName: string, model: string): void {
+    this.unavailableProfileModels.set(unavailableModelKey(profileName, model), Date.now() + MODEL_UNAVAILABLE_BLOCK_MS);
+  }
+
   profileHasModel(profileName: string, model: string): boolean {
     const profile = this.profileRepo.get(profileName);
     if (!profile) return false;
-    const blockedUntil = (this.unavailableProfileModels as Map<string, number> | undefined)
-      ?.get(unavailableModelKey(profileName, model));
+    // Inline (not a method call): unit tests run profileHasModel on a bare object.
+    const blockedUntil = (this.unavailableProfileModels as Map<string, number> | undefined)?.get(unavailableModelKey(profileName, model));
     if (blockedUntil !== undefined && blockedUntil > Date.now()) return false;
     if (profile.authState === 'not_logged_in') return false;
 
@@ -606,11 +612,6 @@ export class Scheduler {
       return ['sonnet', 'opus', 'haiku'].includes(raw);
     }
     return false;
-  }
-
-  /** Remember that the provider rejected this model for this profile. */
-  markModelUnavailable(profileName: string, model: string): void {
-    this.unavailableProfileModels.set(unavailableModelKey(profileName, model), Date.now() + MODEL_UNAVAILABLE_BLOCK_MS);
   }
 
   private schedulerLimits() {
@@ -2961,7 +2962,8 @@ export class Scheduler {
             profile: rt.profileName,
           });
         } else if (detectModelUnavailable(logTail)) {
-          // The account cannot use this model: fail over instead of failing the task.
+          // The account cannot use this model: not a crash of the task. Block the pair and
+          // requeue so the next model in the chain (or another profile) takes over.
           this.runRepo.finish(rt.runId, 'crashed', undefined, 'model_unavailable');
           this.markModelUnavailable(rt.profileName, rt.model);
           this.taskRepo.update(taskId, { status: 'queued', resume: 1, transientRetries: 0, notBefore: null });

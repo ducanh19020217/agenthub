@@ -639,14 +639,47 @@ describe('Scheduler regression fixes', () => {
     delete process.env.FAKE_MODE;
   });
 
-  it('fails over and persists a provider-rejected model pair', async () => {
+  it('moves to the next model instead of failing when the provider rejects the model', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: null, enabled: 1 });
+    taskRepo.insert({
+      id: 'test-project/mnf', projectId: 'test-project', slug: 'mnf', title: 'Model not found', status: 'queued',
+      modelChain: JSON.stringify(['gemini-3.8-flash-high', 'gemini-3.8-flash-medium']),
+    });
+    process.env.FAKE_MODE = 'model-not-found';
+    const scheduler = new Scheduler(
+      config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['agy', new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'))]]),
+    );
+    try {
+      scheduler.tick();
+      expect(runRepo.getByTask('test-project/mnf')[0]?.model).toBe('gemini-3.8-flash-high');
+      // The rejected model is blocked for this profile and the task is requeued, not failed;
+      // the scheduler immediately retries on the next model in the chain.
+      await vi.waitFor(() => {
+        expect(runRepo.getByTask('test-project/mnf').map((r) => r.model)).toContain('gemini-3.8-flash-medium');
+      }, { timeout: 5000 });
+      const high = runRepo.getByTask('test-project/mnf').find((r) => r.model === 'gemini-3.8-flash-high')!;
+      expect(high.outcome).toBe('crashed');
+      expect(high.reason).toBe('model_unavailable');
+      expect(eventRepo.getRecent(50).some((e) => e.taskId === 'test-project/mnf' && e.type === 'task.model_unavailable')).toBe(true);
+      expect(eventRepo.getRecent(50).some((e) => e.taskId === 'test-project/mnf' && e.type === 'task.failed')).toBe(false);
+      expect(scheduler.profileHasModel('p1', 'gemini-3.8-flash-high')).toBe(false);
+    } finally {
+      scheduler.stop();
+      delete process.env.FAKE_MODE;
+    }
+  });
+
+  it('persists a provider-rejected model pair to profile_models', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
     profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'keyring', home: null, email: 'p1@example.com', enabled: 1 });
     taskRepo.insert({
-      id: 'test-project/model-rejected',
+      id: 'test-project/model-rejected-persist',
       projectId: 'test-project',
-      slug: 'model-rejected',
+      slug: 'model-rejected-persist',
       title: 'Model rejected',
       status: 'queued',
       modelChain: JSON.stringify(['gemini-3.8-flash-high', 'gemini-3.8-flash-medium']),
@@ -660,10 +693,10 @@ describe('Scheduler regression fixes', () => {
     try {
       scheduler.tick();
       await vi.waitFor(() => {
-        expect(runRepo.getByTask('test-project/model-rejected').map((run) => run.model))
+        expect(runRepo.getByTask('test-project/model-rejected-persist').map((run) => run.model))
           .toContain('gemini-3.8-flash-medium');
       }, { timeout: 5000 });
-      const rejectedRun = runRepo.getByTask('test-project/model-rejected')
+      const rejectedRun = runRepo.getByTask('test-project/model-rejected-persist')
         .find((run) => run.model === 'gemini-3.8-flash-high');
       expect(rejectedRun?.outcome).toBe('crashed');
       expect(rejectedRun?.reason).toBe('model_unavailable');
@@ -720,9 +753,10 @@ describe('Scheduler regression fixes', () => {
     }
   });
 
-  it('detects provider rejection only on engine error lines', () => {
+  it('detects model rejection only from engine ERROR lines, not from the echoed prompt', () => {
     expect(detectModelUnavailable('ERROR: {"error":{"code":"model_not_found"}}')).toBe(true);
-    expect(detectModelUnavailable('prompt mentions model_not_found')).toBe(false);
+    expect(detectModelUnavailable("noise\nERROR: The 'x' model is not supported when using Codex")).toBe(true);
+    expect(detectModelUnavailable('Ghi chú: lượt trước lỗi model_not_found, model is not supported')).toBe(false);
   });
 
   it('keeps slots stable when an earlier task is cancelled', () => {

@@ -3623,6 +3623,27 @@ describe('Publish Service (t-auto-push-after-done)', () => {
           ).resolves.toEqual({ forwardMerges: [], rejectedMerges: [] });
         });
 
+        it('discovery fail-closed: nhánh task đã xoá, merge có message khớp slug -> ném lỗi thay vì tin heuristic', async () => {
+          const { findMergeCandidatesForTask } = await import('../src/publish.js');
+          const { repoPath } = setup('rrab-deleted-branch');
+          addTaskBranch(repoPath, 'gone');
+          git(repoPath, 'checkout', '-q', 'master');
+          git(repoPath, 'merge', '--no-ff', '-q', '-m', "Merge branch 'agenthub/gone' into master", 'agenthub/gone');
+          git(repoPath, 'branch', '-D', 'agenthub/gone');
+          await expect(
+            findMergeCandidatesForTask(repoPath, taskRow('gone'), ['master'], testEnv, true, true),
+          ).rejects.toThrow(/Cannot verify task source for audit discovery/);
+          // getTaskDiff (audit diff) luôn bắt buộc có ref nhánh task.
+          const { getTaskDiff } = await import('../src/publish.js');
+          await expect(
+            getTaskDiff(repoPath, taskRow('gone'), 'master', 'master', 'master', testEnv),
+          ).rejects.toThrow(/Cannot verify task source for audit discovery/);
+          // Liệt kê task cần audit (không bắt buộc ref) không bị chặn bởi một task cũ đã xoá nhánh.
+          await expect(
+            findMergeCandidatesForTask(repoPath, taskRow('gone'), ['master'], testEnv, true),
+          ).resolves.toBeDefined();
+        });
+
         it('remote không phải origin: dùng refs/remotes/<remote>/<targetBranch>', async () => {
           const { getTaskDiff } = await import('../src/publish.js');
           const { repoPath, remotePath } = setup('rrab-custom-remote');

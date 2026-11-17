@@ -212,12 +212,6 @@ async function run() {
       process.exit(1);
       break;
 
-    case 'model-not-found':
-      console.log('Prompt echo: if you see model_not_found, do not panic.');
-      console.log('ERROR: {"type":"error","status":400,"error":{"message":"The model is not supported when using this account.","code":"model_not_found"}}');
-      process.exit(1);
-      break;
-
     default:
       console.log(`Unknown FAKE_MODE: ${mode}`);
       process.exit(1);

@@ -6,7 +6,7 @@ import { EventEmitter } from 'node:events';
 import { execFileSync, spawn } from 'node:child_process';
 import { loadConfig, DEFAULT_SCHEDULER_LIMITS, saveConfig } from '../src/config.js';
 import { openDatabase, ProjectRepo, DepartmentRepo, ProfileRepo, QuotaMarkRepo, TaskRepo, RunRepo, EventRepo, ReviewRepo } from '../src/db/index.js';
-import { Scheduler, TIMEOUT_RESUME_NOTE } from '../src/scheduler/index.js';
+import { Scheduler, TIMEOUT_RESUME_NOTE, detectModelUnavailable } from '../src/scheduler/index.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
 import { QuotaService } from '../src/quota/index.js';
 import { ClaudeFailoverState } from '../src/chat/failover.js';
@@ -637,6 +637,45 @@ describe('Scheduler regression fixes', () => {
     }, { timeout: 5000 });
     scheduler.stop();
     delete process.env.FAKE_MODE;
+  });
+
+  it('moves to the next model instead of failing when the provider rejects the model', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: null, enabled: 1 });
+    taskRepo.insert({
+      id: 'test-project/mnf', projectId: 'test-project', slug: 'mnf', title: 'Model not found', status: 'queued',
+      modelChain: JSON.stringify(['gemini-3.8-flash-high', 'gemini-3.8-flash-medium']),
+    });
+    process.env.FAKE_MODE = 'model-not-found';
+    const scheduler = new Scheduler(
+      config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['agy', new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'))]]),
+    );
+    try {
+      scheduler.tick();
+      expect(runRepo.getByTask('test-project/mnf')[0]?.model).toBe('gemini-3.8-flash-high');
+      // The rejected model is blocked for this profile and the task is requeued, not failed;
+      // the scheduler immediately retries on the next model in the chain.
+      await vi.waitFor(() => {
+        expect(runRepo.getByTask('test-project/mnf').map((r) => r.model)).toContain('gemini-3.8-flash-medium');
+      }, { timeout: 5000 });
+      const high = runRepo.getByTask('test-project/mnf').find((r) => r.model === 'gemini-3.8-flash-high')!;
+      expect(high.outcome).toBe('crashed');
+      expect(high.reason).toBe('model_unavailable');
+      expect(eventRepo.getRecent(50).some((e) => e.taskId === 'test-project/mnf' && e.type === 'task.model_unavailable')).toBe(true);
+      expect(eventRepo.getRecent(50).some((e) => e.taskId === 'test-project/mnf' && e.type === 'task.failed')).toBe(false);
+      expect(scheduler.profileHasModel('p1', 'gemini-3.8-flash-high')).toBe(false);
+    } finally {
+      scheduler.stop();
+      delete process.env.FAKE_MODE;
+    }
+  });
+
+  it('detects model rejection only from engine ERROR lines, not from the echoed prompt', () => {
+    expect(detectModelUnavailable('ERROR: {"error":{"code":"model_not_found"}}')).toBe(true);
+    expect(detectModelUnavailable("noise\nERROR: The 'x' model is not supported when using Codex")).toBe(true);
+    expect(detectModelUnavailable('Ghi chú: lượt trước lỗi model_not_found, model is not supported')).toBe(false);
   });
 
   it('keeps slots stable when an earlier task is cancelled', () => {

@@ -1880,6 +1880,7 @@ export const vi = {
       looping: "Task bị lặp lệnh",
       merged: "Task đã merge",
       model_skipped: "Task bỏ qua model",
+      model_unavailable: "Model không dùng được, chuyển model khác",
       no_commit: "Task không có commit",
       note: "Ghi chú task",
       overlap: "Task trùng lặp",

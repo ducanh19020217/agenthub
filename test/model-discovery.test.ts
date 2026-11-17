@@ -522,14 +522,21 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     // apply (this is what used to strand tasks in waiting_quota after a reviewer run).
     expect(hasModel('codex:gpt-5.6-luna')).toBe(true);
 
-    // Once the account is logged in, /api/models reports the run-verified model.
-    fs.writeFileSync(path.join(home, 'auth.json'), '{}');
-    const result = AppService.prototype.getModelOptions.call({
+    const options = () => AppService.prototype.getModelOptions.call({
       profileRepo,
       profileModelRepo,
       config: { defaultModelChains: { hard: [], easy: [] }, reviewer: { order: [] } },
     } as any);
-    expect(result.models.find((m) => m.id === 'codex:gpt-5.6-luna')).toMatchObject({ runVerified: true, available: true });
+    // While logged out, /api/models still reports the run evidence for this profile,
+    // but the profile cannot make the model available.
+    expect(options().models.find((m) => m.id === 'codex:gpt-5.6-luna')).toMatchObject({
+      runVerified: true,
+      available: false,
+      profiles: ['codex-no-discovery'],
+    });
+    // Once the account is logged in, the run-verified model is available.
+    fs.writeFileSync(path.join(home, 'auth.json'), '{}');
+    expect(options().models.find((m) => m.id === 'codex:gpt-5.6-luna')).toMatchObject({ runVerified: true, available: true });
   });
 
   it('catalog refresh keeps run-verified models that the catalog no longer lists', () => {

@@ -7068,11 +7068,17 @@ export class AppService {
     for (const profile of enabledProfiles) {
       if (!this.profileModelRepo) continue;
       const rows = this.profileModelRepo.getForProfile(profile.name);
-      if (!isProfileLoggedIn(profile) && !rows.some((row) => row.unavailableAt)) continue;
+      // A logged-out profile still reports what is known about it (provider
+      // rejections and models that have actually run), but cannot make a model
+      // available: its catalog rows are skipped and its rows never count as usable.
+      const loggedIn = isProfileLoggedIn(profile);
+      if (!loggedIn && !rows.some((row) => row.unavailableAt || row.runVerified)) continue;
       for (const r of rows) {
         const isClaudeAlias = r.engine === 'claude' && ['sonnet', 'opus', 'haiku'].includes(r.modelId);
         const isUnavailable = Boolean(r.unavailableAt);
+        if (!loggedIn && !isUnavailable && !r.runVerified) continue;
         if (!r.verified && !isClaudeAlias && !isUnavailable && !r.runVerified) continue;
+        const usable = loggedIn && !isUnavailable;
         const modelId = r.engine === 'codex' && !r.modelId.startsWith('codex:')
           ? `codex:${r.modelId}`
           : r.modelId;
@@ -7089,7 +7095,7 @@ export class AppService {
           existing.runVerified = Boolean(existing.runVerified || r.runVerified);
           if (!existing.runVerified && !existing.unavailable && !r.verified) Object.assign(existing, modelWarning('unverified_catalog'));
           if (r.unavailableReason) existing.unavailableReason = r.unavailableReason;
-          existing.available = existing.available || !isUnavailable;
+          existing.available = existing.available || usable;
           // Keep a rejection visible even when another profile happens to expose
           // the same model. The model must not be used as a chain's first choice
           // until the provider rejection has been resolved.
@@ -7101,7 +7107,7 @@ export class AppService {
             name: r.modelName || modelId,
             profiles: [profile.name],
             verified: Boolean(r.verified),
-            available: !isUnavailable,
+            available: usable,
             configured: false,
             ...modelWarning(isUnavailable ? 'unavailable_for_account' : r.verified || r.runVerified ? null : 'unverified_catalog'),
             runVerified: Boolean(r.runVerified),

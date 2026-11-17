@@ -571,3 +571,40 @@
   1. `finishReview` bỏ qua kết quả reviewer nếu task không còn ở `review` hoặc đang merge (`mergingTasks`). Run được đóng là `cancelled` và phát event `review.stale_ignored`. Kết quả này không đổi trạng thái và không tăng `reviewerChangesRequested`.
   2. Khi có review thủ công (`by` không phải reviewer tự động), `AppService.reviewTask` gọi `Scheduler.supersedeReviewerRun` để dừng reviewer đang chạy, rồi phát event `review.superseded`.
   3. Người dùng được approve một task `blocked` vì reviewer hết vòng (`reviewerEscalated` và `reviewerEscalationReason = reviewer_changes_limit`). Task được đưa lại `review` (event `review.reopened`) rồi đi luồng approve → merge → publish như bình thường. Reviewer tự động không được dùng đường này. Không thêm endpoint mới; dùng lại `POST /api/tasks/:id/review` và MCP `hub_review`.
+
+## DEC-037: Xác định diff audit trước khi publish theo mốc remote và hỗ trợ nhiều lần merge
+
+- **Bối cảnh**:
+  - Ghi nhận sự cố tại repo `dev-insight-rust` (task `ui-dashboard`): pre-publish audit thất bại do diff bị phình to 1867 dòng ngoài phạm vi (chứa toàn bộ code của task approvals đã push lên remote trước đó).
+  - Nguyên nhân gốc rễ:
+    1. Khi project không dùng nhánh tích hợp (`integration.enabled = false`), `sourceBranch` trùng với nhánh task `agenthub/ui-dashboard`. Task branch này trước đó đã reverse merge `master` (`Merge branch 'master' into agenthub/ui-dashboard`).
+    2. `findMergeCommitForTask` tìm kiếm merge commit trên danh sách `candidateBranches: [sourceSha || sourceBranch, targetSha || targetBranch]`. Vì tìm trên `sourceBranch` trước, nó phát hiện commit reverse merge `master` vào `ui-dashboard`.
+    3. Lệnh `git diff merge^1 merge` so sánh nhánh task trước và sau khi reverse merge `master`, khiến diff audit chứa toàn bộ lịch sử commit của `master` thay vì code của task.
+    4. Ngoài ra, việc dùng `--reverse` chỉ lấy merge commit đầu tiên khiến các lần merge tiếp theo (khi task được merge vào target/integration nhiều lần) bị bỏ sót khỏi diff audit.
+- **Quyết định thiết kế**:
+  1. **Loại trừ tuyệt đối Reverse Merge và Fail-closed**:
+     - Loại bỏ các nhánh trùng với nhánh task (`taskBranch`, `refs/heads/${taskBranch}`, SHA của task branch) khỏi danh sách tìm kiếm candidate branches của nhánh đích.
+     - Kiểm tra tiêu đề commit bằng regex: loại bỏ bất kỳ commit nào có dạng `into ... <taskBranch>`.
+     - Kiểm tra cấu trúc parent và ancestry nghiêm ngặt: parent đầu (`p1`) không bao giờ được phép thuộc nhánh task (loại bỏ nếu `p1 === branchSha`, `isAncestor(branchRef, p1)`, hoặc `isAncestor(p1, branchRef) && !isAncestor(p1, p2)`). Hàm `isAncestor` chỉ coi exit code 1 là không phải tổ tiên; mọi lỗi thực thi git hoặc ref không hợp lệ đều ném lỗi. Bất kỳ lỗi hoặc sự cố nào trong quá trình kiểm tra ancestry của `p1` đều bắt buộc fail-closed và loại bỏ merge commit (không chấp nhận theo message).
+     - Khi nhánh task không còn tồn tại cục bộ (`hasBranch === false`), khôi phục kiểm tra cấu trúc parent từ dữ liệu commit qua chuỗi `first-parent`: nếu `p2` thuộc first-parent lineage của nhánh đích (`destRefs`) trong khi `p1` không thuộc, commit đó là reverse merge và bắt buộc bị loại bỏ. Hàm `isFirstParentAncestor` ném lỗi khi git gặp sự cố (fail closed, không nuốt lỗi trả `false`). Khi bất kỳ kiểm tra ancestry nào thất bại hoặc không có `targetRefs` để xác minh, bắt buộc fail-closed loại bỏ merge commit, tuyệt đối không chấp nhận merge chỉ dựa vào commit message.
+     - Khi kiểm tra commit log của `p2`, chỉ coi `p2` thuộc task khi commit log thực sự khớp với task pattern hoặc task title; tuyệt đối không chấp nhận chỉ dựa trên message của merge commit (`isMsgForward`).
+     - Chỉ chấp nhận forward merge: commit message có dạng `Merge branch '<taskBranch>'`, parent 2 (`p2`) thuộc nhánh task / là tổ tiên của task tip, và `p2` không phải là tổ tiên của `p1`. Bất kỳ lỗi kiểm tra ancestry nào ở bước này cũng loại bỏ candidate ngay lập tức (fail-closed).
+  2. **Hỗ trợ đầy đủ nhiều lần merge vào integration / target branch**:
+     - Bổ sung hàm `findForwardMergeCommitsForTask` trả về toàn bộ danh sách commit forward merge của task trên `--first-parent` của candidate branch (sắp xếp từ mới nhất đến cũ nhất).
+     - Khi tính diff (`getTaskDiff`):
+       - Tip của task lấy từ parent 2 của merge commit mới nhất (`latestMerge^2`). Nếu đọc parent 2 lỗi, bắt buộc fail-closed ném lỗi, không thay bằng chính merge commit.
+       - Mốc base: luôn luôn sử dụng remote base (`baseRef` / `prevRemoteSha` / `origin/<targetBranch>`) của snapshot publish trên nhánh đích làm `baseCommit`. Tuyệt đối không thay thế remote base bằng `earliestMergeP1` hay parent merge. Nếu remote base không tồn tại hoặc `rev-parse` lỗi (`resolveRemoteAuditBase`), `getTaskDiff` bắt buộc fail-closed ném lỗi, không rơi xuống snapshot fallback hay dùng ref local ngoài remote.
+       - Dải diff audit được tính qua `mb = git merge-base(baseCommit, taskTip)` và diff theo dải `mb..taskTip`. Nếu tính `merge-base` thất bại, bắt buộc fail-closed ném lỗi thay vì dùng `baseCommit`.
+       - Cơ chế này bao trọn toàn bộ các commit của task qua tất cả các lần merge, đồng thời tự động loại trừ mọi thay đổi đã có sẵn trên remote hoặc nhánh đích.
+       - Khi merge commit có diff hợp lệ rỗng, giữ nguyên range đã xác định (`auditRange = mb..taskTip`, `diff = ""`, `changedFiles = []`) và tuyệt đối không rơi xuống snapshot fallback để tránh kéo diff không thuộc task vào audit.
+       - Khi không tìm thấy merge commit và phải dùng snapshot fallback, mốc base vẫn bắt buộc resolve từ remote qua `resolveRemoteAuditBase`, loại bỏ hoàn toàn các fallback về nhánh local / HEAD không an toàn.
+  3. **Ghi nhận `auditRange` vào `pushResult` và các sự kiện audit**:
+     - Mở rộng interface `PublishSuccessResult` và `PublishFailedResult` bổ sung trường `auditRange?: string` (định dạng `base..tip`).
+     - Ghi nhận `auditRange` vào `pushResult` (trạng thái `pushed`, `audit_failed`, `push_failed`).
+     - Truyền `auditRange` vào payload các sự kiện: `task.auditing`, `task.audit_started`, `task.audit_passed`, `task.audit_failed`, `task.pushed`.
+  4. **Nguyên tắc Remote Base fail-closed và chặn Reverse Merge trong Snapshot**:
+     - Trong publishTask: auditBaseRef bắt buộc chỉ lấy từ prevRemoteSha || remoteRef. Không sử dụng nhánh remote mặc định khác (defaultRemoteRef) khi target branch chưa có remote tracking ref nhằm tránh audit sai nhánh. Tuyệt đối không bao giờ dùng snapshot local (targetSha/sourceSha/targetBranch) làm audit base.
+     - Hàm resolveRemoteAuditBase xác minh tính hợp lệ trên remote: nếu baseRef là 40-char SHA thì bắt buộc kiểm tra SHA đó đã nằm trên remote (isCommitOnRemote đối chiếu với refs/remotes/*). Mọi trường hợp không resolve được remote commit đều ném lỗi fail-closed, không fallback sang commit local.
+     - Bọc gọi getTaskDiff trong publishTask bằng try-catch để chuyển mọi ngoại lệ fail-closed thành push_failed có kiểm soát, phát sự kiện task.push_failed và chặn publish.
+     - Hàm findMergeCandidatesForTask tách biệt { forwardMerges, rejectedMerges }. Nếu không có forward merge nào nhưng có candidate merge bị từ chối (reverse merge), getTaskDiff fail-closed ném lỗi ngay, cấm rơi xuống snapshot fallback.
+     - Trong nhánh snapshot fallback (!usedMergeDiff), kiểm tra cả commit snapshot tip và các merge trong lineage ${effectiveBase}..${taskSnapshotCommit}: nếu chứa reverse merge (qua commit message hoặc parent 2 là tổ tiên của base/targetSha), lập tức ném lỗi fail-closed, ngăn tuyệt đối việc lọt thay đổi target→task ngoài phạm vi vào audit.

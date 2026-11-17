@@ -2397,17 +2397,27 @@ export class ProfileModelRepo {
   }
 
   /**
-   * Record that a run on this profile/model finished. Only rows the profile
-   * already has are updated: inserting a row here would make a profile with no
-   * model discovery look "discovered", which switches profileHasModel away from
-   * the static model list and can strand tasks in waiting_quota.
+   * Record that a run on this profile/model finished.
+   *
+   * - Existing row: mark it run-verified and clear any provider rejection.
+   * - No row, but the profile already has model discovery: insert a run-verified
+   *   row, so a model that runs but is missing from the catalog is still shown
+   *   as verified in /api/models.
+   * - Profile without any discovery: do nothing. Inserting the first row would
+   *   make the profile look "discovered", switching profileHasModel away from
+   *   the static model list and stranding tasks in waiting_quota.
    */
   markRunVerified(profileName: string, modelId: string, engine: string, at = Math.floor(Date.now() / 1000)): void {
-    this.db.prepare(`
+    const result = this.db.prepare(`
       UPDATE profile_models
       SET runVerified = 1, unavailableReason = NULL, unavailableAt = NULL, fetchedAt = ?
       WHERE profileName = ? AND engine = ? AND modelId = ?
     `).run(at, profileName, engine, modelId);
+    if (result.changes > 0) return;
+    const hasDiscovery = this.db.prepare('SELECT 1 FROM profile_models WHERE profileName = ? LIMIT 1').get(profileName);
+    if (!hasDiscovery) return;
+    this.db.prepare('INSERT INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt, runVerified) VALUES (?, ?, ?, ?, 1, ?, 1)')
+      .run(profileName, modelId, modelId, engine, at);
   }
 
   deleteForProfile(profileName: string): void {

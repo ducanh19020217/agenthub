@@ -72,21 +72,22 @@ interface FlowNodeDef {
 }
 
 const NODE_DEFS: FlowNodeDef[] = [
-  // Hàng lỗi phía trên, hàng chính, rồi hàng phát hành phía dưới tạo thành chữ U.
+  // Hàng lỗi trên, hàng chính, hàng phát hành, hàng lỗi dưới tạo thành chữ U.
+  // Hàng chẵn (2, 4, 6) là khoảng đệm cho mũi tên và nhãn.
   { status: 'waiting_quota', col: 2, row: 1, gridClass: 'col-start-3 row-start-1', issue: true },
   { status: 'failed', col: 3, row: 1, gridClass: 'col-start-4 row-start-1', issue: true },
   { status: 'blocked', col: 4, row: 1, gridClass: 'col-start-5 row-start-1', issue: true },
-  { status: 'draft', col: 0, row: 2, gridClass: 'col-start-1 row-start-2' },
-  { status: 'queued', col: 1, row: 2, gridClass: 'col-start-2 row-start-2' },
-  { status: 'running', col: 2, row: 2, gridClass: 'col-start-3 row-start-2' },
-  { status: 'checking', col: 3, row: 2, gridClass: 'col-start-4 row-start-2' },
-  { status: 'review', col: 4, row: 2, gridClass: 'col-start-5 row-start-2' },
-  { status: 'pushed', col: 2, row: 4, gridClass: 'col-start-3 row-start-4' },
-  { status: 'auditing', col: 3, row: 4, gridClass: 'col-start-4 row-start-4' },
-  { status: 'done', col: 4, row: 4, gridClass: 'col-start-5 row-start-4' },
-  { status: 'push_failed', col: 2, row: 5, gridClass: 'col-start-3 row-start-5', issue: true },
-  { status: 'audit_failed', col: 3, row: 5, gridClass: 'col-start-4 row-start-5', issue: true },
-  { status: 'merge_failed', col: 4, row: 5, gridClass: 'col-start-5 row-start-5', issue: true },
+  { status: 'draft', col: 0, row: 3, gridClass: 'col-start-1 row-start-3' },
+  { status: 'queued', col: 1, row: 3, gridClass: 'col-start-2 row-start-3' },
+  { status: 'running', col: 2, row: 3, gridClass: 'col-start-3 row-start-3' },
+  { status: 'checking', col: 3, row: 3, gridClass: 'col-start-4 row-start-3' },
+  { status: 'review', col: 4, row: 3, gridClass: 'col-start-5 row-start-3' },
+  { status: 'pushed', col: 2, row: 5, gridClass: 'col-start-3 row-start-5' },
+  { status: 'auditing', col: 3, row: 5, gridClass: 'col-start-4 row-start-5' },
+  { status: 'done', col: 4, row: 5, gridClass: 'col-start-5 row-start-5' },
+  { status: 'push_failed', col: 2, row: 7, gridClass: 'col-start-3 row-start-7', issue: true },
+  { status: 'audit_failed', col: 3, row: 7, gridClass: 'col-start-4 row-start-7', issue: true },
+  { status: 'merge_failed', col: 4, row: 7, gridClass: 'col-start-5 row-start-7', issue: true },
 ];
 
 export const FLOW_STATUSES: readonly FlowStatus[] = NODE_DEFS.map((node) => node.status);
@@ -109,12 +110,13 @@ interface NodeRect {
 
 const getFallbackBox = (status: FlowStatus): NodeRect => {
   const def = NODE_DEFS.find((n) => n.status === status) || NODE_DEFS[0];
-  const colW = 216;
-  const gapX = 40;
-  const rowOffsets = [0, 60, 184, 256, 380];
+  const colW = 200;
+  const gapX = 56;
+  // 56 issue · 64 gap · 124 main · 104 gap · 124 lower · 64 gap · 56 issue
+  const rowOffsets = [0, 56, 120, 244, 348, 472, 536];
   const x = 24 + def.col * (colW + gapX);
   const y = 72 + (rowOffsets[def.row - 1] ?? 0);
-  return { x, y, w: colW, h: def.issue ? 60 : 124 };
+  return { x, y, w: colW, h: def.issue ? 56 : 124 };
 };
 
 export function useStatusTotal(
@@ -273,7 +275,7 @@ const FlowNodeCard: React.FC<{
               : 'var(--t-border)',
         backgroundColor: `color-mix(in srgb, ${color} ${hasTasks ? (isIssueNode ? 14 : 12) : 4}%, var(--t-surface-2))`,
       } as React.CSSProperties}
-      className={`group relative ${isCompactIssue ? 'flex min-h-[60px] flex-row items-center gap-2.5 rounded-xl px-3.5 py-2.5' : 'flex min-h-[124px] flex-col justify-between rounded-2xl p-3.5'} self-start border transition-all duration-150 outline-hidden select-none ${
+      className={`group relative ${isCompactIssue ? 'flex h-[56px] flex-row items-center rounded-xl px-3 py-2' : 'flex min-h-[124px] flex-col justify-between rounded-2xl p-3.5'} self-stretch border transition-all duration-150 outline-hidden select-none ${
         isDisabled
           ? 'opacity-60 cursor-not-allowed border-[var(--t-border)]'
           : isNodeActive
@@ -286,62 +288,103 @@ const FlowNodeCard: React.FC<{
       } ${node.gridClass}`}
       data-has-issues={isIssueNode && hasTasks ? 'true' : undefined}
     >
-      {/* Icon + label/count. Error nodes stay compact; main nodes keep the full label. */}
-      <div className={`flex min-w-0 ${isCompactIssue ? 'items-center gap-2.5' : 'items-start gap-3'}`}>
-        {/* Icon wrapper (animation class placed on span wrapper, NOT on SVG) */}
-        <div
-          className={`flex shrink-0 items-center justify-center ${isCompactIssue ? 'h-9 w-9 rounded-lg' : 'h-11 w-11 rounded-xl'}`}
-          style={{
-            backgroundColor: `color-mix(in srgb, ${color} ${hasTasks ? 28 : 14}%, transparent)`,
-          }}
-        >
-          <span
-            className={isNodeActive ? `flow-icon-${node.status}` : undefined}
-            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
-          >
-            <Icon className="h-5 w-5" strokeWidth={2.2} style={{ color }} aria-hidden="true" />
-          </span>
-        </div>
-
-        {/* Label & Count */}
-        <div className="min-w-0 flex-1">
+      {isCompactIssue ? (
+        /* Ô lỗi: icon · tên · số đếm trên một dòng, số canh phải. */
+        <div className="flex w-full min-w-0 items-center gap-2.5">
           <div
-            className={`text-[15px] font-semibold flex items-center justify-between ${isCompactIssue ? 'text-sm' : ''}`}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
+            style={{ backgroundColor: `color-mix(in srgb, ${color} ${hasTasks ? 28 : 14}%, transparent)` }}
+          >
+            <Icon className="h-[18px] w-[18px]" strokeWidth={2.2} style={{ color }} aria-hidden="true" />
+          </div>
+          <span
+            className="min-w-0 truncate text-sm font-semibold"
             style={{ color: isDisabled ? 'var(--t-text-3)' : (hasTasks ? 'var(--t-text)' : 'var(--t-text-2)') }}
             title={nodeTooltip || label}
           >
-            <span className="whitespace-nowrap">{label}</span>
-            {isDisabled && (
-              <span
-                data-testid="badge-audit-disabled"
-                className="ml-1 shrink-0 rounded-full bg-[var(--t-surface-3)] px-1.5 py-0.2 text-[10px] font-medium text-[var(--t-text-3)]"
-                title={t('tasks.flow.auditDisabledTooltip')}
-              >
-                {t('tasks.flow.auditDisabled')}
-              </span>
-            )}
-            {!isDisabled && isIssueNode && hasTasks && (
-              <span
-                data-testid={`badge-${node.status}`}
-                className="ml-1 shrink-0 rounded-full bg-[color-mix(in_srgb,var(--t-crit)_18%,transparent)] px-1.5 py-0.2 text-[10px] font-bold text-[var(--t-crit)]"
-              >
-                !
-              </span>
-            )}
-          </div>
-          <div className="mt-1 flex items-baseline gap-1.5">
+            {label}
+          </span>
+          {isDisabled && (
             <span
-              className={`inline-block tabular-nums font-mono font-bold leading-none ${isCompactIssue ? 'text-xl' : 'text-[28px]'} ${isBouncing ? 'flow-count-bounce' : ''}`}
-              style={{ color: hasTasks ? color : 'var(--t-text-3)' }}
+              data-testid="badge-audit-disabled"
+              className="shrink-0 rounded-full bg-[var(--t-surface-3)] px-1.5 py-0.2 text-[10px] font-medium text-[var(--t-text-3)]"
+              title={t('tasks.flow.auditDisabledTooltip')}
             >
-              {isLoading ? '…' : total}
+              {t('tasks.flow.auditDisabled')}
             </span>
-            <span className="text-xs font-normal text-[var(--t-text-3)]">
-              {t('tasks.flow.taskUnit')}
+          )}
+          {!isDisabled && hasTasks && (
+            <span
+              data-testid={`badge-${node.status}`}
+              className="shrink-0 rounded-full bg-[color-mix(in_srgb,var(--t-crit)_18%,transparent)] px-1.5 py-0.2 text-[10px] font-bold text-[var(--t-crit)]"
+            >
+              !
             </span>
+          )}
+          <span
+            className={`ml-auto inline-block shrink-0 tabular-nums font-mono text-lg font-bold leading-none ${isBouncing ? 'flow-count-bounce' : ''}`}
+            style={{ color: hasTasks ? color : 'var(--t-text-3)' }}
+          >
+            {isLoading ? '…' : total}
+          </span>
+        </div>
+      ) : (
+        <div className={`flex min-w-0 ${isCompactIssue ? 'items-center gap-2.5' : 'items-start gap-3'}`}>
+          {/* Icon wrapper (animation class placed on span wrapper, NOT on SVG) */}
+          <div
+            className={`flex shrink-0 items-center justify-center ${isCompactIssue ? 'h-9 w-9 rounded-lg' : 'h-11 w-11 rounded-xl'}`}
+            style={{
+              backgroundColor: `color-mix(in srgb, ${color} ${hasTasks ? 28 : 14}%, transparent)`,
+            }}
+          >
+            <span
+              className={isNodeActive ? `flow-icon-${node.status}` : undefined}
+              style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+            >
+              <Icon className="h-5 w-5" strokeWidth={2.2} style={{ color }} aria-hidden="true" />
+            </span>
+          </div>
+
+          {/* Label & Count */}
+          <div className="min-w-0 flex-1">
+            <div
+              className={`text-[15px] font-semibold flex items-center justify-between ${isCompactIssue ? 'text-sm' : ''}`}
+              style={{ color: isDisabled ? 'var(--t-text-3)' : (hasTasks ? 'var(--t-text)' : 'var(--t-text-2)') }}
+              title={nodeTooltip || label}
+            >
+              <span className="whitespace-nowrap">{label}</span>
+              {isDisabled && (
+                <span
+                  data-testid="badge-audit-disabled"
+                  className="ml-1 shrink-0 rounded-full bg-[var(--t-surface-3)] px-1.5 py-0.2 text-[10px] font-medium text-[var(--t-text-3)]"
+                  title={t('tasks.flow.auditDisabledTooltip')}
+                >
+                  {t('tasks.flow.auditDisabled')}
+                </span>
+              )}
+              {!isDisabled && isIssueNode && hasTasks && (
+                <span
+                  data-testid={`badge-${node.status}`}
+                  className="ml-1 shrink-0 rounded-full bg-[color-mix(in_srgb,var(--t-crit)_18%,transparent)] px-1.5 py-0.2 text-[10px] font-bold text-[var(--t-crit)]"
+                >
+                  !
+                </span>
+              )}
+            </div>
+            <div className="mt-1 flex items-baseline gap-1.5">
+              <span
+                className={`inline-block tabular-nums font-mono font-bold leading-none ${isCompactIssue ? 'text-xl' : 'text-[28px]'} ${isBouncing ? 'flow-count-bounce' : ''}`}
+                style={{ color: hasTasks ? color : 'var(--t-text-3)' }}
+              >
+                {isLoading ? '…' : total}
+              </span>
+              <span className="text-xs font-normal text-[var(--t-text-3)]">
+                {t('tasks.flow.taskUnit')}
+              </span>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {description && <div className="mt-1 text-xs text-[var(--t-text-2)]">{description}</div>}
 
@@ -439,8 +482,6 @@ const FlowEdges: React.FC<{
     ['queued', 'running'],
     ['running', 'checking'],
     ['checking', 'review'],
-    ['done', 'auditing'],
-    ['auditing', 'pushed'],
   ];
 
   const upper: Array<{ from: FlowStatus; to: FlowStatus; label: string }> = [
@@ -457,11 +498,11 @@ const FlowEdges: React.FC<{
   const queuedX = bQueued.x + bQueued.w / 2;
   const bReview = getNodeBox('review');
   const bRunning = getNodeBox('running');
-  const upperLaneY = Math.min(...upper.map(({ to }) => getNodeBox(to).y)) - 36;
+  const upperLaneY = Math.min(...upper.map(({ to }) => getNodeBox(to).y)) - 32;
   const lowerLaneY = Math.max(...lower.map(({ to }) => {
     const b = getNodeBox(to);
     return b.y + b.h;
-  })) + 36;
+  })) + 32;
 
   const renderIssueEdge = (
     edge: { from: FlowStatus; to: FlowStatus; label: string },
@@ -470,18 +511,18 @@ const FlowEdges: React.FC<{
     const bFrom = getNodeBox(edge.from);
     const bTo = getNodeBox(edge.to);
     const hasTasks = (counts[edge.to] ?? 0) > 0;
-    const xFrom = bFrom.x + bFrom.w * 0.7;
-    const xTo = bTo.x + bTo.w * 0.7;
-    const yFrom = direction === 'upper' ? bFrom.y + 8 : bFrom.y + bFrom.h - 8;
-    const yTo = direction === 'upper' ? bTo.y + bTo.h - 8 : bTo.y + 8;
+    const xFrom = bFrom.x + bFrom.w / 2;
+    const xTo = bTo.x + bTo.w / 2;
+    const yFrom = direction === 'upper' ? bFrom.y - 2 : bFrom.y + bFrom.h + 2;
+    const yTo = direction === 'upper' ? bTo.y + bTo.h + 6 : bTo.y - 6;
 
     return (
       <Edge
         key={`${edge.from}-${edge.to}`}
         d={`M ${xFrom} ${yFrom} L ${xTo} ${yTo}`}
         label={edge.label}
-        lx={xFrom + 8}
-        ly={direction === 'upper' ? (yFrom + yTo) / 2 - 4 : (bFrom.y + bFrom.h + bTo.y) / 2}
+        lx={xFrom + 10}
+        ly={(yFrom + yTo) / 2 + 4}
         anchor="start"
         animated={hasTasks}
         stroke={hasTasks ? 'var(--t-crit)' : EDGE_STYLE.stroke}
@@ -491,26 +532,50 @@ const FlowEdges: React.FC<{
     );
   };
 
+  // Mỗi ô lỗi có một nhánh dọc lên/xuống làn chung; làn chung vẽ một lần để nét đứt không chồng lên nhau.
   const renderRetryPath = (edge: { to: FlowStatus }, direction: 'upper' | 'lower') => {
     const box = getNodeBox(edge.to);
-    const x = box.x + box.w * 0.3;
+    const x = box.x + box.w / 2;
     const laneY = direction === 'upper' ? upperLaneY : lowerLaneY;
-    const sourceY = direction === 'upper' ? box.y : box.y + box.h;
-    const queuedY = direction === 'upper' ? bQueued.y - 6 : bQueued.y + bQueued.h + 6;
+    const sourceY = direction === 'upper' ? box.y - 2 : box.y + box.h + 2;
     const hasTasks = (counts[edge.to] ?? 0) > 0;
 
     return (
       <path
         key={`${direction}-retry-${edge.to}`}
-        d={`M ${x} ${sourceY} L ${x} ${laneY} L ${queuedX} ${laneY} L ${queuedX} ${queuedY}`}
+        d={`M ${x} ${sourceY} L ${x} ${laneY}`}
         fill="none"
         strokeWidth={1.75}
         strokeDasharray="6 5"
         stroke={EDGE_STYLE.stroke}
-        markerEnd="url(#flow-arrow)"
+        strokeOpacity={EDGE_STYLE.strokeOpacity}
         className={hasTasks ? 'flow-edge-animated' : undefined}
         data-animated={hasTasks ? 'true' : undefined}
         data-edge={`retry-${direction}`}
+      />
+    );
+  };
+
+  const renderRetryTrunk = (edges: Array<{ to: FlowStatus }>, direction: 'upper' | 'lower') => {
+    const laneY = direction === 'upper' ? upperLaneY : lowerLaneY;
+    const farX = Math.max(...edges.map(({ to }) => {
+      const box = getNodeBox(to);
+      return box.x + box.w / 2;
+    }));
+    const queuedY = direction === 'upper' ? bQueued.y - 7 : bQueued.y + bQueued.h + 7;
+    const hasTasks = edges.some(({ to }) => (counts[to] ?? 0) > 0);
+    return (
+      <path
+        d={`M ${farX} ${laneY} L ${queuedX} ${laneY} L ${queuedX} ${queuedY}`}
+        fill="none"
+        strokeWidth={1.75}
+        strokeDasharray="6 5"
+        stroke={EDGE_STYLE.stroke}
+        strokeOpacity={EDGE_STYLE.strokeOpacity}
+        markerEnd="url(#flow-arrow)"
+        className={hasTasks ? 'flow-edge-animated' : undefined}
+        data-animated={hasTasks ? 'true' : undefined}
+        data-edge={`retry-${direction}-trunk`}
       />
     );
   };
@@ -521,8 +586,8 @@ const FlowEdges: React.FC<{
       {main.map(([from, to]) => {
         const bFrom = getNodeBox(from);
         const bTo = getNodeBox(to);
-        const startX = bFrom.x + bFrom.w + 2;
-        const endX = bTo.x - 6;
+        const startX = bFrom.x + bFrom.w + 4;
+        const endX = bTo.x - 7;
         const midY = bFrom.y + bFrom.h * 0.36;
         const animated = isStatusActive(from) || isStatusActive(to);
 
@@ -542,7 +607,7 @@ const FlowEdges: React.FC<{
         const startY = bReview.y + bReview.h;
         const endX = getNodeBox('done').x + getNodeBox('done').w * 0.7;
         const endY = getNodeBox('done').y;
-        return <Edge d={`M ${startX} ${startY} L ${endX} ${endY - 6}`} label={t('tasks.flow.edgeApproval')} lx={startX + 10} ly={(startY + endY) / 2 - 8} anchor="start" animated={isStatusActive('review') || isStatusActive('done')} />;
+        return <Edge d={`M ${startX} ${startY + 2} L ${endX} ${endY - 7}`} label={t('tasks.flow.edgeApproval')} lx={startX + 10} ly={(startY + endY) / 2 + 4} anchor="start" animated={isStatusActive('review') || isStatusActive('done')} />;
       })()}
 
       {/* Lower row travels right-to-left. */}
@@ -550,7 +615,7 @@ const FlowEdges: React.FC<{
         const bFrom = getNodeBox(from);
         const bTo = getNodeBox(to);
         const animated = isStatusActive(from) || isStatusActive(to);
-        return <Edge key={`${from}-${to}`} d={`M ${bFrom.x - 2} ${bFrom.y + bFrom.h * 0.36} L ${bTo.x + bTo.w + 6} ${bTo.y + bTo.h * 0.36}`} animated={animated} kind="main-lower" />;
+        return <Edge key={`${from}-${to}`} d={`M ${bFrom.x - 4} ${bFrom.y + bFrom.h * 0.36} L ${bTo.x + bTo.w + 7} ${bTo.y + bTo.h * 0.36}`} animated={animated} kind="main-lower" />;
       })}
 
       {/* Errors above their source point upward; errors below point downward. */}
@@ -558,11 +623,28 @@ const FlowEdges: React.FC<{
       {lower.map((edge) => renderIssueEdge(edge, 'lower'))}
 
       {/* Reviewer rework loop between the two rows. */}
-      <Edge d={`M ${bReview.x + bReview.w * 0.3} ${bReview.y + bReview.h} L ${bReview.x + bReview.w * 0.3} ${bReview.y + bReview.h + 48} L ${bRunning.x + bRunning.w / 2} ${bReview.y + bReview.h + 48} L ${bRunning.x + bRunning.w / 2} ${bRunning.y + bRunning.h + 2}`} dashed animated={(counts.review ?? 0) > 0} label={t('tasks.flow.edgeRework')} lx={(bReview.x + bRunning.x) / 2} ly={bReview.y + bReview.h + 54} />
+      {(() => {
+        const fromX = bReview.x + bReview.w * 0.3;
+        const toX = bRunning.x + bRunning.w / 2;
+        const laneY = Math.max(bReview.y + bReview.h, bRunning.y + bRunning.h) + 36;
+        return (
+          <Edge
+            d={`M ${fromX} ${bReview.y + bReview.h + 2} L ${fromX} ${laneY} L ${toX} ${laneY} L ${toX} ${bRunning.y + bRunning.h + 7}`}
+            dashed
+            animated={(counts.review ?? 0) > 0}
+            label={t('tasks.flow.edgeRework')}
+            lx={(fromX + toX) / 2}
+            ly={laneY + 18}
+            kind="rework"
+          />
+        );
+      })()}
 
       {/* Shared retry lanes: upper issues return from above, lower issues from below. */}
       {upper.map((edge) => renderRetryPath(edge, 'upper'))}
       {lower.map((edge) => renderRetryPath(edge, 'lower'))}
+      {renderRetryTrunk(upper, 'upper')}
+      {renderRetryTrunk(lower, 'lower')}
       <text x={queuedX + 10} y={upperLaneY - 8} fontSize={11.5} textAnchor="start" className="select-none fill-[var(--t-text-3)] font-medium">{t('tasks.flow.edgeRetry')}</text>
       <text x={queuedX + 10} y={lowerLaneY + 16} fontSize={11.5} textAnchor="start" className="select-none fill-[var(--t-text-3)] font-medium">{t('tasks.flow.edgeRetry')}</text>
     </g>
@@ -1212,7 +1294,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
       >
         <div
           ref={boardRef}
-          className="relative min-w-[1360px] min-h-[max(480px,calc(100vh-280px))] pt-12 pb-12"
+          className="relative min-w-[1280px] min-h-[max(480px,calc(100vh-280px))] pt-12 pb-12"
           role="group"
           aria-label={t('tasks.flow.ariaLabel')}
         >
@@ -1249,7 +1331,7 @@ export const TaskFlow: React.FC<{ project: string; search: string }> = ({ projec
           </svg>
 
           {/* HTML / CSS Grid for nodes */}
-          <div className="relative z-1 grid min-h-[840px] min-w-[1360px] grid-cols-[repeat(5,minmax(216px,1fr))] grid-rows-[60px_minmax(124px,auto)_72px_minmax(124px,auto)_60px] content-start gap-x-10 gap-y-0 px-6 py-6">
+          <div className="relative z-1 grid min-w-[1280px] grid-cols-[repeat(5,minmax(200px,1fr))] grid-rows-[56px_64px_minmax(124px,auto)_104px_minmax(124px,auto)_64px_56px] content-start gap-x-14 gap-y-0 px-6 py-6">
             {NODE_DEFS.map((def) => (
               <FlowNodeCard
                 key={def.status}

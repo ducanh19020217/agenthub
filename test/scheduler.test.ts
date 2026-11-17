@@ -5,8 +5,8 @@ import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { execFileSync, spawn } from 'node:child_process';
 import { loadConfig, DEFAULT_SCHEDULER_LIMITS, saveConfig } from '../src/config.js';
-import { openDatabase, ProjectRepo, DepartmentRepo, ProfileRepo, QuotaMarkRepo, TaskRepo, RunRepo, EventRepo, ReviewRepo } from '../src/db/index.js';
-import { Scheduler, TIMEOUT_RESUME_NOTE } from '../src/scheduler/index.js';
+import { openDatabase, DepartmentRepo, ProfileModelRepo, ProfileRepo, ProjectRepo, QuotaMarkRepo, TaskRepo, RunRepo, EventRepo, ReviewRepo } from '../src/db/index.js';
+import { Scheduler, TIMEOUT_RESUME_NOTE, detectModelUnavailable } from '../src/scheduler/index.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
 import { QuotaService } from '../src/quota/index.js';
 import { ClaudeFailoverState } from '../src/chat/failover.js';
@@ -637,6 +637,52 @@ describe('Scheduler regression fixes', () => {
     }, { timeout: 5000 });
     scheduler.stop();
     delete process.env.FAKE_MODE;
+  });
+
+  it('fails over and persists a provider-rejected model pair', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'keyring', home: null, email: 'p1@example.com', enabled: 1 });
+    taskRepo.insert({
+      id: 'test-project/model-rejected',
+      projectId: 'test-project',
+      slug: 'model-rejected',
+      title: 'Model rejected',
+      status: 'queued',
+      modelChain: JSON.stringify(['gemini-3.8-flash-high', 'gemini-3.8-flash-medium']),
+    });
+    process.env.FAKE_MODE = 'model-not-found';
+    const scheduler = new Scheduler(
+      config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['agy', new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'))]]),
+    );
+    scheduler.setProfileModelRepo(new ProfileModelRepo(db));
+    try {
+      scheduler.tick();
+      await vi.waitFor(() => {
+        expect(runRepo.getByTask('test-project/model-rejected').map((run) => run.model))
+          .toContain('gemini-3.8-flash-medium');
+      }, { timeout: 5000 });
+      const rejectedRun = runRepo.getByTask('test-project/model-rejected')
+        .find((run) => run.model === 'gemini-3.8-flash-high');
+      expect(rejectedRun?.outcome).toBe('crashed');
+      expect(rejectedRun?.reason).toBe('model_unavailable');
+      expect(eventRepo.getRecent(50).some((event) => event.type === 'task.model_unavailable')).toBe(true);
+      const profileModel = db.prepare(
+        'SELECT unavailableAt, unavailableReason FROM profile_models WHERE profileName = ? AND modelId = ?',
+      ).get('p1', 'gemini-3.8-flash-high') as { unavailableAt: number | null; unavailableReason: string | null } | undefined;
+      expect(profileModel?.unavailableAt).toBeTypeOf('number');
+      expect(profileModel?.unavailableReason).toBe('provider_rejected');
+      expect(scheduler.profileHasModel('p1', 'gemini-3.8-flash-high')).toBe(false);
+    } finally {
+      scheduler.stop();
+      delete process.env.FAKE_MODE;
+    }
+  });
+
+  it('detects provider rejection only on engine error lines', () => {
+    expect(detectModelUnavailable('ERROR: {"error":{"code":"model_not_found"}}')).toBe(true);
+    expect(detectModelUnavailable('prompt mentions model_not_found')).toBe(false);
   });
 
   it('keeps slots stable when an earlier task is cancelled', () => {

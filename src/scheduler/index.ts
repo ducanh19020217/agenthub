@@ -277,6 +277,21 @@ function isContentReview(by: string | undefined, source: ReviewSource): boolean 
 /** Times an arbiter rejection sends a task back before it is blocked for a person. */
 const ARBITER_ROUNDS = 2;
 const ARBITER_RETRY_MODEL = 'claude-opus-4-6-thinking';
+/** How long a profile/model pair the provider rejected as unknown stays out of selection. */
+const MODEL_UNAVAILABLE_BLOCK_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * True when the engine's own error output says the model cannot be used by this account.
+ * Only engine ERROR lines count: the run log also echoes the prompt, which may quote these words.
+ */
+export function detectModelUnavailable(logTail: string): boolean {
+  return /^ERROR:.*(?:model_not_found|model is not supported)/im.test(logTail);
+}
+
+function unavailableModelKey(profileName: string, model: string): string {
+  const bare = model.replace(/^(?:codex|claude):/, '');
+  return `${profileName}\u0000${bare}`;
+}
 const REVIEWER_CRASH_BACKOFF_MS = 60_000;
 const REVIEWER_LOCK_BACKOFF_MS = 10_000;
 
@@ -390,6 +405,7 @@ export class Scheduler {
   private lastLoadHighEventAt: number | null = null;
   private lastLoadHighEventSnapshot: LoadSnapshot | null = null;
   private notifiedSkippedModels = new Set<string>();
+  private unavailableProfileModels = new Map<string, number>();
   private resourceTimer: ReturnType<typeof setInterval> | null = null;
   private diskReader: (p: string) => DiskSpace = getDiskSpaceSync;
   private usageService?: QuotaUsageService;
@@ -554,11 +570,15 @@ export class Scheduler {
   profileHasModel(profileName: string, model: string): boolean {
     const profile = this.profileRepo.get(profileName);
     if (!profile) return false;
+    const blockedUntil = (this.unavailableProfileModels as Map<string, number> | undefined)
+      ?.get(unavailableModelKey(profileName, model));
+    if (blockedUntil !== undefined && blockedUntil > Date.now()) return false;
     if (profile.authState === 'not_logged_in') return false;
 
     if (this.profileModelRepo) {
       const rows = this.profileModelRepo.getForProfile(profileName);
       if (rows.length > 0) {
+        if (!isProfileLoggedIn(profile)) return false;
         // Discovery stores Claude ids bare ("opus") and Codex ids prefixed ("codex:gpt-…"),
         // while callers (e.g. reviewer selection) may pass "claude:opus" or a bare Codex id.
         const normalize = (id: string): string => {
@@ -586,6 +606,11 @@ export class Scheduler {
       return ['sonnet', 'opus', 'haiku'].includes(raw);
     }
     return false;
+  }
+
+  /** Remember that the provider rejected this model for this profile. */
+  markModelUnavailable(profileName: string, model: string): void {
+    this.unavailableProfileModels.set(unavailableModelKey(profileName, model), Date.now() + MODEL_UNAVAILABLE_BLOCK_MS);
   }
 
   private schedulerLimits() {
@@ -2931,6 +2956,23 @@ export class Scheduler {
           this.eventBus.emit('task.queued', taskId, {
             reason: 'quota_retry',
             failover: next ? 'available' : 'waiting_quota',
+            model: rt.model,
+            engine: rt.engine.id,
+            profile: rt.profileName,
+          });
+        } else if (detectModelUnavailable(logTail)) {
+          // The account cannot use this model: fail over instead of failing the task.
+          this.runRepo.finish(rt.runId, 'crashed', undefined, 'model_unavailable');
+          this.markModelUnavailable(rt.profileName, rt.model);
+          this.taskRepo.update(taskId, { status: 'queued', resume: 1, transientRetries: 0, notBefore: null });
+          this.eventBus.emit('task.model_unavailable', taskId, {
+            model: rt.model,
+            profile: rt.profileName,
+            engine: rt.engine.id,
+            blockedForHours: MODEL_UNAVAILABLE_BLOCK_MS / 3_600_000,
+          });
+          this.eventBus.emit('task.queued', taskId, {
+            reason: 'model_unavailable',
             model: rt.model,
             engine: rt.engine.id,
             profile: rt.profileName,

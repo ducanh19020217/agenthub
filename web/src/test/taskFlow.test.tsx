@@ -398,13 +398,13 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     const wrapper = await screen.findByTestId('flow-view-wrapper');
     const board = wrapper.querySelector('[role="group"]');
     expect(board).not.toBeNull();
-    expect(board?.className).toContain('min-w-[1360px]');
+    expect(board?.className).toContain('min-w-[1280px]');
     expect(board?.className).toContain('min-h-[max(480px,calc(100vh-280px))]');
 
     const grid = board?.querySelector('.grid');
     expect(grid).not.toBeNull();
-    expect(grid?.className).toContain('grid-cols-[repeat(5,minmax(216px,1fr))]');
-    expect(grid?.className).toContain('grid-rows-[60px_minmax(124px,auto)_72px_minmax(124px,auto)_60px]');
+    expect(grid?.className).toContain('grid-cols-[repeat(5,minmax(200px,1fr))]');
+    expect(grid?.className).toContain('grid-rows-[56px_64px_minmax(124px,auto)_104px_minmax(124px,auto)_64px_56px]');
     expect(board?.className).toContain('pt-12');
     expect(board?.className).toContain('pb-12');
   });
@@ -423,9 +423,9 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     const edges = await screen.findByTestId('flow-edges');
     await waitFor(() => expect(screen.getByTestId('flow-node-waiting_quota')).toHaveAttribute('data-count', '1'));
 
-    expect(screen.getByTestId('flow-node-auditing')).toHaveClass('col-start-4', 'row-start-4');
-    expect(screen.getByTestId('flow-node-pushed')).toHaveClass('col-start-3', 'row-start-4');
-    expect(screen.getByTestId('flow-node-done')).toHaveClass('col-start-5', 'row-start-4');
+    expect(screen.getByTestId('flow-node-auditing')).toHaveClass('col-start-4', 'row-start-5');
+    expect(screen.getByTestId('flow-node-pushed')).toHaveClass('col-start-3', 'row-start-5');
+    expect(screen.getByTestId('flow-node-done')).toHaveClass('col-start-5', 'row-start-5');
 
     const upperIssuePaths = edges.querySelectorAll('[data-edge="issue-upper"]');
     const lowerIssuePaths = edges.querySelectorAll('[data-edge="issue-lower"]');
@@ -547,14 +547,14 @@ describe('TaskFlow (sơ đồ quy trình)', () => {
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
   });
 
-  it('enforces min-w-[1360px] and five wide columns for flow nodes', async () => {
+  it('enforces min-w-[1280px] and five wide columns for flow nodes', async () => {
     renderPage('/tasks?view=flow');
     const wrapper = await screen.findByTestId('flow-view-wrapper');
     const board = wrapper.querySelector('[role="group"]');
-    expect(board?.className).toContain('min-w-[1360px]');
+    expect(board?.className).toContain('min-w-[1280px]');
 
     const grid = board?.querySelector('.grid');
-    expect(grid?.className).toContain('grid-cols-[repeat(5,minmax(216px,1fr))]');
+    expect(grid?.className).toContain('grid-cols-[repeat(5,minmax(200px,1fr))]');
   });
 
   it('renders merge_failed and push_failed nodes with correct counts and warning badges', async () => {

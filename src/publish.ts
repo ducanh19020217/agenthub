@@ -360,6 +360,7 @@ export async function findMergeCandidatesForTask(
   candidateBranches: string[],
   env: NodeJS.ProcessEnv,
   failClosed = false,
+  requireTaskRef = false,
 ): Promise<TaskMergeCandidatesResult> {
   const taskBranch = task.branch || `agenthub/${task.slug}`;
   let branchRef = `refs/heads/${taskBranch}`;
@@ -405,6 +406,15 @@ export async function findMergeCandidatesForTask(
         }
       }
     }
+  }
+
+  // Without any ref of the task branch there is no way to prove which merge
+  // parent carries the task's commits; commit-message / log heuristics are not
+  // proof. When the caller needs a verified task source, fail closed.
+  if (requireTaskRef && (!hasBranch || !branchSha)) {
+    throw new Error(
+      `Cannot verify task source for audit discovery: no ref of task branch "${taskBranch}" exists (checked refs/heads, remote tracking refs and sourceRef).`,
+    );
   }
 
   const validRefs: string[] = [];
@@ -730,14 +740,12 @@ export async function getTaskDiff(
 
   const taskBranch = task.branch || `agenthub/${task.slug}`;
   const branchRef = `refs/heads/${taskBranch}`;
-  const branchExists = await refExists(repoPath, branchRef, env);
+  // Audit diff discovery is fail-closed: a git error while checking or reading
+  // the task branch must not be mistaken for "branch missing".
+  const branchExists = await refExistsStrict(repoPath, branchRef, env);
   let branchShaValue: string | null = null;
   if (branchExists) {
-    try {
-      branchShaValue = (await runGit(['-C', repoPath, 'rev-parse', branchRef], repoPath, env)).trim();
-    } catch {
-      branchShaValue = null;
-    }
+    branchShaValue = (await runGit(['-C', repoPath, 'rev-parse', '--verify', `${branchRef}^{commit}`], repoPath, env)).trim();
   }
 
   // 1. Prioritize forward merge commit(s) on snapshot of sourceSha/sourceBranch or targetSha/targetBranch
@@ -761,11 +769,16 @@ export async function getTaskDiff(
     return new RegExp(`into\\s+['"/]?(refs/heads/)?(agenthub/)?${escaped}(['"/)]|\\s*$)`, 'i');
   });
 
+  // The audit diff itself must be provably the task's own commits, so a task
+  // branch ref is required here (fail-closed). Listing which tasks to audit
+  // (findTasksToAudit) does not require it: an unverifiable task that is
+  // picked up there still fails here instead of being silently skipped.
   const { forwardMerges, rejectedMerges } = await findMergeCandidatesForTask(
     repoPath,
     task,
     candidateBranches,
     env,
+    true,
     true,
   );
 
@@ -803,34 +816,40 @@ export async function getTaskDiff(
   // 2. If no forward merge commit was found and no merges were rejected, use snapshot commit or branch
   if (!usedMergeDiff) {
     let taskSnapshotCommit: string | null = null;
-    if (sourceSha && (taskBranch === sourceBranch || !task.branch)) {
+    // Only when the task branch *is* the source branch does the source snapshot
+    // equal the task's content; otherwise it would pull in other tasks' commits.
+    if (sourceSha && taskBranch === sourceBranch) {
       taskSnapshotCommit = sourceSha;
     } else if (sourceSha && branchExists) {
+      // `git merge-base` exits 1 when there is no common ancestor; anything
+      // else is a real error and fails closed instead of falling through to
+      // the branch tip.
+      let mb = '';
       try {
-        const mb = (await runGit(['-C', repoPath, 'merge-base', sourceSha, `refs/heads/${taskBranch}`], repoPath, env)).trim();
-        if (mb && (await isAncestor(repoPath, mb, sourceSha, env))) {
-          taskSnapshotCommit = mb;
-        }
-      } catch {
-        // ignore
+        mb = (await runGit(['-C', repoPath, 'merge-base', sourceSha, `refs/heads/${taskBranch}`], repoPath, env)).trim();
+      } catch (err: unknown) {
+        if (!(typeof err === 'object' && err !== null && 'code' in err && (err as { code: unknown }).code === 1)) throw err;
+      }
+      if (mb && (await isAncestor(repoPath, mb, sourceSha, env))) {
+        taskSnapshotCommit = mb;
       }
     } else if (targetSha && branchExists) {
+      // `git merge-base` exits 1 when there is no common ancestor; anything
+      // else is a real error and fails closed instead of falling through to
+      // the branch tip.
+      let mb = '';
       try {
-        const mb = (await runGit(['-C', repoPath, 'merge-base', targetSha, `refs/heads/${taskBranch}`], repoPath, env)).trim();
-        if (mb && (await isAncestor(repoPath, mb, targetSha, env))) {
-          taskSnapshotCommit = mb;
-        }
-      } catch {
-        // ignore
+        mb = (await runGit(['-C', repoPath, 'merge-base', targetSha, `refs/heads/${taskBranch}`], repoPath, env)).trim();
+      } catch (err: unknown) {
+        if (!(typeof err === 'object' && err !== null && 'code' in err && (err as { code: unknown }).code === 1)) throw err;
+      }
+      if (mb && (await isAncestor(repoPath, mb, targetSha, env))) {
+        taskSnapshotCommit = mb;
       }
     }
 
     if (!taskSnapshotCommit && branchExists) {
-      try {
-        taskSnapshotCommit = (await runGit(['-C', repoPath, 'rev-parse', `refs/heads/${taskBranch}`], repoPath, env)).trim();
-      } catch {
-        // ignore
-      }
+      taskSnapshotCommit = branchShaValue;
     }
 
     if (taskSnapshotCommit) {

@@ -292,10 +292,19 @@ const FlowNodeCard: React.FC<{
         /* Ô lỗi: icon · tên · số đếm trên một dòng, số canh phải. */
         <div className="flex w-full min-w-0 items-center gap-2.5">
           <div
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
+            className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
             style={{ backgroundColor: `color-mix(in srgb, ${color} ${hasTasks ? 28 : 14}%, transparent)` }}
           >
             <Icon className="h-[18px] w-[18px]" strokeWidth={2.2} style={{ color }} aria-hidden="true" />
+            {!isDisabled && hasTasks && (
+              /* Chấm cảnh báo ở góc icon để không chiếm chỗ của tên trạng thái. */
+              <span
+                data-testid={`badge-${node.status}`}
+                className="absolute -right-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[var(--t-crit)] text-[9px] font-bold leading-none text-white ring-2 ring-[var(--t-surface-2)]"
+              >
+                !
+              </span>
+            )}
           </div>
           <span
             className="min-w-0 truncate text-sm font-semibold"
@@ -311,14 +320,6 @@ const FlowNodeCard: React.FC<{
               title={t('tasks.flow.auditDisabledTooltip')}
             >
               {t('tasks.flow.auditDisabled')}
-            </span>
-          )}
-          {!isDisabled && hasTasks && (
-            <span
-              data-testid={`badge-${node.status}`}
-              className="shrink-0 rounded-full bg-[color-mix(in_srgb,var(--t-crit)_18%,transparent)] px-1.5 py-0.2 text-[10px] font-bold text-[var(--t-crit)]"
-            >
-              !
             </span>
           )}
           <span

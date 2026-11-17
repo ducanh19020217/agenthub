@@ -356,4 +356,44 @@ describe('CreateTaskPage', () => {
 
     expect(await screen.findByTestId('model-unavailable-warning')).toBeInTheDocument();
   });
+
+  describe('model bị tài khoản từ chối (unavailable)', () => {
+    const rejectedOptions = {
+      suggestions: [],
+      configured: [],
+      models: [
+        // Một profile từ chối nhưng profile khác vẫn chạy được: available=true, unavailable=true.
+        { id: 'codex:gpt-rejected', engine: 'codex', available: true, unavailable: true, verified: true, profiles: ['a', 'b'] },
+        { id: 'gemini-3.8-flash-high', engine: 'agy', available: true, verified: true, runVerified: true, profiles: ['a'] },
+      ],
+    } as any;
+
+    it('không cho đặt model bị từ chối làm model đầu chuỗi', async () => {
+      vi.spyOn(client, 'getConfig').mockResolvedValue({ modelChainHard: [], modelChainEasy: [] } as any);
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue(rejectedOptions);
+      renderPage();
+      const input = await screen.findByLabelText(/^Chuỗi model/);
+      await act(async () => {});
+
+      fireEvent.change(input, { target: { value: 'codex:gpt-rejected, gemini-3.8-flash-high' } });
+      expect((input as HTMLInputElement).value).toBe('');
+
+      fireEvent.change(input, { target: { value: 'gemini-3.8-flash-high, codex:gpt-rejected' } });
+      expect((input as HTMLInputElement).value).toBe('gemini-3.8-flash-high, codex:gpt-rejected');
+
+      // Model bị từ chối không nằm trong gợi ý chọn nhanh.
+      const values = Array.from(document.querySelectorAll('#create-task-model-suggestions option')).map((o) => (o as HTMLOptionElement).value);
+      expect(values).toContain('gemini-3.8-flash-high');
+      expect(values).not.toContain('codex:gpt-rejected');
+    });
+
+    it('cảnh báo đỏ khi chuỗi đã lưu có model bị từ chối', async () => {
+      vi.spyOn(client, 'getConfig').mockResolvedValue({ modelChainHard: ['codex:gpt-rejected'], modelChainEasy: ['codex:gpt-rejected'] } as any);
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue(rejectedOptions);
+      renderPage();
+      const warning = await screen.findByTestId('model-unavailable-warning');
+      expect(warning.textContent).toContain('codex:gpt-rejected');
+      expect(warning.className).toContain('--t-crit');
+    });
+  });
 });

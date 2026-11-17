@@ -1052,6 +1052,11 @@ export interface DiscoveredModel {
   available: boolean;
   configured?: boolean;
   warning?: string | null;
+  /** Stable machine-readable reason; UI text comes from i18n and the flags below. */
+  warningCode?: 'unavailable_for_account' | 'unverified_catalog' | 'unverified_account' | 'configured_no_provider' | null;
+  runVerified?: boolean;
+  unavailable?: boolean;
+  unavailableReason?: string | null;
 }
 
 export interface ModelOptions {

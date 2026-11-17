@@ -57,6 +57,8 @@ export interface GroupedModelOption {
   verified?: boolean;
   available?: boolean;
   warning?: string | null;
+  runVerified?: boolean;
+  unavailable?: boolean;
 }
 
 export function formatDiscoveredModelOptions(
@@ -78,7 +80,7 @@ export function formatDiscoveredModelOptions(
     : models;
 
   if (onlyAvailable) {
-    filtered = filtered.filter((m) => m.available);
+    filtered = filtered.filter((m) => m.available && !m.unavailable);
   }
 
   const engineLabels: Record<string, string> = {
@@ -91,13 +93,22 @@ export function formatDiscoveredModelOptions(
     const group = engineLabels[m.engine] || m.engine;
     const baseName = m.name && m.name !== m.id ? `${m.name} (${m.id})` : m.id;
     let label = baseName;
-    if (m.profiles && m.profiles.length > 0) {
+    if (m.unavailable) {
+      const unavailableLabel = t?.('models.unavailableAccountWarning');
+      label = `${baseName} (⚠️ ${unavailableLabel && unavailableLabel !== 'models.unavailableAccountWarning'
+        ? unavailableLabel
+        : t?.('models.unavailableWarning') || 'Not usable with this account'})`;
+    } else if (m.profiles && m.profiles.length > 0) {
       const countStr = t
         ? t('models.accountCount', { count: m.profiles.length })
         : `${m.profiles.length} account(s)`;
       label = `${baseName} (${countStr})`;
     } else if (!m.available) {
       label = `${baseName} (⚠️ ${t ? t('models.unavailableWarning') : 'Unavailable'})`;
+    }
+    if (m.available && m.runVerified === false) {
+      const unverifiedLabel = t?.('models.unverifiedRunWarning');
+      label = `${label} (⚠️ ${unverifiedLabel && unverifiedLabel !== 'models.unverifiedRunWarning' ? unverifiedLabel : 'Not verified'})`;
     }
 
     return {
@@ -109,6 +120,8 @@ export function formatDiscoveredModelOptions(
       verified: m.verified,
       available: m.available,
       warning: m.warning,
+      runVerified: m.runVerified,
+      unavailable: m.unavailable,
     };
   });
 }

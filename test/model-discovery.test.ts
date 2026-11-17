@@ -396,6 +396,185 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(saved[0].verified).toBe(1);
   });
 
+  it('persists rejected models across discovery refreshes and clears rejection after a successful run', () => {
+    profileRepo.upsert({
+      name: 'codex-persisted',
+      engine: 'codex',
+      kind: 'isolated',
+      home: '/tmp/codex-persisted',
+      email: 'persisted@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+
+    profileModelRepo.markUnavailable('codex-persisted', 'codex:gpt-rejected', 'codex', 'provider_rejected', 100);
+    profileModelRepo.setForProfile('codex-persisted', [
+      { modelId: 'codex:gpt-rejected', modelName: 'Rejected', engine: 'codex', verified: true },
+      { modelId: 'codex:gpt-good', modelName: 'Good', engine: 'codex', verified: true },
+    ], 200);
+
+    let rows = profileModelRepo.getForProfile('codex-persisted');
+    expect(rows.find((row) => row.modelId === 'codex:gpt-rejected')).toMatchObject({
+      unavailableReason: 'provider_rejected',
+      unavailableAt: 100,
+    });
+    expect(rows.find((row) => row.modelId === 'codex:gpt-good')?.verified).toBe(1);
+
+    profileModelRepo.markRunVerified('codex-persisted', 'codex:gpt-rejected', 'codex', 300);
+    rows = profileModelRepo.getForProfile('codex-persisted');
+    expect(rows.find((row) => row.modelId === 'codex:gpt-rejected')).toMatchObject({
+      runVerified: 1,
+      unavailableReason: null,
+      unavailableAt: null,
+    });
+  });
+
+  it('exposes rejected and run-verified states in model options', () => {
+    const home = path.join(tmpDir, 'codex-options-home');
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(home, 'auth.json'), '{}');
+    profileRepo.upsert({
+      name: 'codex-options',
+      engine: 'codex',
+      kind: 'isolated',
+      home,
+      email: 'options@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.markUnavailable('codex-options', 'codex:gpt-rejected', 'codex', 'provider_rejected');
+    profileModelRepo.setForProfile('codex-options', [
+      { modelId: 'codex:gpt-unverified', engine: 'codex', verified: false },
+      { modelId: 'codex:gpt-verified', engine: 'codex', verified: false },
+    ]);
+    profileModelRepo.markRunVerified('codex-options', 'codex:gpt-verified', 'codex');
+
+    const result = AppService.prototype.getModelOptions.call({
+      profileRepo,
+      profileModelRepo,
+      config: { defaultModelChains: { hard: [], easy: [] }, reviewer: { order: [] } },
+    } as any);
+
+    expect(result.models.find((model) => model.id === 'codex:gpt-rejected')).toMatchObject({
+      unavailable: true,
+      available: false,
+      warningCode: 'unavailable_for_account',
+    });
+    expect(result.models.find((model) => model.id === 'codex:gpt-verified')).toMatchObject({
+      runVerified: true,
+      available: true,
+      warningCode: null,
+    });
+    expect(Scheduler.prototype.profileHasModel.call({ profileRepo, profileModelRepo } as any, 'codex-options', 'codex:gpt-rejected')).toBe(false);
+  });
+
+  it('markRunVerified does not create discovery rows for a profile without model discovery', () => {
+    const home = path.join(tmpDir, 'codex-no-discovery-home');
+    fs.mkdirSync(home, { recursive: true });
+    profileRepo.upsert({
+      name: 'codex-no-discovery',
+      engine: 'codex',
+      kind: 'isolated',
+      home,
+      enabled: 1,
+      accountType: 'personal',
+    });
+    expect(Scheduler.prototype.profileHasModel.call({ profileRepo, profileModelRepo } as any, 'codex-no-discovery', 'codex:gpt-5.6-luna')).toBe(true);
+
+    profileModelRepo.markRunVerified('codex-no-discovery', 'codex:gpt-5.6-luna', 'codex');
+
+    // Still no discovery rows, so the static model list keeps applying and the
+    // worker model stays usable after a reviewer/worker run on this profile.
+    expect(profileModelRepo.getForProfile('codex-no-discovery')).toHaveLength(0);
+    expect(Scheduler.prototype.profileHasModel.call({ profileRepo, profileModelRepo } as any, 'codex-no-discovery', 'codex:gpt-5.6-luna')).toBe(true);
+  });
+
+  it('keeps a rejection visible when another enabled profile can run the same model', () => {
+    for (const name of ['codex-rejected', 'codex-usable']) {
+      const home = path.join(tmpDir, name);
+      fs.mkdirSync(home, { recursive: true });
+      fs.writeFileSync(path.join(home, 'auth.json'), '{}');
+      profileRepo.upsert({
+        name,
+        engine: 'codex',
+        kind: 'isolated',
+        home,
+        email: `${name}@example.com`,
+        enabled: 1,
+        accountType: 'personal',
+      });
+    }
+    profileModelRepo.markUnavailable('codex-rejected', 'codex:gpt-shared', 'codex', 'provider_rejected');
+    profileModelRepo.setForProfile('codex-usable', [
+      { modelId: 'codex:gpt-shared', modelName: 'Shared model', engine: 'codex', verified: true },
+    ]);
+
+    const result = AppService.prototype.getModelOptions.call({
+      profileRepo,
+      profileModelRepo,
+      config: { defaultModelChains: { hard: [], easy: [] }, reviewer: { order: [] } },
+    } as any);
+    const shared = result.models.find((model) => model.id === 'codex:gpt-shared');
+
+    expect(shared).toMatchObject({ available: true, unavailable: true });
+    expect(shared?.profiles).toEqual(['codex-rejected', 'codex-usable']);
+  });
+
+  it('rejects saving a chain when every enabled profile rejects its model', () => {
+    profileRepo.upsert({
+      name: 'codex-config',
+      engine: 'codex',
+      kind: 'isolated',
+      home: '/tmp/codex-config',
+      email: 'config@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.markUnavailable('codex-config', 'codex:gpt-rejected', 'codex', 'provider_rejected');
+
+    expect(() => AppService.prototype.updateConfig.call({ profileRepo, profileModelRepo } as any, {
+      modelChainHard: ['codex:gpt-rejected'],
+    })).toThrow('bị mọi tài khoản từ chối');
+  });
+
+  it('rejects a Claude chain model (prefixed or alias) with HTTP 400 only when every Claude profile rejects it', () => {
+    for (const name of ['claude-config-a', 'claude-config-b']) {
+      profileRepo.upsert({
+        name,
+        engine: 'claude',
+        kind: 'isolated',
+        home: `/tmp/${name}`,
+        email: `${name}@example.com`,
+        enabled: 1,
+        accountType: 'personal',
+      });
+    }
+    profileModelRepo.markUnavailable('claude-config-a', 'sonnet', 'claude', 'provider_rejected');
+
+    const save = (model: string) => AppService.prototype.updateConfig.call(
+      { profileRepo, profileModelRepo, config: {}, saveConfig: () => undefined } as any,
+      { modelChainHard: [model] },
+    );
+    const statusOf = (model: string): number | undefined => {
+      try {
+        save(model);
+        return undefined;
+      } catch (err) {
+        return (err as { statusCode?: number }).statusCode;
+      }
+    };
+
+    // One Claude profile still accepts it: saving is allowed (no 400).
+    expect(statusOf('claude:sonnet')).not.toBe(400);
+    expect(statusOf('sonnet')).not.toBe(400);
+
+    profileModelRepo.markUnavailable('claude-config-b', 'sonnet', 'claude', 'provider_rejected');
+    for (const model of ['claude:sonnet', 'sonnet']) {
+      expect(() => save(model)).toThrow('bị mọi tài khoản từ chối');
+      expect(statusOf(model)).toBe(400);
+    }
+  });
+
   it('profileModelRepo supports same modelId across different engines for the same profile', () => {
     profileRepo.upsert({
       name: 'multi-engine-prof',
@@ -643,7 +822,42 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(flashHigh?.verified).toBe(false);
     expect(flashHigh?.available).toBe(false);
     expect(flashHigh?.warning).toBe('Chưa xác minh qua tài khoản');
+    expect(flashHigh?.warningCode).toBe('unverified_account');
     expect(result.suggestions).not.toContain('gemini-3.8-flash-high');
+  });
+
+  it('getModelOptions preserves provider rejection when another profile exposes the same model', () => {
+    profileRepo.upsert({
+      name: 'agy-usable',
+      engine: 'agy',
+      kind: 'keyring',
+      email: 'usable@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileRepo.upsert({
+      name: 'agy-rejected',
+      engine: 'agy',
+      kind: 'keyring',
+      email: 'rejected@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('agy-usable', [
+      { modelId: 'gemini-mixed-model', modelName: 'Gemini Mixed', engine: 'agy', verified: true },
+    ]);
+    profileModelRepo.markUnavailable('agy-rejected', 'gemini-mixed-model', 'agy', 'provider_rejected', 123);
+
+    const result = AppService.prototype.getModelOptions.call({
+      profileRepo,
+      profileModelRepo,
+      config: { defaultModelChains: { hard: [], easy: [] }, reviewer: { order: [] } },
+    } as any);
+    const mixed = result.models.find((model) => model.id === 'gemini-mixed-model');
+
+    expect(mixed?.available).toBe(true);
+    expect(mixed?.unavailable).toBe(true);
+    expect(mixed?.unavailableReason).toBe('provider_rejected');
   });
 
   it('AppService.getModelOptions includes brain.fallback models and warns if no profile provides them', () => {
@@ -727,11 +941,14 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
   });
 
   it('Scheduler.profileHasModel only allows defined fallback models for undiscovered codex profiles', () => {
+    const home = path.join(tmpDir, 'codex-undiscovered-home');
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(home, 'auth.json'), '{}');
     profileRepo.upsert({
       name: 'codex-undiscovered',
       engine: 'codex',
       kind: 'isolated',
-      home: '/tmp/dummy-codex',
+      home,
       email: 'codex@example.com',
       enabled: 1,
       accountType: 'personal',

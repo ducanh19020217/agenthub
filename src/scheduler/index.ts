@@ -505,6 +505,11 @@ export class Scheduler {
       }
     });
     this.eventBus.on('task.done', (taskId) => { this.clearReviewerTaskState(taskId); this.dirtyReviewAttempts.delete(taskId); this.onTaskDoneOrCancelled(taskId); });
+    this.eventBus.on('task.model_unavailable', (_taskId, payload: { profile?: string; model?: string; engine?: string }) => {
+      if (payload?.profile && payload.model && this.profileModelRepo) {
+        this.profileModelRepo.markUnavailable(payload.profile, payload.model, payload.engine || getModelEngine(payload.model), 'provider_rejected');
+      }
+    });
     this.eventBus.on('task.cancelled', (taskId) => { this.clearReviewerTaskState(taskId); this.dirtyReviewAttempts.delete(taskId); this.onTaskDoneOrCancelled(taskId); });
     this.eventBus.on('task.queued', (taskId) => {
       this.clearReviewerTaskState(taskId);
@@ -516,6 +521,17 @@ export class Scheduler {
   getCheckResults(taskId: string) { return this.db ? getCheckResults(this.db, taskId) : []; }
   getDatabase(): Database.Database | undefined { return this.db; }
   setProfileModelRepo(repo: ProfileModelRepo): void { this.profileModelRepo = repo; }
+
+  private markProfileModelRunVerified(profileName: string, model: string, engine: string): void {
+    if (!model) return;
+    if (!this.profileRepo.get(profileName)) return;
+    this.profileModelRepo?.markRunVerified(profileName, model, engine || getModelEngine(model));
+  }
+
+  private markReviewerModelRunVerified(profileName: string, run: { model?: string } | undefined): void {
+    if (!run?.model) return;
+    this.markProfileModelRunVerified(profileName, run.model, this.profileRepo.get(profileName)?.engine || getModelEngine(run.model));
+  }
 
   getKnownDiscoveredModels(): Set<string> {
     const known = new Set<string>();
@@ -578,6 +594,7 @@ export class Scheduler {
         };
         const wanted = normalize(model);
         const isClaudeAlias = profile.engine === 'claude' && ['sonnet', 'opus', 'haiku'].includes(wanted);
+        if (rows.some((r) => normalize(r.modelId) === wanted && Boolean(r.unavailableAt))) return false;
         if (rows.some((r) => normalize(r.modelId) === wanted && (Boolean(r.verified) || isClaudeAlias))) return true;
         // Discovery is additive: fall through to the statically known models below.
       }
@@ -1636,6 +1653,9 @@ export class Scheduler {
     const marker = this.markerForRun(task, startedAt);
     if (marker === 'done') {
       this.runRepo.finish(run.id, 'done');
+      if (persistedRun?.profileName && persistedRun.model) {
+        this.markProfileModelRunVerified(persistedRun.profileName, persistedRun.model, persistedRun.engine || getModelEngine(persistedRun.model));
+      }
       this.taskRepo.update(run.taskId, { status: 'checking' });
       this.eventBus.emit('task.checking', run.taskId, { reason: 'restart_marker' });
       void this.recoverCheckingTasks(run.taskId, run.id).catch((error) => {
@@ -2865,6 +2885,7 @@ export class Scheduler {
         }
       }
       this.runRepo.finish(rt.runId, 'done');
+      this.markProfileModelRunVerified(rt.profileName, rt.model, rt.engine.id);
       this.taskRepo.update(taskId, {
         status: 'checking',
         doneReport: markers.doneContent || currentTask.doneReport,
@@ -4028,6 +4049,7 @@ export class Scheduler {
     const checks = this.getCheckResults(taskId);
     if (checks.length === 0) {
       this.runRepo.finish(runId, 'done', undefined, 'reviewer had no persisted autocheck results');
+      this.markReviewerModelRunVerified(profileName, run);
       this.escalateReview(taskId, 'missing_autocheck_results', 'Không có kết quả autocheck đã lưu; cần người xác minh trước khi tiếp tục.');
       return;
     }
@@ -4062,6 +4084,7 @@ export class Scheduler {
     }
     if (this.isReadOnlyEnvironmentFeedback(result.verdict, result.feedback)) {
       this.runRepo.finish(runId, 'done', undefined, 'reviewer read-only environment error');
+      this.markReviewerModelRunVerified(profileName, run);
       this.escalateReview(taskId, 'reviewer_environment', result.feedback);
       return;
     }
@@ -4077,6 +4100,7 @@ export class Scheduler {
     const reviewerEngine = run?.engine || active.engine.id;
     const reviewerProfile = run?.profileName || active.profileName;
     this.runRepo.finish(runId, 'done');
+    this.markReviewerModelRunVerified(profileName, run);
     this.reviewerErrorCounts.delete(taskId);
     this.reviewerTaskBackoffUntil.delete(taskId);
     this.reviewerLastCrash.delete(taskId);

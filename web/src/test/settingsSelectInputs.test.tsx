@@ -40,7 +40,7 @@ function TestSelectWrapper({ initialValue = 'sonnet', options = ['sonnet', 'opus
   );
 }
 
-function TestSortableWrapper({ initialModels = ['sonnet', 'haiku'] }: { initialModels?: string[] }) {
+function TestSortableWrapper({ initialModels = ['sonnet', 'haiku'], unavailableModels }: { initialModels?: string[]; unavailableModels?: Set<string> }) {
   const [models, setModels] = useState<string[]>(initialModels);
   return (
     <div>
@@ -50,6 +50,7 @@ function TestSortableWrapper({ initialModels = ['sonnet', 'haiku'] }: { initialM
         models={models}
         onChange={setModels}
         availableOptions={['sonnet', 'opus', 'haiku', 'codex:gpt-5.6-luna']}
+        unavailableModels={unavailableModels}
         dataTestId="sortable-list"
       />
     </div>
@@ -84,6 +85,50 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
   });
 
   describe('1. SelectOrCustomInput Component', () => {
+    it('labels rejected models, warns for unverified models, and excludes rejected models from first-choice options', () => {
+      const rejected = {
+        id: 'codex:gpt-rejected',
+        engine: 'codex' as const,
+        profiles: ['codex-main'],
+        verified: false,
+        available: true,
+        unavailable: true,
+        unavailableReason: 'provider_rejected',
+      };
+      const unverified = {
+        id: 'codex:gpt-unverified',
+        engine: 'codex' as const,
+        profiles: ['codex-main'],
+        verified: true,
+        available: true,
+        runVerified: false,
+      };
+
+      const translate = (key: string) => key === 'models.unavailableAccountWarning'
+        ? 'Not usable with this account'
+        : key === 'models.unverifiedRunWarning' ? 'Not verified to run' : key;
+      const all = formatDiscoveredModelOptions([rejected, unverified], translate);
+      expect(all[0].label).toContain('Not usable with this account');
+      expect(all[1].label).toContain('Not verified to run');
+      expect(formatDiscoveredModelOptions([rejected, unverified], translate, 'codex', true).map((option) => option.value))
+        .toEqual(['codex:gpt-unverified']);
+    });
+
+    it('does not allow a rejected model to become the first chain entry', () => {
+      render(
+        <LocaleProvider initialLocale="vi">
+          <TestSortableWrapper
+            initialModels={['codex:gpt-rejected', 'codex:gpt-good']}
+            unavailableModels={new Set(['codex:gpt-rejected'])}
+          />
+        </LocaleProvider>,
+      );
+
+      const firstInput = screen.getByRole('textbox', { name: /Model Chain 1/i }) as HTMLInputElement;
+      fireEvent.change(firstInput, { target: { value: 'codex:gpt-rejected' } });
+      expect(screen.getByTestId('models-json').textContent).toBe(JSON.stringify(['codex:gpt-rejected', 'codex:gpt-good']));
+    });
+
     it('renders preset options and allows selecting a standard model', () => {
       render(
         <LocaleProvider initialLocale="vi">
@@ -249,6 +294,27 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
   });
 
   describe('2. SortableModelList Component', () => {
+    it('marks a rejected saved chain entry in red while offering only usable entries for insertion', () => {
+      render(
+        <LocaleProvider initialLocale="vi">
+          <SortableModelList
+            title="Model Chain"
+            models={['codex:gpt-rejected']}
+            onChange={() => {}}
+            availableOptions={[{ value: 'codex:gpt-usable', label: 'codex:gpt-usable' }]}
+            unavailableModels={new Set(['codex:gpt-rejected'])}
+            dataTestId="rejected-chain"
+          />
+        </LocaleProvider>,
+      );
+
+      expect(screen.getByTestId('rejected-chain')).toHaveAttribute('data-testid', 'rejected-chain');
+      expect(screen.getByTestId('model-unavailable-warning')).toBeInTheDocument();
+      const addSelect = within(screen.getByTestId('rejected-chain')).getByRole('combobox', { name: /Thêm model vào chuỗi/i });
+      expect(within(addSelect).queryByRole('option', { name: 'codex:gpt-rejected' })).not.toBeInTheDocument();
+      expect(within(addSelect).getByRole('option', { name: 'codex:gpt-usable' })).toBeInTheDocument();
+    });
+
     it('moves items up and down with buttons and updates order', () => {
       render(
         <LocaleProvider initialLocale="vi">
@@ -1555,6 +1621,55 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       expect(availableOnly[0].value).toBe('gemini-3.8-flash-high');
     });
 
+    it('formatDiscoveredModelOptions excludes a provider-rejected model even when another profile can run it', () => {
+      const options = formatDiscoveredModelOptions([
+        {
+          id: 'codex:mixed-model',
+          name: 'Mixed model',
+          engine: 'codex',
+          profiles: ['codex-usable', 'codex-rejected'],
+          verified: true,
+          available: true,
+          unavailable: true,
+        },
+      ], undefined, undefined, true);
+
+      expect(options).toEqual([]);
+    });
+
+    it('formatDiscoveredModelOptions labels rejected and unverified models from their state flags', () => {
+      const options = formatDiscoveredModelOptions([
+        {
+          id: 'codex:gpt-rejected',
+          name: 'GPT Rejected',
+          engine: 'codex',
+          profiles: ['codex-1'],
+          verified: false,
+          available: false,
+          unavailable: true,
+        },
+        {
+          id: 'gemini-unverified',
+          name: 'Gemini Unverified',
+          engine: 'agy',
+          profiles: ['agy-1'],
+          verified: true,
+          available: true,
+          runVerified: false,
+        },
+      ], (key) => ({
+        'models.engineAgy': 'Antigravity',
+        'models.engineCodex': 'Codex',
+        'models.unavailableAccountWarning': 'Not usable with this account',
+        'models.unverifiedRunWarning': 'Not verified to run',
+      }[key] || key));
+
+      expect(options[0].label).toContain('Not usable with this account');
+      expect(options[1].label).toContain('Not verified to run');
+      expect(options[0].unavailable).toBe(true);
+      expect(options[1].runVerified).toBe(false);
+    });
+
     it('SettingsPage does not propose unavailable configured models in Add Model dropdown', async () => {
       const queryClient = new QueryClient({
         defaultOptions: { queries: { retry: false } },
@@ -2065,6 +2180,73 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
             modelChainHard: ['custom-undiscovered-model'],
           }),
         );
+      });
+    });
+
+    describe('ProjectSettingsDrawer: model bị tài khoản từ chối (unavailable)', () => {
+      const makeProject = (reviewerModel: string) => ({
+        id: 'p1',
+        name: 'XFarm',
+        path: '/home/repo',
+        defaultBranch: 'main',
+        maxParallel: 2,
+        settings: {
+          integration: { enabled: true, branch: 'integration', baseRef: 'main' },
+          commitConvention: { branchTemplate: 'agenthub/{slug}' },
+          brain: { engine: 'claude', model: 'opus', mode: 'suggest', permissions: 'standard' },
+          worktree: {},
+          ci: {},
+          references: [],
+          reviewChecklist: [],
+          notifications: { telegramContent: 'full' },
+          review: {
+            order: [{ engine: 'claude', model: reviewerModel, profiles: [] }],
+            fallback: { onUnavailable: true, onError: true, onBusyAfterMin: 10 },
+          },
+        },
+        review: { chain: [{ reviewer: 'claude', mode: 'gate' as const }], maxRounds: 2 },
+      });
+
+      const renderDrawer = async (reviewerModel: string) => {
+        // sonnet bị một profile từ chối nhưng profile khác vẫn chạy: available=true, unavailable=true.
+        vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+          configured: [],
+          suggestions: [],
+          models: [
+            { id: 'sonnet', engine: 'claude', profiles: ['a', 'b'], verified: true, available: true, unavailable: true },
+            { id: 'opus', engine: 'claude', profiles: ['a'], verified: true, available: true, runVerified: true },
+          ],
+        } as any);
+        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+        render(
+          <LocaleProvider initialLocale="vi">
+            <ThemeProvider>
+              <QueryClientProvider client={queryClient}>
+                <MemoryRouter>
+                  <ProjectSettingsDrawer project={makeProject(reviewerModel) as any} isOpen={true} onClose={() => {}} />
+                </MemoryRouter>
+              </QueryClientProvider>
+            </ThemeProvider>
+          </LocaleProvider>,
+        );
+        const advancedSummary = screen.getByTestId('advanced-settings-section').querySelector('summary');
+        if (advancedSummary) fireEvent.click(advancedSummary);
+        await waitFor(() => expect(screen.getByTestId('project-reviewer-order')).toBeInTheDocument());
+        return screen.getByTestId('project-reviewer-order');
+      };
+
+      it('không đưa model bị từ chối vào lựa chọn reviewer đầu chuỗi', async () => {
+        const orderBlock = await renderDrawer('opus');
+        const reviewerSelect = within(orderBlock).getByRole('combobox', { name: /^Model reviewer 1$/i }) as HTMLSelectElement;
+        await waitFor(() => expect(within(reviewerSelect).getByRole('option', { name: 'opus' })).toBeInTheDocument());
+        expect(within(reviewerSelect).queryByRole('option', { name: 'sonnet' })).not.toBeInTheDocument();
+        expect(within(orderBlock).queryByTestId('model-unavailable-warning')).not.toBeInTheDocument();
+      });
+
+      it('cảnh báo đỏ khi reviewer đầu chuỗi đã lưu là model bị từ chối', async () => {
+        const orderBlock = await renderDrawer('sonnet');
+        const warning = await within(orderBlock).findByTestId('model-unavailable-warning');
+        expect(warning.className).toContain('--t-crit');
       });
     });
 

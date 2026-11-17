@@ -1147,6 +1147,12 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_profile_models_engine ON profile_models(engine);
   CREATE INDEX IF NOT EXISTS idx_profile_models_profile ON profile_models(profileName);
   `,
+  // Migration 78: persist provider model failures and successful worker runs.
+  `
+  ALTER TABLE profile_models ADD COLUMN runVerified INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE profile_models ADD COLUMN unavailableReason TEXT;
+  ALTER TABLE profile_models ADD COLUMN unavailableAt INTEGER;
+  `,
 ];
 
 export function openDatabase(dbPath: string): Database.Database {
@@ -1742,6 +1748,9 @@ export interface ProfileModelRow {
   engine: string;
   verified: number;
   fetchedAt: number;
+  runVerified: number;
+  unavailableReason: string | null;
+  unavailableAt: number | null;
 }
 
 export type WaitReason = 'disk' | 'quota' | 'no_department_profile' | 'no_matching_profile' | 'parallel' | 'department_parallel' | 'profile_busy' | 'project_unavailable' | 'focus' | 'slot' | 'load' | 'dependency' | 'restart' | null;
@@ -2362,15 +2371,43 @@ export class ProfileModelRepo {
     fetchedAt = Math.floor(Date.now() / 1000),
   ): void {
     const transaction = this.db.transaction(() => {
-      this.db.prepare('DELETE FROM profile_models WHERE profileName = ?').run(profileName);
+      this.db.prepare('DELETE FROM profile_models WHERE profileName = ? AND unavailableAt IS NULL').run(profileName);
       const insert = this.db.prepare(
-        'INSERT OR REPLACE INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt) VALUES (?, ?, ?, ?, ?, ?)',
+        `INSERT INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(profileName, engine, modelId) DO UPDATE SET
+           modelName = excluded.modelName, verified = excluded.verified, fetchedAt = excluded.fetchedAt
+         WHERE profile_models.unavailableAt IS NULL`,
       );
       for (const m of models) {
         insert.run(profileName, m.modelId, m.modelName || null, m.engine, m.verified === false ? 0 : 1, fetchedAt);
       }
     });
     transaction();
+  }
+
+  markUnavailable(profileName: string, modelId: string, engine: string, reason: string, at = Math.floor(Date.now() / 1000)): void {
+    this.db.prepare(`
+      INSERT INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt, unavailableReason, unavailableAt)
+      VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+      ON CONFLICT(profileName, engine, modelId) DO UPDATE SET
+        unavailableReason = excluded.unavailableReason, unavailableAt = excluded.unavailableAt,
+        verified = 0, fetchedAt = excluded.fetchedAt
+    `).run(profileName, modelId, modelId, engine, at, reason, at);
+  }
+
+  /**
+   * Record that a run on this profile/model finished. Only rows the profile
+   * already has are updated: inserting a row here would make a profile with no
+   * model discovery look "discovered", which switches profileHasModel away from
+   * the static model list and can strand tasks in waiting_quota.
+   */
+  markRunVerified(profileName: string, modelId: string, engine: string, at = Math.floor(Date.now() / 1000)): void {
+    this.db.prepare(`
+      UPDATE profile_models
+      SET runVerified = 1, unavailableReason = NULL, unavailableAt = NULL, fetchedAt = ?
+      WHERE profileName = ? AND engine = ? AND modelId = ?
+    `).run(at, profileName, engine, modelId);
   }
 
   deleteForProfile(profileName: string): void {

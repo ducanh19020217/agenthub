@@ -460,7 +460,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const availableCodexReviewerModels = useMemo(() => {
     if (modelOptions?.models) {
       return modelOptions.models
-        .filter((m) => m.engine === 'codex' && m.available)
+        .filter((m) => m.engine === 'codex' && m.available && !m.unavailable)
         .map((m) => m.id);
     }
     if (modelOptions?.suggestions) {
@@ -474,7 +474,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
   const availableClaudeReviewerModels = useMemo(() => {
     if (modelOptions?.models) {
       return modelOptions.models
-        .filter((m) => m.engine === 'claude' && m.available)
+        .filter((m) => m.engine === 'claude' && m.available && !m.unavailable)
         .map((m) => (m.id.startsWith('claude:') ? m.id.slice('claude:'.length) : m.id));
     }
     if (modelOptions?.suggestions) {
@@ -515,7 +515,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     const set = new Set<string>();
     if (modelOptions?.models) {
       for (const m of modelOptions.models) {
-        if (!m.available) {
+        if (!m.available || m.unavailable) {
           set.add(m.id);
           set.add(`${m.engine}:${m.id}`);
           if (m.id.startsWith(`${m.engine}:`)) {
@@ -3774,6 +3774,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
                                 ariaLabel={`${t('settings.reviewerModel')} ${index + 1}`}
                                 value={item.model}
                                 onChange={(val) => {
+                                  if (index === 0 && isReviewerModelUnavailable(val, item.engine)) return;
                                   const next = reviewerOrder.map((row, i) =>
                                     i === index ? { ...row, model: val } : row,
                                   );

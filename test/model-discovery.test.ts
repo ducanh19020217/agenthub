@@ -468,6 +468,35 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(Scheduler.prototype.profileHasModel.call({ profileRepo, profileModelRepo } as any, 'codex-options', 'codex:gpt-rejected')).toBe(false);
   });
 
+  it('markRunVerified records a run-verified model missing from the catalog of a discovered profile', () => {
+    const home = path.join(tmpDir, 'codex-catalog-home');
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(home, 'auth.json'), '{}');
+    profileRepo.upsert({
+      name: 'codex-catalog',
+      engine: 'codex',
+      kind: 'isolated',
+      home,
+      email: 'catalog@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('codex-catalog', [{ modelId: 'codex:gpt-6', engine: 'codex', verified: true }]);
+
+    // gpt-5.6-luna is not in this account's catalog but a run on it finished done.
+    profileModelRepo.markRunVerified('codex-catalog', 'codex:gpt-5.6-luna', 'codex');
+
+    const row = profileModelRepo.getForProfile('codex-catalog').find((r) => r.modelId === 'codex:gpt-5.6-luna');
+    expect(row?.runVerified).toBeTruthy();
+    const result = AppService.prototype.getModelOptions.call({
+      profileRepo,
+      profileModelRepo,
+      config: { defaultModelChains: { hard: [], easy: [] }, reviewer: { order: [] } },
+    } as any);
+    expect(result.models.find((m) => m.id === 'codex:gpt-5.6-luna')).toMatchObject({ runVerified: true, available: true });
+    expect(Scheduler.prototype.profileHasModel.call({ profileRepo, profileModelRepo } as any, 'codex-catalog', 'codex:gpt-5.6-luna')).toBe(true);
+  });
+
   it('markRunVerified does not create discovery rows for a profile without model discovery', () => {
     const home = path.join(tmpDir, 'codex-no-discovery-home');
     fs.mkdirSync(home, { recursive: true });

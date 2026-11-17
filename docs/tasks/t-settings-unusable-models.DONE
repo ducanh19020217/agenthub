@@ -1,0 +1,41 @@
+# Hoàn thành task: t-settings-unusable-models
+
+## Tóm tắt việc đã làm
+
+1. **Lưu bền model bị provider từ chối** theo từng profile (`profile_models.unavailableAt/unavailableReason`, migration chỉ thêm cột). Scheduler phát hiện lỗi `model_not_found` / "model is not supported" chỉ trên dòng `ERROR:` của engine, chặn cặp profile/model, requeue sang model tiếp theo và ghi qua `task.model_unavailable`.
+2. **Ghi nhận model đã chạy được** (`runVerified`) khi worker done, reviewer done và khi khôi phục `restart_marker` sau restart. `markRunVerified` cập nhật dòng có sẵn; nếu profile đã có discovery thì chèn dòng mới (model chạy được nhưng không có trong catalog vẫn hiện là đã xác minh); profile chưa có discovery thì không chèn, để giữ fallback danh sách model tĩnh (nếu chèn, task sau review rơi vào `waiting_quota`).
+3. **Daemon** truyền `ProfileModelRepo` cho scheduler một cách tường minh (trước đó scheduler tự tạo repo từ `db` trong constructor; nay dùng chung một instance) kèm test daemon thật lưu rejection.
+4. **`/api/models`** trả `unavailable`, `runVerified`, `unavailableReason` và `warningCode` (`unavailable_for_account`, `unverified_catalog`, `unverified_account`, `configured_no_provider`); chuỗi tiếng Việt gom về một bảng tra, giữ `warning` để tương thích API.
+5. **`PUT /api/config`** trả 400 khi mọi profile cùng engine đều từ chối model trong chuỗi (Codex, `claude:*` và alias `sonnet/opus/haiku`).
+6. **UI** (SettingsPage, ProjectSettingsDrawer, DepartmentsPage, CreateTaskPage): model bị từ chối (kể cả `available=true, unavailable=true`) không chọn được làm model đầu chuỗi; chuỗi đã lưu có model bị từ chối hiện cảnh báo đỏ; model chưa xác minh chạy được có cảnh báo riêng.
+
+## Kết quả kiểm tra
+
+- `npm run lint`: 0 lỗi (205 warning `no-explicit-any` có sẵn).
+- `npm run typecheck`: đạt.
+- `npm run build`, `npm run build:web`: đạt.
+- `npm test -- --run`: 150 file, 1986/1986 đạt. `test/scheduler.test.ts`: 158/158 đạt, gồm 2 test "Codex reviewer failover lifecycle" từng đỏ.
+- `npm run test:web -- --run`: 75 file / 735 test đạt.
+
+## Việc chưa làm
+
+- Không còn việc nào trong phạm vi task.
+
+## Commit
+
+- `8193f6fc` fix: record run verification for discovered profiles and wire repo in daemon
+- `728a7436` test: drop duplicate model-not-found case from fake agent after merge
+- `fb53fd91` Merge branch 'agenthub/integration' into agenthub/t-settings-unusable-models
+- `59eb6f40` fix: keep static model fallback after run verification; cover review findings
+- `89fa2bad` fix: restore provider rejected model failover
+- `f4615d95` test: cover mixed profile model rejection
+- `6f9dfa7c` fix: keep model ids accessible in selectors
+- `412073c6` fix: preserve verified model selections
+- `5ea186b3` fix: guard unusable models across settings selectors
+- `af4225ea` fix: guard rejected models in chain selectors
+- `05ef90bf` test: cover unusable model selectors
+- `df2aea10` fix: block provider-rejected model choices
+- `4bd6be3d` fix: complete unusable model settings handling
+- `ca023389` fix: preserve model selection after verified runs
+- `21bc9883` fix: complete unusable model state handling
+- `6b32121d` feat: persist unusable model state

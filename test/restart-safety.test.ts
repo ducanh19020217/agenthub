@@ -60,6 +60,17 @@ describe('safe restart API', () => {
 
   const headers = () => ({ host: '127.0.0.1:7798', authorization: `Bearer ${token}` });
 
+  it('daemon wires ProfileModelRepo into the scheduler so provider rejections are persisted', () => {
+    new ProfileRepo(ctx.db).upsert({ name: 'codex-wired', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    ctx.scheduler.getEventBus().emit('task.model_unavailable', 'p/wired', {
+      profile: 'codex-wired', model: 'codex:gpt-wired', engine: 'codex',
+    });
+    const row = new ProfileModelRepo(ctx.db).getForProfile('codex-wired').find((r) => r.modelId === 'codex:gpt-wired');
+    expect(row?.unavailableAt).toBeTypeOf('number');
+    expect(row?.unavailableReason).toBe('provider_rejected');
+    expect(ctx.scheduler.profileHasModel('codex-wired', 'codex:gpt-wired')).toBe(false);
+  });
+
   it('starts a when-idle drain, exposes it, and DELETE resumes dispatch', async () => {
     const requested = await server.inject({
       method: 'POST', url: '/api/system/restart', headers: headers(), payload: { mode: 'when-idle', timeoutMinutes: 5, reason: 'test' },

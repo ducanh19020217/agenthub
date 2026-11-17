@@ -362,6 +362,9 @@ export function createContext(
     departmentRepo,
   );
   service.profileModelRepo = profileModelRepo;
+  // The scheduler needs the same repo: provider rejections (task.model_unavailable)
+  // and run verification are persisted through it, and profileHasModel consults it.
+  scheduler.setProfileModelRepo(profileModelRepo);
   service.modelDiscoveryService = modelDiscoveryService;
   service.setSetupTools(new SetupTools(config, db, scheduler.getEventBus(), () => service));
   service.deployService = deployService;

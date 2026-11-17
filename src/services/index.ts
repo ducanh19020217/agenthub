@@ -1135,10 +1135,26 @@ export interface DiscoveredModelApiItem {
   verified: boolean;
   available: boolean;
   configured?: boolean;
+  /** Human-readable text kept for API compatibility; clients should use warningCode / flags. */
   warning?: string | null;
+  warningCode?: ModelWarningCode | null;
   runVerified?: boolean;
   unavailable?: boolean;
   unavailableReason?: string | null;
+}
+
+export type ModelWarningCode = 'unavailable_for_account' | 'unverified_catalog' | 'unverified_account' | 'configured_no_provider';
+
+const MODEL_WARNING_TEXT: Record<ModelWarningCode, string> = {
+  unavailable_for_account: 'Không dùng được với tài khoản',
+  unverified_catalog: 'Chưa xác minh qua model catalog',
+  unverified_account: 'Chưa xác minh qua tài khoản',
+  configured_no_provider: 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp',
+};
+
+/** Warning fields for a model option: a stable code plus its legacy text. */
+function modelWarning(code: ModelWarningCode | null): { warning: string | null; warningCode: ModelWarningCode | null } {
+  return { warning: code ? MODEL_WARNING_TEXT[code] : null, warningCode: code };
 }
 
 export interface ModelOptionsResponse {
@@ -7066,10 +7082,10 @@ export class AppService {
           }
           if (r.verified) {
             existing.verified = true;
-            existing.warning = null;
+            Object.assign(existing, modelWarning(null));
           }
           existing.runVerified = Boolean(existing.runVerified || r.runVerified);
-          if (!existing.runVerified && !existing.unavailable && !r.verified) existing.warning = 'Chưa xác minh qua model catalog';
+          if (!existing.runVerified && !existing.unavailable && !r.verified) Object.assign(existing, modelWarning('unverified_catalog'));
           if (r.unavailableReason) existing.unavailableReason = r.unavailableReason;
           existing.available = existing.available || !isUnavailable;
           // Keep a rejection visible even when another profile happens to expose
@@ -7085,7 +7101,7 @@ export class AppService {
             verified: Boolean(r.verified),
             available: !isUnavailable,
             configured: false,
-            warning: isUnavailable ? 'Không dùng được với tài khoản' : r.verified || r.runVerified ? null : 'Chưa xác minh qua model catalog',
+            ...modelWarning(isUnavailable ? 'unavailable_for_account' : r.verified || r.runVerified ? null : 'unverified_catalog'),
             runVerified: Boolean(r.runVerified),
             unavailable: isUnavailable,
             unavailableReason: r.unavailableReason,
@@ -7116,7 +7132,7 @@ export class AppService {
               verified: false,
               available: false,
               configured: false,
-              warning: 'Chưa xác minh qua tài khoản',
+              ...modelWarning('unverified_account'),
             });
           }
         }
@@ -7285,15 +7301,13 @@ export class AppService {
           verified: false,
           available: false,
           configured: true,
-          warning: 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp',
+          ...modelWarning('configured_no_provider'),
         });
       } else {
         existing.configured = true;
         if (existing.profiles.length === 0) {
           existing.available = false;
-          existing.warning = existing.unavailable
-            ? 'Không dùng được với tài khoản'
-            : 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp';
+          Object.assign(existing, modelWarning(existing.unavailable ? 'unavailable_for_account' : 'configured_no_provider'));
         }
       }
     }

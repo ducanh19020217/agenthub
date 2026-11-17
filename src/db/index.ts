@@ -2396,17 +2396,18 @@ export class ProfileModelRepo {
     `).run(profileName, modelId, modelId, engine, at, reason, at);
   }
 
+  /**
+   * Record that a run on this profile/model finished. Only rows the profile
+   * already has are updated: inserting a row here would make a profile with no
+   * model discovery look "discovered", which switches profileHasModel away from
+   * the static model list and can strand tasks in waiting_quota.
+   */
   markRunVerified(profileName: string, modelId: string, engine: string, at = Math.floor(Date.now() / 1000)): void {
-    const result = this.db.prepare(`
+    this.db.prepare(`
       UPDATE profile_models
       SET runVerified = 1, unavailableReason = NULL, unavailableAt = NULL, fetchedAt = ?
       WHERE profileName = ? AND engine = ? AND modelId = ?
-    `)
-      .run(at, profileName, engine, modelId);
-    if (result.changes === 0) {
-      this.db.prepare('INSERT INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt, runVerified) VALUES (?, ?, ?, ?, 1, ?, 1)')
-        .run(profileName, modelId, modelId, engine, at);
-    }
+    `).run(at, profileName, engine, modelId);
   }
 
   deleteForProfile(profileName: string): void {

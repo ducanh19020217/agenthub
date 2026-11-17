@@ -680,6 +680,46 @@ describe('Scheduler regression fixes', () => {
     }
   });
 
+  it('marks the worker profile/model run-verified when a worker run finishes done', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'keyring', home: null, email: 'p1@example.com', enabled: 1 });
+    const profileModelRepo = new ProfileModelRepo(db);
+    profileModelRepo.setForProfile('p1', [
+      { modelId: 'gemini-3.8-flash-high', engine: 'agy', verified: true },
+    ]);
+    // A stale rejection must be cleared by a successful run.
+    db.prepare("UPDATE profile_models SET unavailableAt = NULL, runVerified = 0 WHERE profileName = 'p1'").run();
+    taskRepo.insert({
+      id: 'test-project/run-verified',
+      projectId: 'test-project',
+      slug: 'run-verified',
+      title: 'Run verified',
+      status: 'queued',
+      modelChain: JSON.stringify(['gemini-3.8-flash-high']),
+    });
+    process.env.FAKE_MODE = 'done';
+    const scheduler = new Scheduler(
+      config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['agy', new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'))]]),
+    );
+    scheduler.setProfileModelRepo(profileModelRepo);
+    try {
+      scheduler.tick();
+      await vi.waitFor(() => {
+        const run = runRepo.getByTask('test-project/run-verified').find((r) => r.kind === 'worker');
+        expect(run?.outcome).toBe('done');
+      }, { timeout: 5000 });
+      const row = profileModelRepo.getForProfile('p1').find((r) => r.modelId === 'gemini-3.8-flash-high');
+      expect(row?.runVerified).toBeTruthy();
+      expect(row?.unavailableAt ?? null).toBeNull();
+    } finally {
+      scheduler.cancelAll();
+      scheduler.stop();
+      delete process.env.FAKE_MODE;
+    }
+  });
+
   it('detects provider rejection only on engine error lines', () => {
     expect(detectModelUnavailable('ERROR: {"error":{"code":"model_not_found"}}')).toBe(true);
     expect(detectModelUnavailable('prompt mentions model_not_found')).toBe(false);
@@ -861,6 +901,21 @@ describe('Codex reviewer failover lifecycle', () => {
     const reviewerRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
     expect(reviewerRun?.outcome).toBe('done');
     expect(profileRepo.get('codex-1')?.authState).not.toBe('not_logged_in');
+    scheduler.stop();
+  });
+
+  it('marks the reviewer profile/model run-verified when a reviewer run finishes done', async () => {
+    const { scheduler, reviewRepo } = makeReviewer('reviewer-approved');
+    const profileModelRepo = new ProfileModelRepo(db);
+    const markRunVerified = vi.spyOn(profileModelRepo, 'markRunVerified');
+    scheduler.setProfileModelRepo(profileModelRepo);
+    scheduler.tick();
+    await vi.waitFor(() => {
+      expect(reviewRepo.getByTask('test-project/review')[0]?.verdict).toBe('approved');
+    });
+    const reviewerRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
+    expect(reviewerRun?.outcome).toBe('done');
+    expect(markRunVerified).toHaveBeenCalledWith('codex-1', reviewerRun!.model, 'codex');
     scheduler.stop();
   });
 

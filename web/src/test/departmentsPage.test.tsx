@@ -201,4 +201,40 @@ describe('DepartmentsPage', () => {
     await screen.findByText('Phòng Đang Tải');
     expect(screen.getByRole('alert')).toBeInTheDocument();
   });
+
+  describe('model bị tài khoản từ chối (unavailable)', () => {
+    beforeEach(() => {
+      vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+        suggestions: [],
+        configured: [],
+        models: [
+          { id: 'sonnet', engine: 'claude', available: true, unavailable: true, verified: true, profiles: ['worker-1', 'worker-2'] },
+          { id: 'opus', engine: 'claude', available: true, verified: true, runVerified: true, profiles: ['worker-1'] },
+        ],
+      } as any);
+    });
+
+    it('không cho chọn model bị từ chối làm model Brain', async () => {
+      vi.spyOn(client, 'getDepartments').mockResolvedValue([{ ...department, brainModel: 'opus' }]);
+      const updateSpy = vi.spyOn(client, 'updateDepartment').mockResolvedValue(department);
+      renderPage();
+      await screen.findByText('Engineering');
+      fireEvent.click(screen.getByText('Cấu hình Brain'));
+
+      const model = screen.getByLabelText('Model Brain');
+      await waitFor(() => expect(screen.getByRole('option', { name: 'opus' })).toBeInTheDocument());
+      expect(screen.queryByRole('option', { name: 'sonnet' })).toBeNull();
+      fireEvent.change(model, { target: { value: 'sonnet' } });
+      expect(updateSpy).not.toHaveBeenCalledWith('engineering', { brainModel: 'sonnet' });
+    });
+
+    it('cảnh báo đỏ khi model Brain đang lưu bị từ chối', async () => {
+      // department mặc định đang lưu brainModel = 'sonnet'
+      renderPage();
+      await screen.findByText('Engineering');
+      fireEvent.click(screen.getByText('Cấu hình Brain'));
+      const warning = await screen.findByTestId('model-unavailable-warning');
+      expect(warning.className).toContain('--t-crit');
+    });
+  });
 });

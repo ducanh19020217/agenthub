@@ -2183,6 +2183,73 @@ describe('Settings Select Inputs and Sortable Lists (f-settings-select-inputs)',
       });
     });
 
+    describe('ProjectSettingsDrawer: model bị tài khoản từ chối (unavailable)', () => {
+      const makeProject = (reviewerModel: string) => ({
+        id: 'p1',
+        name: 'XFarm',
+        path: '/home/repo',
+        defaultBranch: 'main',
+        maxParallel: 2,
+        settings: {
+          integration: { enabled: true, branch: 'integration', baseRef: 'main' },
+          commitConvention: { branchTemplate: 'agenthub/{slug}' },
+          brain: { engine: 'claude', model: 'opus', mode: 'suggest', permissions: 'standard' },
+          worktree: {},
+          ci: {},
+          references: [],
+          reviewChecklist: [],
+          notifications: { telegramContent: 'full' },
+          review: {
+            order: [{ engine: 'claude', model: reviewerModel, profiles: [] }],
+            fallback: { onUnavailable: true, onError: true, onBusyAfterMin: 10 },
+          },
+        },
+        review: { chain: [{ reviewer: 'claude', mode: 'gate' as const }], maxRounds: 2 },
+      });
+
+      const renderDrawer = async (reviewerModel: string) => {
+        // sonnet bị một profile từ chối nhưng profile khác vẫn chạy: available=true, unavailable=true.
+        vi.spyOn(client, 'getModelOptions').mockResolvedValue({
+          configured: [],
+          suggestions: [],
+          models: [
+            { id: 'sonnet', engine: 'claude', profiles: ['a', 'b'], verified: true, available: true, unavailable: true },
+            { id: 'opus', engine: 'claude', profiles: ['a'], verified: true, available: true, runVerified: true },
+          ],
+        } as any);
+        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+        render(
+          <LocaleProvider initialLocale="vi">
+            <ThemeProvider>
+              <QueryClientProvider client={queryClient}>
+                <MemoryRouter>
+                  <ProjectSettingsDrawer project={makeProject(reviewerModel) as any} isOpen={true} onClose={() => {}} />
+                </MemoryRouter>
+              </QueryClientProvider>
+            </ThemeProvider>
+          </LocaleProvider>,
+        );
+        const advancedSummary = screen.getByTestId('advanced-settings-section').querySelector('summary');
+        if (advancedSummary) fireEvent.click(advancedSummary);
+        await waitFor(() => expect(screen.getByTestId('project-reviewer-order')).toBeInTheDocument());
+        return screen.getByTestId('project-reviewer-order');
+      };
+
+      it('không đưa model bị từ chối vào lựa chọn reviewer đầu chuỗi', async () => {
+        const orderBlock = await renderDrawer('opus');
+        const reviewerSelect = within(orderBlock).getByRole('combobox', { name: /^Model reviewer 1$/i }) as HTMLSelectElement;
+        await waitFor(() => expect(within(reviewerSelect).getByRole('option', { name: 'opus' })).toBeInTheDocument());
+        expect(within(reviewerSelect).queryByRole('option', { name: 'sonnet' })).not.toBeInTheDocument();
+        expect(within(orderBlock).queryByTestId('model-unavailable-warning')).not.toBeInTheDocument();
+      });
+
+      it('cảnh báo đỏ khi reviewer đầu chuỗi đã lưu là model bị từ chối', async () => {
+        const orderBlock = await renderDrawer('sonnet');
+        const warning = await within(orderBlock).findByTestId('model-unavailable-warning');
+        expect(warning.className).toContain('--t-crit');
+      });
+    });
+
     it('ProjectSettingsDrawer does not insert hardcoded default models when getModelOptions has no available models or is loading, and preserves configured model with warning', async () => {
       const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
       const testProject = {

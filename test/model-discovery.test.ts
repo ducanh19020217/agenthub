@@ -445,6 +445,7 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     profileModelRepo.markUnavailable('codex-options', 'codex:gpt-rejected', 'codex', 'provider_rejected');
     profileModelRepo.setForProfile('codex-options', [
       { modelId: 'codex:gpt-unverified', engine: 'codex', verified: false },
+      { modelId: 'codex:gpt-verified', engine: 'codex', verified: false },
     ]);
     profileModelRepo.markRunVerified('codex-options', 'codex:gpt-verified', 'codex');
 
@@ -457,12 +458,35 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(result.models.find((model) => model.id === 'codex:gpt-rejected')).toMatchObject({
       unavailable: true,
       available: false,
+      warningCode: 'unavailable_for_account',
     });
     expect(result.models.find((model) => model.id === 'codex:gpt-verified')).toMatchObject({
       runVerified: true,
       available: true,
+      warningCode: null,
     });
     expect(Scheduler.prototype.profileHasModel.call({ profileRepo, profileModelRepo } as any, 'codex-options', 'codex:gpt-rejected')).toBe(false);
+  });
+
+  it('markRunVerified does not create discovery rows for a profile without model discovery', () => {
+    const home = path.join(tmpDir, 'codex-no-discovery-home');
+    fs.mkdirSync(home, { recursive: true });
+    profileRepo.upsert({
+      name: 'codex-no-discovery',
+      engine: 'codex',
+      kind: 'isolated',
+      home,
+      enabled: 1,
+      accountType: 'personal',
+    });
+    expect(Scheduler.prototype.profileHasModel.call({ profileRepo, profileModelRepo } as any, 'codex-no-discovery', 'codex:gpt-5.6-luna')).toBe(true);
+
+    profileModelRepo.markRunVerified('codex-no-discovery', 'codex:gpt-5.6-luna', 'codex');
+
+    // Still no discovery rows, so the static model list keeps applying and the
+    // worker model stays usable after a reviewer/worker run on this profile.
+    expect(profileModelRepo.getForProfile('codex-no-discovery')).toHaveLength(0);
+    expect(Scheduler.prototype.profileHasModel.call({ profileRepo, profileModelRepo } as any, 'codex-no-discovery', 'codex:gpt-5.6-luna')).toBe(true);
   });
 
   it('keeps a rejection visible when another enabled profile can run the same model', () => {
@@ -511,6 +535,44 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(() => AppService.prototype.updateConfig.call({ profileRepo, profileModelRepo } as any, {
       modelChainHard: ['codex:gpt-rejected'],
     })).toThrow('bị mọi tài khoản từ chối');
+  });
+
+  it('rejects a Claude chain model (prefixed or alias) with HTTP 400 only when every Claude profile rejects it', () => {
+    for (const name of ['claude-config-a', 'claude-config-b']) {
+      profileRepo.upsert({
+        name,
+        engine: 'claude',
+        kind: 'isolated',
+        home: `/tmp/${name}`,
+        email: `${name}@example.com`,
+        enabled: 1,
+        accountType: 'personal',
+      });
+    }
+    profileModelRepo.markUnavailable('claude-config-a', 'sonnet', 'claude', 'provider_rejected');
+
+    const save = (model: string) => AppService.prototype.updateConfig.call(
+      { profileRepo, profileModelRepo, config: {}, saveConfig: () => undefined } as any,
+      { modelChainHard: [model] },
+    );
+    const statusOf = (model: string): number | undefined => {
+      try {
+        save(model);
+        return undefined;
+      } catch (err) {
+        return (err as { statusCode?: number }).statusCode;
+      }
+    };
+
+    // One Claude profile still accepts it: saving is allowed (no 400).
+    expect(statusOf('claude:sonnet')).not.toBe(400);
+    expect(statusOf('sonnet')).not.toBe(400);
+
+    profileModelRepo.markUnavailable('claude-config-b', 'sonnet', 'claude', 'provider_rejected');
+    for (const model of ['claude:sonnet', 'sonnet']) {
+      expect(() => save(model)).toThrow('bị mọi tài khoản từ chối');
+      expect(statusOf(model)).toBe(400);
+    }
   });
 
   it('profileModelRepo supports same modelId across different engines for the same profile', () => {
@@ -760,6 +822,7 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(flashHigh?.verified).toBe(false);
     expect(flashHigh?.available).toBe(false);
     expect(flashHigh?.warning).toBe('Chưa xác minh qua tài khoản');
+    expect(flashHigh?.warningCode).toBe('unverified_account');
     expect(result.suggestions).not.toContain('gemini-3.8-flash-high');
   });
 

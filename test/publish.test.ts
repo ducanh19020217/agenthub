@@ -3505,6 +3505,122 @@ describe('Publish Service (t-auto-push-after-done)', () => {
         ).rejects.toThrow(/Failed to resolve remote base commit/);
       });
 
+      describe('resolveRemoteAuditBase chỉ chấp nhận remote của đúng nhánh đích (audit P1)', () => {
+        const git = (repo: string, ...args: string[]) =>
+          execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', env: testEnv }).trim();
+        const commitFile = (repo: string, name: string, msg: string) => {
+          fs.writeFileSync(path.join(repo, name), `${msg}\n`);
+          git(repo, 'add', '.');
+          git(repo, 'commit', '-m', msg);
+          return git(repo, 'rev-parse', 'HEAD');
+        };
+        const taskRow = (slug: string, baseRef = 'master') =>
+          ({
+            id: `proj/${slug}`,
+            projectId: 'proj',
+            slug,
+            title: slug,
+            status: 'done',
+            branch: `agenthub/${slug}`,
+            baseRef,
+          }) as unknown as Parameters<typeof import('../src/publish.js').getTaskDiff>[1];
+
+        /** Repo có origin/master, nhánh task chưa merge, trả về snapshot SHA của nhánh task. */
+        const setup = (name: string) => {
+          const remotePath = path.join(tmpDir, `${name}.git`);
+          initBareRemote(remotePath);
+          const repoPath = path.join(tmpDir, name);
+          initGitRepoWithRemote(repoPath, remotePath, 'master');
+          const initialSha = git(repoPath, 'rev-parse', 'HEAD');
+          return { repoPath, remotePath, initialSha };
+        };
+        const addTaskBranch = (repoPath: string, slug: string) => {
+          git(repoPath, 'checkout', '-q', '-b', `agenthub/${slug}`, 'master');
+          return commitFile(repoPath, `${slug}.txt`, `feat: ${slug}`);
+        };
+
+        it('SHA local chưa push trong khi origin/master tồn tại -> ném lỗi, không dùng tip khác', async () => {
+          const { getTaskDiff } = await import('../src/publish.js');
+          const { repoPath } = setup('rrab-local-sha');
+          const localOnlySha = commitFile(repoPath, 'local.txt', 'chore: local only');
+          const snapshotSha = addTaskBranch(repoPath, 'local-sha');
+          await expect(
+            getTaskDiff(repoPath, taskRow('local-sha'), 'agenthub/local-sha', 'master', localOnlySha, testEnv, snapshotSha),
+          ).rejects.toThrow(/is not on refs\/remotes\/origin\/master/);
+        });
+
+        it('SHA chỉ nằm trên một nhánh remote khác nhánh đích -> ném lỗi', async () => {
+          const { getTaskDiff } = await import('../src/publish.js');
+          const { repoPath } = setup('rrab-other-remote-sha');
+          git(repoPath, 'checkout', '-q', '-b', 'feature-x');
+          const otherSha = commitFile(repoPath, 'x.txt', 'feat: other branch');
+          git(repoPath, 'push', '-q', 'origin', 'feature-x');
+          git(repoPath, 'fetch', '-q', 'origin');
+          expect(git(repoPath, 'rev-parse', 'refs/remotes/origin/feature-x')).toBe(otherSha);
+          const snapshotSha = addTaskBranch(repoPath, 'other-remote');
+          await expect(
+            getTaskDiff(repoPath, taskRow('other-remote'), 'agenthub/other-remote', 'master', otherSha, testEnv, snapshotSha),
+          ).rejects.toThrow(/is not on refs\/remotes\/origin\/master/);
+        });
+
+        it('baseRef tên một nhánh remote khác nhánh đích -> ném lỗi', async () => {
+          const { getTaskDiff } = await import('../src/publish.js');
+          const { repoPath } = setup('rrab-other-remote-name');
+          git(repoPath, 'push', '-q', 'origin', 'master:feature-y');
+          git(repoPath, 'fetch', '-q', 'origin');
+          const snapshotSha = addTaskBranch(repoPath, 'other-name');
+          await expect(
+            getTaskDiff(repoPath, taskRow('other-name'), 'agenthub/other-name', 'master', 'origin/feature-y', testEnv, snapshotSha),
+          ).rejects.toThrow(/baseRef does not point to refs\/remotes\/origin\/master/);
+        });
+
+        it('origin/<targetBranch> không tồn tại dù origin/<task.baseRef> có -> ném lỗi', async () => {
+          const { getTaskDiff } = await import('../src/publish.js');
+          const { repoPath } = setup('rrab-missing-target');
+          const snapshotSha = addTaskBranch(repoPath, 'missing-target');
+          expect(git(repoPath, 'rev-parse', 'refs/remotes/origin/master')).toBeTruthy();
+          await expect(
+            getTaskDiff(repoPath, taskRow('missing-target', 'master'), 'agenthub/missing-target', 'release', 'release', testEnv, snapshotSha),
+          ).rejects.toThrow(/refs\/remotes\/origin\/release does not exist/);
+        });
+
+        it('lỗi git khi xác minh ancestry (SHA không tồn tại) -> ném lỗi, không fallback', async () => {
+          const { getTaskDiff } = await import('../src/publish.js');
+          const { repoPath } = setup('rrab-git-error');
+          const snapshotSha = addTaskBranch(repoPath, 'git-error');
+          await expect(
+            getTaskDiff(repoPath, taskRow('git-error'), 'agenthub/git-error', 'master', 'f'.repeat(40), testEnv, snapshotSha),
+          ).rejects.toThrow();
+          await expect(
+            getTaskDiff(repoPath, taskRow('git-error'), 'agenthub/git-error', 'master', 'f'.repeat(40), testEnv, snapshotSha),
+          ).rejects.not.toThrow(/is not on/);
+        });
+
+        it('SHA là tổ tiên của origin/master -> dùng đúng SHA đó làm mốc', async () => {
+          const { getTaskDiff } = await import('../src/publish.js');
+          const { repoPath, initialSha } = setup('rrab-valid-sha');
+          const snapshotSha = addTaskBranch(repoPath, 'valid-sha');
+          const res = await getTaskDiff(repoPath, taskRow('valid-sha'), 'agenthub/valid-sha', 'master', initialSha, testEnv, snapshotSha);
+          expect(res.changedFiles).toEqual(['valid-sha.txt']);
+        });
+
+        it('remote không phải origin: dùng refs/remotes/<remote>/<targetBranch>', async () => {
+          const { getTaskDiff } = await import('../src/publish.js');
+          const { repoPath, remotePath } = setup('rrab-custom-remote');
+          git(repoPath, 'remote', 'add', 'upstream', remotePath);
+          git(repoPath, 'fetch', '-q', 'upstream');
+          const snapshotSha = addTaskBranch(repoPath, 'custom-remote');
+          const res = await getTaskDiff(
+            repoPath, taskRow('custom-remote'), 'agenthub/custom-remote', 'master',
+            'refs/remotes/upstream/master', testEnv, snapshotSha, undefined, 'upstream',
+          );
+          expect(res.changedFiles).toEqual(['custom-remote.txt']);
+          await expect(
+            getTaskDiff(repoPath, taskRow('custom-remote'), 'agenthub/custom-remote', 'master', 'refs/remotes/upstream/master', testEnv, snapshotSha),
+          ).rejects.toThrow(/baseRef does not point to refs\/remotes\/origin\/master/);
+        });
+      });
+
       it('publishTask fail-closed khi không có prevRemoteSha và không thể resolve remote base (không dùng targetSha local)', async () => {
         const remotePath = path.join(tmpDir, 'remote-publish-no-remote-base.git');
         initBareRemote(remotePath);

@@ -143,104 +143,51 @@ async function refExists(repo: string, ref: string, env: NodeJS.ProcessEnv): Pro
   }
 }
 
-async function isCommitOnRemote(
-  repoPath: string,
-  sha: string,
-  targetBranch: string,
-  task: TaskRow,
-  env: NodeJS.ProcessEnv,
-): Promise<boolean> {
-  const remoteCandidates = [
-    `refs/remotes/origin/${targetBranch}`,
-    `origin/${targetBranch}`,
-    task.baseRef && task.baseRef !== targetBranch ? `refs/remotes/origin/${task.baseRef}` : '',
-    task.baseRef && task.baseRef !== targetBranch ? `origin/${task.baseRef}` : '',
-  ].filter(Boolean);
-
-  for (const r of remoteCandidates) {
-    if (await refExists(repoPath, r, env)) {
-      try {
-        if (await isAncestor(repoPath, sha, r, env)) {
-          return true;
-        }
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  try {
-    const allRemotes = (
-      await runGit(['-C', repoPath, 'for-each-ref', '--format=%(refname)', 'refs/remotes/'], repoPath, env)
-    )
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    for (const r of allRemotes) {
-      if (await isAncestor(repoPath, sha, r, env)) {
-        return true;
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  return false;
-}
-
+/**
+ * Resolve the commit the pre-publish audit diff is measured from.
+ *
+ * The base must be the remote state of the branch being published:
+ * - `refs/remotes/<remote>/<targetBranch>` itself, or
+ * - a SHA that is proven (via `git merge-base --is-ancestor`) to be on that ref.
+ *
+ * Anything else — another remote branch, the task's own baseRef, a local-only
+ * SHA, a missing target remote ref, or a git error while verifying ancestry —
+ * fails closed by throwing. There is deliberately no fallback.
+ */
 async function resolveRemoteAuditBase(
   repoPath: string,
   baseRef: string,
   targetBranch: string,
-  task: TaskRow,
+  remote: string,
   env: NodeJS.ProcessEnv,
 ): Promise<string> {
-  const isSha = /^[0-9a-f]{40}$/i.test(baseRef);
-  let verifiedSha: string | null = null;
-  if (isSha) {
-    if (await isCommitOnRemote(repoPath, baseRef, targetBranch, task, env)) {
-      try {
-        verifiedSha = (await runGit(['-C', repoPath, 'rev-parse', `${baseRef}^{commit}`], repoPath, env)).trim();
-      } catch {
-        verifiedSha = null;
-      }
+  const targetRemoteRef = `refs/remotes/${remote}/${targetBranch}`;
+  const fail = (reason: string): never => {
+    throw new Error(
+      `Failed to resolve remote base commit for audit diff (baseRef: "${baseRef}", targetBranch: "${targetBranch}", remote: "${remote}"): ${reason}. Remote base is required and cannot fall back to another ref or a local snapshot.`,
+    );
+  };
+
+  if (!(await refExists(repoPath, targetRemoteRef, env))) {
+    fail(`remote tracking ref ${targetRemoteRef} does not exist`);
+  }
+
+  if (/^[0-9a-f]{40}$/i.test(baseRef)) {
+    // isAncestor returns false only for "not an ancestor" (exit 1); real git
+    // errors propagate and therefore fail closed.
+    if (!(await isAncestor(repoPath, baseRef, targetRemoteRef, env))) {
+      fail(`commit ${baseRef} is not on ${targetRemoteRef}`);
     }
+    return (await runGit(['-C', repoPath, 'rev-parse', '--verify', `${baseRef}^{commit}`], repoPath, env)).trim();
   }
 
-  const remoteRefCandidates: string[] = [];
-  if (verifiedSha) {
-    remoteRefCandidates.push(verifiedSha);
-  } else if (!isSha && baseRef) {
-    if (baseRef.startsWith('refs/remotes/') || baseRef.startsWith('origin/')) {
-      remoteRefCandidates.push(baseRef);
-    } else if (!baseRef.startsWith('refs/heads/')) {
-      remoteRefCandidates.push(`refs/remotes/origin/${baseRef}`);
-      remoteRefCandidates.push(`origin/${baseRef}`);
-    }
+  // A bare target branch name means "the target branch" and is resolved to its
+  // remote tracking ref, never to the local branch.
+  const acceptedNames = new Set(['', targetBranch, targetRemoteRef, `${remote}/${targetBranch}`]);
+  if (!acceptedNames.has(baseRef)) {
+    fail(`baseRef does not point to ${targetRemoteRef}`);
   }
-
-  remoteRefCandidates.push(`refs/remotes/origin/${targetBranch}`);
-  remoteRefCandidates.push(`origin/${targetBranch}`);
-  if (task.baseRef && task.baseRef !== targetBranch) {
-    remoteRefCandidates.push(`refs/remotes/origin/${task.baseRef}`);
-    remoteRefCandidates.push(`origin/${task.baseRef}`);
-  }
-
-  for (const ref of remoteRefCandidates) {
-    if (!ref) continue;
-    if (ref === verifiedSha) return verifiedSha;
-    if (!(await refExists(repoPath, ref, env))) continue;
-    try {
-      const resolved = (await runGit(['-C', repoPath, 'rev-parse', `${ref}^{commit}`], repoPath, env)).trim();
-      if (resolved) return resolved;
-    } catch {
-      // Try the next explicitly supplied remote-base candidate.
-    }
-  }
-
-  throw new Error(
-    `Failed to resolve remote base commit for audit diff (baseRef: "${baseRef}", targetBranch: "${targetBranch}"). Remote base is required and cannot fall back to a local snapshot.`,
-  );
+  return (await runGit(['-C', repoPath, 'rev-parse', '--verify', `${targetRemoteRef}^{commit}`], repoPath, env)).trim();
 }
 
 async function gitIdentityArgs(repo: string, env: NodeJS.ProcessEnv): Promise<string[]> {
@@ -742,6 +689,7 @@ export async function getTaskDiff(
   env: NodeJS.ProcessEnv,
   sourceSha?: string | null,
   targetSha?: string | null,
+  remote = 'origin',
 ): Promise<{ diff: string; changedFiles: string[]; commitSha: string; branchSha?: string; auditRange?: string }> {
   let commitSha = '';
   let branchSha: string | undefined;
@@ -803,7 +751,7 @@ export async function getTaskDiff(
     // Always use remote base before publish (baseRef / prevRemoteSha / origin/<targetBranch>).
     // Never fall back to earliest merge parent or parent merge.
     // If remote base cannot be resolved, fail closed (throw).
-    const baseCommit = await resolveRemoteAuditBase(repoPath, baseRef, targetBranch, task, env);
+    const baseCommit = await resolveRemoteAuditBase(repoPath, baseRef, targetBranch, remote, env);
     const mb = (await runGit(['-C', repoPath, 'merge-base', baseCommit, taskTip], repoPath, env)).trim();
     if (!mb) throw new Error('Failed to resolve merge-base for audit diff.');
 
@@ -861,7 +809,7 @@ export async function getTaskDiff(
       if (!branchSha) {
         branchSha = taskSnapshotCommit;
       }
-      const effectiveBase = await resolveRemoteAuditBase(repoPath, baseRef, targetBranch, task, env);
+      const effectiveBase = await resolveRemoteAuditBase(repoPath, baseRef, targetBranch, remote, env);
 
       // Verify taskSnapshotCommit does not contain any reverse merges
       const snapshotParents = (
@@ -1704,6 +1652,7 @@ export async function publishTask(
             env,
             sourceSha,
             targetSha,
+            remote,
           );
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);

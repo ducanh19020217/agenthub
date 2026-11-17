@@ -2371,7 +2371,10 @@ export class ProfileModelRepo {
     fetchedAt = Math.floor(Date.now() / 1000),
   ): void {
     const transaction = this.db.transaction(() => {
-      this.db.prepare('DELETE FROM profile_models WHERE profileName = ? AND unavailableAt IS NULL').run(profileName);
+      // Keep provider rejections and run evidence across catalog refreshes: a model
+      // that has actually run on this profile stays run-verified even if the
+      // account catalog stops listing it.
+      this.db.prepare('DELETE FROM profile_models WHERE profileName = ? AND unavailableAt IS NULL AND COALESCE(runVerified, 0) = 0').run(profileName);
       const insert = this.db.prepare(
         `INSERT INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt)
          VALUES (?, ?, ?, ?, ?, ?)
@@ -2399,25 +2402,19 @@ export class ProfileModelRepo {
   /**
    * Record that a run on this profile/model finished.
    *
-   * - Existing row: mark it run-verified and clear any provider rejection.
-   * - No row, but the profile already has model discovery: insert a run-verified
-   *   row, so a model that runs but is missing from the catalog is still shown
-   *   as verified in /api/models.
-   * - Profile without any discovery: do nothing. Inserting the first row would
-   *   make the profile look "discovered", switching profileHasModel away from
-   *   the static model list and stranding tasks in waiting_quota.
+   * Existing row: mark it run-verified and clear any provider rejection.
+   * No row: insert a run-evidence row (verified = 0, runVerified = 1). verified
+   * stays reserved for "listed by the account catalog"; profileHasModel ignores
+   * run-evidence rows when deciding whether a profile has model discovery, so a
+   * profile without a catalog keeps using the static model list.
    */
   markRunVerified(profileName: string, modelId: string, engine: string, at = Math.floor(Date.now() / 1000)): void {
-    const result = this.db.prepare(`
-      UPDATE profile_models
-      SET runVerified = 1, unavailableReason = NULL, unavailableAt = NULL, fetchedAt = ?
-      WHERE profileName = ? AND engine = ? AND modelId = ?
-    `).run(at, profileName, engine, modelId);
-    if (result.changes > 0) return;
-    const hasDiscovery = this.db.prepare('SELECT 1 FROM profile_models WHERE profileName = ? LIMIT 1').get(profileName);
-    if (!hasDiscovery) return;
-    this.db.prepare('INSERT INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt, runVerified) VALUES (?, ?, ?, ?, 1, ?, 1)')
-      .run(profileName, modelId, modelId, engine, at);
+    this.db.prepare(`
+      INSERT INTO profile_models (profileName, modelId, modelName, engine, verified, fetchedAt, runVerified)
+      VALUES (?, ?, ?, ?, 0, ?, 1)
+      ON CONFLICT(profileName, engine, modelId) DO UPDATE SET
+        runVerified = 1, unavailableReason = NULL, unavailableAt = NULL, fetchedAt = excluded.fetchedAt
+    `).run(profileName, modelId, modelId, engine, at);
   }
 
   deleteForProfile(profileName: string): void {

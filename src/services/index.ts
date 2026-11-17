@@ -1135,7 +1135,7 @@ export interface DiscoveredModelApiItem {
   verified: boolean;
   available: boolean;
   configured?: boolean;
-  /** Human-readable text kept for API compatibility; clients should use warningCode / flags. */
+  /** Locale-neutral text kept for API compatibility; clients should use warningCode / flags. */
   warning?: string | null;
   warningCode?: ModelWarningCode | null;
   runVerified?: boolean;
@@ -1145,11 +1145,13 @@ export interface DiscoveredModelApiItem {
 
 export type ModelWarningCode = 'unavailable_for_account' | 'unverified_catalog' | 'unverified_account' | 'configured_no_provider';
 
+// Locale-neutral fallback text for API clients that do not read warningCode.
+// The web UI never shows this text: it renders i18n strings from warningCode and the flags.
 const MODEL_WARNING_TEXT: Record<ModelWarningCode, string> = {
-  unavailable_for_account: 'Không dùng được với tài khoản',
-  unverified_catalog: 'Chưa xác minh qua model catalog',
-  unverified_account: 'Chưa xác minh qua tài khoản',
-  configured_no_provider: 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp',
+  unavailable_for_account: 'Not usable with this account',
+  unverified_catalog: 'Not verified by the model catalog',
+  unverified_account: 'Not verified by any account',
+  configured_no_provider: 'Configured model is not provided by any account',
 };
 
 /** Warning fields for a model option: a stable code plus its legacy text. */

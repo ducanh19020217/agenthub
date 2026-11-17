@@ -584,7 +584,13 @@ export class Scheduler {
     if (this.profileModelRepo) {
       const rows = this.profileModelRepo.getForProfile(profileName);
       if (rows.length > 0) {
-        if (!isProfileLoggedIn(profile)) return false;
+        // Rows written only because a run finished (not listed by the catalog and
+        // not rejected) are evidence, not discovery: they must not switch a
+        // profile without a catalog away from the static model list below.
+        const isRunEvidenceOnly = (r: { verified?: number | boolean | null; runVerified?: number | boolean | null; unavailableAt?: number | null }) =>
+          Boolean(r.runVerified) && !r.verified && !r.unavailableAt;
+        const hasCatalog = rows.some((r) => !isRunEvidenceOnly(r));
+        if (hasCatalog && !isProfileLoggedIn(profile)) return false;
         // Discovery stores Claude ids bare ("opus") and Codex ids prefixed ("codex:gpt-…"),
         // while callers (e.g. reviewer selection) may pass "claude:opus" or a bare Codex id.
         const normalize = (id: string): string => {
@@ -595,7 +601,7 @@ export class Scheduler {
         const wanted = normalize(model);
         const isClaudeAlias = profile.engine === 'claude' && ['sonnet', 'opus', 'haiku'].includes(wanted);
         if (rows.some((r) => normalize(r.modelId) === wanted && Boolean(r.unavailableAt))) return false;
-        if (rows.some((r) => normalize(r.modelId) === wanted && (Boolean(r.verified) || isClaudeAlias))) return true;
+        if (rows.some((r) => normalize(r.modelId) === wanted && (Boolean(r.verified) || Boolean(r.runVerified) || isClaudeAlias))) return true;
         // Discovery is additive: fall through to the statically known models below.
       }
     }

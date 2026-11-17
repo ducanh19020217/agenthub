@@ -1385,6 +1385,39 @@ describe('Codex reviewer failover lifecycle', () => {
     scheduler.stop();
   });
 
+  it('marks the reviewer model run-verified when read-only feedback escalates the review', async () => {
+    const { scheduler } = makeReviewer('reviewer-erofs');
+    const profileModelRepo = new ProfileModelRepo(db);
+    const markRunVerified = vi.spyOn(profileModelRepo, 'markRunVerified');
+    scheduler.setProfileModelRepo(profileModelRepo);
+    scheduler.tick();
+    await vi.waitFor(() => {
+      expect(taskRepo.get('test-project/review')?.reviewerEscalationReason).toBe('reviewer_environment');
+    });
+    const reviewerRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
+    expect(reviewerRun?.outcome).toBe('done');
+    expect(markRunVerified).toHaveBeenCalledWith('codex-1', reviewerRun!.model, 'codex');
+    scheduler.stop();
+  });
+
+  it('marks the reviewer model run-verified when autocheck results vanish before the verdict', async () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    const profileModelRepo = new ProfileModelRepo(db);
+    const markRunVerified = vi.spyOn(profileModelRepo, 'markRunVerified');
+    scheduler.setProfileModelRepo(profileModelRepo);
+    scheduler.tick();
+    expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(1);
+    // Checks existed when the reviewer was spawned but are gone when its verdict is processed.
+    db.prepare("DELETE FROM check_results WHERE taskId = 'test-project/review'").run();
+    await vi.waitFor(() => {
+      expect(taskRepo.get('test-project/review')?.reviewerEscalationReason).toBe('missing_autocheck_results');
+    });
+    const reviewerRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
+    expect(reviewerRun?.outcome).toBe('done');
+    expect(markRunVerified).toHaveBeenCalledWith('codex-1', reviewerRun!.model, 'codex');
+    scheduler.stop();
+  });
+
   it('ignores environment wording in the reviewer log and processes the final quality verdict', async () => {
     const { scheduler } = makeReviewer('reviewer-erofs-log');
     scheduler.tick();

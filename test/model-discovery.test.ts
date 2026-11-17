@@ -497,7 +497,7 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(Scheduler.prototype.profileHasModel.call({ profileRepo, profileModelRepo } as any, 'codex-catalog', 'codex:gpt-5.6-luna')).toBe(true);
   });
 
-  it('markRunVerified does not create discovery rows for a profile without model discovery', () => {
+  it('markRunVerified on a profile without discovery records run evidence but keeps the static model fallback', () => {
     const home = path.join(tmpDir, 'codex-no-discovery-home');
     fs.mkdirSync(home, { recursive: true });
     profileRepo.upsert({
@@ -508,14 +508,54 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
       enabled: 1,
       accountType: 'personal',
     });
-    expect(Scheduler.prototype.profileHasModel.call({ profileRepo, profileModelRepo } as any, 'codex-no-discovery', 'codex:gpt-5.6-luna')).toBe(true);
+    const hasModel = (model: string) => Scheduler.prototype.profileHasModel.call({ profileRepo, profileModelRepo } as any, 'codex-no-discovery', model);
+    expect(hasModel('codex:gpt-5.6-luna')).toBe(true);
 
     profileModelRepo.markRunVerified('codex-no-discovery', 'codex:gpt-5.6-luna', 'codex');
 
-    // Still no discovery rows, so the static model list keeps applying and the
-    // worker model stays usable after a reviewer/worker run on this profile.
-    expect(profileModelRepo.getForProfile('codex-no-discovery')).toHaveLength(0);
-    expect(Scheduler.prototype.profileHasModel.call({ profileRepo, profileModelRepo } as any, 'codex-no-discovery', 'codex:gpt-5.6-luna')).toBe(true);
+    // The run is recorded ...
+    const rows = profileModelRepo.getForProfile('codex-no-discovery');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ modelId: 'codex:gpt-5.6-luna', runVerified: 1, verified: 0 });
+    // ... but a run-evidence row is not a catalog: the profile keeps the static model
+    // list. There is no auth.json yet, so the discovered-profile login guard must not
+    // apply (this is what used to strand tasks in waiting_quota after a reviewer run).
+    expect(hasModel('codex:gpt-5.6-luna')).toBe(true);
+
+    // Once the account is logged in, /api/models reports the run-verified model.
+    fs.writeFileSync(path.join(home, 'auth.json'), '{}');
+    const result = AppService.prototype.getModelOptions.call({
+      profileRepo,
+      profileModelRepo,
+      config: { defaultModelChains: { hard: [], easy: [] }, reviewer: { order: [] } },
+    } as any);
+    expect(result.models.find((m) => m.id === 'codex:gpt-5.6-luna')).toMatchObject({ runVerified: true, available: true });
+  });
+
+  it('catalog refresh keeps run-verified models that the catalog no longer lists', () => {
+    const home = path.join(tmpDir, 'codex-refresh-home');
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(home, 'auth.json'), '{}');
+    profileRepo.upsert({
+      name: 'codex-refresh',
+      engine: 'codex',
+      kind: 'isolated',
+      home,
+      email: 'refresh@example.com',
+      enabled: 1,
+      accountType: 'personal',
+    });
+    profileModelRepo.setForProfile('codex-refresh', [
+      { modelId: 'codex:gpt-old', engine: 'codex', verified: true },
+      { modelId: 'codex:gpt-dropped', engine: 'codex', verified: true },
+    ]);
+    profileModelRepo.markRunVerified('codex-refresh', 'codex:gpt-old', 'codex');
+
+    profileModelRepo.setForProfile('codex-refresh', [{ modelId: 'codex:gpt-new', engine: 'codex', verified: true }]);
+
+    const ids = profileModelRepo.getForProfile('codex-refresh').map((r) => r.modelId).sort();
+    expect(ids).toEqual(['codex:gpt-new', 'codex:gpt-old']);
+    expect(profileModelRepo.getForProfile('codex-refresh').find((r) => r.modelId === 'codex:gpt-old')?.runVerified).toBe(1);
   });
 
   it('keeps a rejection visible when another enabled profile can run the same model', () => {
@@ -850,7 +890,7 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(flashHigh?.profiles).toEqual([]);
     expect(flashHigh?.verified).toBe(false);
     expect(flashHigh?.available).toBe(false);
-    expect(flashHigh?.warning).toBe('Chưa xác minh qua tài khoản');
+    expect(flashHigh?.warning).toBe('Not verified by any account');
     expect(flashHigh?.warningCode).toBe('unverified_account');
     expect(result.suggestions).not.toContain('gemini-3.8-flash-high');
   });
@@ -916,7 +956,8 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(fallbackItem).toBeDefined();
     expect(fallbackItem?.available).toBe(false);
     expect(fallbackItem?.profiles).toEqual([]);
-    expect(fallbackItem?.warning).toContain('Model đang được cấu hình');
+    expect(fallbackItem?.warning).toBe('Configured model is not provided by any account');
+    expect(fallbackItem?.warningCode).toBe('configured_no_provider');
   });
 
   it('isKnownModel checks discovered models and falls back to hardcoded models', () => {

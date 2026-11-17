@@ -14,7 +14,7 @@
 - `npm run lint`: 0 lỗi (205 warning `no-explicit-any` có sẵn).
 - `npm run typecheck`: đạt.
 - `npm run build`, `npm run build:web`: đạt.
-- `npm test -- --run`: 1981/1986 đạt. 5 test `test/installer.test.ts` cần mạng tới GitHub nên fail trong sandbox local; autocheck của hub (có mạng) ghi 1984/1984 đạt cho cùng code trước vòng này. `test/scheduler.test.ts`: 158/158 đạt, gồm 2 test "Codex reviewer failover lifecycle" từng đỏ (đỏ trên nhánh trước khi sửa, xanh trên base `8ea60b2b`).
+- `npm test -- --run`: 150 file, 1986/1986 đạt. `test/scheduler.test.ts`: 158/158 đạt, gồm 2 test "Codex reviewer failover lifecycle" từng đỏ.
 - `npm run test:web -- --run`: 75 file / 735 test đạt.
 
 ## Việc chưa làm

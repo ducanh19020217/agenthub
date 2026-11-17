@@ -465,6 +465,37 @@ describe('ModelDiscoveryService DB Caching & Fallback', () => {
     expect(Scheduler.prototype.profileHasModel.call({ profileRepo, profileModelRepo } as any, 'codex-options', 'codex:gpt-rejected')).toBe(false);
   });
 
+  it('keeps a rejection visible when another enabled profile can run the same model', () => {
+    for (const name of ['codex-rejected', 'codex-usable']) {
+      const home = path.join(tmpDir, name);
+      fs.mkdirSync(home, { recursive: true });
+      fs.writeFileSync(path.join(home, 'auth.json'), '{}');
+      profileRepo.upsert({
+        name,
+        engine: 'codex',
+        kind: 'isolated',
+        home,
+        email: `${name}@example.com`,
+        enabled: 1,
+        accountType: 'personal',
+      });
+    }
+    profileModelRepo.markUnavailable('codex-rejected', 'codex:gpt-shared', 'codex', 'provider_rejected');
+    profileModelRepo.setForProfile('codex-usable', [
+      { modelId: 'codex:gpt-shared', modelName: 'Shared model', engine: 'codex', verified: true },
+    ]);
+
+    const result = AppService.prototype.getModelOptions.call({
+      profileRepo,
+      profileModelRepo,
+      config: { defaultModelChains: { hard: [], easy: [] }, reviewer: { order: [] } },
+    } as any);
+    const shared = result.models.find((model) => model.id === 'codex:gpt-shared');
+
+    expect(shared).toMatchObject({ available: true, unavailable: true });
+    expect(shared?.profiles).toEqual(['codex-rejected', 'codex-usable']);
+  });
+
   it('rejects saving a chain when every enabled profile rejects its model', () => {
     profileRepo.upsert({
       name: 'codex-config',

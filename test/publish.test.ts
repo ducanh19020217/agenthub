@@ -3604,6 +3604,25 @@ describe('Publish Service (t-auto-push-after-done)', () => {
           expect(res.changedFiles).toEqual(['valid-sha.txt']);
         });
 
+        it('discovery fail-closed: ref nhánh task tồn tại nhưng không đọc được commit -> ném lỗi, không coi như nhánh đã xoá', async () => {
+          const { findMergeCandidatesForTask } = await import('../src/publish.js');
+          const { repoPath } = setup('rrab-broken-branch-ref');
+          // Ref tồn tại nhưng trỏ tới blob, nên `rev-parse <ref>^{commit}` thất bại.
+          const blobSha = execFileSync('git', ['-C', repoPath, 'hash-object', '-w', '--stdin'], {
+            input: 'not a commit\n', encoding: 'utf8', env: testEnv,
+          }).trim();
+          // git update-ref từ chối nhánh trỏ vào non-commit, nên ghi thẳng file ref.
+          fs.mkdirSync(path.join(repoPath, '.git', 'refs', 'heads', 'agenthub'), { recursive: true });
+          fs.writeFileSync(path.join(repoPath, '.git', 'refs', 'heads', 'agenthub', 'broken-ref'), `${blobSha}\n`);
+          await expect(
+            findMergeCandidatesForTask(repoPath, taskRow('broken-ref'), ['master'], testEnv, true),
+          ).rejects.toThrow(/Failed to verify task branch ref "refs\/heads\/agenthub\/broken-ref"/);
+          // Không fail-closed thì vẫn giữ hành vi cũ: coi như không có nhánh và tiếp tục.
+          await expect(
+            findMergeCandidatesForTask(repoPath, taskRow('broken-ref'), ['master'], testEnv, false),
+          ).resolves.toEqual({ forwardMerges: [], rejectedMerges: [] });
+        });
+
         it('remote không phải origin: dùng refs/remotes/<remote>/<targetBranch>', async () => {
           const { getTaskDiff } = await import('../src/publish.js');
           const { repoPath, remotePath } = setup('rrab-custom-remote');

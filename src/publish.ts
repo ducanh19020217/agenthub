@@ -144,6 +144,23 @@ async function refExists(repo: string, ref: string, env: NodeJS.ProcessEnv): Pro
 }
 
 /**
+ * Like refExists, but only "ref is missing" (exit code 1 from
+ * `rev-parse --verify --quiet`) returns false; any other git failure throws so
+ * fail-closed callers cannot mistake an error for an absent ref.
+ */
+async function refExistsStrict(repo: string, ref: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['-C', repo, 'rev-parse', '--verify', '--quiet', ref], { env });
+    return true;
+  } catch (err: unknown) {
+    if (typeof err === 'object' && err !== null && 'code' in err && (err as { code: unknown }).code === 1) {
+      return false;
+    }
+    throw err;
+  }
+}
+
+/**
  * Resolve the commit the pre-publish audit diff is measured from.
  *
  * The base must be the remote state of the branch being published:
@@ -346,15 +363,27 @@ export async function findMergeCandidatesForTask(
 ): Promise<TaskMergeCandidatesResult> {
   const taskBranch = task.branch || `agenthub/${task.slug}`;
   let branchRef = `refs/heads/${taskBranch}`;
-  let hasBranch = await refExists(repoPath, branchRef, env);
+  // In fail-closed mode a git error while reading a ref that exists (or while
+  // checking whether it exists) must stop discovery, not be treated as "the
+  // task branch is gone" and fall through to ancestry/message heuristics.
+  const exists = (ref: string) => (failClosed ? refExistsStrict(repoPath, ref, env) : refExists(repoPath, ref, env));
+  const readSha = async (ref: string): Promise<string | null> => {
+    try {
+      return (await runGit(['-C', repoPath, 'rev-parse', '--verify', `${ref}^{commit}`], repoPath, env)).trim() || null;
+    } catch (err) {
+      if (failClosed) {
+        const reason = err instanceof Error ? err.message : String(err);
+        throw new Error(`Failed to verify task branch ref "${ref}" for audit discovery: ${reason}`);
+      }
+      return null;
+    }
+  };
+
+  let hasBranch = await exists(branchRef);
   let branchSha: string | null = null;
   if (hasBranch) {
-    try {
-      branchSha = (await runGit(['-C', repoPath, 'rev-parse', branchRef], repoPath, env)).trim();
-    } catch {
-      branchSha = null;
-      hasBranch = false;
-    }
+    branchSha = await readSha(branchRef);
+    if (!branchSha) hasBranch = false;
   }
 
   if (!hasBranch) {
@@ -366,14 +395,13 @@ export async function findMergeCandidatesForTask(
       taskBranch,
     ].filter(Boolean) as string[];
     for (const refName of candidateTaskRefs) {
-      if (await refExists(repoPath, refName, env)) {
-        try {
-          branchSha = (await runGit(['-C', repoPath, 'rev-parse', refName], repoPath, env)).trim();
+      if (await exists(refName)) {
+        const sha = await readSha(refName);
+        if (sha) {
+          branchSha = sha;
           branchRef = refName;
           hasBranch = true;
           break;
-        } catch {
-          // ignore
         }
       }
     }
@@ -385,7 +413,7 @@ export async function findMergeCandidatesForTask(
     if (b === taskBranch || b === task.branch || b === branchRef) continue;
     if (branchSha && b === branchSha) continue;
     const bRef = `refs/heads/${b}`;
-    if (await refExists(repoPath, bRef, env)) {
+    if (await exists(bRef)) {
       if (bRef !== branchRef && !validRefs.includes(bRef)) {
         if (!branchSha) {
           validRefs.push(bRef);
@@ -393,12 +421,13 @@ export async function findMergeCandidatesForTask(
           try {
             const resolved = (await runGit(['-C', repoPath, 'rev-parse', bRef], repoPath, env)).trim();
             if (resolved !== branchSha) validRefs.push(bRef);
-          } catch {
+          } catch (err) {
+            if (failClosed) throw err;
             validRefs.push(bRef);
           }
         }
       }
-    } else if (await refExists(repoPath, b, env)) {
+    } else if (await exists(b)) {
       if (b !== branchRef && !validRefs.includes(b)) {
         if (!branchSha) {
           validRefs.push(b);
@@ -406,21 +435,22 @@ export async function findMergeCandidatesForTask(
           try {
             const resolved = (await runGit(['-C', repoPath, 'rev-parse', b], repoPath, env)).trim();
             if (resolved !== branchSha) validRefs.push(b);
-          } catch {
+          } catch (err) {
+            if (failClosed) throw err;
             validRefs.push(b);
           }
         }
       }
     }
   }
-  if (validRefs.length === 0 && (await refExists(repoPath, 'HEAD', env))) {
+  if (validRefs.length === 0 && (await exists('HEAD'))) {
     let headIsTask = false;
     if (branchSha) {
       try {
         const headSha = (await runGit(['-C', repoPath, 'rev-parse', 'HEAD'], repoPath, env)).trim();
         if (headSha === branchSha) headIsTask = true;
-      } catch {
-        // ignore
+      } catch (err) {
+        if (failClosed) throw err;
       }
     }
     if (!headIsTask) {
@@ -444,9 +474,9 @@ export async function findMergeCandidatesForTask(
 
   const destRefs: string[] = [];
   if (task.baseRef) {
-    if (await refExists(repoPath, `refs/heads/${task.baseRef}`, env)) {
+    if (await exists(`refs/heads/${task.baseRef}`)) {
       destRefs.push(`refs/heads/${task.baseRef}`);
-    } else if (await refExists(repoPath, task.baseRef, env)) {
+    } else if (await exists(task.baseRef)) {
       destRefs.push(task.baseRef);
     }
   }
@@ -454,10 +484,10 @@ export async function findMergeCandidatesForTask(
     if (b && b !== taskBranch && b !== task.branch && b !== branchRef) {
       const isSha = /^[0-9a-f]{40}$/i.test(b);
       if (!isSha) {
-        if (await refExists(repoPath, `refs/heads/${b}`, env)) {
+        if (await exists(`refs/heads/${b}`)) {
           const refName = `refs/heads/${b}`;
           if (!destRefs.includes(refName)) destRefs.push(refName);
-        } else if (await refExists(repoPath, b, env)) {
+        } else if (await exists(b)) {
           if (!destRefs.includes(b)) destRefs.push(b);
         }
       }
@@ -592,7 +622,8 @@ export async function findMergeCandidatesForTask(
                 isP2OnTask = true;
               }
             }
-          } catch {
+          } catch (err) {
+            if (failClosed) throw err;
             ancestryVerificationFailed = true;
             if (!rejectedMerges.includes(hash)) rejectedMerges.push(hash);
             continue;

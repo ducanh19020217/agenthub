@@ -3,9 +3,9 @@
 ## Tóm tắt việc đã làm
 
 1. **Lưu bền model bị provider từ chối** theo từng profile (`profile_models.unavailableAt/unavailableReason`, migration chỉ thêm cột). Scheduler phát hiện lỗi `model_not_found` / "model is not supported" chỉ trên dòng `ERROR:` của engine, chặn cặp profile/model, requeue sang model tiếp theo và ghi qua `task.model_unavailable`.
-2. **Ghi nhận model đã chạy được** (`runVerified`) khi worker done, reviewer done và khi khôi phục `restart_marker` sau restart. `markRunVerified` cập nhật dòng có sẵn; nếu profile đã có discovery thì chèn dòng mới (model chạy được nhưng không có trong catalog vẫn hiện là đã xác minh); profile chưa có discovery thì không chèn, để giữ fallback danh sách model tĩnh (nếu chèn, task sau review rơi vào `waiting_quota`).
+2. **Ghi nhận model đã chạy được** (`runVerified`) khi worker done, reviewer done (kể cả nhánh thiếu autocheck và feedback môi trường read-only) và khi khôi phục `restart_marker` sau restart. `markRunVerified` luôn ghi: cập nhật dòng có sẵn, hoặc chèn dòng bằng chứng chạy (`verified = 0`, `runVerified = 1`) cho cả profile chưa có discovery. `profileHasModel` không coi dòng chỉ-bằng-chứng-chạy là catalog, nên profile chưa có discovery vẫn dùng danh sách model tĩnh (tránh task sau review rơi vào `waiting_quota`). `setForProfile` giữ dòng `runVerified` khi refresh catalog.
 3. **Daemon** truyền `ProfileModelRepo` cho scheduler một cách tường minh (trước đó scheduler tự tạo repo từ `db` trong constructor; nay dùng chung một instance) kèm test daemon thật lưu rejection.
-4. **`/api/models`** trả `unavailable`, `runVerified`, `unavailableReason` và `warningCode` (`unavailable_for_account`, `unverified_catalog`, `unverified_account`, `configured_no_provider`); chuỗi tiếng Việt gom về một bảng tra, giữ `warning` để tương thích API.
+4. **`/api/models`** trả `unavailable`, `runVerified`, `unavailableReason` và `warningCode` (`unavailable_for_account`, `unverified_catalog`, `unverified_account`, `configured_no_provider`); `warning` chỉ còn là text tiếng Anh trung tính để tương thích API; UI dùng `warningCode`/cờ và i18n.
 5. **`PUT /api/config`** trả 400 khi mọi profile cùng engine đều từ chối model trong chuỗi (Codex, `claude:*` và alias `sonnet/opus/haiku`).
 6. **UI** (SettingsPage, ProjectSettingsDrawer, DepartmentsPage, CreateTaskPage): model bị từ chối (kể cả `available=true, unavailable=true`) không chọn được làm model đầu chuỗi; chuỗi đã lưu có model bị từ chối hiện cảnh báo đỏ; model chưa xác minh chạy được có cảnh báo riêng.
 
@@ -14,7 +14,7 @@
 - `npm run lint`: 0 lỗi (205 warning `no-explicit-any` có sẵn).
 - `npm run typecheck`: đạt.
 - `npm run build`, `npm run build:web`: đạt.
-- `npm test -- --run`: 150 file, 1986/1986 đạt. `test/scheduler.test.ts`: 158/158 đạt, gồm 2 test "Codex reviewer failover lifecycle" từng đỏ.
+- `npm test -- --run`: 1984/1989 đạt. 5 test `test/installer.test.ts` cần mạng tới GitHub nên fail trong sandbox local (autocheck có mạng của hub đạt toàn bộ). `test/scheduler.test.ts`: 160/160 đạt, gồm 2 test "Codex reviewer failover lifecycle" từng đỏ.
 - `npm run test:web -- --run`: 75 file / 735 test đạt.
 
 ## Việc chưa làm
@@ -23,6 +23,9 @@
 
 ## Commit
 
+- `8ee2c660` fix: persist run verification for every profile and across catalog refresh
+- `0e6bc472` docs: refresh unusable models completion report
+- `f8f0d6ea` docs(tasks): add DONE report for t-settings-unusable-models
 - `8193f6fc` fix: record run verification for discovered profiles and wire repo in daemon
 - `728a7436` test: drop duplicate model-not-found case from fake agent after merge
 - `fb53fd91` Merge branch 'agenthub/integration' into agenthub/t-settings-unusable-models

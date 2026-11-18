@@ -177,6 +177,9 @@
   --t-chart-2: #1d4ed8;
   --t-chart-3: #10b981;
   --t-chart-4: #047857;
+  /* Worker engine series (validated categorical pair, light surface). */
+  --t-series-gemini: #3b82f6;
+  --t-series-codex: #10b981;
   --t-overlay: rgba(0, 0, 0, 0.6);
   --t-overlay-strong: rgba(0, 0, 0, 0.55);
   --t-shadow: rgba(0, 0, 0, 0.04);
@@ -417,6 +420,9 @@
   --t-chart-2: #1d4ed8;
   --t-chart-3: #34d399;
   --t-chart-4: #047857;
+  /* Worker engine series (validated categorical pair, dark surface). */
+  --t-series-gemini: #3b82f6;
+  --t-series-codex: #0ea371;
   color-scheme: dark;
   --t-overlay: rgba(0, 0, 0, 0.72);
   --t-overlay-strong: rgba(0, 0, 0, 0.55);

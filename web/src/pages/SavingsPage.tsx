@@ -17,6 +17,7 @@ import { useLocale } from '../context/LocaleContext';
 import { ModelBadge } from '../components/ModelBadge';
 import { formatNumber as formatNum, formatSigned } from '../utils/format';
 import { Pagination } from '../components/ui/Pagination';
+import { DailyTokenChart } from '../components/DailyTokenChart';
 
 export const SavingsPage: React.FC = () => {
   const { t, locale } = useLocale();
@@ -62,12 +63,6 @@ export const SavingsPage: React.FC = () => {
   const summary = savings?.summary;
   const tasks = savings?.tasks || [];
   const byDay = savings?.byDay || [];
-
-  // Chart max calculation
-  const maxDayTokens = Math.max(
-    1,
-    ...byDay.map((d) => Math.max(d.geminiTokens, d.codexTokens, d.totalTokens)),
-  );
 
   return (
     <div className="space-y-8 max-w-7xl mx-auto">
@@ -247,11 +242,11 @@ export const SavingsPage: React.FC = () => {
               {/* Legend */}
               <div className="flex items-center gap-4 text-xs">
                 <div className="flex items-center gap-1.5">
-                  <div className="w-3 h-3 rounded-xs bg-[var(--t-chart-1)]" />
+                  <div className="w-3 h-3 rounded-xs bg-[var(--t-series-gemini)]" />
                   <span className="text-[var(--t-text-2)]">Gemini (agy)</span>
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <div className="w-3 h-3 rounded-xs bg-[var(--t-chart-3)]" />
+                  <div className="w-3 h-3 rounded-xs bg-[var(--t-series-codex)]" />
                   <span className="text-[var(--t-text-2)]">Codex</span>
                 </div>
               </div>
@@ -262,88 +257,17 @@ export const SavingsPage: React.FC = () => {
                 {t('savings.noDailyData')}
               </div>
             ) : (
-              <div className="w-full overflow-x-auto">
-                <div className="min-w-[600px] h-64 flex flex-col justify-end pt-4 pb-2">
-                  {/* SVG Chart */}
-                  <svg className="w-full h-48" viewBox={`0 0 ${Math.max(600, byDay.length * 60)} 200`}>
-                    <defs>
-                      <linearGradient id="geminiGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="var(--t-chart-1)" stopOpacity="0.9" />
-                        <stop offset="100%" stopColor="var(--t-chart-2)" stopOpacity="0.7" />
-                      </linearGradient>
-                      <linearGradient id="codexGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="var(--t-chart-3)" stopOpacity="0.9" />
-                        <stop offset="100%" stopColor="var(--t-chart-4)" stopOpacity="0.7" />
-                      </linearGradient>
-                    </defs>
-
-                    {/* Horizontal grid lines */}
-                    {[0.25, 0.5, 0.75, 1].map((pct) => (
-                      <line
-                        key={pct}
-                        x1="0"
-                        y1={180 - pct * 160}
-                        x2="100%"
-                        y2={180 - pct * 160}
-                        stroke="currentColor"
-                        strokeDasharray="4 4"
-                        className="text-[var(--t-border)] opacity-40"
-                      />
-                    ))}
-
-                    {/* Bars */}
-                    {byDay.map((d, idx) => {
-                      const totalWidth = Math.max(600, byDay.length * 60);
-                      const groupWidth = totalWidth / byDay.length;
-                      const xBase = idx * groupWidth + groupWidth * 0.15;
-                      const barW = Math.min(20, groupWidth * 0.35);
-
-                      const geminiH = Math.max(4, (d.geminiTokens / maxDayTokens) * 160);
-                      const codexH = Math.max(4, (d.codexTokens / maxDayTokens) * 160);
-
-                      return (
-                        <g key={d.date} className="cursor-pointer group">
-                          {/* Gemini bar */}
-                          <rect
-                            x={xBase}
-                            y={180 - geminiH}
-                            width={barW}
-                            height={geminiH}
-                            rx="3"
-                            fill="url(#geminiGrad)"
-                            className="transition-all hover:opacity-100 opacity-90"
-                          >
-                            <title>{`${d.date} - Gemini: ${formatNumber(d.geminiTokens)} tokens`}</title>
-                          </rect>
-
-                          {/* Codex bar */}
-                          <rect
-                            x={xBase + barW + 4}
-                            y={180 - codexH}
-                            width={barW}
-                            height={codexH}
-                            rx="3"
-                            fill="url(#codexGrad)"
-                            className="transition-all hover:opacity-100 opacity-90"
-                          >
-                            <title>{`${d.date} - Codex: ${formatNumber(d.codexTokens)} tokens`}</title>
-                          </rect>
-
-                          {/* Date label */}
-                          <text
-                            x={xBase + barW}
-                            y="196"
-                            textAnchor="middle"
-                            className="text-[10px] fill-[var(--t-text-2)] font-mono"
-                          >
-                            {d.date.slice(5)}
-                          </text>
-                        </g>
-                      );
-                    })}
-                  </svg>
-                </div>
-              </div>
+              <DailyTokenChart
+                days={byDay}
+                locale={locale}
+                labels={{
+                  gemini: 'Gemini (agy)',
+                  codex: 'Codex',
+                  total: t('savings.chartTotal'),
+                  codexShare: t('savings.chartCodexShare'),
+                  ariaLabel: t('savings.tokensByDay'),
+                }}
+              />
             )}
           </div>
 

@@ -300,7 +300,7 @@ const FlowNodeCard: React.FC<{
               /* Chấm cảnh báo ở góc icon để không chiếm chỗ của tên trạng thái. */
               <span
                 data-testid={`badge-${node.status}`}
-                className="absolute -right-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[var(--t-crit)] text-[9px] font-bold leading-none text-white ring-2 ring-[var(--t-surface-2)]"
+                className="absolute -right-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[var(--t-crit)] text-[9px] font-bold leading-none text-[var(--t-on-accent)] ring-2 ring-[var(--t-surface-2)]"
               >
                 !
               </span>

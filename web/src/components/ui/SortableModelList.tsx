@@ -60,6 +60,7 @@ export const SortableModelList: React.FC<SortableModelListProps> = ({
   const moveModel = (index: number, direction: -1 | 1) => {
     const target = index + direction;
     if (target < 0 || target >= models.length) return;
+    if (target === 0 && unavailableSet.has(models[index])) return;
     const next = [...models];
     const temp = next[index];
     next[index] = next[target];
@@ -72,6 +73,7 @@ export const SortableModelList: React.FC<SortableModelListProps> = ({
   };
 
   const updateModel = (index: number, value: string) => {
+    if (index === 0 && unavailableSet.has(value)) return;
     const next = [...models];
     next[index] = value;
     onChange(next);
@@ -80,6 +82,7 @@ export const SortableModelList: React.FC<SortableModelListProps> = ({
   const addModel = () => {
     const trimmed = modelToAdd.trim();
     if (!trimmed) return;
+    if (unavailableSet.has(trimmed) && models.length === 0) return;
     onChange([...models, trimmed]);
   };
 
@@ -93,6 +96,7 @@ export const SortableModelList: React.FC<SortableModelListProps> = ({
 
   const handleDrop = (index: number) => {
     if (draggedIndex === null || draggedIndex === index) return;
+    if (index === 0 && unavailableSet.has(models[draggedIndex])) return;
     const next = [...models];
     const [moved] = next.splice(draggedIndex, 1);
     next.splice(index, 0, moved);

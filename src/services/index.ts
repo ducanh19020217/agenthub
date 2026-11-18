@@ -66,7 +66,7 @@ import { ProfileService as CoreProfileService, accountKey, isProfileLoggedIn, ex
 import { Scheduler } from '../scheduler/index.js';
 import { CodexEngine } from '../engines/index.js';
 import { hasClaudeQuotaAvailable, QuotaUsageService } from '../quota/usage.js';
-import { QuotaService } from '../quota/index.js';
+import { getModelEngine, QuotaService } from '../quota/index.js';
 import { ProfileLockService } from '../profiles/locks.js';
 import { CheckRunner } from '../checks.js';
 import { BrainService } from '../brain.js';
@@ -1135,7 +1135,28 @@ export interface DiscoveredModelApiItem {
   verified: boolean;
   available: boolean;
   configured?: boolean;
+  /** Locale-neutral text kept for API compatibility; clients should use warningCode / flags. */
   warning?: string | null;
+  warningCode?: ModelWarningCode | null;
+  runVerified?: boolean;
+  unavailable?: boolean;
+  unavailableReason?: string | null;
+}
+
+export type ModelWarningCode = 'unavailable_for_account' | 'unverified_catalog' | 'unverified_account' | 'configured_no_provider';
+
+// Locale-neutral fallback text for API clients that do not read warningCode.
+// The web UI never shows this text: it renders i18n strings from warningCode and the flags.
+const MODEL_WARNING_TEXT: Record<ModelWarningCode, string> = {
+  unavailable_for_account: 'Not usable with this account',
+  unverified_catalog: 'Not verified by the model catalog',
+  unverified_account: 'Not verified by any account',
+  configured_no_provider: 'Configured model is not provided by any account',
+};
+
+/** Warning fields for a model option: a stable code plus its legacy text. */
+function modelWarning(code: ModelWarningCode | null): { warning: string | null; warningCode: ModelWarningCode | null } {
+  return { warning: code ? MODEL_WARNING_TEXT[code] : null, warningCode: code };
 }
 
 export interface ModelOptionsResponse {
@@ -7045,12 +7066,19 @@ export class AppService {
     // 1. Collect verified models from enabled and logged-in profiles that actually have discovery records
     // (Also collect Claude aliases sonnet/opus/haiku for logged-in Claude profiles even when unverified)
     for (const profile of enabledProfiles) {
-      if (!isProfileLoggedIn(profile)) continue;
       if (!this.profileModelRepo) continue;
       const rows = this.profileModelRepo.getForProfile(profile.name);
+      // A logged-out profile still reports what is known about it (provider
+      // rejections and models that have actually run), but cannot make a model
+      // available: its catalog rows are skipped and its rows never count as usable.
+      const loggedIn = isProfileLoggedIn(profile);
+      if (!loggedIn && !rows.some((row) => row.unavailableAt || row.runVerified)) continue;
       for (const r of rows) {
         const isClaudeAlias = r.engine === 'claude' && ['sonnet', 'opus', 'haiku'].includes(r.modelId);
-        if (!r.verified && !isClaudeAlias) continue;
+        const isUnavailable = Boolean(r.unavailableAt);
+        if (!loggedIn && !isUnavailable && !r.runVerified) continue;
+        if (!r.verified && !isClaudeAlias && !isUnavailable && !r.runVerified) continue;
+        const usable = loggedIn && !isUnavailable;
         const modelId = r.engine === 'codex' && !r.modelId.startsWith('codex:')
           ? `codex:${r.modelId}`
           : r.modelId;
@@ -7062,9 +7090,16 @@ export class AppService {
           }
           if (r.verified) {
             existing.verified = true;
-            existing.warning = null;
+            Object.assign(existing, modelWarning(null));
           }
-          existing.available = true;
+          existing.runVerified = Boolean(existing.runVerified || r.runVerified);
+          if (!existing.runVerified && !existing.unavailable && !r.verified) Object.assign(existing, modelWarning('unverified_catalog'));
+          if (r.unavailableReason) existing.unavailableReason = r.unavailableReason;
+          existing.available = existing.available || usable;
+          // Keep a rejection visible even when another profile happens to expose
+          // the same model. The model must not be used as a chain's first choice
+          // until the provider rejection has been resolved.
+          existing.unavailable = Boolean(existing.unavailable || isUnavailable);
         } else {
           modelMap.set(key, {
             id: modelId,
@@ -7072,9 +7107,12 @@ export class AppService {
             name: r.modelName || modelId,
             profiles: [profile.name],
             verified: Boolean(r.verified),
-            available: true,
+            available: usable,
             configured: false,
-            warning: r.verified ? null : 'Chưa xác minh qua model catalog',
+            ...modelWarning(isUnavailable ? 'unavailable_for_account' : r.verified || r.runVerified ? null : 'unverified_catalog'),
+            runVerified: Boolean(r.runVerified),
+            unavailable: isUnavailable,
+            unavailableReason: r.unavailableReason,
           });
         }
       }
@@ -7102,7 +7140,7 @@ export class AppService {
               verified: false,
               available: false,
               configured: false,
-              warning: 'Chưa xác minh qua tài khoản',
+              ...modelWarning('unverified_account'),
             });
           }
         }
@@ -7271,13 +7309,13 @@ export class AppService {
           verified: false,
           available: false,
           configured: true,
-          warning: 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp',
+          ...modelWarning('configured_no_provider'),
         });
       } else {
         existing.configured = true;
         if (existing.profiles.length === 0) {
           existing.available = false;
-          existing.warning = 'Model đang được cấu hình nhưng không có tài khoản nào cung cấp';
+          Object.assign(existing, modelWarning(existing.unavailable ? 'unavailable_for_account' : 'configured_no_provider'));
         }
       }
     }
@@ -7311,6 +7349,30 @@ export class AppService {
 
   updateConfig(raw: unknown) {
     const parsed = UpdateConfigSchema.parse(raw);
+    const requestedChains = [
+      ...(parsed.modelChainHard || []),
+      ...(parsed.modelChainEasy || []),
+    ];
+    if (this.profileModelRepo && requestedChains.length > 0) {
+      const enabledProfiles = this.profileRepo.getAll().filter((p) => Boolean(p.enabled) && !p.deletedAt);
+      for (const model of requestedChains) {
+        const engine = model.startsWith('claude:') || ['sonnet', 'opus', 'haiku'].includes(model)
+          ? 'claude'
+          : getModelEngine(model);
+        const candidates = enabledProfiles.filter((p) => p.engine === engine);
+        if (candidates.length === 0) continue;
+        const normalized = engine === 'codex' && !model.startsWith('codex:')
+          ? `codex:${model}`
+          : engine === 'claude' && model.startsWith('claude:')
+            ? model.slice('claude:'.length)
+            : model;
+        const rejectedEverywhere = candidates.every((profile) => this.profileModelRepo!.getForProfile(profile.name)
+          .some((row) => row.modelId === normalized && row.engine === engine && Boolean(row.unavailableAt)));
+        if (rejectedEverywhere) {
+          throw new HttpError(400, 'model_unavailable', `Model "${model}" bị mọi tài khoản từ chối; hãy chọn model khác trong chuỗi.`);
+        }
+      }
+    }
 
     // Apply in-memory
     updateConfigInMemory(this.config, parsed);

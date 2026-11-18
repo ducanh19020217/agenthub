@@ -1,0 +1,48 @@
+# Hoàn thành task: t-settings-unusable-models
+
+## Tóm tắt việc đã làm
+
+1. **Lưu bền model bị provider từ chối** theo từng profile (`profile_models.unavailableAt/unavailableReason`, migration chỉ thêm cột). Scheduler phát hiện lỗi `model_not_found` / "model is not supported" chỉ trên dòng `ERROR:` của engine, chặn cặp profile/model, requeue sang model tiếp theo và ghi qua `task.model_unavailable`.
+2. **Ghi nhận model đã chạy được** (`runVerified`) khi worker done, reviewer done (kể cả nhánh thiếu autocheck và feedback môi trường read-only) và khi khôi phục `restart_marker` sau restart. `markRunVerified` luôn ghi: cập nhật dòng có sẵn, hoặc chèn dòng bằng chứng chạy (`verified = 0`, `runVerified = 1`) cho cả profile chưa có discovery. `profileHasModel` không coi dòng chỉ-bằng-chứng-chạy là catalog, nên profile chưa có discovery vẫn dùng danh sách model tĩnh (tránh task sau review rơi vào `waiting_quota`). `setForProfile` giữ dòng `runVerified` khi refresh catalog.
+3. **Daemon** truyền `ProfileModelRepo` cho scheduler một cách tường minh (trước đó scheduler tự tạo repo từ `db` trong constructor; nay dùng chung một instance) kèm test daemon thật lưu rejection.
+4. **`/api/models`** báo cả bằng chứng (rejection, run-verified) của profile chưa đăng nhập nhưng không để profile đó làm model thành khả dụng; trả `unavailable`, `runVerified`, `unavailableReason` và `warningCode` (`unavailable_for_account`, `unverified_catalog`, `unverified_account`, `configured_no_provider`); `warning` chỉ còn là text tiếng Anh trung tính để tương thích API; UI dùng `warningCode`/cờ và i18n.
+5. **`PUT /api/config`** trả 400 khi mọi profile cùng engine đều từ chối model trong chuỗi (Codex, `claude:*` và alias `sonnet/opus/haiku`).
+6. **UI** (SettingsPage, ProjectSettingsDrawer, DepartmentsPage, CreateTaskPage): model bị từ chối (kể cả `available=true, unavailable=true`) không chọn được làm model đầu chuỗi; chuỗi đã lưu có model bị từ chối hiện cảnh báo đỏ; model chưa xác minh chạy được có cảnh báo riêng.
+
+## Kết quả kiểm tra
+
+- `npm run lint`: 0 lỗi (205 warning `no-explicit-any` có sẵn).
+- `npm run typecheck`: đạt.
+- `npm run build`, `npm run build:web`: đạt.
+- `npm test -- --run` (Node 22.19.0, giống môi trường hub): 150 file / 1989 test đạt. Ghi chú: trên Node 24, 5 test `test/installer.test.ts` fail vì installer yêu cầu Node.js 22; đó là môi trường chạy test, không phải lỗi code.
+- `npm run test:web -- --run`: 734/735 đạt. Test fail duy nhất là `src/test/themeAudit.test.ts` vì `web/src/components/TaskFlow.tsx:303` dùng class `text-white`; dòng này đến từ commit `789e242c` trên `origin/main` (fix(web): keep issue node labels readable...), file giống hệt main, không thuộc task này. Trước khi merge `789e242c` vào nhánh, test:web đạt 735/735.
+
+## Việc chưa làm
+
+- Không còn việc nào trong phạm vi task.
+
+## Commit
+
+- `6269b4d3` Merge branch 'agenthub/integration' (đồng bộ với origin/main 789e242c)
+- `20907906` fix(models): report run evidence for logged-out profiles
+- `164cd922` docs(tasks): update DONE report for t-settings-unusable-models
+- `8ee2c660` fix: persist run verification for every profile and across catalog refresh
+- `8ee2c660` fix: persist run verification for every profile and across catalog refresh
+- `0e6bc472` docs: refresh unusable models completion report
+- `f8f0d6ea` docs(tasks): add DONE report for t-settings-unusable-models
+- `8193f6fc` fix: record run verification for discovered profiles and wire repo in daemon
+- `728a7436` test: drop duplicate model-not-found case from fake agent after merge
+- `fb53fd91` Merge branch 'agenthub/integration' into agenthub/t-settings-unusable-models
+- `59eb6f40` fix: keep static model fallback after run verification; cover review findings
+- `89fa2bad` fix: restore provider rejected model failover
+- `f4615d95` test: cover mixed profile model rejection
+- `6f9dfa7c` fix: keep model ids accessible in selectors
+- `412073c6` fix: preserve verified model selections
+- `5ea186b3` fix: guard unusable models across settings selectors
+- `af4225ea` fix: guard rejected models in chain selectors
+- `05ef90bf` test: cover unusable model selectors
+- `df2aea10` fix: block provider-rejected model choices
+- `4bd6be3d` fix: complete unusable model settings handling
+- `ca023389` fix: preserve model selection after verified runs
+- `21bc9883` fix: complete unusable model state handling
+- `6b32121d` feat: persist unusable model state

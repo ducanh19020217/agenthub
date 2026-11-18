@@ -5,7 +5,7 @@ import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { execFileSync, spawn } from 'node:child_process';
 import { loadConfig, DEFAULT_SCHEDULER_LIMITS, saveConfig } from '../src/config.js';
-import { openDatabase, ProjectRepo, DepartmentRepo, ProfileRepo, QuotaMarkRepo, TaskRepo, RunRepo, EventRepo, ReviewRepo } from '../src/db/index.js';
+import { openDatabase, DepartmentRepo, ProfileModelRepo, ProfileRepo, ProjectRepo, QuotaMarkRepo, TaskRepo, RunRepo, EventRepo, ReviewRepo } from '../src/db/index.js';
 import { Scheduler, TIMEOUT_RESUME_NOTE, detectModelUnavailable } from '../src/scheduler/index.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
 import { QuotaService } from '../src/quota/index.js';
@@ -672,6 +672,87 @@ describe('Scheduler regression fixes', () => {
     }
   });
 
+  it('persists a provider-rejected model pair to profile_models', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'keyring', home: null, email: 'p1@example.com', enabled: 1 });
+    taskRepo.insert({
+      id: 'test-project/model-rejected-persist',
+      projectId: 'test-project',
+      slug: 'model-rejected-persist',
+      title: 'Model rejected',
+      status: 'queued',
+      modelChain: JSON.stringify(['gemini-3.8-flash-high', 'gemini-3.8-flash-medium']),
+    });
+    process.env.FAKE_MODE = 'model-not-found';
+    const scheduler = new Scheduler(
+      config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['agy', new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'))]]),
+    );
+    scheduler.setProfileModelRepo(new ProfileModelRepo(db));
+    try {
+      scheduler.tick();
+      await vi.waitFor(() => {
+        expect(runRepo.getByTask('test-project/model-rejected-persist').map((run) => run.model))
+          .toContain('gemini-3.8-flash-medium');
+      }, { timeout: 5000 });
+      const rejectedRun = runRepo.getByTask('test-project/model-rejected-persist')
+        .find((run) => run.model === 'gemini-3.8-flash-high');
+      expect(rejectedRun?.outcome).toBe('crashed');
+      expect(rejectedRun?.reason).toBe('model_unavailable');
+      expect(eventRepo.getRecent(50).some((event) => event.type === 'task.model_unavailable')).toBe(true);
+      const profileModel = db.prepare(
+        'SELECT unavailableAt, unavailableReason FROM profile_models WHERE profileName = ? AND modelId = ?',
+      ).get('p1', 'gemini-3.8-flash-high') as { unavailableAt: number | null; unavailableReason: string | null } | undefined;
+      expect(profileModel?.unavailableAt).toBeTypeOf('number');
+      expect(profileModel?.unavailableReason).toBe('provider_rejected');
+      expect(scheduler.profileHasModel('p1', 'gemini-3.8-flash-high')).toBe(false);
+    } finally {
+      scheduler.stop();
+      delete process.env.FAKE_MODE;
+    }
+  });
+
+  it('marks the worker profile/model run-verified when a worker run finishes done', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'keyring', home: null, email: 'p1@example.com', enabled: 1 });
+    const profileModelRepo = new ProfileModelRepo(db);
+    profileModelRepo.setForProfile('p1', [
+      { modelId: 'gemini-3.8-flash-high', engine: 'agy', verified: true },
+    ]);
+    // A stale rejection must be cleared by a successful run.
+    db.prepare("UPDATE profile_models SET unavailableAt = NULL, runVerified = 0 WHERE profileName = 'p1'").run();
+    taskRepo.insert({
+      id: 'test-project/run-verified',
+      projectId: 'test-project',
+      slug: 'run-verified',
+      title: 'Run verified',
+      status: 'queued',
+      modelChain: JSON.stringify(['gemini-3.8-flash-high']),
+    });
+    process.env.FAKE_MODE = 'done';
+    const scheduler = new Scheduler(
+      config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['agy', new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'))]]),
+    );
+    scheduler.setProfileModelRepo(profileModelRepo);
+    try {
+      scheduler.tick();
+      await vi.waitFor(() => {
+        const run = runRepo.getByTask('test-project/run-verified').find((r) => r.kind === 'worker');
+        expect(run?.outcome).toBe('done');
+      }, { timeout: 5000 });
+      const row = profileModelRepo.getForProfile('p1').find((r) => r.modelId === 'gemini-3.8-flash-high');
+      expect(row?.runVerified).toBeTruthy();
+      expect(row?.unavailableAt ?? null).toBeNull();
+    } finally {
+      scheduler.cancelAll();
+      scheduler.stop();
+      delete process.env.FAKE_MODE;
+    }
+  });
+
   it('detects model rejection only from engine ERROR lines, not from the echoed prompt', () => {
     expect(detectModelUnavailable('ERROR: {"error":{"code":"model_not_found"}}')).toBe(true);
     expect(detectModelUnavailable("noise\nERROR: The 'x' model is not supported when using Codex")).toBe(true);
@@ -854,6 +935,21 @@ describe('Codex reviewer failover lifecycle', () => {
     const reviewerRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
     expect(reviewerRun?.outcome).toBe('done');
     expect(profileRepo.get('codex-1')?.authState).not.toBe('not_logged_in');
+    scheduler.stop();
+  });
+
+  it('marks the reviewer profile/model run-verified when a reviewer run finishes done', async () => {
+    const { scheduler, reviewRepo } = makeReviewer('reviewer-approved');
+    const profileModelRepo = new ProfileModelRepo(db);
+    const markRunVerified = vi.spyOn(profileModelRepo, 'markRunVerified');
+    scheduler.setProfileModelRepo(profileModelRepo);
+    scheduler.tick();
+    await vi.waitFor(() => {
+      expect(reviewRepo.getByTask('test-project/review')[0]?.verdict).toBe('approved');
+    });
+    const reviewerRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
+    expect(reviewerRun?.outcome).toBe('done');
+    expect(markRunVerified).toHaveBeenCalledWith('codex-1', reviewerRun!.model, 'codex');
     scheduler.stop();
   });
 
@@ -1286,6 +1382,39 @@ describe('Codex reviewer failover lifecycle', () => {
     expect(task.reviewerEscalationReason).toBe('reviewer_environment');
     expect(runRepo.getByTask(task.id).filter((run) => run.kind === 'reviewer')).toHaveLength(1);
     expect(eventRepo.getRecent(20).filter((event) => event.type === 'review.escalated')).toHaveLength(1);
+    scheduler.stop();
+  });
+
+  it('marks the reviewer model run-verified when read-only feedback escalates the review', async () => {
+    const { scheduler } = makeReviewer('reviewer-erofs');
+    const profileModelRepo = new ProfileModelRepo(db);
+    const markRunVerified = vi.spyOn(profileModelRepo, 'markRunVerified');
+    scheduler.setProfileModelRepo(profileModelRepo);
+    scheduler.tick();
+    await vi.waitFor(() => {
+      expect(taskRepo.get('test-project/review')?.reviewerEscalationReason).toBe('reviewer_environment');
+    });
+    const reviewerRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
+    expect(reviewerRun?.outcome).toBe('done');
+    expect(markRunVerified).toHaveBeenCalledWith('codex-1', reviewerRun!.model, 'codex');
+    scheduler.stop();
+  });
+
+  it('marks the reviewer model run-verified when autocheck results vanish before the verdict', async () => {
+    const { scheduler } = makeReviewer('reviewer-approved');
+    const profileModelRepo = new ProfileModelRepo(db);
+    const markRunVerified = vi.spyOn(profileModelRepo, 'markRunVerified');
+    scheduler.setProfileModelRepo(profileModelRepo);
+    scheduler.tick();
+    expect(runRepo.getByTask('test-project/review').filter((run) => run.kind === 'reviewer')).toHaveLength(1);
+    // Checks existed when the reviewer was spawned but are gone when its verdict is processed.
+    db.prepare("DELETE FROM check_results WHERE taskId = 'test-project/review'").run();
+    await vi.waitFor(() => {
+      expect(taskRepo.get('test-project/review')?.reviewerEscalationReason).toBe('missing_autocheck_results');
+    });
+    const reviewerRun = runRepo.getByTask('test-project/review').find((run) => run.kind === 'reviewer');
+    expect(reviewerRun?.outcome).toBe('done');
+    expect(markRunVerified).toHaveBeenCalledWith('codex-1', reviewerRun!.model, 'codex');
     scheduler.stop();
   });
 

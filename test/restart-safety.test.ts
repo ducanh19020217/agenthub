@@ -9,7 +9,7 @@ import { createContext, startDaemon } from '../src/daemon.js';
 import { createServer } from '../src/api/server.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { Scheduler } from '../src/scheduler/index.js';
-import { openDatabase, ProjectRepo, ProfileRepo, QuotaMarkRepo, TaskRepo, RunRepo, EventRepo } from '../src/db/index.js';
+import { openDatabase, ProfileModelRepo, ProjectRepo, ProfileRepo, QuotaMarkRepo, TaskRepo, RunRepo, EventRepo } from '../src/db/index.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
 import { linuxPlatform } from '../src/platform/linux.js';
 import { darwinPlatform } from '../src/platform/darwin.js';
@@ -59,6 +59,17 @@ describe('safe restart API', () => {
   });
 
   const headers = () => ({ host: '127.0.0.1:7798', authorization: `Bearer ${token}` });
+
+  it('daemon wires ProfileModelRepo into the scheduler so provider rejections are persisted', () => {
+    new ProfileRepo(ctx.db).upsert({ name: 'codex-wired', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    ctx.scheduler.getEventBus().emit('task.model_unavailable', 'p/wired', {
+      profile: 'codex-wired', model: 'codex:gpt-wired', engine: 'codex',
+    });
+    const row = new ProfileModelRepo(ctx.db).getForProfile('codex-wired').find((r) => r.modelId === 'codex:gpt-wired');
+    expect(row?.unavailableAt).toBeTypeOf('number');
+    expect(row?.unavailableReason).toBe('provider_rejected');
+    expect(ctx.scheduler.profileHasModel('codex-wired', 'codex:gpt-wired')).toBe(false);
+  });
 
   it('starts a when-idle drain, exposes it, and DELETE resumes dispatch', async () => {
     const requested = await server.inject({
@@ -396,6 +407,44 @@ describe('worker survival across daemon restart (handoff & adoption)', () => {
 
     const task = taskRepo.get('p/t3')!;
     expect(task.status).toBe('checking');
+
+    scheduler.stop();
+  });
+
+  it('restart_marker recovery marks the worker profile/model run-verified', async () => {
+    const worktreePath = path.join(tmpDir, 'worktree-rv');
+    fs.mkdirSync(path.join(worktreePath, '.agenthub'), { recursive: true });
+    fs.writeFileSync(path.join(worktreePath, '.agenthub', 'DONE'), 'Done before restart');
+
+    const profileModelRepo = new ProfileModelRepo(db);
+    profileModelRepo.setForProfile('p1', [{ modelId: 'gemini-3.8-flash-high', engine: 'agy', verified: true }]);
+    db.prepare("UPDATE profile_models SET runVerified = 0 WHERE profileName = 'p1'").run();
+
+    taskRepo.insert({ id: 'p/t-rv', projectId: 'p', slug: 't-rv', title: 'T rv', status: 'running', worktreePath });
+    runRepo.insert({
+      id: 'run-dead-rv',
+      taskId: 'p/t-rv',
+      engine: 'agy',
+      model: 'gemini-3.8-flash-high',
+      profileName: 'p1',
+      pid: 9999999, // dead PID
+      startedAt: new Date(Date.now() - 30_000).toISOString(),
+    });
+    db.prepare("UPDATE runs SET handoff = 1 WHERE id = 'run-dead-rv'").run();
+
+    const scheduler = new Scheduler(
+      config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
+      new Map<string, Engine>([['agy', fakeEngine]]), undefined, undefined, undefined, db,
+    );
+    scheduler.setProfileModelRepo(profileModelRepo);
+    activeSchedulers.push(scheduler);
+    scheduler.start();
+
+    expect(runRepo.get('run-dead-rv')!.outcome).toBe('done');
+    expect(taskRepo.get('p/t-rv')!.status).toBe('checking');
+    expect(eventRepo.getRecent(30).some((e) => e.type === 'task.checking' && e.taskId === 'p/t-rv' && (e.payload || '').includes('restart_marker'))).toBe(true);
+    const row = profileModelRepo.getForProfile('p1').find((r) => r.modelId === 'gemini-3.8-flash-high');
+    expect(row?.runVerified).toBeTruthy();
 
     scheduler.stop();
   });

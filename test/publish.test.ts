@@ -728,6 +728,117 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
     });
 
+    it('a successful audit whose log mentions rate limit / 429 still passes and pushes', async () => {
+      const remotePath = path.join(tmpDir, 'remote-audit-limit.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-audit-limit');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/audit-task-1'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'pass.txt'), 'clean code\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: clean feature'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-audit-limit',
+        name: 'Project Audit Limit',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 2 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-audit-limit/task-1',
+        projectId: 'proj-audit-limit',
+        slug: 'audit-task-1',
+        title: 'Audit Task 1',
+        status: 'done',
+        branch: 'agenthub/audit-task-1',
+        baseRef: 'main',
+      });
+
+      const events: Array<{ type: string; payload: any }> = [];
+      ctx.scheduler.getEventBus().on('task.audit_started', (_id, p) => events.push({ type: 'task.audit_started', payload: p }));
+      ctx.scheduler.getEventBus().on('task.audit_passed', (_id, p) => events.push({ type: 'task.audit_passed', payload: p }));
+      ctx.scheduler.getEventBus().on('task.pushed', (_id, p) => events.push({ type: 'task.pushed', payload: p }));
+
+      process.env.FAKE_MODE = 'audit-pass-mentions-limit';
+      const result = await ctx.service.publishTask('proj-audit-limit/task-1');
+      expect(result.ok).toBe(true);
+
+      const updated = ctx.taskRepo.get('proj-audit-limit/task-1');
+      expect(updated?.status).toBe('pushed');
+      const pushResult = JSON.parse(updated!.pushResult!);
+      expect(pushResult.auditPassed).toBe(true);
+      expect(pushResult.auditSkipped).toBe(false);
+
+      expect(events.some((e) => e.type === 'task.audit_started')).toBe(true);
+      expect(events.some((e) => e.type === 'task.audit_passed')).toBe(true);
+      expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
+    });
+
+    it('a failed audit run with a usage-limit error is still reported as reviewer quota', async () => {
+      const remotePath = path.join(tmpDir, 'remote-audit-quota.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-audit-quota');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/audit-task-1'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'pass.txt'), 'clean code\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: clean feature'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-audit-quota',
+        name: 'Project Audit Quota',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 2 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-audit-quota/task-1',
+        projectId: 'proj-audit-quota',
+        slug: 'audit-task-1',
+        title: 'Audit Task 1',
+        status: 'done',
+        branch: 'agenthub/audit-task-1',
+        baseRef: 'main',
+      });
+
+      const events: Array<{ type: string; payload: any }> = [];
+      ctx.scheduler.getEventBus().on('task.audit_started', (_id, p) => events.push({ type: 'task.audit_started', payload: p }));
+      ctx.scheduler.getEventBus().on('task.audit_passed', (_id, p) => events.push({ type: 'task.audit_passed', payload: p }));
+      ctx.scheduler.getEventBus().on('task.pushed', (_id, p) => events.push({ type: 'task.pushed', payload: p }));
+
+      process.env.FAKE_MODE = 'audit-quota';
+      const result = await ctx.service.publishTask('proj-audit-quota/task-1');
+      expect(result.ok).toBe(false);
+
+      const updated = ctx.taskRepo.get('proj-audit-quota/task-1');
+      expect(updated?.status).toBe('done');
+      expect(updated?.pushResult ?? '').toContain('Hết quota reviewer khi audit trước khi publish');
+      expect(events.some((e) => e.type === 'task.pushed')).toBe(false);
+    });
+
     it('audit fail with P1 finding -> blocks push, returns task to worker via changes_requested flow', async () => {
       const remotePath = path.join(tmpDir, 'remote-audit-fail.git');
       initBareRemote(remotePath);

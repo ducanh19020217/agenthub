@@ -58,6 +58,15 @@ async function run() {
       console.error('usage limit exceeded; try again in 2h 3m');
       process.exit(1);
     }
+    if (mode === 'audit-pass-mentions-limit') {
+      // The agent read source files that handle provider quota errors.
+      console.log('crates/core/src/ai/quota.rs: Regex::new(r"(?i)usage limit|rate limit|quota|\\b429\\b")');
+      console.log('openproject/client.rs: if status.as_u16() != 429 { return Err(e) }');
+      if (process.env.FAKE_OUTPUT_PATH) {
+        fs.writeFileSync(process.env.FAKE_OUTPUT_PATH, JSON.stringify(auditResults['audit-pass']));
+      }
+      return;
+    }
     if (mode === 'audit-malformed') {
       if (process.env.FAKE_OUTPUT_PATH) {
         fs.writeFileSync(process.env.FAKE_OUTPUT_PATH, 'malformed json {{{');

@@ -1315,8 +1315,11 @@ async function runAuditAgentForTask(
   try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch { /* ignore */ }
   try { if (fs.existsSync(logPath)) fs.unlinkSync(logPath); } catch { /* ignore */ }
 
-  const quota = chosenEngine.detectQuota(`${logOutput}\n${fileOutput}`).exhausted;
-  if (quota) {
+  // Only a failed run can be a quota failure. A successful audit log also contains
+  // the files the agent read, and a repository that handles HTTP 429 / "rate limit"
+  // itself would otherwise be reported as reviewer quota exhaustion forever.
+  const failed = Boolean(error) || code !== 0;
+  if (failed && chosenEngine.detectQuota(`${logOutput}\n${fileOutput}`).exhausted) {
     deps.quotaService?.mark(
       chosenProfile.name,
       chosenProfile.engine === 'claude' ? 'claude' : 'codex',
@@ -1331,7 +1334,7 @@ async function runAuditAgentForTask(
     };
   }
 
-  if (error || code !== 0) {
+  if (failed) {
     return {
       ok: false,
       error: `Audit agent gặp lỗi (exit code: ${code}): ${error?.message || logOutput.slice(-300) || 'Lỗi không xác định'}`,

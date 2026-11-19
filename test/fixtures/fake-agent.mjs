@@ -58,6 +58,16 @@ async function run() {
       console.error('usage limit exceeded; try again in 2h 3m');
       process.exit(1);
     }
+    if (mode === 'audit-quota-first-profile') {
+      if (process.env.FAKE_PROFILE === 'codex-a-exhausted') {
+        console.error("ERROR: You've hit your usage limit. Upgrade to Plus to continue using Codex, or try again at Dec 31st, 2099 2:54 PM.");
+        process.exit(1);
+      }
+      if (process.env.FAKE_OUTPUT_PATH) {
+        fs.writeFileSync(process.env.FAKE_OUTPUT_PATH, JSON.stringify(auditResults['audit-pass']));
+      }
+      return;
+    }
     if (mode === 'audit-pass-mentions-limit') {
       // The agent read source files that handle provider quota errors.
       console.log('crates/core/src/ai/quota.rs: Regex::new(r"(?i)usage limit|rate limit|quota|\\b429\\b")');

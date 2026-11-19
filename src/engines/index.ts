@@ -55,7 +55,45 @@ export interface Engine {
  * Returns seconds, or default 18000 (5h) if unparsable.
  * Adds 60s buffer per PLAN 3.3.
  */
+const RESET_MONTHS: Record<string, number> = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+
+/**
+ * "try again at Nov 21st, 2026 2:54 PM" / "try again at 2:54 PM" (Codex usage limit).
+ * The CLI prints wall-clock time on this machine, so it is read in local time.
+ * Returns seconds until then, or null when absent or not in the future.
+ */
+export function parseAbsoluteResetTime(text: string, now = new Date()): number | null {
+  const m = text.match(
+    /try again at\s+(?:([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(?:(\d{4}),?\s+)?)?(\d{1,2}):(\d{2})\s*([AP]M)/i,
+  );
+  if (!m) return null;
+  let hour = Number(m[4]) % 12;
+  if (m[6].toUpperCase() === 'PM') hour += 12;
+  const minute = Number(m[5]);
+  let target: Date;
+  if (m[1]) {
+    const month = RESET_MONTHS[m[1].toLowerCase()];
+    if (month === undefined) return null;
+    let year = m[3] ? Number(m[3]) : now.getFullYear();
+    target = new Date(year, month, Number(m[2]), hour, minute);
+    if (!m[3] && target.getTime() <= now.getTime()) {
+      year += 1;
+      target = new Date(year, month, Number(m[2]), hour, minute);
+    }
+  } else {
+    target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute);
+    if (target.getTime() <= now.getTime()) target = new Date(target.getTime() + 24 * 3600 * 1000);
+  }
+  const seconds = Math.ceil((target.getTime() - now.getTime()) / 1000);
+  return seconds > 0 ? seconds : null;
+}
+
 export function parseResetTime(text: string): number {
+  const absolute = parseAbsoluteResetTime(text);
+  if (absolute !== null) return absolute + 60; // add 60s buffer
+
   // Try pattern: NhNmNs or N h N m N s (with optional spaces)
   const patterns = [
     /(\d+)\s*h\s*(\d+)\s*m\s*(\d+)\s*s/i,

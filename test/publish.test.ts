@@ -786,6 +786,77 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
     });
 
+    it('a quota failure on the first reviewer profile fails over to the next profile and blocks the first until its reported reset', async () => {
+      const remotePath = path.join(tmpDir, 'remote-audit-failover.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-audit-failover');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/audit-task-1'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'pass.txt'), 'clean code\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: clean feature'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-audit-failover',
+        name: 'Project Audit Failover',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 2 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-audit-failover/task-1',
+        projectId: 'proj-audit-failover',
+        slug: 'audit-task-1',
+        title: 'Audit Task 1',
+        status: 'done',
+        branch: 'agenthub/audit-task-1',
+        baseRef: 'main',
+      });
+
+      const events: Array<{ type: string; payload: any }> = [];
+      ctx.scheduler.getEventBus().on('task.audit_started', (_id, p) => events.push({ type: 'task.audit_started', payload: p }));
+      ctx.scheduler.getEventBus().on('task.audit_passed', (_id, p) => events.push({ type: 'task.audit_passed', payload: p }));
+      ctx.scheduler.getEventBus().on('task.pushed', (_id, p) => events.push({ type: 'task.pushed', payload: p }));
+
+      ctx.profileRepo.upsert({
+        name: 'codex-a-exhausted',
+        engine: 'codex',
+        kind: 'codex',
+        home: path.join(tmpDir, 'codex-home-exhausted'),
+        email: 'exhausted@example.com',
+        enabled: 1,
+      });
+      process.env.FAKE_MODE = 'audit-quota-first-profile';
+      const result = await ctx.service.publishTask('proj-audit-failover/task-1');
+      expect(result.ok).toBe(true);
+
+      const updated = ctx.taskRepo.get('proj-audit-failover/task-1');
+      expect(updated?.status).toBe('pushed');
+      const pushResult = JSON.parse(updated!.pushResult!);
+      expect(pushResult.auditPassed).toBe(true);
+      expect(pushResult.auditSkipped).toBe(false);
+
+      expect(events.some((e) => e.type === 'task.audit_started')).toBe(true);
+      expect(events.some((e) => e.type === 'task.audit_passed')).toBe(true);
+      expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
+      const mark = ctx.quotaMarkRepo.getActive().find((m) => m.profileName === 'codex-a-exhausted' && m.family === 'codex');
+      expect(mark).toBeDefined();
+      // Blocked until the reset Codex reported (year 2099), not for 5 minutes.
+      expect(mark!.until - Math.floor(Date.now() / 1000)).toBeGreaterThan(365 * 24 * 3600);
+      expect(ctx.quotaMarkRepo.getActive().some((m) => m.profileName === 'codex-publish-tester')).toBe(false);
+    });
+
     it('a failed audit run with a usage-limit error is still reported as reviewer quota', async () => {
       const remotePath = path.join(tmpDir, 'remote-audit-quota.git');
       initBareRemote(remotePath);

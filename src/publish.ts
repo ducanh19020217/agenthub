@@ -1153,6 +1153,9 @@ async function findTasksToAudit(
 /**
  * Runs the read-only pre-publish audit agent using reviewer engine infrastructure.
  */
+/** Reviewer profiles tried per audit when earlier ones hit their usage limit. */
+const MAX_AUDIT_QUOTA_ATTEMPTS = 4;
+
 async function runAuditAgentForTask(
   task: TaskRow,
   project: ProjectRow,
@@ -1164,7 +1167,7 @@ async function runAuditAgentForTask(
   commitSha?: string,
 ): Promise<
   | { ok: true; result: PrePublishAuditResult; engineId: string; profileName: string; model: string }
-  | { ok: false; error: string; retryable: boolean; isQuota?: boolean }
+  | { ok: false; error: string; retryable: boolean; isQuota?: boolean; noProfile?: boolean }
 > {
   const currentSettings = projectSettings(project);
   const reviewerOrder = (currentSettings.review?.order && currentSettings.review.order.length > 0)
@@ -1227,6 +1230,7 @@ async function runAuditAgentForTask(
       ok: false,
       error: 'Không tìm thấy reviewer engine hoặc profile khả dụng để chạy audit',
       retryable: true,
+      noProfile: true,
     };
   }
 
@@ -1319,11 +1323,14 @@ async function runAuditAgentForTask(
   // the files the agent read, and a repository that handles HTTP 429 / "rate limit"
   // itself would otherwise be reported as reviewer quota exhaustion forever.
   const failed = Boolean(error) || code !== 0;
-  if (failed && chosenEngine.detectQuota(`${logOutput}\n${fileOutput}`).exhausted) {
+  const quotaDetection = failed ? chosenEngine.detectQuota(`${logOutput}\n${fileOutput}`) : { exhausted: false };
+  if (quotaDetection.exhausted) {
+    // Block the profile until the reset the provider reported (e.g. "try again at
+    // Nov 21st ... 2:54 PM"), so the next attempt does not pick it again in 5 minutes.
     deps.quotaService?.mark(
       chosenProfile.name,
       chosenProfile.engine === 'claude' ? 'claude' : 'codex',
-      300,
+      quotaDetection.resetSeconds && quotaDetection.resetSeconds > 0 ? quotaDetection.resetSeconds : 300,
       'Pre-publish audit quota exhausted',
     );
     return {
@@ -1775,7 +1782,9 @@ export async function publishTask(
           ...(auditRange ? { auditRange } : {}),
         });
 
-        const auditExec = await runAuditAgentForTask(
+        // A quota failure marks that profile exhausted, so the next attempt picks
+        // another reviewer profile instead of failing the whole publish.
+        let auditExec = await runAuditAgentForTask(
           t,
           currentProject,
           repoPath,
@@ -1785,6 +1794,21 @@ export async function publishTask(
           doneReport,
           commitSha,
         );
+        for (let attempt = 1; !auditExec.ok && auditExec.isQuota && attempt < MAX_AUDIT_QUOTA_ATTEMPTS; attempt += 1) {
+          const next = await runAuditAgentForTask(
+            t,
+            currentProject,
+            repoPath,
+            deps,
+            diff,
+            changedFiles,
+            doneReport,
+            commitSha,
+          );
+          // Every reviewer profile is now exhausted: keep reporting the quota failure.
+          if (!next.ok && next.noProfile) break;
+          auditExec = next;
+        }
 
         if (!auditExec.ok) {
           // Fail closed

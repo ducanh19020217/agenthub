@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   parseResetTime,
+  parseAbsoluteResetTime,
   lastNLines,
   AgyEngine,
   CodexEngine,
@@ -19,6 +20,27 @@ import { getModelFamily, getModelEngine } from '../src/quota/index.js';
 import { loadConfig } from '../src/config.js';
 
 describe('parseResetTime', () => {
+  it('reads the absolute reset time Codex prints for a usage limit (local time)', () => {
+    const now = new Date(2026, 10, 19, 11, 0, 0);
+    const msg = "ERROR: You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at Nov 21st, 2026 2:54 PM.";
+    const expected = (new Date(2026, 10, 21, 14, 54).getTime() - now.getTime()) / 1000;
+    expect(parseAbsoluteResetTime(msg, now)).toBe(expected);
+    expect(parseAbsoluteResetTime('try again at Nov 21st 2:54 PM', now)).toBe(expected);
+  });
+
+  it('reads a time-only reset as the next occurrence and ignores past or missing times', () => {
+    const now = new Date(2026, 10, 19, 15, 0, 0);
+    expect(parseAbsoluteResetTime('try again at 2:54 PM', now)).toBe((new Date(2026, 10, 20, 14, 54).getTime() - now.getTime()) / 1000);
+    expect(parseAbsoluteResetTime('try again at 3:30 PM', now)).toBe(30 * 60);
+    expect(parseAbsoluteResetTime('try again at Nov 1st, 2026 2:54 PM', now)).toBeNull();
+    expect(parseAbsoluteResetTime('try again in 2h 3m', now)).toBeNull();
+  });
+
+  it('prefers the absolute reset time over the duration fallback', () => {
+    const result = parseResetTime('usage limit, try again at Dec 31st, 2099 2:54 PM.');
+    expect(result).toBeGreaterThan(365 * 24 * 3600);
+  });
+
   it('parses "Resets in 4h54m26s" to seconds + 60s buffer', () => {
     const result = parseResetTime('Resets in 4h54m26s');
     // 4*3600 + 54*60 + 26 = 14400 + 3240 + 26 = 17666 + 60 = 17726

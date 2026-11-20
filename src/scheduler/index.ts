@@ -2410,7 +2410,7 @@ export class Scheduler {
       if (codexExitReason && run?.logPath && !existingMatch) {
         try { fs.appendFileSync(run.logPath, `${codexExitReason}\n`, 'utf8'); } catch { /* best effort */ }
       }
-      const isLockBusy = durationMs < 3000 && logTail.trim() === '' && Boolean(rt.lockFile) && exitCode === 1;
+      const isLockBusy = durationMs < 3000 && logTail.replace(/\[hub\] codex thoát sớm: [^\r\n]*/g, '').trim() === '' && Boolean(rt.lockFile) && exitCode === 1;
 
       if (this.hasCommitAfter(currentTask, rt.startTime)) {
         if (this.recordWorkerCrash(taskId, rt, codexExitReason || 'resume_after_progress')) return;
@@ -3326,7 +3326,7 @@ export class Scheduler {
     // The Claude CLI prints its limit notice on stdout, which lands in the output file, not the log.
     const quota = active.engine.detectQuota(`${logOutput}\n${output}`).exhausted;
     const duration = Date.now() - active.startedAt;
-    const isLockBusy = duration < 3000 && logOutput.trim() === '' && Boolean(active.lockFile) && exitCode === 1;
+    const isLockBusy = duration < 3000 && logOutput.replace(/\[hub\] codex thoát sớm: [^\r\n]*/g, '').trim() === '' && Boolean(active.lockFile) && exitCode === 1;
 
     const logTail = logOutput || (run?.logPath ? readLogTail(run.logPath, { maxBytes: CODEX_STDERR_TAIL_BYTES }) : '');
     const existingMatch = logTail.match(/\[hub\] codex thoát sớm: [^\r\n]+/);
@@ -3343,9 +3343,6 @@ export class Scheduler {
       this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_LOCK_BACKOFF_MS);
       const finishReason = codexExitReason || 'lock_busy';
       this.runRepo.finish(runId, 'crashed', undefined, finishReason);
-      if (active.engine.id === 'codex') {
-        this.recordProfileCrash(profileName, active.model, finishReason, taskId);
-      }
       this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: 'lock_busy' });
       return;
     }

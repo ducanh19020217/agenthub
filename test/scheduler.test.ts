@@ -333,6 +333,59 @@ describe('Codex reviewer crash diagnostics', () => {
     expect(profileRepo.get('codex-rev-1')?.coolingUntil).toBeGreaterThan(Math.floor(Date.now() / 1000));
     scheduler.stop();
   });
+
+  it('handles reviewer lock_busy under flock without cooling profile even when synthetic early-exit was written to log', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-reviewer-flock.log');
+    fs.writeFileSync(logPath, '[hub] codex thoát sớm: exit=1 signal=none stderr=<trống>\n');
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-rev-lock', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/rev-lock-task', projectId: 'test-project', slug: 'rev-lock-task', title: 'Review lock task', status: 'review' });
+    runRepo.insert({ id: 'codex-rev-lock-run', taskId: 'test-project/rev-lock-task', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-rev-lock', logPath, kind: 'reviewer' });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      finishReview: (taskId: string, runId: string, profileName: string, reason: string, exitCode: number | null, exitSignal: NodeJS.Signals | null, spawnError?: string) => void;
+      reviewerRuns: Map<string, unknown>;
+    };
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const active = {
+      taskId: 'test-project/rev-lock-task',
+      runId: 'codex-rev-lock-run',
+      pid: 999998,
+      profileName: 'codex-rev-lock',
+      engine,
+      actor: 'codex-reviewer',
+      model: 'codex:gpt-5.6-luna',
+      logPath,
+      outputPath: path.join(tmpDir, 'nonexistent.final.json'),
+      lockSlot: 0,
+      lockFile: path.join(tmpDir, 'codex.lock'),
+      startedAt: Date.now() - 500, // < 3000ms
+      timeout: setTimeout(() => {}, 60_000),
+      stderrTail: '',
+    };
+    internal.reviewerRuns.set('test-project/rev-lock-task', active);
+    internal.finishReview('test-project/rev-lock-task', 'codex-rev-lock-run', 'codex-rev-lock', 'exit', 1, null);
+
+    const run = runRepo.get('codex-rev-lock-run');
+    expect(run?.outcome).toBe('crashed');
+    expect(run?.reason).toContain('exit=1 signal=none');
+
+    const mark = quotaMarkRepo.getAll().find((row) => row.profileName === 'codex-rev-lock' && row.family === 'codex');
+    expect(mark).toBeUndefined();
+    expect(profileRepo.get('codex-rev-lock')?.coolingUntil).toBeNull();
+
+    const events = eventRepo.getRecent(10);
+    expect(events.some((e) => e.type === 'review.waiting' && e.payload?.includes('lock_busy'))).toBe(true);
+
+    scheduler.stop();
+  });
 });
 
 describe('Claude profiles are never worker scheduler profiles', () => {

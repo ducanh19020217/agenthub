@@ -253,6 +253,7 @@ export interface ProjectSettings {
   openproject?: { enabled: boolean; sourceId: string | null; role: 'primary' | 'secondary' };
   gitea?: { enabled: boolean; url?: string; sourceBranch?: string; targetBranch?: string; schedule: string[]; weekdaysOnly: boolean; checks: string[][]; unionMergeGlobs: string[] };
   remoteDeploy?: { enabled: boolean; trigger: 'after-gitea-sync' | 'manual'; steps: string[][]; healthChecks: Array<{ url: string; expectStatusBelow: number; contains?: string }>; waitMinutes: number; timeoutSec?: number };
+  postDone?: { enabled: boolean; cmd: string[]; timeoutSec: number; artifactsDir: string };
 }
 
 export interface OpenProjectSource {
@@ -417,6 +418,7 @@ export interface Task {
   paused?: boolean;
   pauseReason?: 'manual' | 'load' | 'brain_load' | 'focus' | null;
   checks?: CheckResult[];
+  postDoneArtifacts?: string[];
   sourceRef?: {
     taskId: string;
     runId?: string | null;

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import os from 'node:os';
 import { getPlatform } from './platform/index.js';
 
@@ -40,7 +41,7 @@ export interface GroupRunResult {
 export function runInProcessGroup(
   command: string,
   args: string[],
-  opts: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxOutput?: number },
+  opts: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxOutput?: number; logPath?: string },
 ): Promise<GroupRunResult> {
   const maxOutput = opts.maxOutput ?? 4 * 1024 * 1024;
   const [exe, finalArgs] = lowPriority(command, args);
@@ -65,7 +66,9 @@ export function runInProcessGroup(
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     if (child.pid) processGroups.add(child.pid);
+    const logStream = opts.logPath ? fs.createWriteStream(opts.logPath, { flags: 'w' }) : null;
     const append = (chunk: Buffer) => {
+      if (logStream) logStream.write(chunk);
       output += chunk.toString();
       if (output.length > maxOutput) output = output.slice(-maxOutput);
     };
@@ -89,6 +92,8 @@ export function runInProcessGroup(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (extra && logStream) logStream.write(extra);
+      if (logStream) logStream.end();
       // Dọn tiến trình cháu còn sót trong group sau khi lệnh chính đã thoát.
       killGroup('SIGKILL');
       if (child.pid) processGroups.delete(child.pid);

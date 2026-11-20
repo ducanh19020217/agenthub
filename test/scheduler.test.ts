@@ -161,6 +161,42 @@ describe('Codex worker crash diagnostics', () => {
     expect(profileRepo.get('codex-1')?.coolingUntil).toBeGreaterThan(Math.floor(Date.now() / 1000));
     scheduler.stop();
   });
+
+  it('records an explicit empty-stderr diagnostic when Codex exits silently', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-silent-crash.log');
+    fs.writeFileSync(logPath, '');
+    profileRepo.upsert({ name: 'codex-silent', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/codex-silent-crash', projectId: 'test-project', slug: 'codex-silent-crash', title: 'Silent Codex crash', status: 'running', runCount: 1, branch: 'missing-silent-branch' });
+    runRepo.insert({ id: 'codex-silent-run', taskId: 'test-project/codex-silent-crash', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-silent', logPath });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      handleRunCompletion: (taskId: string, rt: unknown) => Promise<void>;
+      running: Map<string, unknown>;
+    };
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const rt = {
+      runId: 'codex-silent-run', taskId: 'test-project/codex-silent-crash', pid: 999998, pidStart: null,
+      engine, model: 'codex:gpt-5.6-luna', profileName: 'codex-silent', projectId: 'test-project',
+      startTime: Date.now() + 60_000, timeoutMs: 60_000, timeoutAt: Date.now() + 60_000, retryCount: 0,
+      lastOutputAt: Date.now(), lastActivityAt: Date.now(), activitySource: 'log', activityCheckedAt: Date.now(),
+      cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+      exitCode: 7, exitSignal: null, stderrTail: '',
+    };
+    internal.running.set('test-project/codex-silent-crash', rt);
+    await internal.handleRunCompletion('test-project/codex-silent-crash', rt);
+
+    const reason = runRepo.get('codex-silent-run')?.reason || '';
+    expect(reason).toContain('exit=7 signal=none stderr=<trống>');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('exit=7 signal=none stderr=<trống>');
+    scheduler.stop();
+  });
 });
 
 describe('Claude profiles are never worker scheduler profiles', () => {

@@ -153,11 +153,11 @@ describe('Codex early-exit diagnostics plumbing', () => {
     }
   });
 
-  it('preserves stderr directly into the log and records exit status without pipes', async () => {
+  it('preserves stderr directly into the log, saves isolated stderr, and records exit status without pipes', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-codex-log-'));
     try {
       const launcher = path.join(tmp, 'codex.mjs');
-      fs.writeFileSync(launcher, "console.error('codex direct stderr failure'); process.exit(42);\n");
+      fs.writeFileSync(launcher, "console.error('codex direct stderr failure'); console.log('codex stdout after stderr'); process.exit(42);\n");
       const logPath = path.join(tmp, 'run.log');
       const child = new CodexEngine(launcher).spawn({
         profile: { name: 'codex-test', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1, createdAt: '2026-01-01' },
@@ -172,6 +172,10 @@ describe('Codex early-exit diagnostics plumbing', () => {
       });
       const logContent = fs.readFileSync(logPath, 'utf8');
       expect(logContent).toContain('codex direct stderr failure');
+      expect(logContent).toContain('codex stdout after stderr');
+      const stderrContent = fs.readFileSync(`${logPath}.stderr`, 'utf8');
+      expect(stderrContent).toContain('codex direct stderr failure');
+      expect(stderrContent).not.toContain('codex stdout after stderr');
       const statusContent = fs.readFileSync(`${logPath}.status`, 'utf8').trim();
       expect(statusContent).toBe('42');
     } finally {

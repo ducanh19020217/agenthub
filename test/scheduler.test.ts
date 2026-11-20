@@ -3522,6 +3522,58 @@ describe('Crash recovery on startup', () => {
     expect(fs.readFileSync(logPath, 'utf8')).not.toContain('[hub] codex thoát sớm:');
     scheduler.stop();
   });
+
+  it('preserves stderr in reason when stdout is written after stderr', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-stdout-after-stderr-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-stdout-after-stderr.log');
+    fs.writeFileSync(`${logPath}.stderr`, 'critical codex configuration error\n');
+    fs.writeFileSync(logPath, 'critical codex configuration error\n' + 'stdout noise line\n'.repeat(600));
+    fs.writeFileSync(`${logPath}.status`, '1\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-stdout-after-task',
+      projectId: 'test-project',
+      slug: 'codex-stdout-after-task',
+      title: 'Codex stdout after stderr task',
+      status: 'running',
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-stdout-after',
+      taskId: 'test-project/codex-stdout-after-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-stdout-after-stderr-prof',
+      logPath,
+      pid: process.pid,
+      pidStart: null,
+    });
+
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map([['codex', engine]]));
+    scheduler.start();
+
+    const internal = scheduler as unknown as {
+      isProcessAlive: (pid: number | null, expectedStart?: number | null) => boolean;
+      checkRunningTasks: () => Promise<void>;
+    };
+    internal.isProcessAlive = () => false;
+    await internal.checkRunningTasks();
+
+    const run = runRepo.get('run-codex-stdout-after')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toBe('[hub] codex thoát sớm: exit=1 signal=none stderr=critical codex configuration error');
+    scheduler.stop();
+  });
 });
 
 describe('Worktree creation', () => {

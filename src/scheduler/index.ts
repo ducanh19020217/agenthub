@@ -332,6 +332,19 @@ export function readCodexExitStatus(logPath: string | null | undefined): { exitC
   return null;
 }
 
+export function readCodexStderrTail(logPath: string | null | undefined, maxBytes = CODEX_STDERR_TAIL_BYTES): string {
+  if (!logPath) return '';
+  const stderrPath = `${logPath}.stderr`;
+  try {
+    if (fs.existsSync(stderrPath)) {
+      return readLogTail(stderrPath, { maxBytes });
+    }
+  } catch {
+    // ignore
+  }
+  return readLogTail(logPath, { maxBytes });
+}
+
 export interface ReviewerRun {
   taskId: string;
   runId: string;
@@ -621,7 +634,8 @@ export class Scheduler {
     const status = readCodexExitStatus(logPath);
     const exitCode = status?.exitCode ?? null;
     const exitSignal = status?.exitSignal ?? null;
-    const diagnostic = formatCodexEarlyExit(exitCode, exitSignal, logTail);
+    const stderrTail = readCodexStderrTail(logPath);
+    const diagnostic = formatCodexEarlyExit(exitCode, exitSignal, stderrTail);
     if (logPath) {
       try {
         fs.mkdirSync(path.dirname(logPath), { recursive: true });
@@ -1136,7 +1150,7 @@ export class Scheduler {
         this.eventBus.emit('run.timeout_deferred', run.taskId, { runId: run.id, timeoutAt: new Date(timeoutAt).toISOString() });
       }
       const initialStderrTail = run.logPath
-        ? readLogTail(run.logPath, { maxBytes: CODEX_STDERR_TAIL_BYTES })
+        ? readCodexStderrTail(run.logPath)
         : '';
       this.running.set(run.taskId, {
         runId: run.id,
@@ -2445,9 +2459,10 @@ export class Scheduler {
         if (existingMatch) {
           codexExitReason = existingMatch[0];
         } else if (exitCode !== 0 || exitSignal || Boolean(rt.spawnError) || (!rt.child && exitCode === null)) {
-          const stderrTail = (rt.stderrTail && rt.stderrTail.trim())
-            ? rt.stderrTail
-            : logTail.slice(-CODEX_STDERR_TAIL_BYTES);
+          const recordedStderrTail = readCodexStderrTail(run?.logPath);
+          const stderrTail = (recordedStderrTail && recordedStderrTail.trim())
+            ? recordedStderrTail
+            : ((rt.stderrTail && rt.stderrTail.trim()) ? rt.stderrTail : readCodexStderrTail(run?.logPath));
           codexExitReason = formatCodexEarlyExit(exitCode, exitSignal, stderrTail, rt.spawnError);
         }
       }
@@ -3327,7 +3342,11 @@ export class Scheduler {
       activeRun.exitCode = code;
       activeRun.exitSignal = signal;
       if (engine.id === 'codex' && (code !== 0 || signal)) {
-        const diagnostic = formatCodexEarlyExit(code, signal, activeRun.stderrTail);
+        const recordedStderrTail = readCodexStderrTail(logPath);
+        const stderrTail = (recordedStderrTail && recordedStderrTail.trim())
+          ? recordedStderrTail
+          : ((activeRun.stderrTail && activeRun.stderrTail.trim()) ? activeRun.stderrTail : '');
+        const diagnostic = formatCodexEarlyExit(code, signal, stderrTail);
         try {
           const currentTail = readLogTail(logPath, { maxBytes: CODEX_STDERR_TAIL_BYTES });
           if (!currentTail.includes('[hub] codex thoát sớm:')) {
@@ -3384,7 +3403,10 @@ export class Scheduler {
 
     const logTail = logOutput || (run?.logPath ? readLogTail(run.logPath, { maxBytes: CODEX_STDERR_TAIL_BYTES }) : '');
     const existingMatch = logTail.match(/\[hub\] codex thoát sớm: [^\r\n]+/);
-    const resolvedStderrTail = (active.stderrTail && active.stderrTail.trim()) ? active.stderrTail : logTail;
+    const recordedStderrTail = readCodexStderrTail(run?.logPath);
+    const resolvedStderrTail = (recordedStderrTail && recordedStderrTail.trim())
+      ? recordedStderrTail
+      : ((active.stderrTail && active.stderrTail.trim()) ? active.stderrTail : readCodexStderrTail(run?.logPath));
     const isEarlyCodexExit = active.engine.id === 'codex' && (effectiveExitCode !== 0 || effectiveExitSignal || Boolean(spawnError || active.spawnError) || reason === 'error');
     const codexExitReason = existingMatch
       ? existingMatch[0]

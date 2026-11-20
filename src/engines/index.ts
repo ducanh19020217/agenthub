@@ -555,7 +555,7 @@ export class CodexEngine implements Engine {
           // absolute path or from `sh -c`.
           'rm', 'mv', 'cp', 'install', 'find', 'xargs', 'sed', 'perl', 'python', 'python3', 'ruby', 'node',
           'systemctl', 'launchctl', 'sudo', 'su', 'ssh', 'scp', 'sftp', 'docker', 'docker-compose', 'podman',
-          'mkfs', 'dd', 'truncate', 'chown', 'chmod', 'chgrp', 'mount', 'umount', 'tar', 'zip', 'unzip',
+          'mkfs', 'mkfifo', 'dd', 'truncate', 'chown', 'chmod', 'chgrp', 'mount', 'umount', 'tar', 'zip', 'unzip',
           'sh', 'bash', 'zsh', 'dash', 'fish', 'echo', 'printf', 'touch', 'mkdir', 'rmdir', 'ln', 'tee', 'awk', 'gawk',
           'busybox', 'env', 'nohup', 'timeout', 'watch', 'yes', 'sort', 'uniq', 'xargs',
           'ed', 'ex', 'vim', 'vi', 'nvim', 'emacs', 'make', 'cmake', 'gcc', 'clang', 'go', 'java', 'php',
@@ -568,12 +568,26 @@ export class CodexEngine implements Engine {
     let spawnCommand = command;
     if (!opts.streamOutput) {
       const statusPath = `${opts.logPath}.status`;
-      const wrapperScript =
-        'status_file="$1"; shift; ' +
-        'trap \'code=$?; echo "$code" > "$status_file"; exit $code\' EXIT INT TERM HUP; ' +
-        '"$@" & child_pid=$!; wait $child_pid; code=$?; echo "$code" > "$status_file"; trap - EXIT INT TERM HUP; exit $code';
-      spawnCommand = ['-c', wrapperScript, '--', statusPath, executable, ...command];
-      spawnExecutable = 'sh';
+      if (!opts.pipeStderr) {
+        const stderrPath = `${opts.logPath}.stderr`;
+        const wrapperScript =
+          'status_file="$1"; stderr_file="$2"; shift 2; ' +
+          'fifo="${stderr_file}.fifo.$$"; rm -f "$fifo" 2>/dev/null; mkfifo "$fifo" || exit 1; ' +
+          'trap \'code=$?; echo "$code" > "$status_file"; rm -f "$fifo" 2>/dev/null; exit $code\' EXIT INT TERM HUP; ' +
+          'tee -a "$stderr_file" < "$fifo" & tee_pid=$!; ' +
+          '"$@" 2>"$fifo" & child_pid=$!; ' +
+          'wait $child_pid; code=$?; echo "$code" > "$status_file"; ' +
+          'wait $tee_pid 2>/dev/null; rm -f "$fifo" 2>/dev/null; trap - EXIT INT TERM HUP; exit $code';
+        spawnCommand = ['-c', wrapperScript, '--', statusPath, stderrPath, executable, ...command];
+        spawnExecutable = 'sh';
+      } else {
+        const wrapperScript =
+          'status_file="$1"; shift; ' +
+          'trap \'code=$?; echo "$code" > "$status_file"; exit $code\' EXIT INT TERM HUP; ' +
+          '"$@" & child_pid=$!; wait $child_pid; code=$?; echo "$code" > "$status_file"; trap - EXIT INT TERM HUP; exit $code';
+        spawnCommand = ['-c', wrapperScript, '--', statusPath, executable, ...command];
+        spawnExecutable = 'sh';
+      }
     }
 
     const usePipe = Boolean(opts.streamOutput || opts.pipeStderr);

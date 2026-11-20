@@ -123,6 +123,67 @@ describe('detectQuota', () => {
   });
 });
 
+describe('Codex early-exit diagnostics plumbing', () => {
+  it('keeps stderr available to the scheduler when pipeStderr is requested', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-codex-stderr-'));
+    try {
+      const launcher = path.join(tmp, 'codex.mjs');
+      fs.writeFileSync(launcher, "console.error('codex startup failure'); process.exit(23);\n");
+      const logPath = path.join(tmp, 'run.log');
+      const child = new CodexEngine(launcher).spawn({
+        profile: { name: 'codex-test', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1, createdAt: '2026-01-01' },
+        model: 'codex:gpt-5.6-luna',
+        cwd: tmp,
+        prompt: 'test',
+        logPath,
+        pipeStderr: true,
+      });
+      let stderr = '';
+      child.stderr?.setEncoding('utf8');
+      child.stderr?.on('data', (chunk: string) => { stderr += chunk; });
+      const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
+      const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+        child.once('exit', (code, signal) => resolve({ code, signal }));
+      });
+      await closed;
+      expect(result).toEqual({ code: 23, signal: null });
+      expect(stderr).toContain('codex startup failure');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves stderr directly into the log, saves isolated stderr, and records exit status without pipes', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-codex-log-'));
+    try {
+      const launcher = path.join(tmp, 'codex.mjs');
+      fs.writeFileSync(launcher, "console.error('codex direct stderr failure'); console.log('codex stdout after stderr'); process.exit(42);\n");
+      const logPath = path.join(tmp, 'run.log');
+      const child = new CodexEngine(launcher).spawn({
+        profile: { name: 'codex-test', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1, createdAt: '2026-01-01' },
+        model: 'codex:gpt-5.6-luna',
+        cwd: tmp,
+        prompt: 'test',
+        logPath,
+      });
+      expect(child.stderr).toBeNull();
+      await new Promise<void>((resolve) => {
+        child.once('exit', () => resolve());
+      });
+      const logContent = fs.readFileSync(logPath, 'utf8');
+      expect(logContent).toContain('codex direct stderr failure');
+      expect(logContent).toContain('codex stdout after stderr');
+      const stderrContent = fs.readFileSync(`${logPath}.stderr`, 'utf8');
+      expect(stderrContent).toContain('codex direct stderr failure');
+      expect(stderrContent).not.toContain('codex stdout after stderr');
+      const statusContent = fs.readFileSync(`${logPath}.status`, 'utf8').trim();
+      expect(statusContent).toBe('42');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('detectAuthError', () => {
   it('detects agy authentication failures in the last 8 lines', () => {
     const agy = new AgyEngine('/nonexistent');

@@ -1,5 +1,12 @@
 # Quyết định kiến trúc (Decisions Log)
 
+## DEC-CRASH-CODEX: Chẩn đoán crash sớm và tạm loại hồ sơ lỗi lặp lại
+
+- **Bối cảnh**: Codex có thể thoát trong vài giây trước khi ghi stdout; trước đây scheduler chỉ lưu exit code, bỏ qua signal/stderr nên log 0 byte và `runs.reason` rỗng, đồng thời lượt sau vẫn tiếp tục chọn hồ sơ lỗi.
+- **Quyết định**: Codex giữ stdout trong log, chuyển stderr qua pipe để scheduler giữ tail tối đa 8 KB, ghi dòng `[hub] codex thoát sớm: exit=… signal=… stderr=…` vào log run và lưu cùng lý do vào `runs.reason`. Sau ngưỡng crash liên tiếp của hồ sơ, scheduler tạo quota mark tạm trên đúng model family, kèm lý do, để bộ chọn hồ sơ và `hub_profiles`/`hub_status` cùng thấy trạng thái tạm loại.
+- **Reviewer & Phục hồi daemon**: Cơ chế ghi log chẩn đoán và cooling hồ sơ được áp dụng đồng nhất cho cả Codex reviewer. Worker và reviewer Codex không dùng pipe không gắn listener; tiến trình ghi trực tiếp vào log qua logFd, lưu stderr đồng thời vào file riêng `.stderr` và lưu exit status vào file `.status` để bảo toàn exit code/signal thật và stderr kể cả khi daemon restart hoặc khi stdout xuất hiện sau stderr. Khi daemon restart, các worker Codex đã chết trên task terminal (`done`/`cancelled`) vẫn được ghi nhận lý do crash và tính cooling cho hồ sơ mà không thay đổi trạng thái task. Với worker Codex sống sau restart, scheduler khôi phục stderr tail từ file `.stderr` và bảo lưu chẩn đoán thật khi hoàn tất thay vì ghi đè giả.
+- **Watchdog**: Codex có thể im lặng lâu trong lúc suy luận; không coi Codex stalled trước 45 phút dù cấu hình watchdog thấp hơn, áp dụng cho cả ngưỡng im lặng chung lẫn nhánh phát hiện chờ lệnh nền ("waiting up to"). Các engine khác giữ nguyên ngưỡng hiện tại.
+
 ## DEC-OPENPROJECT-TRIAGE
 
 - `manual` là action nội bộ bổ sung cho hợp đồng `do|split|ask|skip`, dùng cho kết luận `việc thủ công`; action này đánh dấu ticket để người dùng tự xử lý và không tạo task sửa.

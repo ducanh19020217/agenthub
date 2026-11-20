@@ -80,7 +80,7 @@ export function formatProfileSummary(p: {
   engine: string;
   enabled: boolean | number;
   duplicateWarning?: boolean;
-  quotaMarks?: Array<{ family: string; until: number }>;
+  quotaMarks?: Array<{ family: string; until: number; reason?: string | null }>;
   usage?: Array<{ grp: string; window: string; remainingPct: number; resetAt: number }>;
   slotsUsed?: number;
   slotsTotal?: number;
@@ -101,15 +101,18 @@ export function formatProfileSummary(p: {
   const marks = p.quotaMarks || [];
   if (p.engine === 'codex') {
     const mark = marks.find((m) => m.family === 'codex');
-    return `${p.name}(codex${mark ? `✗→${formatUntil(mark.until)}` : '✓'})`;
+    const reasonPart = mark?.reason ? ` [${mark.reason}]` : '';
+    return `${p.name}(codex${mark ? `✗→${formatUntil(mark.until)}${reasonPart}` : '✓'})`;
   }
   // agy
   const gMark = marks.find((m) => m.family === 'gemini');
   const cMark = marks.find((m) => m.family === 'claude');
-  const gStr = gMark ? `gemini✗→${formatUntil(gMark.until)}` : 'gemini✓';
-  const cStr = cMark ? `claude✗→${formatUntil(cMark.until)}` : 'claude✓';
+  const gReason = gMark?.reason ? ` [${gMark.reason}]` : '';
+  const cReason = cMark?.reason ? ` [${cMark.reason}]` : '';
+  const gStr = gMark ? `gemini✗→${formatUntil(gMark.until)}${gReason}` : 'gemini✓';
+  const cStr = cMark ? `claude✗→${formatUntil(cMark.until)}${cReason}` : 'claude✓';
   const otherMarks = marks.filter((m) => m.family !== 'gemini' && m.family !== 'claude');
-  const otherStr = otherMarks.map((m) => ` ${m.family}✗→${formatUntil(m.until)}`).join('');
+  const otherStr = otherMarks.map((m) => ` ${m.family}✗→${formatUntil(m.until)}${m.reason ? ` [${m.reason}]` : ''}`).join('');
   const usage = p.usage || [];
   const usageStr = usage.length
     ? ` ${usage.map((u) => `${u.grp.startsWith('Gemini') ? 'gemini' : 'claude'} ${u.window} còn ${u.remainingPct}% (reset ${formatUntil(u.resetAt)})`).join(' · ')}`
@@ -288,7 +291,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             engine: string;
             enabled: boolean | number;
             duplicateWarning?: boolean;
-            quotaMarks?: Array<{ family: string; until: number }>;
+            quotaMarks?: Array<{ family: string; until: number; reason?: string | null }>;
             usage?: Array<{ grp: string; window: string; remainingPct: number; resetAt: number }>;
             slotsUsed?: number;
             slotsTotal?: number;
@@ -337,7 +340,11 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           } else {
             const hasMarks = (data.profiles || []).some((p) => (p.quotaMarks || []).length > 0);
             if (hasMarks) {
-              lines.push(`Quota: Vẫn chạy bằng ${formatRunnableCapacity(data.quotaCapacity)}`);
+              const markDetails = (data.profiles || []).flatMap((p) =>
+                (p.quotaMarks || []).map((m) => `${p.name}/${m.family} đến ${formatUntil(m.until)}${m.reason ? ` (${m.reason})` : ''}`),
+              );
+              const markSuffix = markDetails.length > 0 ? ` · Tạm nghỉ: ${markDetails.join(', ')}` : '';
+              lines.push(`Quota: Vẫn chạy bằng ${formatRunnableCapacity(data.quotaCapacity)}${markSuffix}`);
             }
           }
         }
@@ -558,7 +565,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             email?: string | null;
             busy?: boolean;
             duplicateWarning?: boolean;
-            quotaMarks?: Array<{ family: string; until: number }>;
+            quotaMarks?: Array<{ family: string; until: number; reason?: string | null }>;
             usage?: Array<{ grp: string; window: string; remainingPct: number; resetAt: number }>;
             authState?: string | null;
             authMessage?: string | null;
@@ -576,7 +583,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         ];
         for (const p of profiles) {
           const dupeStr = p.duplicateWarning ? ' ⚠️ (trùng email)' : '';
-          const marks = (p.quotaMarks || []).map((m) => `${m.family} đến ${formatUntil(m.until)}`);
+          const marks = (p.quotaMarks || []).map((m) => `${m.family} đến ${formatUntil(m.until)}${m.reason ? ` (${m.reason})` : ''}`);
           const marksStr = marks.length ? ` [Quota: ${marks.join(', ')}]` : '';
           let authStr = '';
           if (p.authState === 'needs_verification') {
@@ -1115,7 +1122,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           runs.forEach((r, index) => {
             const dur = formatRunDuration(r);
             const outcome = r.reason === 'stalled' ? 'kẹt (stalled)' : (r.outcome || 'running');
-            lines.push(`  - Run #${typeof r.attempt === 'number' ? r.attempt : index + 1} [${outcome}]: model=${r.model} profile=${r.profileName} (${dur})`);
+            const reasonPart = r.reason && r.reason !== 'stalled' ? ` - lý do: ${r.reason}` : '';
+            lines.push(`  - Run #${typeof r.attempt === 'number' ? r.attempt : index + 1} [${outcome}]: model=${r.model} profile=${r.profileName} (${dur})${reasonPart}`);
           });
         }
 

@@ -115,6 +115,451 @@ describe('Quota mark propagation to same-email profiles', () => {
   });
 });
 
+describe('Codex worker crash diagnostics', () => {
+  beforeEach(setupTestEnv);
+  afterEach(teardownTestEnv);
+
+  it('records exit/signal/stderr in the run and temporarily marks a repeatedly failing profile', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-crash.log');
+    fs.writeFileSync(logPath, '');
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-1', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/codex-crash', projectId: 'test-project', slug: 'codex-crash', title: 'Codex crash', status: 'running', runCount: 1, branch: 'missing-crash-branch' });
+    runRepo.insert({ id: 'codex-crash-run', taskId: 'test-project/codex-crash', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-1', logPath });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      handleRunCompletion: (taskId: string, rt: unknown) => Promise<void>;
+      running: Map<string, unknown>;
+    };
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const rt = {
+      runId: 'codex-crash-run', taskId: 'test-project/codex-crash', pid: 999999, pidStart: null,
+      engine, model: 'codex:gpt-5.6-luna', profileName: 'codex-1', projectId: 'test-project',
+      startTime: Date.now() + 60_000, timeoutMs: 60_000, timeoutAt: Date.now() + 60_000, retryCount: 0,
+      lastOutputAt: Date.now(), lastActivityAt: Date.now(), activitySource: 'log', activityCheckedAt: Date.now(),
+      cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+      exitCode: 23, exitSignal: 'SIGTERM', stderrTail: 'Error loading config.toml: invalid type',
+    };
+    internal.running.set('test-project/codex-crash', rt);
+    await internal.handleRunCompletion('test-project/codex-crash', rt);
+
+    const run = runRepo.get('codex-crash-run');
+    expect(run?.outcome).toBe('crashed');
+    expect(run?.reason).toContain('[hub] codex thoát sớm: exit=23 signal=SIGTERM stderr=Error loading config.toml');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('[hub] codex thoát sớm: exit=23 signal=SIGTERM');
+
+    // Repeated failures are cooled and represented as a visible codex mark.
+    const mark = quotaMarkRepo.getAll().find((row) => row.profileName === 'codex-1' && row.family === 'codex');
+    expect(mark?.reason).toContain('tạm loại hồ sơ');
+    expect(profileRepo.get('codex-1')?.coolingUntil).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    scheduler.stop();
+  });
+
+  it('records an explicit empty-stderr diagnostic when Codex exits silently', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-silent-crash.log');
+    fs.writeFileSync(logPath, '');
+    profileRepo.upsert({ name: 'codex-silent', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/codex-silent-crash', projectId: 'test-project', slug: 'codex-silent-crash', title: 'Silent Codex crash', status: 'running', runCount: 1, branch: 'missing-silent-branch' });
+    runRepo.insert({ id: 'codex-silent-run', taskId: 'test-project/codex-silent-crash', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-silent', logPath });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      handleRunCompletion: (taskId: string, rt: unknown) => Promise<void>;
+      running: Map<string, unknown>;
+    };
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const rt = {
+      runId: 'codex-silent-run', taskId: 'test-project/codex-silent-crash', pid: 999998, pidStart: null,
+      engine, model: 'codex:gpt-5.6-luna', profileName: 'codex-silent', projectId: 'test-project',
+      startTime: Date.now() + 60_000, timeoutMs: 60_000, timeoutAt: Date.now() + 60_000, retryCount: 0,
+      lastOutputAt: Date.now(), lastActivityAt: Date.now(), activitySource: 'log', activityCheckedAt: Date.now(),
+      cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+      exitCode: 7, exitSignal: null, stderrTail: '',
+    };
+    internal.running.set('test-project/codex-silent-crash', rt);
+    await internal.handleRunCompletion('test-project/codex-silent-crash', rt);
+
+    const reason = runRepo.get('codex-silent-run')?.reason || '';
+    expect(reason).toContain('exit=7 signal=none stderr=<trống>');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('exit=7 signal=none stderr=<trống>');
+    scheduler.stop();
+  });
+
+  it('worker thoát sớm, stderr chỉ có trong file .stderr -> runs.reason và log chứa stderr thật, không có stderr=<trống>', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-only-stderr-file.log');
+    // Pre-populate with diagnostic containing <trống> to verify that existing <trống> gets replaced by real stderr
+    fs.writeFileSync(logPath, '[hub] codex thoát sớm: exit=1 signal=none stderr=<trống>\n');
+    fs.writeFileSync(`${logPath}.stderr`, 'syntax error in schema configuration\n');
+    profileRepo.upsert({ name: 'codex-only-stderr', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/codex-only-stderr-task', projectId: 'test-project', slug: 'codex-only-stderr-task', title: 'Codex only stderr task', status: 'running', runCount: 1, branch: 'missing-branch' });
+    runRepo.insert({ id: 'codex-only-stderr-run', taskId: 'test-project/codex-only-stderr-task', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-only-stderr', logPath });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      handleRunCompletion: (taskId: string, rt: unknown) => Promise<void>;
+      running: Map<string, unknown>;
+    };
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const rt = {
+      runId: 'codex-only-stderr-run', taskId: 'test-project/codex-only-stderr-task', pid: 999995, pidStart: null,
+      engine, model: 'codex:gpt-5.6-luna', profileName: 'codex-only-stderr', projectId: 'test-project',
+      startTime: Date.now() + 60_000, timeoutMs: 60_000, timeoutAt: Date.now() + 60_000, retryCount: 0,
+      lastOutputAt: Date.now(), lastActivityAt: Date.now(), activitySource: 'log', activityCheckedAt: Date.now(),
+      cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+      exitCode: 1, exitSignal: null, stderrTail: '',
+    };
+    internal.running.set('test-project/codex-only-stderr-task', rt);
+    await internal.handleRunCompletion('test-project/codex-only-stderr-task', rt);
+
+    const run = runRepo.get('codex-only-stderr-run');
+    expect(run?.outcome).toBe('crashed');
+    expect(run?.reason).toBe('[hub] codex thoát sớm: exit=1 signal=none stderr=syntax error in schema configuration');
+    expect(run?.reason).not.toContain('stderr=<trống>');
+
+    const logContent = fs.readFileSync(logPath, 'utf8');
+    expect(logContent).toContain('[hub] codex thoát sớm: exit=1 signal=none stderr=syntax error in schema configuration');
+    expect(logContent).not.toContain('stderr=<trống>');
+
+    // Also verify when log file initially has no diagnostic line and rt.stderrTail is empty
+    const cleanLogPath = path.join(tmpDir, 'codex-only-stderr-clean.log');
+    fs.writeFileSync(cleanLogPath, '');
+    fs.writeFileSync(`${cleanLogPath}.stderr`, 'another fatal configuration error\n');
+    taskRepo.insert({ id: 'test-project/codex-only-stderr-clean-task', projectId: 'test-project', slug: 'codex-only-stderr-clean-task', title: 'Codex clean log task', status: 'running', runCount: 1, branch: 'missing-branch-2' });
+    runRepo.insert({ id: 'codex-only-stderr-clean-run', taskId: 'test-project/codex-only-stderr-clean-task', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-only-stderr', logPath: cleanLogPath });
+
+    const cleanRt = {
+      runId: 'codex-only-stderr-clean-run', taskId: 'test-project/codex-only-stderr-clean-task', pid: 999994, pidStart: null,
+      engine, model: 'codex:gpt-5.6-luna', profileName: 'codex-only-stderr', projectId: 'test-project',
+      startTime: Date.now() + 60_000, timeoutMs: 60_000, timeoutAt: Date.now() + 60_000, retryCount: 0,
+      lastOutputAt: Date.now(), lastActivityAt: Date.now(), activitySource: 'log', activityCheckedAt: Date.now(),
+      cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+      exitCode: 2, exitSignal: null, stderrTail: '',
+    };
+    internal.running.set('test-project/codex-only-stderr-clean-task', cleanRt);
+    await internal.handleRunCompletion('test-project/codex-only-stderr-clean-task', cleanRt);
+
+    const cleanRun = runRepo.get('codex-only-stderr-clean-run');
+    expect(cleanRun?.outcome).toBe('crashed');
+    expect(cleanRun?.reason).toBe('[hub] codex thoát sớm: exit=2 signal=none stderr=another fatal configuration error');
+    expect(cleanRun?.reason).not.toContain('stderr=<trống>');
+
+    const cleanLogContent = fs.readFileSync(cleanLogPath, 'utf8');
+    expect(cleanLogContent).toContain('[hub] codex thoát sớm: exit=2 signal=none stderr=another fatal configuration error');
+    expect(cleanLogContent).not.toContain('stderr=<trống>');
+
+    scheduler.stop();
+  });
+
+  it('records Codex early-exit diagnostics even when the worker has progress commits', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-commit-crash.log');
+    fs.writeFileSync(logPath, '');
+    profileRepo.upsert({ name: 'codex-commit', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/codex-commit-crash', projectId: 'test-project', slug: 'codex-commit-crash', title: 'Commit Codex crash', status: 'running', runCount: 1, branch: 'missing-commit-branch' });
+    runRepo.insert({ id: 'codex-commit-run', taskId: 'test-project/codex-commit-crash', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-commit', logPath });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      handleRunCompletion: (taskId: string, rt: unknown) => Promise<void>;
+      running: Map<string, unknown>;
+      hasCommitAfter: (task: unknown, startTime: number) => boolean;
+    };
+    internal.hasCommitAfter = () => true;
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const rt = {
+      runId: 'codex-commit-run', taskId: 'test-project/codex-commit-crash', pid: 999997, pidStart: null,
+      engine, model: 'codex:gpt-5.6-luna', profileName: 'codex-commit', projectId: 'test-project',
+      startTime: Date.now() + 60_000, timeoutMs: 60_000, timeoutAt: Date.now() + 60_000, retryCount: 0,
+      lastOutputAt: Date.now(), lastActivityAt: Date.now(), activitySource: 'log', activityCheckedAt: Date.now(),
+      cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+      exitCode: 42, exitSignal: 'SIGABRT', stderrTail: 'panic: runtime error',
+    };
+    internal.running.set('test-project/codex-commit-crash', rt);
+    await internal.handleRunCompletion('test-project/codex-commit-crash', rt);
+
+    const reason = runRepo.get('codex-commit-run')?.reason || '';
+    expect(reason).toContain('exit=42 signal=SIGABRT stderr=panic: runtime error');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('exit=42 signal=SIGABRT stderr=panic: runtime error');
+    const task = taskRepo.get('test-project/codex-commit-crash');
+    expect(task?.status).toBe('queued');
+    expect(task?.resume).toBe(1);
+    scheduler.stop();
+  });
+
+  it('records Codex early-exit diagnostics when lock_busy occurs', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-lock-crash.log');
+    fs.writeFileSync(logPath, '');
+    profileRepo.upsert({ name: 'codex-lock', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/codex-lock-crash', projectId: 'test-project', slug: 'codex-lock-crash', title: 'Lock Codex crash', status: 'running', runCount: 1, branch: 'missing-lock-branch' });
+    runRepo.insert({ id: 'codex-lock-run', taskId: 'test-project/codex-lock-crash', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-lock', logPath });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      handleRunCompletion: (taskId: string, rt: unknown) => Promise<void>;
+      running: Map<string, unknown>;
+      hasCommitAfter: (task: unknown, startTime: number) => boolean;
+    };
+    internal.hasCommitAfter = () => false;
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const now = Date.now();
+    const rt = {
+      runId: 'codex-lock-run', taskId: 'test-project/codex-lock-crash', pid: 999996, pidStart: null,
+      engine, model: 'codex:gpt-5.6-luna', profileName: 'codex-lock', projectId: 'test-project',
+      startTime: now - 1000, timeoutMs: 60_000, timeoutAt: now + 59_000, retryCount: 0,
+      lastOutputAt: now, lastActivityAt: now, activitySource: 'log', activityCheckedAt: now,
+      cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+      exitCode: 1, exitSignal: null, stderrTail: 'cannot acquire profile lock', lockFile: '/tmp/test.lock',
+    };
+    internal.running.set('test-project/codex-lock-crash', rt);
+    await internal.handleRunCompletion('test-project/codex-lock-crash', rt);
+
+    const reason = runRepo.get('codex-lock-run')?.reason || '';
+    expect(reason).toContain('exit=1 signal=none stderr=cannot acquire profile lock');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('exit=1 signal=none stderr=cannot acquire profile lock');
+    const task = taskRepo.get('test-project/codex-lock-crash');
+    expect(task?.status).toBe('queued');
+    scheduler.stop();
+  });
+});
+
+describe('Codex reviewer crash diagnostics', () => {
+  beforeEach(setupTestEnv);
+  afterEach(teardownTestEnv);
+
+  it('captures exit/signal/stderr from Codex reviewer early exit, writes diagnostic to log and reason, and cools profile', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-reviewer-crash.log');
+    fs.writeFileSync(logPath, '');
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-rev-1', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/rev-task', projectId: 'test-project', slug: 'rev-task', title: 'Review task', status: 'review' });
+    runRepo.insert({ id: 'codex-rev-run', taskId: 'test-project/rev-task', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-rev-1', logPath, kind: 'reviewer' });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      finishReview: (taskId: string, runId: string, profileName: string, reason: string, exitCode: number | null, exitSignal: NodeJS.Signals | null, spawnError?: string) => void;
+      reviewerRuns: Map<string, unknown>;
+    };
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const active = {
+      taskId: 'test-project/rev-task',
+      runId: 'codex-rev-run',
+      pid: 999999,
+      profileName: 'codex-rev-1',
+      engine,
+      actor: 'codex-reviewer',
+      model: 'codex:gpt-5.6-luna',
+      logPath,
+      outputPath: path.join(tmpDir, 'nonexistent.final.json'),
+      lockSlot: 0,
+      startedAt: Date.now() - 5000,
+      timeout: setTimeout(() => {}, 60_000),
+      stderrTail: 'fatal: could not read review input payload',
+    };
+    internal.reviewerRuns.set('test-project/rev-task', active);
+    internal.finishReview('test-project/rev-task', 'codex-rev-run', 'codex-rev-1', 'exit', 2, 'SIGTERM');
+
+    const run = runRepo.get('codex-rev-run');
+    expect(run?.outcome).toBe('crashed');
+    expect(run?.reason).toContain('[hub] codex thoát sớm: exit=2 signal=SIGTERM stderr=fatal: could not read review input payload');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('[hub] codex thoát sớm: exit=2 signal=SIGTERM stderr=fatal: could not read review input payload');
+
+    const mark = quotaMarkRepo.getAll().find((row) => row.profileName === 'codex-rev-1' && row.family === 'codex');
+    expect(mark?.reason).toContain('tạm loại hồ sơ sau 1 crash liên tiếp');
+    expect(profileRepo.get('codex-rev-1')?.coolingUntil).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    scheduler.stop();
+  });
+
+  it('handles reviewer lock_busy under flock without cooling profile even when synthetic early-exit was written to log', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-reviewer-flock.log');
+    fs.writeFileSync(logPath, '[hub] codex thoát sớm: exit=1 signal=none stderr=<trống>\n');
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-rev-lock', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/rev-lock-task', projectId: 'test-project', slug: 'rev-lock-task', title: 'Review lock task', status: 'review' });
+    runRepo.insert({ id: 'codex-rev-lock-run', taskId: 'test-project/rev-lock-task', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-rev-lock', logPath, kind: 'reviewer' });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      finishReview: (taskId: string, runId: string, profileName: string, reason: string, exitCode: number | null, exitSignal: NodeJS.Signals | null, spawnError?: string) => void;
+      reviewerRuns: Map<string, unknown>;
+    };
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const active = {
+      taskId: 'test-project/rev-lock-task',
+      runId: 'codex-rev-lock-run',
+      pid: 999998,
+      profileName: 'codex-rev-lock',
+      engine,
+      actor: 'codex-reviewer',
+      model: 'codex:gpt-5.6-luna',
+      logPath,
+      outputPath: path.join(tmpDir, 'nonexistent.final.json'),
+      lockSlot: 0,
+      lockFile: path.join(tmpDir, 'codex.lock'),
+      startedAt: Date.now() - 500, // < 3000ms
+      timeout: setTimeout(() => {}, 60_000),
+      stderrTail: '',
+    };
+    internal.reviewerRuns.set('test-project/rev-lock-task', active);
+    internal.finishReview('test-project/rev-lock-task', 'codex-rev-lock-run', 'codex-rev-lock', 'exit', 1, null);
+
+    const run = runRepo.get('codex-rev-lock-run');
+    expect(run?.outcome).toBe('crashed');
+    expect(run?.reason).toContain('exit=1 signal=none');
+
+    const mark = quotaMarkRepo.getAll().find((row) => row.profileName === 'codex-rev-lock' && row.family === 'codex');
+    expect(mark).toBeUndefined();
+    expect(profileRepo.get('codex-rev-lock')?.coolingUntil).toBeNull();
+
+    const events = eventRepo.getRecent(10);
+    expect(events.some((e) => e.type === 'review.waiting' && e.payload?.includes('lock_busy'))).toBe(true);
+
+    scheduler.stop();
+  });
+
+  it('reviewer thoát sớm, stderr chỉ có trong file .stderr -> runs.reason và log chứa stderr thật, không có stderr=<trống>', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-reviewer-only-stderr.log');
+    // Pre-populate with diagnostic containing <trống> to verify that existing <trống> gets replaced by real stderr
+    fs.writeFileSync(logPath, '[hub] codex thoát sớm: exit=1 signal=none stderr=<trống>\n');
+    fs.writeFileSync(`${logPath}.stderr`, 'syntax error in reviewer configuration\n');
+    profileRepo.upsert({ name: 'codex-rev-stderr-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/rev-stderr-task', projectId: 'test-project', slug: 'rev-stderr-task', title: 'Reviewer stderr task', status: 'review' });
+    runRepo.insert({ id: 'codex-rev-stderr-run', taskId: 'test-project/rev-stderr-task', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-rev-stderr-prof', logPath, kind: 'reviewer' });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      finishReview: (taskId: string, runId: string, profileName: string, reason: string, exitCode: number | null, exitSignal: NodeJS.Signals | null, spawnError?: string) => void;
+      reviewerRuns: Map<string, unknown>;
+    };
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const active = {
+      taskId: 'test-project/rev-stderr-task',
+      runId: 'codex-rev-stderr-run',
+      pid: 999997,
+      profileName: 'codex-rev-stderr-prof',
+      engine,
+      actor: 'codex-reviewer',
+      model: 'codex:gpt-5.6-luna',
+      logPath,
+      outputPath: path.join(tmpDir, 'nonexistent.final.json'),
+      lockSlot: 0,
+      startedAt: Date.now() - 5000,
+      timeout: setTimeout(() => {}, 60_000),
+      stderrTail: '',
+    };
+    internal.reviewerRuns.set('test-project/rev-stderr-task', active);
+    internal.finishReview('test-project/rev-stderr-task', 'codex-rev-stderr-run', 'codex-rev-stderr-prof', 'exit', 1, null);
+
+    const run = runRepo.get('codex-rev-stderr-run');
+    expect(run?.outcome).toBe('crashed');
+    expect(run?.reason).toBe('[hub] codex thoát sớm: exit=1 signal=none stderr=syntax error in reviewer configuration');
+    expect(run?.reason).not.toContain('stderr=<trống>');
+
+    const logContent = fs.readFileSync(logPath, 'utf8');
+    expect(logContent).toContain('[hub] codex thoát sớm: exit=1 signal=none stderr=syntax error in reviewer configuration');
+    expect(logContent).not.toContain('stderr=<trống>');
+
+    // Also verify when log file initially has no diagnostic line and active.stderrTail is empty
+    const cleanLogPath = path.join(tmpDir, 'codex-reviewer-clean.log');
+    fs.writeFileSync(cleanLogPath, '');
+    fs.writeFileSync(`${cleanLogPath}.stderr`, 'another fatal reviewer configuration error\n');
+    taskRepo.insert({ id: 'test-project/rev-clean-task', projectId: 'test-project', slug: 'rev-clean-task', title: 'Reviewer clean task', status: 'review' });
+    runRepo.insert({ id: 'codex-rev-clean-run', taskId: 'test-project/rev-clean-task', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-rev-stderr-prof', logPath: cleanLogPath, kind: 'reviewer' });
+
+    const cleanActive = {
+      taskId: 'test-project/rev-clean-task',
+      runId: 'codex-rev-clean-run',
+      pid: 999996,
+      profileName: 'codex-rev-stderr-prof',
+      engine,
+      actor: 'codex-reviewer',
+      model: 'codex:gpt-5.6-luna',
+      logPath: cleanLogPath,
+      outputPath: path.join(tmpDir, 'nonexistent.clean.json'),
+      lockSlot: 0,
+      startedAt: Date.now() - 5000,
+      timeout: setTimeout(() => {}, 60_000),
+      stderrTail: '',
+    };
+    internal.reviewerRuns.set('test-project/rev-clean-task', cleanActive);
+    internal.finishReview('test-project/rev-clean-task', 'codex-rev-clean-run', 'codex-rev-stderr-prof', 'exit', 2, null);
+
+    const cleanRun = runRepo.get('codex-rev-clean-run');
+    expect(cleanRun?.outcome).toBe('crashed');
+    expect(cleanRun?.reason).toBe('[hub] codex thoát sớm: exit=2 signal=none stderr=another fatal reviewer configuration error');
+    expect(cleanRun?.reason).not.toContain('stderr=<trống>');
+
+    const cleanLogContent = fs.readFileSync(cleanLogPath, 'utf8');
+    expect(cleanLogContent).toContain('[hub] codex thoát sớm: exit=2 signal=none stderr=another fatal reviewer configuration error');
+    expect(cleanLogContent).not.toContain('stderr=<trống>');
+
+    scheduler.stop();
+  });
+
+  it('replaces empty-stderr diagnostic with true stderr during daemon restart recovery', () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-recovery-stderr.log');
+    fs.writeFileSync(logPath, '[hub] codex thoát sớm: exit=1 signal=none stderr=<trống>\n');
+    fs.writeFileSync(`${logPath}.stderr`, 'fatal crash during daemon restart\n');
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      recoverCodexExitReason: (logPath: string | null | undefined) => string;
+    };
+    const recoveredReason = internal.recoverCodexExitReason(logPath);
+    expect(recoveredReason).toBe('[hub] codex thoát sớm: exit=1 signal=none stderr=fatal crash during daemon restart');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('[hub] codex thoát sớm: exit=1 signal=none stderr=fatal crash during daemon restart');
+    expect(fs.readFileSync(logPath, 'utf8')).not.toContain('stderr=<trống>');
+    scheduler.stop();
+  });
+});
+
 describe('Claude profiles are never worker scheduler profiles', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
@@ -1740,22 +2185,28 @@ describe('Watchdog', () => {
   afterEach(teardownTestEnv);
 
   function makeActivityFixture(options: {
-    profileKind?: 'isolated' | 'keyring';
+    profileKind?: 'isolated' | 'keyring' | 'codex';
     home?: string;
     worktreePath?: string;
     startTime?: number;
+    engine?: 'agy' | 'codex';
+    model?: string;
   } = {}) {
     if (!projectRepo.get('test-project')) createTestProject(path.join(tmpDir, 'activity-repo'));
     const home = options.home || path.join(tmpDir, 'profile-home');
     fs.mkdirSync(path.join(home, '.gemini', 'antigravity-cli', 'conversations'), { recursive: true });
     const worktreePath = options.worktreePath || path.join(tmpDir, 'activity-worktree');
     fs.mkdirSync(worktreePath, { recursive: true });
-    const profileName = `watchdog-${options.profileKind || 'isolated'}`;
+    const engineId = options.engine || 'agy';
+    const profileKind = options.engine === 'codex' ? 'codex' : (options.profileKind || 'isolated');
+    const profileName = options.engine === 'codex'
+      ? 'watchdog-codex'
+      : `watchdog-${options.profileKind || 'isolated'}`;
     profileRepo.upsert({
       name: profileName,
-      engine: 'agy',
-      kind: options.profileKind || 'isolated',
-      home: options.profileKind === 'keyring' ? path.join(tmpDir, 'wrong-home') : home,
+      engine: engineId,
+      kind: profileKind,
+      home: options.profileKind === 'keyring' ? path.join(tmpDir, 'wrong-home') : (engineId === 'codex' ? null : home),
       email: null,
       enabled: 1,
     });
@@ -1765,17 +2216,20 @@ describe('Watchdog', () => {
     const logPath = path.join(tmpDir, `${profileName}.log`);
     fs.writeFileSync(logPath, 'worker output\n');
     const startTime = options.startTime || Date.now();
-    runRepo.insert({ id: `run-${profileName}`, taskId, engine: 'agy', model: 'gemini-3.8-flash-low', profileName, logPath });
+    const model = options.model || (engineId === 'codex' ? 'codex:gpt-5.6-luna' : 'gemini-3.8-flash-low');
+    runRepo.insert({ id: `run-${profileName}`, taskId, engine: engineId, model, profileName, logPath });
+    const fakeEngine = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fakeEngine as unknown as { id: string }).id = engineId;
     const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
-      new Map<string, Engine>([['agy', new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'))]]));
+      new Map<string, Engine>([[engineId, fakeEngine]]));
     const running = {
       runId: `run-${profileName}`,
       taskId,
       pid: 1,
       pidStart: null,
       profileName,
-      model: 'gemini-3.8-flash-low',
-      engine: new FakeEngine(),
+      model,
+      engine: fakeEngine,
       startTime,
       timeoutMs: 300_000,
       timeoutAt: Date.now() + 300_000,
@@ -1877,6 +2331,31 @@ describe('Watchdog', () => {
     const mtime = (fixture.scheduler as unknown as { getConversationMtime: (running: unknown) => number }).getConversationMtime(fixture.running);
     expect(mtime).toBe(0);
   });
+
+  it('does not stall codex at 20m even if log contains waiting up to, and stalls after 45m', async () => {
+    config.watchdog = { stallMinutes: 20, waitingMinutes: 15 };
+    const now = Date.now();
+    const startTime = now - 60 * 60 * 1000;
+    const fixture = makeActivityFixture({ engine: 'codex', startTime });
+
+    const twentyMinAgo = new Date(now - 20 * 60 * 1000);
+    fs.writeFileSync(fixture.logPath, 'running background job... waiting up to 10m for result\n');
+    fs.utimesSync(fixture.logPath, twentyMinAgo, twentyMinAgo);
+    fixture.running.lastActivityAt = twentyMinAgo.getTime();
+    fixture.running.lastOutputAt = twentyMinAgo.getTime();
+    fixture.running.activityCheckedAt = now;
+
+    const isStalled = (fixture.scheduler as unknown as { isStalled: (running: unknown) => boolean }).isStalled.bind(fixture.scheduler);
+    expect(isStalled(fixture.running)).toBe(false);
+
+    const fortySixMinAgo = new Date(now - 46 * 60 * 1000);
+    fs.utimesSync(fixture.logPath, fortySixMinAgo, fortySixMinAgo);
+    fixture.running.lastActivityAt = fortySixMinAgo.getTime();
+    fixture.running.lastOutputAt = fortySixMinAgo.getTime();
+    fixture.running.activityCheckedAt = now;
+
+    expect(isStalled(fixture.running)).toBe(true);
+  });
 });
 
 describe('Codex slots', () => {
@@ -1973,7 +2452,7 @@ describe('Codex slots', () => {
     const runs = runRepo.getByTask('test-project/flock-busy-task');
     expect(runs).toHaveLength(1);
     expect(runs[0].outcome).toBe('crashed');
-    expect(runs[0].reason).toBe('lock_busy');
+    expect(runs[0].reason).toContain('exit=1 signal=none');
 
     const events = eventRepo.getRecent(20);
     expect(events.some((e) => e.type === 'task.queued' && e.payload?.includes('lock_busy'))).toBe(true);
@@ -2749,6 +3228,41 @@ describe('Crash recovery on startup', () => {
     scheduler.stop();
   });
 
+  it('applies profile crash cooling while keeping terminal task status during daemon recovery', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-term-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-term.log');
+    fs.writeFileSync(logPath, 'fatal error: memory exhausted\n');
+
+    taskRepo.insert({ id: 'test-project/cancelled-old', projectId: 'test-project', slug: 'cancelled-old', title: 'Cancelled', status: 'cancelled' });
+    runRepo.insert({
+      id: 'run-codex-cancelled-old',
+      taskId: 'test-project/cancelled-old',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-term-prof',
+      logPath,
+      pid: 999999,
+    });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map());
+    scheduler.start();
+
+    // Task must remain cancelled (terminal)
+    expect(taskRepo.get('test-project/cancelled-old')?.status).toBe('cancelled');
+    const run = runRepo.get('run-codex-cancelled-old')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toContain('[hub] codex thoát sớm: exit=null signal=none stderr=fatal error: memory exhausted');
+
+    // Profile crash accounting and cooling must be applied
+    const mark = quotaMarkRepo.getAll().find((row) => row.profileName === 'codex-term-prof' && row.family === 'codex');
+    expect(mark?.reason).toContain('tạm loại hồ sơ sau 1 crash liên tiếp');
+    expect(profileRepo.get('codex-term-prof')?.coolingUntil).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    scheduler.stop();
+  });
+
   it('does not treat a stale marker on a queued task as a new completion', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);
@@ -2831,6 +3345,405 @@ describe('Crash recovery on startup', () => {
     scheduler.start();
     expect(runRepo.get('run-progress')).toMatchObject({ outcome: 'crashed', reason: 'resume_after_progress' });
     expect(taskRepo.get('test-project/progress')).toMatchObject({ status: 'queued', resume: 1, attempt: 0 });
+    scheduler.stop();
+  });
+
+  it('records Codex early-exit diagnostics and cools profile during startup recovery for dead worker without progress', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-recovery', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-recovery-dead.log');
+    fs.writeFileSync(logPath, 'fatal error: config invalid\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-recovery-task',
+      projectId: 'test-project',
+      slug: 'codex-recovery-task',
+      title: 'Codex recovery task',
+      status: 'running',
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-dead',
+      taskId: 'test-project/codex-recovery-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-recovery',
+      logPath,
+      pid: 999999,
+    });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map());
+    scheduler.start();
+
+    const run = runRepo.get('run-codex-dead')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toContain('[hub] codex thoát sớm: exit=null signal=none stderr=fatal error: config invalid');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('[hub] codex thoát sớm: exit=null signal=none stderr=fatal error: config invalid');
+
+    const mark = quotaMarkRepo.getAll().find((row) => row.profileName === 'codex-recovery' && row.family === 'codex');
+    expect(mark?.reason).toContain('tạm loại hồ sơ sau 1 crash liên tiếp');
+    expect(mark?.reason).toContain('[hub] codex thoát sớm: exit=null signal=none');
+    expect(profileRepo.get('codex-recovery')?.coolingUntil).toBeGreaterThan(Math.floor(Date.now() / 1000));
+
+    const task = taskRepo.get('test-project/codex-recovery-task')!;
+    expect(task.status).toBe('queued');
+    expect(task.resume).toBe(1);
+    expect(task.consecutiveCrashes).toBe(1);
+    scheduler.stop();
+  });
+
+  it('records Codex early-exit diagnostics and cools profile during startup recovery when worker has progress commits', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    execFileSync('git', ['checkout', '-b', 'agenthub/codex-progress'], { cwd: projectPath });
+    fs.writeFileSync(path.join(projectPath, 'codex-progress.txt'), 'progress from codex');
+    execFileSync('git', ['add', '.'], { cwd: projectPath });
+    execFileSync('git', ['commit', '-m', 'codex progress commit'], {
+      cwd: projectPath,
+      env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@test.com', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@test.com' },
+    });
+
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-prog-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-progress-dead.log');
+    fs.writeFileSync(logPath, 'SIGKILL received during execution\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-progress-task',
+      projectId: 'test-project',
+      slug: 'codex-progress-task',
+      title: 'Codex progress task',
+      status: 'running',
+      branch: 'agenthub/codex-progress',
+      worktreePath: projectPath,
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-progress',
+      taskId: 'test-project/codex-progress-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-prog-prof',
+      logPath,
+      pid: 999999,
+    });
+    db.prepare("UPDATE runs SET startedAt = datetime('now', '-1 minute') WHERE id = 'run-codex-progress'").run();
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map());
+    scheduler.start();
+
+    const run = runRepo.get('run-codex-progress')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toContain('[hub] codex thoát sớm: exit=null signal=none stderr=SIGKILL received during execution');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('[hub] codex thoát sớm: exit=null signal=none stderr=SIGKILL received during execution');
+
+    const mark = quotaMarkRepo.getAll().find((row) => row.profileName === 'codex-prog-prof' && row.family === 'codex');
+    expect(mark?.reason).toContain('tạm loại hồ sơ sau 1 crash liên tiếp');
+    expect(profileRepo.get('codex-prog-prof')?.coolingUntil).toBeGreaterThan(Math.floor(Date.now() / 1000));
+
+    const task = taskRepo.get('test-project/codex-progress-task')!;
+    expect(task.status).toBe('queued');
+    expect(task.resume).toBe(1);
+    expect(task.consecutiveCrashes).toBe(1);
+    scheduler.stop();
+  });
+
+  it('records explicit empty-stderr diagnostic during startup recovery when Codex log is empty', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'codex-empty-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-empty-dead.log');
+    fs.writeFileSync(logPath, '');
+
+    taskRepo.insert({
+      id: 'test-project/codex-empty-task',
+      projectId: 'test-project',
+      slug: 'codex-empty-task',
+      title: 'Codex empty task',
+      status: 'running',
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-empty',
+      taskId: 'test-project/codex-empty-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-empty-prof',
+      logPath,
+      pid: 999999,
+    });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map());
+    scheduler.start();
+
+    const run = runRepo.get('run-codex-empty')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toContain('exit=null signal=none stderr=<trống>');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('exit=null signal=none stderr=<trống>');
+    scheduler.stop();
+  });
+
+  it('recovers live Codex worker after restart and preserves log stderr when it dies later', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-live-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-live.log');
+    fs.writeFileSync(logPath, 'error: unhandled exception in codex worker\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-live-task',
+      projectId: 'test-project',
+      slug: 'codex-live-task',
+      title: 'Codex live task',
+      status: 'running',
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-live',
+      taskId: 'test-project/codex-live-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-live-prof',
+      logPath,
+      pid: process.pid,
+      pidStart: null,
+    });
+
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map([['codex', engine]]));
+    scheduler.start();
+
+    // Verify it was recovered into running
+    expect(scheduler.getRunning().has('test-project/codex-live-task')).toBe(true);
+
+    // Now simulate process dying later
+    const internal = scheduler as unknown as {
+      isProcessAlive: (pid: number | null, expectedStart?: number | null) => boolean;
+      checkRunningTasks: () => Promise<void>;
+    };
+    internal.isProcessAlive = () => false;
+    await internal.checkRunningTasks();
+
+    const run = runRepo.get('run-codex-live')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toContain('error: unhandled exception in codex worker');
+    expect(run.reason).not.toContain('stderr=<trống>');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('error: unhandled exception in codex worker');
+    scheduler.stop();
+  });
+
+  it('preserves pre-restart exit diagnostic with real exit code and signal from log', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'codex-diag-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-diag.log');
+    fs.writeFileSync(logPath, 'some logs\n[hub] codex thoát sớm: exit=137 signal=SIGKILL stderr=killed by OOM killer\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-diag-task',
+      projectId: 'test-project',
+      slug: 'codex-diag-task',
+      title: 'Codex diag task',
+      status: 'running',
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-diag',
+      taskId: 'test-project/codex-diag-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-diag-prof',
+      logPath,
+      pid: 999999,
+    });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map());
+    scheduler.start();
+
+    const run = runRepo.get('run-codex-diag')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toBe('[hub] codex thoát sớm: exit=137 signal=SIGKILL stderr=killed by OOM killer');
+    // Ensure no duplicate or fake line was appended
+    const logContent = fs.readFileSync(logPath, 'utf8');
+    const matches = logContent.match(/\[hub\] codex thoát sớm:/g);
+    expect(matches).toHaveLength(1);
+    scheduler.stop();
+  });
+
+  it('recovers live Codex worker after restart and preserves real exit code and signal from status file', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-status-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-status.log');
+    fs.writeFileSync(logPath, 'some crash logs from worker\n');
+    fs.writeFileSync(`${logPath}.status`, '23\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-status-task',
+      projectId: 'test-project',
+      slug: 'codex-status-task',
+      title: 'Codex status task',
+      status: 'running',
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-status',
+      taskId: 'test-project/codex-status-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-status-prof',
+      logPath,
+      pid: process.pid,
+      pidStart: null,
+    });
+
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map([['codex', engine]]));
+    scheduler.start();
+
+    // Verify it was recovered into running
+    expect(scheduler.getRunning().has('test-project/codex-status-task')).toBe(true);
+
+    // Simulate process exiting later
+    const internal = scheduler as unknown as {
+      isProcessAlive: (pid: number | null, expectedStart?: number | null) => boolean;
+      checkRunningTasks: () => Promise<void>;
+    };
+    internal.isProcessAlive = () => false;
+    await internal.checkRunningTasks();
+
+    const run = runRepo.get('run-codex-status')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toBe('[hub] codex thoát sớm: exit=23 signal=none stderr=some crash logs from worker');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('[hub] codex thoát sớm: exit=23 signal=none stderr=some crash logs from worker');
+    scheduler.stop();
+  });
+
+  it('does not treat recovered live Codex worker with exit 0 and commits as a crash', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-success-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-success.log');
+    fs.writeFileSync(logPath, 'worker finished work cleanly\n');
+    fs.writeFileSync(`${logPath}.status`, '0\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-success-task',
+      projectId: 'test-project',
+      slug: 'codex-success-task',
+      title: 'Codex success task',
+      status: 'running',
+      runCount: 1,
+      worktreePath: projectPath,
+    });
+    runRepo.insert({
+      id: 'run-codex-success',
+      taskId: 'test-project/codex-success-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-success-prof',
+      logPath,
+      pid: process.pid,
+      pidStart: null,
+    });
+
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map([['codex', engine]]));
+    scheduler.start();
+
+    const internal = scheduler as unknown as {
+      isProcessAlive: (pid: number | null, expectedStart?: number | null) => boolean;
+      hasCommitAfter: () => boolean;
+      checkRunningTasks: () => Promise<void>;
+    };
+    internal.isProcessAlive = () => false;
+    internal.hasCommitAfter = () => true;
+    await internal.checkRunningTasks();
+
+    // Verify task was resumed with resume_after_progress and no fake diagnostic line was appended
+    const task = taskRepo.get('test-project/codex-success-task')!;
+    expect(['queued', 'waiting_quota']).toContain(task.status);
+    expect(task.resume).toBe(1);
+    const run = runRepo.get('run-codex-success')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toBe('resume_after_progress');
+    // Ensure no fake early-exit diagnostic was appended to the log
+    expect(fs.readFileSync(logPath, 'utf8')).not.toContain('[hub] codex thoát sớm:');
+    scheduler.stop();
+  });
+
+  it('preserves stderr in reason when stdout is written after stderr', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-stdout-after-stderr-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-stdout-after-stderr.log');
+    fs.writeFileSync(`${logPath}.stderr`, 'critical codex configuration error\n');
+    fs.writeFileSync(logPath, 'critical codex configuration error\n' + 'stdout noise line\n'.repeat(600));
+    fs.writeFileSync(`${logPath}.status`, '1\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-stdout-after-task',
+      projectId: 'test-project',
+      slug: 'codex-stdout-after-task',
+      title: 'Codex stdout after stderr task',
+      status: 'running',
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-stdout-after',
+      taskId: 'test-project/codex-stdout-after-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-stdout-after-stderr-prof',
+      logPath,
+      pid: process.pid,
+      pidStart: null,
+    });
+
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map([['codex', engine]]));
+    scheduler.start();
+
+    const internal = scheduler as unknown as {
+      isProcessAlive: (pid: number | null, expectedStart?: number | null) => boolean;
+      checkRunningTasks: () => Promise<void>;
+    };
+    internal.isProcessAlive = () => false;
+    await internal.checkRunningTasks();
+
+    const run = runRepo.get('run-codex-stdout-after')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toBe('[hub] codex thoát sớm: exit=1 signal=none stderr=critical codex configuration error');
     scheduler.stop();
   });
 });

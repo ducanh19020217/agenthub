@@ -3259,6 +3259,100 @@ describe('Crash recovery on startup', () => {
     expect(fs.readFileSync(logPath, 'utf8')).toContain('exit=null signal=none stderr=<trống>');
     scheduler.stop();
   });
+
+  it('recovers live Codex worker after restart and preserves log stderr when it dies later', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-live-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-live.log');
+    fs.writeFileSync(logPath, 'error: unhandled exception in codex worker\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-live-task',
+      projectId: 'test-project',
+      slug: 'codex-live-task',
+      title: 'Codex live task',
+      status: 'running',
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-live',
+      taskId: 'test-project/codex-live-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-live-prof',
+      logPath,
+      pid: process.pid,
+      pidStart: null,
+    });
+
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map([['codex', engine]]));
+    scheduler.start();
+
+    // Verify it was recovered into running
+    expect(scheduler.getRunning().has('test-project/codex-live-task')).toBe(true);
+
+    // Now simulate process dying later
+    const internal = scheduler as unknown as {
+      isProcessAlive: (pid: number | null, expectedStart?: number | null) => boolean;
+      checkRunningTasks: () => Promise<void>;
+    };
+    internal.isProcessAlive = () => false;
+    await internal.checkRunningTasks();
+
+    const run = runRepo.get('run-codex-live')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toContain('error: unhandled exception in codex worker');
+    expect(run.reason).not.toContain('stderr=<trống>');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('error: unhandled exception in codex worker');
+    scheduler.stop();
+  });
+
+  it('preserves pre-restart exit diagnostic with real exit code and signal from log', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'codex-diag-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-diag.log');
+    fs.writeFileSync(logPath, 'some logs\n[hub] codex thoát sớm: exit=137 signal=SIGKILL stderr=killed by OOM killer\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-diag-task',
+      projectId: 'test-project',
+      slug: 'codex-diag-task',
+      title: 'Codex diag task',
+      status: 'running',
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-diag',
+      taskId: 'test-project/codex-diag-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-diag-prof',
+      logPath,
+      pid: 999999,
+    });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map());
+    scheduler.start();
+
+    const run = runRepo.get('run-codex-diag')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toBe('[hub] codex thoát sớm: exit=137 signal=SIGKILL stderr=killed by OOM killer');
+    // Ensure no duplicate or fake line was appended
+    const logContent = fs.readFileSync(logPath, 'utf8');
+    const matches = logContent.match(/\[hub\] codex thoát sớm:/g);
+    expect(matches).toHaveLength(1);
+    scheduler.stop();
+  });
 });
 
 describe('Worktree creation', () => {

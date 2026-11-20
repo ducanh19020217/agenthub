@@ -1098,6 +1098,9 @@ export class Scheduler {
         console.warn(`[scheduler] deferred timeout for recovered run ${run.id} until ${new Date(timeoutAt).toISOString()}`);
         this.eventBus.emit('run.timeout_deferred', run.taskId, { runId: run.id, timeoutAt: new Date(timeoutAt).toISOString() });
       }
+      const initialStderrTail = run.logPath
+        ? readLogTail(run.logPath, { maxBytes: CODEX_STDERR_TAIL_BYTES })
+        : '';
       this.running.set(run.taskId, {
         runId: run.id,
         taskId: run.taskId,
@@ -1118,6 +1121,7 @@ export class Scheduler {
         cachedConversationMtime: 0,
         cachedWorktreeMtime: 0,
         usageBefore: null,
+        stderrTail: initialStderrTail,
         rss: 0,
         cpu: 0,
         paused: false,
@@ -2391,10 +2395,19 @@ export class Scheduler {
     } else {
       const exitCode = rt.exitCode ?? rt.child?.exitCode ?? null;
       const exitSignal = rt.exitSignal ?? null;
-      const codexExitReason = rt.engine.id === 'codex' && (exitCode !== 0 || exitSignal || rt.spawnError)
-        ? formatCodexEarlyExit(exitCode, exitSignal, rt.stderrTail, rt.spawnError)
-        : undefined;
-      if (codexExitReason && run?.logPath) {
+      const existingMatch = logTail.match(/\[hub\] codex thoát sớm: [^\r\n]+/);
+      let codexExitReason: string | undefined;
+      if (rt.engine.id === 'codex') {
+        if (existingMatch) {
+          codexExitReason = existingMatch[0];
+        } else if (exitCode !== 0 || exitSignal || Boolean(rt.spawnError) || !rt.child) {
+          const stderrTail = (rt.stderrTail && rt.stderrTail.trim())
+            ? rt.stderrTail
+            : logTail.slice(-CODEX_STDERR_TAIL_BYTES);
+          codexExitReason = formatCodexEarlyExit(exitCode, exitSignal, stderrTail, rt.spawnError);
+        }
+      }
+      if (codexExitReason && run?.logPath && !existingMatch) {
         try { fs.appendFileSync(run.logPath, `${codexExitReason}\n`, 'utf8'); } catch { /* best effort */ }
       }
       const isLockBusy = durationMs < 3000 && logTail.trim() === '' && Boolean(rt.lockFile) && exitCode === 1;
@@ -4171,6 +4184,15 @@ export class Scheduler {
       child.on('exit', (code, signal) => {
         rt.exitCode = code;
         rt.exitSignal = signal;
+        if (engine.id === 'codex' && (code !== 0 || signal)) {
+          const diagnostic = formatCodexEarlyExit(code, signal, rt.stderrTail);
+          try {
+            const currentTail = readLogTail(logPath, { maxBytes: CODEX_STDERR_TAIL_BYTES });
+            if (!currentTail.includes('[hub] codex thoát sớm:')) {
+              fs.appendFileSync(logPath, `${diagnostic}\n`, 'utf8');
+            }
+          } catch { /* best effort */ }
+        }
         if (this.stopped) return;
         // Trigger immediate check
         setTimeout(() => {

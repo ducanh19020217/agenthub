@@ -4,7 +4,7 @@
 
 - **Bối cảnh**: Codex có thể thoát trong vài giây trước khi ghi stdout; trước đây scheduler chỉ lưu exit code, bỏ qua signal/stderr nên log 0 byte và `runs.reason` rỗng, đồng thời lượt sau vẫn tiếp tục chọn hồ sơ lỗi.
 - **Quyết định**: Codex giữ stdout trong log, chuyển stderr qua pipe để scheduler giữ tail tối đa 8 KB, ghi dòng `[hub] codex thoát sớm: exit=… signal=… stderr=…` vào log run và lưu cùng lý do vào `runs.reason`. Sau ngưỡng crash liên tiếp của hồ sơ, scheduler tạo quota mark tạm trên đúng model family, kèm lý do, để bộ chọn hồ sơ và `hub_profiles`/`hub_status` cùng thấy trạng thái tạm loại.
-- **Watchdog**: Codex có thể im lặng lâu trong lúc suy luận; không coi Codex stalled trước 45 phút dù cấu hình watchdog thấp hơn. Các engine khác giữ nguyên ngưỡng hiện tại.
+- **Watchdog**: Codex có thể im lặng lâu trong lúc suy luận; không coi Codex stalled trước 45 phút dù cấu hình watchdog thấp hơn, áp dụng cho cả ngưỡng im lặng chung lẫn nhánh phát hiện chờ lệnh nền ("waiting up to"). Các engine khác giữ nguyên ngưỡng hiện tại.
 
 ## DEC-OPENPROJECT-TRIAGE
 

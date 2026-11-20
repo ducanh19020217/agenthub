@@ -1906,22 +1906,28 @@ describe('Watchdog', () => {
   afterEach(teardownTestEnv);
 
   function makeActivityFixture(options: {
-    profileKind?: 'isolated' | 'keyring';
+    profileKind?: 'isolated' | 'keyring' | 'codex';
     home?: string;
     worktreePath?: string;
     startTime?: number;
+    engine?: 'agy' | 'codex';
+    model?: string;
   } = {}) {
     if (!projectRepo.get('test-project')) createTestProject(path.join(tmpDir, 'activity-repo'));
     const home = options.home || path.join(tmpDir, 'profile-home');
     fs.mkdirSync(path.join(home, '.gemini', 'antigravity-cli', 'conversations'), { recursive: true });
     const worktreePath = options.worktreePath || path.join(tmpDir, 'activity-worktree');
     fs.mkdirSync(worktreePath, { recursive: true });
-    const profileName = `watchdog-${options.profileKind || 'isolated'}`;
+    const engineId = options.engine || 'agy';
+    const profileKind = options.engine === 'codex' ? 'codex' : (options.profileKind || 'isolated');
+    const profileName = options.engine === 'codex'
+      ? 'watchdog-codex'
+      : `watchdog-${options.profileKind || 'isolated'}`;
     profileRepo.upsert({
       name: profileName,
-      engine: 'agy',
-      kind: options.profileKind || 'isolated',
-      home: options.profileKind === 'keyring' ? path.join(tmpDir, 'wrong-home') : home,
+      engine: engineId,
+      kind: profileKind,
+      home: options.profileKind === 'keyring' ? path.join(tmpDir, 'wrong-home') : (engineId === 'codex' ? null : home),
       email: null,
       enabled: 1,
     });
@@ -1931,17 +1937,20 @@ describe('Watchdog', () => {
     const logPath = path.join(tmpDir, `${profileName}.log`);
     fs.writeFileSync(logPath, 'worker output\n');
     const startTime = options.startTime || Date.now();
-    runRepo.insert({ id: `run-${profileName}`, taskId, engine: 'agy', model: 'gemini-3.8-flash-low', profileName, logPath });
+    const model = options.model || (engineId === 'codex' ? 'codex:gpt-5.6-luna' : 'gemini-3.8-flash-low');
+    runRepo.insert({ id: `run-${profileName}`, taskId, engine: engineId, model, profileName, logPath });
+    const fakeEngine = new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'));
+    (fakeEngine as unknown as { id: string }).id = engineId;
     const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
-      new Map<string, Engine>([['agy', new FakeEngine(path.join(process.cwd(), 'test', 'fixtures', 'fake-agent.mjs'))]]));
+      new Map<string, Engine>([[engineId, fakeEngine]]));
     const running = {
       runId: `run-${profileName}`,
       taskId,
       pid: 1,
       pidStart: null,
       profileName,
-      model: 'gemini-3.8-flash-low',
-      engine: new FakeEngine(),
+      model,
+      engine: fakeEngine,
       startTime,
       timeoutMs: 300_000,
       timeoutAt: Date.now() + 300_000,
@@ -2042,6 +2051,31 @@ describe('Watchdog', () => {
 
     const mtime = (fixture.scheduler as unknown as { getConversationMtime: (running: unknown) => number }).getConversationMtime(fixture.running);
     expect(mtime).toBe(0);
+  });
+
+  it('does not stall codex at 20m even if log contains waiting up to, and stalls after 45m', async () => {
+    config.watchdog = { stallMinutes: 20, waitingMinutes: 15 };
+    const now = Date.now();
+    const startTime = now - 60 * 60 * 1000;
+    const fixture = makeActivityFixture({ engine: 'codex', startTime });
+
+    const twentyMinAgo = new Date(now - 20 * 60 * 1000);
+    fs.writeFileSync(fixture.logPath, 'running background job... waiting up to 10m for result\n');
+    fs.utimesSync(fixture.logPath, twentyMinAgo, twentyMinAgo);
+    fixture.running.lastActivityAt = twentyMinAgo.getTime();
+    fixture.running.lastOutputAt = twentyMinAgo.getTime();
+    fixture.running.activityCheckedAt = now;
+
+    const isStalled = (fixture.scheduler as unknown as { isStalled: (running: unknown) => boolean }).isStalled.bind(fixture.scheduler);
+    expect(isStalled(fixture.running)).toBe(false);
+
+    const fortySixMinAgo = new Date(now - 46 * 60 * 1000);
+    fs.utimesSync(fixture.logPath, fortySixMinAgo, fortySixMinAgo);
+    fixture.running.lastActivityAt = fortySixMinAgo.getTime();
+    fixture.running.lastOutputAt = fortySixMinAgo.getTime();
+    fixture.running.activityCheckedAt = now;
+
+    expect(isStalled(fixture.running)).toBe(true);
   });
 });
 

@@ -2043,9 +2043,12 @@ export class Scheduler {
       : this.config.watchdog.stallMinutes;
     const stallMs = stallMinutes * 60 * 1000;
     if (silentMs > stallMs) return true;
-    if (silentMs <= this.config.watchdog.waitingMinutes * 60 * 1000) return false;
+    const waitingMinutes = rt.engine.id === 'codex'
+      ? Math.max(this.config.watchdog.waitingMinutes, stallMinutes)
+      : this.config.watchdog.waitingMinutes;
+    const waitingMs = waitingMinutes * 60 * 1000;
+    if (silentMs <= waitingMs) return false;
     if (!this.logTail(run?.logPath, 20).includes('waiting up to')) return false;
-    const waitingMs = this.config.watchdog.waitingMinutes * 60 * 1000;
     const logSilent = Date.now() - this.getLogMtime(run?.logPath) > waitingMs;
     const conversation = this.getConversationMtime(rt);
     const conversationSilent = conversation === 0 || Date.now() - conversation > waitingMs;

@@ -4567,9 +4567,10 @@ export class AppService {
 
     const parsed = ReviewTaskSchema.parse(raw);
     if (parsed.verdict === 'approved') {
-      const checks = this.scheduler.getCheckResults(taskId);
-      if (checks.some((c) => !c.ok)) {
-        throw new HttpError(400, 'bad_request', `Không thể duyệt hoàn thành task khi checks thất bại: ${checks.filter((c) => !c.ok).map((c) => c.name).join(', ')}`);
+      const project = this.projectRepo.get(task.projectId);
+      const checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project);
+      if (!checkStatus.ok) {
+        throw new HttpError(400, 'bad_request', `Không thể duyệt hoàn thành task khi checks chưa đạt: ${checkStatus.reason}`);
       }
     }
     if (this.reviewingTasks.has(taskId)) {
@@ -4757,8 +4758,9 @@ export class AppService {
         checks = this.scheduler.getCheckResults(taskId);
       }
       if (this.taskRepo.get(taskId)?.status !== 'review') return;
-      if (checks.length === 0 || checks.some((c) => !c.ok)) { skip('checks_failed', checks, retried); return; }
+      if (checks.length === 0 || !this.scheduler.checkMandatoryChecksForTask(task, project).ok) { skip('checks_failed', checks, retried); return; }
     }
+    if (!this.scheduler.checkMandatoryChecksForTask(task, project).ok) { skip('checks_failed', checks); return; }
     if (this.failedAutoMerges.has(taskId)) { skip('merge_failed', checks); return; }
     // The ready event can arrive twice for one approval; the first call is already merging.
     if (this.reviewingTasks.has(taskId)) {
@@ -5162,12 +5164,8 @@ export class AppService {
     const onlyNames = parsed.success && parsed.data.onlyNames && parsed.data.onlyNames.length > 0 ? parsed.data.onlyNames : undefined;
     const result = await new CheckRunner(db).run(task, project, run.id, { onlyNames });
 
-    const allChecks = this.scheduler.getCheckResults(taskId);
-    let allPassed = allChecks.length > 0 && allChecks.every((c) => c.ok);
-    if (projectSettings(project).postDone?.enabled) {
-      const postDone = allChecks.find((c) => c.name === 'post-done');
-      if (!postDone || !postDone.ok) allPassed = false;
-    }
+    const checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project);
+    const allPassed = checkStatus.ok;
 
     if (allPassed) {
       this.taskRepo.update(taskId, {

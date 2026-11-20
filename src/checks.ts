@@ -303,3 +303,63 @@ export function getCheckResults(db: Database.Database, taskId: string): CheckRes
   }>;
   return rows.map((r) => ({ ...r, ok: Boolean(r.ok) }));
 }
+
+export function getRequiredCheckNames(project: ProjectRow, repoPath?: string): string[] {
+  const settings = projectSettings(project);
+  const names: string[] = [];
+  if (settings.postDone?.enabled) {
+    names.push('post-done');
+  }
+  if (project.checks) {
+    try {
+      const configured = JSON.parse(project.checks) as CheckDefinition[];
+      for (const def of configured) {
+        if (def.name && !isHeavyReleaseCheck(def) && !names.includes(def.name)) {
+          names.push(def.name);
+        }
+      }
+    } catch {
+      // ignore parse error
+    }
+  } else {
+    const targetPath = repoPath || project.path;
+    if (targetPath && fs.existsSync(path.join(targetPath, 'package.json'))) {
+      const detected = detectChecks(targetPath).filter((c) => !isHeavyReleaseCheck(c));
+      for (const def of detected) {
+        if (def.name && !names.includes(def.name)) {
+          names.push(def.name);
+        }
+      }
+    }
+  }
+  return names;
+}
+
+export function checkMandatoryChecks(
+  checks: CheckResult[],
+  project?: ProjectRow | null,
+  repoPath?: string,
+): { ok: boolean; reason?: string } {
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length > 0) {
+    return {
+      ok: false,
+      reason: `check thất bại: ${failed.map((c) => c.name).join(', ')}`,
+    };
+  }
+
+  if (project) {
+    const required = getRequiredCheckNames(project, repoPath);
+    for (const req of required) {
+      const res = checks.find((c) => c.name === req);
+      if (!res || !res.ok) {
+        return {
+          ok: false,
+          reason: `chưa pass check bắt buộc "${req}"`,
+        };
+      }
+    }
+  }
+
+  return { ok: true };
+}

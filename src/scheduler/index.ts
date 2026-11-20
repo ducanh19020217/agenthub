@@ -482,11 +482,11 @@ export class Scheduler {
   getCheckResults(taskId: string) { return this.db ? getCheckResults(this.db, taskId) : []; }
   getDatabase(): Database.Database | undefined { return this.db; }
 
-  checkMandatoryChecksForTask(task: TaskRow, project?: ProjectRow | null): { ok: boolean; reason?: string } {
+  checkMandatoryChecksForTask(task: TaskRow, project?: ProjectRow | null, currentHead?: string | null): { ok: boolean; reason?: string } {
     const checks = this.getCheckResults(task.id);
     const proj = project || this.projectRepo.get(task.projectId);
     const repoPath = task.worktreePath || (proj ? proj.path : undefined);
-    return checkMandatoryChecks(checks, proj, repoPath);
+    return checkMandatoryChecks(checks, proj, repoPath, currentHead);
   }
 
   private schedulerLimits() {
@@ -4830,8 +4830,12 @@ export class Scheduler {
         if (!hasCommits) continue;
 
         // Verify mandatory checks have passed before auto-closing to done
-        const checkStatus = this.checkMandatoryChecksForTask(task, project);
-        if (!checkStatus.ok) continue;
+        const checkResults = this.getCheckResults(task.id);
+        const runs = this.runRepo.getByTask(task.id);
+        if (checkResults.length > 0 || runs.length > 0 || projectSettings(project).postDone?.enabled || project.checks) {
+          const checkStatus = this.checkMandatoryChecksForTask(task, project);
+          if (!checkStatus.ok) continue;
+        }
 
         // Clean up any reviewer runs/state if task was in review
         const reviewerRun = this.reviewerRuns.get(task.id);

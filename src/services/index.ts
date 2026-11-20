@@ -53,7 +53,7 @@ import { CodexEngine } from '../engines/index.js';
 import { hasClaudeQuotaAvailable, QuotaUsageService } from '../quota/usage.js';
 import { QuotaService } from '../quota/index.js';
 import { ProfileLockService } from '../profiles/locks.js';
-import { CheckRunner } from '../checks.js';
+import { CheckRunner, worktreeHead } from '../checks.js';
 import { BrainService } from '../brain.js';
 import { toApiTime } from '../db/time.js';
 import { ChatService } from '../chat/service.js';
@@ -5164,7 +5164,9 @@ export class AppService {
     const onlyNames = parsed.success && parsed.data.onlyNames && parsed.data.onlyNames.length > 0 ? parsed.data.onlyNames : undefined;
     const result = await new CheckRunner(db).run(task, project, run.id, { onlyNames });
 
-    const checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project);
+    const repoPath = task.worktreePath || project.path;
+    const currentHead = await worktreeHead(repoPath);
+    const checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
     const allPassed = checkStatus.ok;
 
     if (allPassed) {

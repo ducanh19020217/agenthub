@@ -16,7 +16,7 @@ const execFileAsync = promisify(execFile);
 const MAX_OUTPUT = 8192;
 const CONFLICT_MARKER_REGEX = /^(<{7}|={7}|>{7})( |$)/m;
 export interface CheckDefinition { name: string; cmd: string[]; timeoutSec?: number }
-export interface CheckResult { name: string; ok: boolean; exitCode: number | null; durationMs: number; outputTail: string; runId?: string; runStartedAt?: string }
+export interface CheckResult { name: string; ok: boolean; exitCode: number | null; durationMs: number; outputTail: string; runId?: string; runStartedAt?: string; head?: string | null }
 export interface CheckRunOptions { reuseSavedResults?: boolean; onlyNames?: string[] }
 
 /** Release packaging is deliberately opt-in: it may run npm ci and rebuild the hub. */
@@ -127,7 +127,7 @@ export async function mandatoryChecks(repo: string, task: TaskRow, project: Proj
   return checks;
 }
 function tail(value: string): string { return value.length > MAX_OUTPUT ? value.slice(-MAX_OUTPUT) : value; }
-async function worktreeHead(repo: string): Promise<string | null> {
+export async function worktreeHead(repo: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' });
     return stdout.trim() || null;
@@ -241,20 +241,27 @@ export class CheckRunner {
     const postDoneChecks: CheckDefinition[] = project && projectSettings(project).postDone?.enabled
       ? [{ name: 'post-done', cmd: [], timeoutSec: projectSettings(project).postDone.timeoutSec }]
       : [];
+    const mandatory = await mandatoryChecks(repo, task, project);
     const allChecks = [
       ...(project.checks ? configured : configured.filter((check) => !isHeavyReleaseCheck(check))),
-      ...await mandatoryChecks(repo, task, project),
+      ...mandatory,
       ...postDoneChecks,
     ];
-    const checks = options.onlyNames ? allChecks.filter((check) => options.onlyNames!.includes(check.name)) : allChecks;
+    const mandatoryNames = mandatory.map((c) => c.name);
+    const checks = options.onlyNames
+      ? allChecks.filter((check) => options.onlyNames!.includes(check.name) || mandatoryNames.includes(check.name))
+      : allChecks;
+    const head = await worktreeHead(repo);
     if (!options.reuseSavedResults) {
-      if (options.onlyNames?.length) {
-        this.db.prepare(`DELETE FROM check_results WHERE taskId = ? AND runId = ? AND name IN (${options.onlyNames.map(() => '?').join(',')})`).run(task.id, runId, ...options.onlyNames);
-      } else {
-        this.db.prepare('DELETE FROM check_results WHERE taskId = ? AND runId = ?').run(task.id, runId);
+      if (head) {
+        this.db.prepare('DELETE FROM check_results WHERE taskId = ? AND runId = ? AND head IS NOT NULL AND head != ?')
+          .run(task.id, runId, head);
+      }
+      const namesToDelete = checks.map((c) => c.name);
+      if (namesToDelete.length > 0) {
+        this.db.prepare(`DELETE FROM check_results WHERE taskId = ? AND runId = ? AND name IN (${namesToDelete.map(() => '?').join(',')})`).run(task.id, runId, ...namesToDelete);
       }
     }
-    const head = await worktreeHead(repo);
     const existingRows = options.reuseSavedResults
       ? this.db.prepare('SELECT name, ok, exitCode, durationMs, outputTail, head FROM check_results WHERE taskId = ? AND runId = ?')
         .all(task.id, runId) as Array<{ name: string; ok: number; exitCode: number | null; durationMs: number; outputTail: string; head: string | null }>
@@ -268,7 +275,7 @@ export class CheckRunner {
         continue;
       }
       const result = await runOne(check, repo, hubHome, project, task);
-      results.push(result);
+      results.push({ ...result, head });
       this.db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
         .run(task.id, runId, result.name, result.ok ? 1 : 0, result.exitCode, result.durationMs, result.outputTail, head);
     }
@@ -286,7 +293,7 @@ export class CheckRunner {
   }
 }
 export function getCheckResults(db: Database.Database, taskId: string): CheckResult[] {
-  const rows = db.prepare(`SELECT c.name, c.ok, c.exitCode, c.durationMs, c.outputTail, c.runId, r.startedAt AS runStartedAt
+  const rows = db.prepare(`SELECT c.name, c.ok, c.exitCode, c.durationMs, c.outputTail, c.runId, c.head, r.startedAt AS runStartedAt
     FROM check_results c JOIN runs r ON r.id = c.runId
     WHERE c.taskId = ? AND c.runId = (
       SELECT c2.runId FROM check_results c2 JOIN runs r2 ON r2.id = c2.runId
@@ -300,16 +307,37 @@ export function getCheckResults(db: Database.Database, taskId: string): CheckRes
     outputTail: string;
     runId: string;
     runStartedAt: string;
+    head: string | null;
   }>;
   return rows.map((r) => ({ ...r, ok: Boolean(r.ok) }));
 }
 
+export const INTERNAL_MANDATORY_CHECKS = [
+  'zero-byte',
+  'uncommitted',
+  'conflict-markers',
+  'agenthub-files',
+] as const;
+
 export function getRequiredCheckNames(project: ProjectRow, repoPath?: string): string[] {
   const settings = projectSettings(project);
+  const targetPath = repoPath || project.path;
+  const hasPackageJson = Boolean(targetPath && fs.existsSync(path.join(targetPath, 'package.json')));
+  const hasProjectConfig = Boolean(project.checks || settings.postDone?.enabled || hasPackageJson);
+
   const names: string[] = [];
-  if (settings.postDone?.enabled) {
+
+  if (hasProjectConfig) {
+    names.push(...INTERNAL_MANDATORY_CHECKS);
+    if (settings.commitConvention?.commitRegex || settings.commitConvention?.commitTemplate?.includes('{ref}')) {
+      names.push('commit-message');
+    }
+  }
+
+  if (settings.postDone?.enabled && !names.includes('post-done')) {
     names.push('post-done');
   }
+
   if (project.checks) {
     try {
       const configured = JSON.parse(project.checks) as CheckDefinition[];
@@ -321,17 +349,15 @@ export function getRequiredCheckNames(project: ProjectRow, repoPath?: string): s
     } catch {
       // ignore parse error
     }
-  } else {
-    const targetPath = repoPath || project.path;
-    if (targetPath && fs.existsSync(path.join(targetPath, 'package.json'))) {
-      const detected = detectChecks(targetPath).filter((c) => !isHeavyReleaseCheck(c));
-      for (const def of detected) {
-        if (def.name && !names.includes(def.name)) {
-          names.push(def.name);
-        }
+  } else if (hasPackageJson) {
+    const detected = detectChecks(targetPath).filter((c) => !isHeavyReleaseCheck(c));
+    for (const def of detected) {
+      if (def.name && !names.includes(def.name)) {
+        names.push(def.name);
       }
     }
   }
+
   return names;
 }
 
@@ -339,12 +365,31 @@ export function checkMandatoryChecks(
   checks: CheckResult[],
   project?: ProjectRow | null,
   repoPath?: string,
+  currentHead?: string | null,
 ): { ok: boolean; reason?: string } {
   const failed = checks.filter((c) => !c.ok);
   if (failed.length > 0) {
     return {
       ok: false,
       reason: `check thất bại: ${failed.map((c) => c.name).join(', ')}`,
+    };
+  }
+
+  if (currentHead) {
+    const staleHead = checks.filter((c) => c.head && c.head !== currentHead);
+    if (staleHead.length > 0) {
+      return {
+        ok: false,
+        reason: `check "${staleHead.map((c) => c.name).join(', ')}" thuộc commit cũ (${staleHead[0].head?.slice(0, 7)}), không khớp HEAD hiện tại (${currentHead.slice(0, 7)})`,
+      };
+    }
+  }
+
+  const heads = new Set(checks.map((c) => c.head).filter(Boolean));
+  if (heads.size > 1) {
+    return {
+      ok: false,
+      reason: `kết quả checks không cùng một commit HEAD (${[...heads].map((h) => h?.slice(0, 7)).join(', ')})`,
     };
   }
 
@@ -356,6 +401,12 @@ export function checkMandatoryChecks(
         return {
           ok: false,
           reason: `chưa pass check bắt buộc "${req}"`,
+        };
+      }
+      if (currentHead && res.head && res.head !== currentHead) {
+        return {
+          ok: false,
+          reason: `check bắt buộc "${req}" thuộc commit cũ (${res.head.slice(0, 7)}), không khớp HEAD hiện tại (${currentHead.slice(0, 7)})`,
         };
       }
     }

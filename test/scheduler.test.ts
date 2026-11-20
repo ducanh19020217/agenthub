@@ -281,6 +281,60 @@ describe('Codex worker crash diagnostics', () => {
   });
 });
 
+describe('Codex reviewer crash diagnostics', () => {
+  beforeEach(setupTestEnv);
+  afterEach(teardownTestEnv);
+
+  it('captures exit/signal/stderr from Codex reviewer early exit, writes diagnostic to log and reason, and cools profile', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-reviewer-crash.log');
+    fs.writeFileSync(logPath, '');
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-rev-1', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/rev-task', projectId: 'test-project', slug: 'rev-task', title: 'Review task', status: 'review' });
+    runRepo.insert({ id: 'codex-rev-run', taskId: 'test-project/rev-task', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-rev-1', logPath, kind: 'reviewer' });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      finishReview: (taskId: string, runId: string, profileName: string, reason: string, exitCode: number | null, exitSignal: NodeJS.Signals | null, spawnError?: string) => void;
+      reviewerRuns: Map<string, unknown>;
+    };
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const active = {
+      taskId: 'test-project/rev-task',
+      runId: 'codex-rev-run',
+      pid: 999999,
+      profileName: 'codex-rev-1',
+      engine,
+      actor: 'codex-reviewer',
+      model: 'codex:gpt-5.6-luna',
+      logPath,
+      outputPath: path.join(tmpDir, 'nonexistent.final.json'),
+      lockSlot: 0,
+      startedAt: Date.now() - 5000,
+      timeout: setTimeout(() => {}, 60_000),
+      stderrTail: 'fatal: could not read review input payload',
+    };
+    internal.reviewerRuns.set('test-project/rev-task', active);
+    internal.finishReview('test-project/rev-task', 'codex-rev-run', 'codex-rev-1', 'exit', 2, 'SIGTERM');
+
+    const run = runRepo.get('codex-rev-run');
+    expect(run?.outcome).toBe('crashed');
+    expect(run?.reason).toContain('[hub] codex thoát sớm: exit=2 signal=SIGTERM stderr=fatal: could not read review input payload');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('[hub] codex thoát sớm: exit=2 signal=SIGTERM stderr=fatal: could not read review input payload');
+
+    const mark = quotaMarkRepo.getAll().find((row) => row.profileName === 'codex-rev-1' && row.family === 'codex');
+    expect(mark?.reason).toContain('tạm loại hồ sơ sau 1 crash liên tiếp');
+    expect(profileRepo.get('codex-rev-1')?.coolingUntil).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    scheduler.stop();
+  });
+});
+
 describe('Claude profiles are never worker scheduler profiles', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);

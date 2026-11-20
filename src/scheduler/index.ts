@@ -305,12 +305,18 @@ export interface ReviewerRun {
   profileName: string;
   engine: Engine;
   actor: ReviewerActor;
+  model: string;
+  logPath: string;
   outputPath: string;
   lockSlot: number;
   lockFile?: string;
   startedAt: number;
   timeout: NodeJS.Timeout;
   exitTimeout?: NodeJS.Timeout;
+  exitCode?: number | null;
+  exitSignal?: NodeJS.Signals | null;
+  stderrTail?: string;
+  spawnError?: string;
 }
 
 type ReviewerPick = { engine: Engine; model: string; profile: ProfileRow } | { wait: true };
@@ -3212,7 +3218,14 @@ export class Scheduler {
       this.runRepo.updatePid(runId, child.pid, this.getProcessStartTime(child.pid));
     } catch (error) {
       this.locks.release(profile.name, lockFile);
-      this.runRepo.finish(runId, 'crashed', undefined, String(error));
+      const reason = engine.id === 'codex'
+        ? formatCodexEarlyExit(null, null, '', String(error))
+        : String(error);
+      if (engine.id === 'codex') {
+        try { fs.appendFileSync(logPath, `${reason}\n`, 'utf8'); } catch { /* best effort */ }
+        this.recordProfileCrash(profileName, reviewerModel, reason, task.id);
+      }
+      this.runRepo.finish(runId, 'crashed', undefined, reason);
       this.eventBus.emit('review.failed', task.id, { actor, reason: 'spawn_failed' });
       return;
     }
@@ -3221,22 +3234,65 @@ export class Scheduler {
       this.killProcessGroup(child.pid!);
       this.finishReview(task.id, runId, profileName, 'timeout');
     }, (this.config.reviewer?.timeoutSec || 900) * 1000);
-    this.reviewerRuns.set(task.id, { taskId: task.id, runId, pid: child.pid, profileName, engine, actor, outputPath, lockSlot, lockFile, startedAt: Date.now(), timeout });
+    const activeRun: ReviewerRun = {
+      taskId: task.id,
+      runId,
+      pid: child.pid,
+      profileName,
+      engine,
+      actor,
+      model: reviewerModel,
+      logPath,
+      outputPath,
+      lockSlot,
+      lockFile,
+      startedAt: Date.now(),
+      timeout,
+    };
+    this.reviewerRuns.set(task.id, activeRun);
     this.locks.invalidate(profileName);
+
+    if (engine.id === 'codex' && child.stderr) {
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk: string) => {
+        activeRun.stderrTail = appendTail(activeRun.stderrTail || '', chunk, CODEX_STDERR_TAIL_BYTES);
+        try { fs.appendFileSync(logPath, chunk, 'utf8'); } catch { /* best effort */ }
+      });
+    }
+
     child.unref();
     this.eventBus.emit('review.started', task.id, { actor: reviewerActor, model: reviewerModel, profile: profileName, runId });
-    child.once('error', () => {
-      if (!this.stopped) this.finishReview(task.id, runId, profileName, 'error', null);
+    child.once('error', (err) => {
+      activeRun.spawnError = err.message;
+      if (!this.stopped) this.finishReview(task.id, runId, profileName, 'error', null, null, err.message);
     });
-    child.once('exit', (code) => {
+    child.once('exit', (code, signal) => {
+      activeRun.exitCode = code;
+      activeRun.exitSignal = signal;
+      if (engine.id === 'codex' && (code !== 0 || signal)) {
+        const diagnostic = formatCodexEarlyExit(code, signal, activeRun.stderrTail);
+        try {
+          const currentTail = readLogTail(logPath, { maxBytes: CODEX_STDERR_TAIL_BYTES });
+          if (!currentTail.includes('[hub] codex thoát sớm:')) {
+            fs.appendFileSync(logPath, `${diagnostic}\n`, 'utf8');
+          }
+        } catch { /* best effort */ }
+      }
       if (this.stopped) return;
-      const run = this.reviewerRuns.get(task.id);
-      const exitTimeout = setTimeout(() => this.finishReview(task.id, runId, profileName, 'exit', code), 10);
-      if (run) run.exitTimeout = exitTimeout;
+      const exitTimeout = setTimeout(() => this.finishReview(task.id, runId, profileName, 'exit', code, signal), 10);
+      activeRun.exitTimeout = exitTimeout;
     });
   }
 
-  private finishReview(taskId: string, runId: string, profileName: string, reason: 'exit' | 'timeout' | 'error', exitCode: number | null = 0): void {
+  private finishReview(
+    taskId: string,
+    runId: string,
+    profileName: string,
+    reason: 'exit' | 'timeout' | 'error',
+    exitCode: number | null = 0,
+    exitSignal: NodeJS.Signals | null = null,
+    spawnError?: string,
+  ): void {
     if (this.stopped) return;
     const active = this.reviewerRuns.get(taskId);
     if (!active || active.runId !== runId) return;
@@ -3258,17 +3314,39 @@ export class Scheduler {
     const quota = active.engine.detectQuota(`${logOutput}\n${output}`).exhausted;
     const duration = Date.now() - active.startedAt;
     const isLockBusy = duration < 3000 && logOutput.trim() === '' && Boolean(active.lockFile) && exitCode === 1;
+
+    const logTail = logOutput || (run?.logPath ? readLogTail(run.logPath, { maxBytes: CODEX_STDERR_TAIL_BYTES }) : '');
+    const existingMatch = logTail.match(/\[hub\] codex thoát sớm: [^\r\n]+/);
+    const resolvedStderrTail = (active.stderrTail && active.stderrTail.trim()) ? active.stderrTail : logTail;
+    const isEarlyCodexExit = active.engine.id === 'codex' && (exitCode !== 0 || exitSignal || Boolean(spawnError || active.spawnError) || reason === 'error');
+    const codexExitReason = existingMatch
+      ? existingMatch[0]
+      : (isEarlyCodexExit ? formatCodexEarlyExit(exitCode, exitSignal, resolvedStderrTail, spawnError || active.spawnError) : undefined);
+    if (codexExitReason && run?.logPath && !existingMatch) {
+      try { fs.appendFileSync(run.logPath, `${codexExitReason}\n`, 'utf8'); } catch { /* best effort */ }
+    }
+
     if (isLockBusy) {
       this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_LOCK_BACKOFF_MS);
-      this.runRepo.finish(runId, 'crashed', undefined, 'lock_busy');
+      const finishReason = codexExitReason || 'lock_busy';
+      this.runRepo.finish(runId, 'crashed', undefined, finishReason);
+      if (active.engine.id === 'codex') {
+        this.recordProfileCrash(profileName, active.model, finishReason, taskId);
+      }
       this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: 'lock_busy' });
       return;
     }
     if (reason === 'timeout' || reason === 'error' || exitCode !== 0 || quota) {
       if (!quota) this.reviewerErrorCounts.set(taskId, (this.reviewerErrorCounts.get(taskId) || 0) + 1);
       this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
-      this.runRepo.finish(runId, quota ? 'quota' : reason === 'timeout' ? 'timeout' : 'crashed');
-      if (quota) this.quotaService.mark(profileName, active.actor === 'claude-reviewer' ? 'claude' : 'codex', this.config.reviewer?.failoverSec || 5 * 60 * 60, `${active.actor} quota`);
+      const outcome = quota ? 'quota' : reason === 'timeout' ? 'timeout' : 'crashed';
+      const finishReason = codexExitReason || (outcome === 'crashed' ? (reason === 'error' ? (spawnError || 'error') : `exit code ${exitCode}`) : undefined);
+      this.runRepo.finish(runId, outcome, undefined, finishReason);
+      if (quota) {
+        this.quotaService.mark(profileName, active.actor === 'claude-reviewer' ? 'claude' : 'codex', this.config.reviewer?.failoverSec || 5 * 60 * 60, `${active.actor} quota`);
+      } else if (active.engine.id === 'codex' && outcome === 'crashed') {
+        this.recordProfileCrash(profileName, active.model, finishReason, taskId);
+      }
       this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: quota ? 'quota' : reason === 'timeout' ? 'timeout' : 'crash' });
       return;
     }

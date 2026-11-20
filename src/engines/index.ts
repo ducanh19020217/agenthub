@@ -568,7 +568,7 @@ export class CodexEngine implements Engine {
       env,
       detached: true,
       // Brain sessions need stdout as a pipe for stream-json parsing. Worker
-      // sessions can keep stdout in the run log directly. Stderr is always a
+      // and reviewer sessions can keep stdout in the run log directly. Stderr is always a
       // pipe so the scheduler can retain a bounded crash diagnostic tail.
       stdio: opts.streamOutput ? ['ignore', 'pipe', 'pipe'] : ['ignore', logFd, 'pipe'],
     });

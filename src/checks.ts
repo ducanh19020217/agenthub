@@ -272,12 +272,15 @@ export class CheckRunner {
       if (namesToDelete.length > 0) {
         this.db.prepare(`DELETE FROM check_results WHERE taskId = ? AND runId = ? AND name IN (${namesToDelete.map(() => '?').join(',')})`).run(task.id, runId, ...namesToDelete);
       }
+    } else if (!options.onlyNames && head) {
+      this.db.prepare('DELETE FROM check_results WHERE taskId = ? AND (head IS NULL OR head != ?)')
+        .run(task.id, head);
     }
     const existingRows = options.reuseSavedResults
       ? this.db.prepare('SELECT name, ok, exitCode, durationMs, outputTail, head FROM check_results WHERE taskId = ? AND runId = ?')
         .all(task.id, runId) as Array<{ name: string; ok: number; exitCode: number | null; durationMs: number; outputTail: string; head: string | null }>
       : [];
-    const existing = new Map(existingRows.filter((row) => row.head === head && head !== null).map((row) => [row.name, row] as const));
+    const existing = new Map(existingRows.filter((row) => row.head === head && head !== null && row.ok === 1).map((row) => [row.name, row] as const));
     const results: CheckResult[] = [];
     for (const check of checks) {
       const saved = existing.get(check.name) as CheckResult | undefined;
@@ -285,6 +288,8 @@ export class CheckRunner {
         results.push({ ...saved, ok: Boolean(saved.ok) });
         continue;
       }
+      this.db.prepare('DELETE FROM check_results WHERE taskId = ? AND runId = ? AND name = ?')
+        .run(task.id, runId, check.name);
       const result = await runOne(check, repo, hubHome, project, task);
       results.push({ ...result, head });
       this.db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
@@ -386,12 +391,14 @@ export function checkMandatoryChecks(
   const targetPath = repoPath || (project ? project.path : undefined);
   const hasPackageJson = Boolean(targetPath && fs.existsSync(path.join(targetPath, 'package.json')));
   const isConfiguredProject = Boolean(settings?.postDone?.enabled || project?.checks || hasPackageJson);
+  const hasGit = Boolean(targetPath && (fs.existsSync(path.join(targetPath, '.git')) || (repoPath && fs.existsSync(path.join(repoPath, '.git')))));
 
   // If not a configured project, and checks table already has mock check results from legacy unit tests
   // (which don't include internal mandatory checks like zero-byte), accept them if all passed
   const isLegacyMockCheckRun = !isConfiguredProject && checks.length > 0 && !checks.some((c) => (INTERNAL_MANDATORY_CHECKS as readonly string[]).includes(c.name));
+  const isLegacyNonGitMockTask = !isConfiguredProject && !hasGit && checks.length === 0;
 
-  if (project && !isLegacyMockCheckRun) {
+  if (project && !isLegacyMockCheckRun && !isLegacyNonGitMockTask) {
     const required = getRequiredCheckNames(project, repoPath);
     for (const req of required) {
       const res = checks.find((c) => c.name === req);
@@ -405,7 +412,7 @@ export function checkMandatoryChecks(
   }
 
   if (currentHead) {
-    if (!isLegacyMockCheckRun) {
+    if (!isLegacyMockCheckRun && !isLegacyNonGitMockTask) {
       const invalidHead = checks.filter((c) => !c.head || c.head !== currentHead);
       if (invalidHead.length > 0) {
         const missingHead = invalidHead.filter((c) => !c.head);

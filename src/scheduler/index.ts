@@ -4208,15 +4208,10 @@ export class Scheduler {
         }
       }
       const project = this.projectRepo.get(task.projectId);
-      const settings = project ? projectSettings(project) : null;
       const repoPath = task.worktreePath || (project ? project.path : undefined);
       const currentHead = repoPath ? worktreeHeadSync(repoPath) : null;
-      const isConfigured = Boolean(settings?.postDone?.enabled || project?.checks || (repoPath && fs.existsSync(path.join(repoPath, 'package.json'))));
-      const isAuto = Boolean(by && (isAutoReviewer(by) || by === 'reviewer'));
-      if (isConfigured || isAuto || checks.length > 0) {
-        const checkStatus = this.checkMandatoryChecksForTask(task, project, currentHead);
-        if (!checkStatus.ok) return;
-      }
+      const checkStatus = this.checkMandatoryChecksForTask(task, project, currentHead);
+      if (!checkStatus.ok) return;
       if (!isAutoReviewer(by)) this.resetReviewerEscalation(taskId);
       this.taskRepo.updateStatus(taskId, 'done');
       if (this.runMetricsRepo) {

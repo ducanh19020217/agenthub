@@ -4566,26 +4566,32 @@ export class AppService {
     }
 
     const parsed = ReviewTaskSchema.parse(raw);
-    if (parsed.verdict === 'approved') {
-      const project = this.projectRepo.get(task.projectId);
-      const settings = project ? projectSettings(project) : null;
-      const repoPath = task.worktreePath || (project ? project.path : undefined);
-      const currentHead = repoPath ? worktreeHeadSync(repoPath) : null;
-      const checks = this.scheduler.getCheckResults(taskId);
-      const isConfigured = Boolean(settings?.postDone?.enabled || project?.checks || (repoPath && fs.existsSync(path.join(repoPath, 'package.json'))));
-      const isAuto = Boolean(parsed.by && (isAutoReviewer(parsed.by) || parsed.by === 'reviewer' || parsed.by === 'auto-merge'));
-      if (isConfigured || isAuto || checks.length > 0) {
-        const checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
-        if (!checkStatus.ok) {
-          throw new HttpError(400, 'bad_request', `Không thể duyệt hoàn thành task khi checks chưa đạt: ${checkStatus.reason}`);
-        }
-      }
-    }
     if (this.reviewingTasks.has(taskId)) {
       throw new HttpError(409, 'conflict', 'Task đang được duyệt');
     }
     this.reviewingTasks.add(taskId);
     try {
+      if (parsed.verdict === 'approved') {
+        const project = this.projectRepo.get(task.projectId);
+        const repoPath = task.worktreePath || (project ? project.path : undefined);
+        const currentHead = repoPath ? worktreeHeadSync(repoPath) : null;
+        let checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
+        if (!checkStatus.ok && this.scheduler.getDatabase() && this.scheduler.getCheckResults(taskId).length === 0 && project) {
+          let lastRun = this.runRepo.getByTask(taskId).at(-1);
+          if (!lastRun) {
+            const runId = crypto.randomUUID();
+            this.runRepo.insert({ id: runId, taskId: task.id, engine: 'hub', model: 'checks', profileName: 'hub' });
+            lastRun = this.runRepo.get(runId);
+          }
+          if (lastRun) {
+            await new CheckRunner(this.scheduler.getDatabase()!).run(task, project, lastRun.id);
+            checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
+          }
+        }
+        if (!checkStatus.ok) {
+          throw new HttpError(400, 'bad_request', `Không thể duyệt hoàn thành task khi checks chưa đạt: ${checkStatus.reason}`);
+        }
+      }
 
     let mergeResult: { mergeCommit: string; checks: string[] } | undefined;
     const isPlan = task.slug.endsWith('-plan');
@@ -5174,12 +5180,24 @@ export class AppService {
     if (!db) throw new HttpError(500, 'internal_server_error', 'Check database chưa sẵn sàng');
     const parsed = RerunChecksSchema.safeParse(raw || {});
     const onlyNames = parsed.success && parsed.data.onlyNames && parsed.data.onlyNames.length > 0 ? parsed.data.onlyNames : undefined;
-    const result = await new CheckRunner(db).run(task, project, run.id, { onlyNames });
+    const runner = new CheckRunner(db);
+    let result = await runner.run(task, project, run.id, { onlyNames });
 
     const repoPath = task.worktreePath || project.path;
     const currentHead = await worktreeHead(repoPath);
-    const checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
-    const allPassed = checkStatus.ok;
+    let checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
+
+    if (!checkStatus.ok && result.passed && onlyNames) {
+      // Re-run remaining required checks that are missing or belong to an older HEAD
+      const fullResult = await runner.run(task, project, run.id, { reuseSavedResults: true });
+      result = {
+        passed: fullResult.passed,
+        failed: [...new Set([...result.failed, ...fullResult.failed])],
+        results: fullResult.results,
+      };
+      checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
+    }
+    const allPassed = checkStatus.ok && result.passed;
 
     if (allPassed) {
       this.taskRepo.update(taskId, {

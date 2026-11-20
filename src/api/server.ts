@@ -691,7 +691,7 @@ export async function createServer(
 
   fastify.post('/api/tasks/:id/checks/rerun', async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
-    return service.rerunChecks(id);
+    return service.rerunChecks(id, req.body);
   });
 
   fastify.post('/api/tasks/:id/notes', async (req: FastifyRequest, reply: FastifyReply) => {

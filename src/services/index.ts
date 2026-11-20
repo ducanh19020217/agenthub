@@ -446,6 +446,12 @@ export const ReviewTaskSchema = z.object({
 
 export const RetryTaskSchema = z.object({
   note: z.string().optional(),
+  checksOnly: z.boolean().optional(),
+  onlyNames: z.array(z.string()).optional(),
+});
+
+export const RerunChecksSchema = z.object({
+  onlyNames: z.array(z.string()).optional(),
 });
 
 export const CreateTaskNoteSchema = z.object({
@@ -3522,6 +3528,7 @@ export class AppService {
         autoMergeSkippedReason,
         autoMergeSkippedChecks,
         autoMergeSkippedRetried,
+        dependencyWaitReason: this.scheduler ? this.scheduler.getDependencyWaitReason(task) : null,
         checks: this.scheduler.getCheckResults(task.id),
         paused: Boolean(run?.paused),
         pauseReason: run?.pauseReason ?? null,
@@ -3729,6 +3736,7 @@ export class AppService {
       commits,
       worktreePath: task.worktreePath,
       checks: this.scheduler.getCheckResults(taskId),
+      dependencyWaitReason: this.scheduler ? this.scheduler.getDependencyWaitReason(task) : null,
       postDoneArtifacts: getPostDoneArtifacts(task, project),
       sourceRef: task.sourceRef ? JSON.parse(task.sourceRef) : null,
       triage,
@@ -4558,6 +4566,12 @@ export class AppService {
     }
 
     const parsed = ReviewTaskSchema.parse(raw);
+    if (parsed.verdict === 'approved') {
+      const checks = this.scheduler.getCheckResults(taskId);
+      if (checks.some((c) => !c.ok)) {
+        throw new HttpError(400, 'bad_request', `Không thể duyệt hoàn thành task khi checks thất bại: ${checks.filter((c) => !c.ok).map((c) => c.name).join(', ')}`);
+      }
+    }
     if (this.reviewingTasks.has(taskId)) {
       throw new HttpError(409, 'conflict', 'Task đang được duyệt');
     }
@@ -4948,7 +4962,7 @@ export class AppService {
     return this.scheduler.autoCloseMergedTasks();
   }
 
-  retryTask(idParam: string, raw: unknown): TaskRow {
+  async retryTask(idParam: string, raw: unknown): Promise<TaskRow> {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) {
@@ -4959,6 +4973,23 @@ export class AppService {
     }
 
     const parsed = RetryTaskSchema.parse(raw || {});
+    if (parsed.checksOnly) {
+      if (parsed.note && this.taskNoteRepo) {
+        try {
+          this.taskNoteRepo.insert({
+            projectId: task.projectId,
+            taskId: task.id,
+            kind: 'note',
+            content: parsed.note,
+          });
+        } catch {
+          // ignore
+        }
+      }
+      await this.rerunChecks(idParam, { onlyNames: parsed.onlyNames });
+      return this.taskRepo.get(taskId)!;
+    }
+
     const newBody = parsed.note ? `${task.body || ''}\n\n## Retry Note\n\n${parsed.note}` : task.body;
 
     this.taskRepo.update(taskId, {
@@ -5112,7 +5143,13 @@ export class AppService {
     return readLogTail(targetRun.logPath, isNaN(tailKB) ? 512 : tailKB);
   }
 
-  async rerunChecks(idParam: string) {
+  async rerunChecks(idParam: string, raw?: unknown): Promise<{
+    passed: boolean;
+    failed: string[];
+    results: import('../checks.js').CheckResult[];
+    allPassed: boolean;
+    taskStatus?: string;
+  }> {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
@@ -5121,7 +5158,34 @@ export class AppService {
     if (!project || !run) throw new HttpError(400, 'bad_request', 'Task chưa có run để lưu kết quả kiểm tra');
     const db = this.scheduler.getDatabase();
     if (!db) throw new HttpError(500, 'internal_server_error', 'Check database chưa sẵn sàng');
-    return new CheckRunner(db).run(task, project, run.id);
+    const parsed = RerunChecksSchema.safeParse(raw || {});
+    const onlyNames = parsed.success && parsed.data.onlyNames && parsed.data.onlyNames.length > 0 ? parsed.data.onlyNames : undefined;
+    const result = await new CheckRunner(db).run(task, project, run.id, { onlyNames });
+
+    const allChecks = this.scheduler.getCheckResults(taskId);
+    let allPassed = allChecks.length > 0 && allChecks.every((c) => c.ok);
+    if (projectSettings(project).postDone?.enabled) {
+      const postDone = allChecks.find((c) => c.name === 'post-done');
+      if (!postDone || !postDone.ok) allPassed = false;
+    }
+
+    if (allPassed) {
+      this.taskRepo.update(taskId, {
+        status: 'done',
+        transientRetries: 0,
+        notBefore: null,
+        waitReason: null,
+        blockedReport: null,
+      });
+      this.scheduler.getEventBus().emit('task.done', taskId, { rerunChecks: true, passed: true });
+      this.scheduler.triggerTick();
+    }
+
+    return {
+      ...result,
+      allPassed,
+      taskStatus: this.taskRepo.get(taskId)?.status,
+    };
   }
 
   // --- Task Notes ---

@@ -2456,18 +2456,45 @@ export class Scheduler {
       const existingMatch = logTail.match(/\[hub\] codex thoát sớm: [^\r\n]+/);
       let codexExitReason: string | undefined;
       if (rt.engine.id === 'codex') {
-        if (existingMatch) {
+        const recordedStderrTail = readCodexStderrTail(run?.logPath);
+        const stderrTail = (recordedStderrTail && recordedStderrTail.trim())
+          ? recordedStderrTail
+          : ((rt.stderrTail && rt.stderrTail.trim()) ? rt.stderrTail : '');
+        const isEarlyExit = exitCode !== 0 || exitSignal || Boolean(rt.spawnError) || (!rt.child && exitCode === null);
+
+        let matchExitCode = exitCode;
+        let matchExitSignal = exitSignal;
+        if (matchExitCode === null && matchExitSignal === null && existingMatch) {
+          const codeMatch = existingMatch[0].match(/exit=([0-9]+|null)/);
+          if (codeMatch && codeMatch[1] !== 'null') {
+            matchExitCode = Number(codeMatch[1]);
+          }
+          const sigMatch = existingMatch[0].match(/signal=([A-Z0-9]+|none)/);
+          if (sigMatch && sigMatch[1] !== 'none') {
+            matchExitSignal = sigMatch[1] as NodeJS.Signals;
+          }
+        }
+
+        if (existingMatch && !existingMatch[0].includes('stderr=<trống>')) {
           codexExitReason = existingMatch[0];
-        } else if (exitCode !== 0 || exitSignal || Boolean(rt.spawnError) || (!rt.child && exitCode === null)) {
-          const recordedStderrTail = readCodexStderrTail(run?.logPath);
-          const stderrTail = (recordedStderrTail && recordedStderrTail.trim())
-            ? recordedStderrTail
-            : ((rt.stderrTail && rt.stderrTail.trim()) ? rt.stderrTail : readCodexStderrTail(run?.logPath));
-          codexExitReason = formatCodexEarlyExit(exitCode, exitSignal, stderrTail, rt.spawnError);
+        } else if (existingMatch && existingMatch[0].includes('stderr=<trống>') && stderrTail) {
+          codexExitReason = formatCodexEarlyExit(matchExitCode, matchExitSignal, stderrTail, rt.spawnError);
+        } else if (existingMatch) {
+          codexExitReason = existingMatch[0];
+        } else if (isEarlyExit) {
+          codexExitReason = formatCodexEarlyExit(matchExitCode, matchExitSignal, stderrTail, rt.spawnError);
         }
       }
-      if (codexExitReason && run?.logPath && !existingMatch) {
-        try { fs.appendFileSync(run.logPath, `${codexExitReason}\n`, 'utf8'); } catch { /* best effort */ }
+      if (codexExitReason && run?.logPath) {
+        if (!existingMatch) {
+          try { fs.appendFileSync(run.logPath, `${codexExitReason}\n`, 'utf8'); } catch { /* best effort */ }
+        } else if (existingMatch[0] !== codexExitReason) {
+          try {
+            const content = fs.readFileSync(run.logPath, 'utf8');
+            const updated = content.replaceAll(existingMatch[0], codexExitReason);
+            fs.writeFileSync(run.logPath, updated, 'utf8');
+          } catch { /* best effort */ }
+        }
       }
       const isLockBusy = durationMs < 3000 && logTail.replace(/\[hub\] codex thoát sớm: [^\r\n]*/g, '').trim() === '' && Boolean(rt.lockFile) && exitCode === 1;
 
@@ -4258,13 +4285,19 @@ export class Scheduler {
         rt.exitCode = code;
         rt.exitSignal = signal;
         if (engine.id === 'codex' && (code !== 0 || signal)) {
-          const diagnostic = formatCodexEarlyExit(code, signal, rt.stderrTail);
-          try {
-            const currentTail = readLogTail(logPath, { maxBytes: CODEX_STDERR_TAIL_BYTES });
-            if (!currentTail.includes('[hub] codex thoát sớm:')) {
-              fs.appendFileSync(logPath, `${diagnostic}\n`, 'utf8');
-            }
-          } catch { /* best effort */ }
+          const recordedStderrTail = readCodexStderrTail(logPath);
+          const stderrTail = (recordedStderrTail && recordedStderrTail.trim())
+            ? recordedStderrTail
+            : ((rt.stderrTail && rt.stderrTail.trim()) ? rt.stderrTail : '');
+          if (stderrTail) {
+            const diagnostic = formatCodexEarlyExit(code, signal, stderrTail);
+            try {
+              const currentTail = readLogTail(logPath, { maxBytes: CODEX_STDERR_TAIL_BYTES });
+              if (!currentTail.includes('[hub] codex thoát sớm:')) {
+                fs.appendFileSync(logPath, `${diagnostic}\n`, 'utf8');
+              }
+            } catch { /* best effort */ }
+          }
         }
         if (this.stopped) return;
         // Trigger immediate check

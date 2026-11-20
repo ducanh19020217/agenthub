@@ -44,6 +44,7 @@ import { formatEventType, formatReason, formatReviewWaitingReason } from '../uti
 import { Pagination } from '../components/ui/Pagination';
 import { getReviewerEngine } from '../utils/reviewer';
 import { autoMergeReasonKey } from '../utils/autoMerge';
+import { cleanTerminalLog } from '../utils/terminalLog';
 import {
   ArrowLeft,
   Play,
@@ -74,6 +75,9 @@ import {
 import { useToasts, ToastViewport } from '../components/ui/Toast';
 
 const TERMINAL_STATUSES = new Set<string>(['done', 'merged', 'pushed', 'cancelled', 'failed', 'merge_failed', 'push_failed']);
+/** Fixed row height (px) of the virtualized live log; matches the `h-[18px]` rows. */
+const LOG_ROW_HEIGHT = 18;
+
 function tailPrefixOverlap(snapshot: string, stream: string): number {
   const length = Math.min(snapshot.length, stream.length);
   if (length === 0) return 0;
@@ -224,16 +228,18 @@ export const TaskDetailPage: React.FC = () => {
     .filter((segment) => segment.taskId === id && segment.sequence > fetchedSequence)
     .map((segment) => segment.text)
     .join(''), [fetchedSequence, id, liveLogRevision]);
-  const displayedLog = React.useMemo(() => {
+  const rawLog = React.useMemo(() => {
     const storedLog = logQuery.isFetching && !logQuery.isFetchedAfterMount ? '' : logSnapshot;
     if (!storedLog || !liveLog) return storedLog + liveLog;
     const overlap = tailPrefixOverlap(storedLog, liveLog);
     return storedLog + liveLog.slice(overlap);
   }, [logSnapshot, logQuery.isFetching, logQuery.isFetchedAfterMount, liveLog]);
+  // Strip ANSI codes and resolve `\r` redraws after merging, so sequences split across chunks are handled too.
+  const displayedLog = React.useMemo(() => cleanTerminalLog(rawLog), [rawLog]);
   const logLines = React.useMemo(() => displayedLog.split('\n'), [displayedLog]);
   const [logScrollTop, setLogScrollTop] = useState(0);
   const logVirtualized = logLines.length > 500;
-  const logStart = logVirtualized ? Math.max(0, Math.floor(logScrollTop / 18) - 20) : 0;
+  const logStart = logVirtualized ? Math.max(0, Math.floor(logScrollTop / LOG_ROW_HEIGHT) - 20) : 0;
   const logEnd = logVirtualized ? Math.min(logLines.length, logStart + 80) : logLines.length;
 
   const { data: task, isLoading, error } = useQuery({
@@ -1869,14 +1875,20 @@ export const TaskDetailPage: React.FC = () => {
           <div
             ref={logContainerRef}
             onScroll={handleScroll}
-            className="w-full h-[520px] bg-[var(--t-log-bg)] text-[var(--t-log-text)] font-mono text-xs p-4 rounded-xl overflow-y-auto border border-[var(--t-border)] shadow-inner whitespace-pre-wrap leading-relaxed select-text"
+            className={`w-full h-[520px] bg-[var(--t-log-bg)] text-[var(--t-log-text)] font-mono text-xs p-4 rounded-xl border border-[var(--t-border)] shadow-inner select-text ${
+              logVirtualized ? 'overflow-auto whitespace-pre' : 'overflow-y-auto whitespace-pre-wrap break-words leading-relaxed'
+            }`}
           >
             {displayedLog.trim() ? (
               <>
                 {logVirtualized ? (
-                  <div style={{ height: `${logLines.length * 18}px`, position: 'relative' }}>
-                    <div style={{ position: 'absolute', top: `${logStart * 18}px`, left: 0, right: 0 }}>
-                      {logLines.slice(logStart, logEnd).map((line, index) => <div key={logStart + index} className="h-[18px]">{line || '\u00a0'}</div>)}
+                  // Virtualized rows have a fixed height, so they must not wrap: a wrapped
+                  // line would spill over the rows below. Long lines scroll horizontally.
+                  <div data-testid="log-virtual" style={{ height: `${logLines.length * LOG_ROW_HEIGHT}px`, position: 'relative' }}>
+                    <div style={{ position: 'absolute', top: `${logStart * LOG_ROW_HEIGHT}px`, left: 0 }}>
+                      {logLines.slice(logStart, logEnd).map((line, index) => (
+                        <div key={logStart + index} className="h-[18px] leading-[18px] whitespace-pre overflow-hidden">{line || '\u00a0'}</div>
+                      ))}
                     </div>
                   </div>
                 ) : displayedLog}

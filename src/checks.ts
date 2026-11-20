@@ -387,28 +387,15 @@ export function checkMandatoryChecks(
     };
   }
 
-  const settings = project ? projectSettings(project) : null;
-  const targetPath = repoPath || (project ? project.path : undefined);
-  const hasPackageJson = Boolean(targetPath && fs.existsSync(path.join(targetPath, 'package.json')));
-  const isConfiguredProject = Boolean(settings?.postDone?.enabled || project?.checks || hasPackageJson);
-  const hasGit = Boolean(targetPath && (fs.existsSync(path.join(targetPath, '.git')) || (repoPath && fs.existsSync(path.join(repoPath, '.git')))));
+  const head = currentHead !== undefined ? currentHead : (repoPath ? worktreeHeadSync(repoPath) : null);
+  if (!head) {
+    return {
+      ok: false,
+      reason: 'không lấy được commit HEAD hiện tại (worktree không tồn tại hoặc lỗi git)',
+    };
+  }
 
-  const TASK_COMPLETION_TEST_PROJECTS = new Set([
-    'test-proj',
-    'no-cfg-proj',
-    'unconf-proj',
-    'proj-with-checks',
-    'post-done-proj',
-    'post-done-art',
-  ]);
-  const isActualTaskCompletionPath = !process.env.VITEST || (project && TASK_COMPLETION_TEST_PROJECTS.has(project.id));
-
-  // Legacy mock check runs in unit tests not going through actual task completion
-  const isLegacyMockCheckRun = !isActualTaskCompletionPath && !isConfiguredProject && checks.length > 0 && !checks.some((c) => (INTERNAL_MANDATORY_CHECKS as readonly string[]).includes(c.name));
-  const isLegacyNonGitMockTask = !isActualTaskCompletionPath && !isConfiguredProject && !hasGit && checks.length === 0;
-  const isLegacyMockDoneDependency = !isActualTaskCompletionPath && checks.length === 0;
-
-  if (project && !isLegacyMockCheckRun && !isLegacyNonGitMockTask && !isLegacyMockDoneDependency) {
+  if (project) {
     const required = getRequiredCheckNames(project, repoPath);
     for (const req of required) {
       const res = checks.find((c) => c.name === req);
@@ -421,31 +408,19 @@ export function checkMandatoryChecks(
     }
   }
 
-  if (currentHead) {
-    if (!isLegacyMockCheckRun && !isLegacyNonGitMockTask && !isLegacyMockDoneDependency) {
-      const invalidHead = checks.filter((c) => !c.head || c.head !== currentHead);
-      if (invalidHead.length > 0) {
-        const missingHead = invalidHead.filter((c) => !c.head);
-        if (missingHead.length > 0) {
-          return {
-            ok: false,
-            reason: `check "${missingHead.map((c) => c.name).join(', ')}" thiếu thông tin commit HEAD, không khớp HEAD hiện tại (${currentHead.slice(0, 7)})`,
-          };
-        }
-        return {
-          ok: false,
-          reason: `check "${invalidHead.map((c) => c.name).join(', ')}" thuộc commit cũ (${invalidHead[0].head?.slice(0, 7)}), không khớp HEAD hiện tại (${currentHead.slice(0, 7)})`,
-        };
-      }
-    } else {
-      const staleHead = checks.filter((c) => c.head && c.head !== currentHead);
-      if (staleHead.length > 0) {
-        return {
-          ok: false,
-          reason: `check "${staleHead.map((c) => c.name).join(', ')}" thuộc commit cũ (${staleHead[0].head?.slice(0, 7)}), không khớp HEAD hiện tại (${currentHead.slice(0, 7)})`,
-        };
-      }
+  const invalidHead = checks.filter((c) => !c.head || c.head !== head);
+  if (invalidHead.length > 0) {
+    const missingHead = invalidHead.filter((c) => !c.head);
+    if (missingHead.length > 0) {
+      return {
+        ok: false,
+        reason: `check "${missingHead.map((c) => c.name).join(', ')}" thiếu thông tin commit HEAD, không khớp HEAD hiện tại (${head.slice(0, 7)})`,
+      };
     }
+    return {
+      ok: false,
+      reason: `check "${invalidHead.map((c) => c.name).join(', ')}" thuộc commit cũ (${invalidHead[0].head?.slice(0, 7)}), không khớp HEAD hiện tại (${head.slice(0, 7)})`,
+    };
   }
 
   const heads = new Set(checks.map((c) => c.head).filter(Boolean));
@@ -462,16 +437,16 @@ export function checkMandatoryChecks(
     };
   }
 
-  if (project && currentHead && !isLegacyMockCheckRun && !isLegacyNonGitMockTask && !isLegacyMockDoneDependency) {
+  if (project) {
     const required = getRequiredCheckNames(project, repoPath);
     for (const req of required) {
       const res = checks.find((c) => c.name === req);
-      if (res && (!res.head || res.head !== currentHead)) {
+      if (res && (!res.head || res.head !== head)) {
         return {
           ok: false,
           reason: res.head
-            ? `check bắt buộc "${req}" thuộc commit cũ (${res.head.slice(0, 7)}), không khớp HEAD hiện tại (${currentHead.slice(0, 7)})`
-            : `check bắt buộc "${req}" thiếu commit HEAD, không khớp HEAD hiện tại (${currentHead.slice(0, 7)})`,
+            ? `check bắt buộc "${req}" thuộc commit cũ (${res.head.slice(0, 7)}), không khớp HEAD hiện tại (${head.slice(0, 7)})`
+            : `check bắt buộc "${req}" thiếu commit HEAD, không khớp HEAD hiện tại (${head.slice(0, 7)})`,
         };
       }
     }

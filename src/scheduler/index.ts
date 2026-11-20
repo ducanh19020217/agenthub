@@ -487,6 +487,9 @@ export class Scheduler {
     const proj = project || this.projectRepo.get(task.projectId);
     const repoPath = task.worktreePath || (proj ? proj.path : undefined);
     const head = currentHead !== undefined ? currentHead : (repoPath ? worktreeHeadSync(repoPath) : null);
+    if (!head) {
+      return { ok: false, reason: 'không lấy được commit HEAD hiện tại (worktree không tồn tại hoặc lỗi git)' };
+    }
     return checkMandatoryChecks(checks, proj, repoPath, head);
   }
 
@@ -3330,7 +3333,7 @@ export class Scheduler {
       const depProject = this.projectRepo.get(dep.projectId);
       const depRepoPath = dep.worktreePath || (depProject ? depProject.path : undefined);
       const depHead = depRepoPath ? worktreeHeadSync(depRepoPath) : null;
-      if (!this.checkMandatoryChecksForTask(dep, depProject, depHead).ok) return false;
+      if (!depHead || !this.checkMandatoryChecksForTask(dep, depProject, depHead).ok) return false;
     }
     return true;
   }
@@ -3361,9 +3364,13 @@ export class Scheduler {
         const depProject = this.projectRepo.get(dep.projectId);
         const depRepoPath = dep.worktreePath || (depProject ? depProject.path : undefined);
         const depHead = depRepoPath ? worktreeHeadSync(depRepoPath) : null;
-        const checkStatus = this.checkMandatoryChecksForTask(dep, depProject, depHead);
-        if (!checkStatus.ok) {
-          reasons.push(`task gốc "${dep.id}" ${checkStatus.reason}`);
+        if (!depHead) {
+          reasons.push(`task gốc "${dep.id}" không lấy được HEAD hiện tại (worktree không tồn tại hoặc lỗi git)`);
+        } else {
+          const checkStatus = this.checkMandatoryChecksForTask(dep, depProject, depHead);
+          if (!checkStatus.ok) {
+            reasons.push(`task gốc "${dep.id}" ${checkStatus.reason}`);
+          }
         }
       }
     }
@@ -4188,6 +4195,7 @@ export class Scheduler {
       const project = this.projectRepo.get(task.projectId);
       const repoPath = task.worktreePath || (project ? project.path : undefined);
       const currentHead = repoPath ? worktreeHeadSync(repoPath) : null;
+      if (!currentHead) return;
       const checkStatus = this.checkMandatoryChecksForTask(task, project, currentHead);
       if (!checkStatus.ok) return;
       if (!isAutoReviewer(by)) this.resetReviewerEscalation(taskId);
@@ -4837,6 +4845,7 @@ export class Scheduler {
         // Verify mandatory checks have passed before auto-closing to done
         const repoPath = task.worktreePath || project.path;
         const currentHead = repoPath ? (await worktreeHead(repoPath)) : null;
+        if (!currentHead) continue;
         let checkStatus = this.checkMandatoryChecksForTask(task, project, currentHead);
         if (!checkStatus.ok && this.db && this.getCheckResults(task.id).length === 0) {
           const runId = crypto.randomUUID();

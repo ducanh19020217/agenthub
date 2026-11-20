@@ -4575,6 +4575,9 @@ export class AppService {
         const project = this.projectRepo.get(task.projectId);
         const repoPath = task.worktreePath || (project ? project.path : undefined);
         const currentHead = repoPath ? worktreeHeadSync(repoPath) : null;
+        if (!currentHead) {
+          throw new HttpError(400, 'bad_request', 'Không thể duyệt hoàn thành task khi không lấy được HEAD hiện tại');
+        }
         let checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
         if (!checkStatus.ok && this.scheduler.getDatabase() && this.scheduler.getCheckResults(taskId).length === 0 && project && repoPath) {
           let lastRun = this.runRepo.getByTask(taskId).at(-1);

@@ -13,6 +13,7 @@ import { loadConfig } from '../src/config.js';
 import { getOrCreateToken } from '../src/auth.js';
 import { createMcpServer } from '../src/mcp/index.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
+import { getRequiredCheckNames, checkMandatoryChecks, INTERNAL_MANDATORY_CHECKS } from '../src/checks.js';
 
 describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', () => {
   let tmpDir: string;
@@ -116,7 +117,11 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
     delete process.env.AGENTHUB_AGY_BIN;
     delete process.env.AGENTHUB_PORT;
     delete process.env.AGENTHUB_TOKEN;
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch {
+      // ignore
+    }
     vi.restoreAllMocks();
   });
 
@@ -457,10 +462,11 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
       model: 'checks',
       profileName: 'hub',
     });
+    const headMf = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
     for (const name of ['post-done', 'zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
       ctx.db.prepare(
-        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, 1, 0, 10, 'SUCCESS')",
-      ).run('test-proj/t-merged-fail', 'run-mf-2', name);
+        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 10, 'SUCCESS', ?)",
+      ).run('test-proj/t-merged-fail', 'run-mf-2', name, headMf);
     }
 
     // Bây giờ autoCloseMergedTasks được phép chuyển sang done
@@ -498,10 +504,11 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
       model: 'checks',
       profileName: 'hub',
     });
+    const headR1 = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
     for (const name of ['zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
       ctx.db.prepare(
-        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, 1, 0, 5, 'ok')",
-      ).run('test-proj/t-review-postdone', 'run-r-1', name);
+        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 5, 'ok', ?)",
+      ).run('test-proj/t-review-postdone', 'run-r-1', name, headR1);
     }
 
     await expect(
@@ -510,8 +517,8 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
 
     // 3. Khi post-done fail -> bị từ chối
     ctx.db.prepare(
-      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'post-done', 0, 1, 10, 'failed')",
-    ).run('test-proj/t-review-postdone', 'run-r-1');
+      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, 'post-done', 0, 1, 10, 'failed', ?)",
+    ).run('test-proj/t-review-postdone', 'run-r-1', headR1);
 
     await expect(
       ctx.service.reviewTask('test-proj/t-review-postdone', { verdict: 'approved', by: 'reviewer' }),
@@ -525,10 +532,11 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
       model: 'checks',
       profileName: 'hub',
     });
+    const headR2 = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
     for (const name of ['post-done', 'zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
       ctx.db.prepare(
-        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, 1, 0, 10, 'ok')",
-      ).run('test-proj/t-review-postdone', 'run-r-2', name);
+        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 10, 'ok', ?)",
+      ).run('test-proj/t-review-postdone', 'run-r-2', name, headR2);
     }
 
     await ctx.service.reviewTask('test-proj/t-review-postdone', { verdict: 'approved', by: 'reviewer', feedback: 'all good' });
@@ -556,9 +564,10 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
     });
 
     // Chỉ có post-done pass, thiếu zero-byte, uncommitted, conflict-markers, agenthub-files
+    const headInternal1 = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
     ctx.db.prepare(
-      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'post-done', 1, 0, 10, 'ok')",
-    ).run('test-proj/t-missing-internal', 'run-internal-1');
+      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, 'post-done', 1, 0, 10, 'ok', ?)",
+    ).run('test-proj/t-missing-internal', 'run-internal-1', headInternal1);
 
     const checkStatus = ctx.scheduler.checkMandatoryChecksForTask(
       ctx.taskRepo.get('test-proj/t-missing-internal')!,
@@ -574,8 +583,8 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
     // Thêm các internal check còn lại
     for (const name of ['zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
       ctx.db.prepare(
-        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, 1, 0, 5, 'ok')",
-      ).run('test-proj/t-missing-internal', 'run-internal-1', name);
+        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 5, 'ok', ?)",
+      ).run('test-proj/t-missing-internal', 'run-internal-1', name, headInternal1);
     }
 
     const checkStatus2 = ctx.scheduler.checkMandatoryChecksForTask(
@@ -651,5 +660,186 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
     for (const r of results) {
       expect(r.head).toBe(head3);
     }
+  });
+
+  it('Feedback 3 P1.1: mandatory checks bắt buộc cho mọi project kể cả không có checks/postDone/package.json', async () => {
+    const emptyRepo = path.join(tmpDir, 'empty-repo');
+    fs.mkdirSync(emptyRepo, { recursive: true });
+    execFileSync('git', ['init', '--template='], { cwd: emptyRepo });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: emptyRepo });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: emptyRepo });
+    execFileSync('git', ['checkout', '-b', 'main'], { cwd: emptyRepo });
+    fs.writeFileSync(path.join(emptyRepo, 'readme.txt'), 'hello');
+    execFileSync('git', ['add', '.'], { cwd: emptyRepo });
+    execFileSync('git', ['commit', '-m', 'feat: init empty'], { cwd: emptyRepo });
+
+    ctx.projectRepo.insert({
+      id: 'no-cfg-proj',
+      name: 'No Config Project',
+      path: emptyRepo,
+      defaultBranch: 'main',
+      envTemplate: null,
+      maxParallel: 1,
+    });
+
+    const project = ctx.projectRepo.get('no-cfg-proj')!;
+    const reqNames = getRequiredCheckNames(project, emptyRepo);
+    expect(reqNames).toEqual([...INTERNAL_MANDATORY_CHECKS]);
+
+    const checkRes = checkMandatoryChecks([], project, emptyRepo);
+    expect(checkRes.ok).toBe(false);
+    expect(checkRes.reason).toContain('chưa pass check bắt buộc "zero-byte"');
+
+    ctx.taskRepo.insert({
+      id: 'no-cfg-proj/t-unconfigured',
+      projectId: 'no-cfg-proj',
+      slug: 't-unconfigured',
+      title: 'Task in unconfigured project',
+      status: 'review',
+      worktreePath: emptyRepo,
+      baseRef: 'main',
+      branch: 'main',
+    });
+
+    await expect(
+      ctx.service.reviewTask('no-cfg-proj/t-unconfigured', { verdict: 'approved', by: 'reviewer' }),
+    ).rejects.toThrow('chưa pass check bắt buộc "zero-byte"');
+  });
+
+  it('Feedback 3 P1.2: check results thiếu HEAD (head = NULL) bị coi là không hợp lệ khi kiểm tra currentHead và bị xóa khi rerun', async () => {
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+
+    ctx.taskRepo.insert({
+      id: 'test-proj/t-null-head',
+      projectId: 'test-proj',
+      slug: 't-null-head',
+      title: 'Task with NULL head checks',
+      status: 'blocked',
+      worktreePath: repoDir,
+      baseRef: 'main',
+      branch: 'main',
+    });
+
+    ctx.runRepo.insert({
+      id: 'run-null-1',
+      taskId: 'test-proj/t-null-head',
+      engine: 'hub',
+      model: 'checks',
+      profileName: 'hub',
+    });
+
+    // Chèn check results với head = NULL (dữ liệu cũ trước migration)
+    for (const name of ['post-done', 'zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
+      ctx.db.prepare(
+        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 5, 'ok', NULL)",
+      ).run('test-proj/t-null-head', 'run-null-1', name);
+    }
+
+    const task = ctx.taskRepo.get('test-proj/t-null-head')!;
+    const proj = ctx.projectRepo.get('test-proj')!;
+    const checkStatus = ctx.scheduler.checkMandatoryChecksForTask(task, proj, head);
+    expect(checkStatus.ok).toBe(false);
+    expect(checkStatus.reason).toContain('thiếu thông tin commit HEAD');
+
+    // Chạy rerunChecks: các kết quả head = NULL bị xóa và thay thế bằng kết quả mang head mới
+    fs.writeFileSync(
+      path.join(repoDir, 'post-done.js'),
+      'console.log("Post done ok");\nprocess.exit(0);\n',
+    );
+    execFileSync('git', ['add', 'post-done.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'fix: post done script'], { cwd: repoDir });
+    const newHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+
+    const rerunRes = await ctx.service.rerunChecks('test-proj/t-null-head');
+    expect(rerunRes.allPassed).toBe(true);
+
+    const saved = ctx.scheduler.getCheckResults('test-proj/t-null-head');
+    for (const r of saved) {
+      expect(r.head).toBe(newHead);
+    }
+  });
+
+  it('Feedback 3 P1.3: areDependenciesMet, reviewTask và autoMerge từ chối khi checks thuộc HEAD cũ', async () => {
+    const head1 = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+
+    // 1. Dependency: task parent có status done nhưng checks thuộc HEAD cũ
+    ctx.taskRepo.insert({
+      id: 'test-proj/t-dep-parent',
+      projectId: 'test-proj',
+      slug: 't-dep-parent',
+      title: 'Parent Task',
+      status: 'done',
+      worktreePath: repoDir,
+      baseRef: 'main',
+      branch: 'main',
+    });
+
+    ctx.runRepo.insert({
+      id: 'run-dep-p1',
+      taskId: 'test-proj/t-dep-parent',
+      engine: 'hub',
+      model: 'checks',
+      profileName: 'hub',
+    });
+
+    for (const name of ['post-done', 'zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
+      ctx.db.prepare(
+        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 5, 'ok', ?)",
+      ).run('test-proj/t-dep-parent', 'run-dep-p1', name, head1);
+    }
+
+    // Tạo commit mới trên repoDir để HEAD đổi sang head2
+    fs.writeFileSync(path.join(repoDir, 'dep-change.txt'), 'new commit for dep');
+    execFileSync('git', ['add', '.'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'feat: new commit on branch'], { cwd: repoDir });
+    const head2 = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+    expect(head1).not.toBe(head2);
+
+    ctx.taskRepo.insert({
+      id: 'test-proj/t-dep-child',
+      projectId: 'test-proj',
+      slug: 't-dep-child',
+      title: 'Child Task',
+      status: 'queued',
+      dependsOn: ['test-proj/t-dep-parent'],
+    });
+
+    const child = ctx.taskRepo.get('test-proj/t-dep-child')!;
+    expect(ctx.scheduler.areDependenciesMet(child)).toBe(false);
+    const reason = ctx.scheduler.getDependencyWaitReason(child);
+    expect(reason).toContain('không khớp HEAD hiện tại');
+
+    // 2. reviewTask: task trong review nhưng checks thuộc HEAD cũ
+    ctx.taskRepo.insert({
+      id: 'test-proj/t-review-stale-head',
+      projectId: 'test-proj',
+      slug: 't-review-stale-head',
+      title: 'Task in review with stale checks',
+      status: 'review',
+      worktreePath: repoDir,
+      baseRef: 'main',
+      branch: 'main',
+    });
+
+    ctx.runRepo.insert({
+      id: 'run-rev-s1',
+      taskId: 'test-proj/t-review-stale-head',
+      engine: 'hub',
+      model: 'checks',
+      profileName: 'hub',
+    });
+
+    for (const name of ['post-done', 'zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
+      ctx.db.prepare(
+        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 5, 'ok', ?)",
+      ).run('test-proj/t-review-stale-head', 'run-rev-s1', name, head1);
+    }
+
+    await expect(
+      ctx.service.reviewTask('test-proj/t-review-stale-head', { verdict: 'approved', by: 'reviewer' }),
+    ).rejects.toThrow('không khớp HEAD hiện tại');
+
+    ctx.scheduler.reviewTask('test-proj/t-review-stale-head', 'approved', 'looks good', 'reviewer');
+    expect(ctx.taskRepo.get('test-proj/t-review-stale-head')?.status).toBe('review');
   });
 });

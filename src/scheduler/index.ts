@@ -524,13 +524,17 @@ export class Scheduler {
     return true;
   }
 
-  private recordWorkerCrash(taskId: string, rt: RunningTask, reason?: string): boolean {
-    this.runRepo.finish(rt.runId, 'crashed', undefined, reason);
+  private recordWorkerCrash(
+    taskId: string,
+    target: { runId: string; profileName: string; model: string },
+    reason?: string,
+  ): boolean {
+    this.runRepo.finish(target.runId, 'crashed', undefined, reason);
     const task = this.taskRepo.get(taskId);
     if (!task) return false;
     const crashes = (task.consecutiveCrashes || 0) + 1;
     this.taskRepo.update(taskId, { consecutiveCrashes: crashes });
-    const profile = this.profileRepo.get(rt.profileName);
+    const profile = this.profileRepo.get(target.profileName);
     if (profile) {
       const now = Date.now();
       if (profile.lastCrashAt && now - profile.lastCrashAt > this.config.profileCooling.windowMin * 60_000) this.profileRepo.resetCrashes(profile.name);
@@ -545,7 +549,7 @@ export class Scheduler {
         const markReason = `tạm loại hồ sơ sau ${nextCount} crash liên tiếp${reason ? `: ${reason}` : ''}`;
         // A cooling profile must be visible to the same consumers as quota
         // state, otherwise the dashboard/MCP still reports it as runnable.
-        this.quotaService.mark(profile.name, getModelFamily(rt.model), coolingSeconds, markReason.slice(0, 1000));
+        this.quotaService.mark(profile.name, getModelFamily(target.model), coolingSeconds, markReason.slice(0, 1000));
         this.eventBus.emit('profile.cooling', taskId, { profile: profile.name, until: coolingUntil, reason: 'consecutive_crashes', message: markReason });
       }
     }
@@ -559,6 +563,24 @@ export class Scheduler {
       return true;
     }
     return false;
+  }
+
+  private recoverCodexExitReason(logPath: string | null | undefined): string {
+    const logTail = logPath ? readLogTail(logPath, { maxBytes: CODEX_STDERR_TAIL_BYTES }) : '';
+    const existingMatch = logTail.match(/\[hub\] codex thoát sớm: [^\r\n]+/);
+    if (existingMatch) {
+      return existingMatch[0];
+    }
+    const diagnostic = formatCodexEarlyExit(null, null, logTail);
+    if (logPath) {
+      try {
+        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+        fs.appendFileSync(logPath, `${diagnostic}\n`, 'utf8');
+      } catch {
+        /* best effort */
+      }
+    }
+    return diagnostic;
   }
 
   private recordWorkerSuccess(profileName: string, taskId: string): void {
@@ -1020,12 +1042,23 @@ export class Scheduler {
         const task = this.taskRepo.get(run.taskId);
         if (!task || !this.projectRepo.get(task.projectId)) continue;
         if (this.recoverFinishedWork(run)) continue;
-        this.runRepo.finish(run.id, 'crashed');
+        const codexExitReason = run.engine === 'codex'
+          ? this.recoverCodexExitReason(run.logPath)
+          : undefined;
         // Terminal tasks must remain terminal even when an old worker row is
         // found during daemon recovery.
-        if (task.status === 'done' || task.status === 'cancelled') continue;
-        this.taskRepo.update(run.taskId, { status: 'queued', resume: 1 });
+        if (task.status === 'done' || task.status === 'cancelled') {
+          this.runRepo.finish(run.id, 'crashed', undefined, codexExitReason);
+          continue;
+        }
+        const blocked = this.recordWorkerCrash(
+          run.taskId,
+          { runId: run.id, profileName: run.profileName, model: run.model },
+          codexExitReason,
+        );
         this.eventBus.emit('run.crashed', run.taskId, { runId: run.id });
+        if (blocked) continue;
+        this.taskRepo.update(run.taskId, { status: 'queued', resume: 1 });
         this.eventBus.emit('task.queued', run.taskId);
         continue;
       }
@@ -1137,6 +1170,7 @@ export class Scheduler {
     const marker = this.markerForRun(task, startedAt);
     if (marker === 'done') {
       this.runRepo.finish(run.id, 'done');
+      if (persistedRun) this.recordWorkerSuccess(persistedRun.profileName, run.taskId);
       this.taskRepo.update(run.taskId, { status: 'checking' });
       this.eventBus.emit('task.checking', run.taskId, { reason: 'restart_marker' });
       void this.recoverCheckingTasks(run.taskId, run.id).catch((error) => {
@@ -1153,7 +1187,17 @@ export class Scheduler {
       return true;
     }
     if (this.hasCommitAfter(task, startedAt)) {
-      this.runRepo.finish(run.id, 'crashed', undefined, 'resume_after_progress');
+      const codexExitReason = persistedRun.engine === 'codex'
+        ? this.recoverCodexExitReason(persistedRun.logPath)
+        : undefined;
+      const reason = codexExitReason || 'resume_after_progress';
+      if (this.recordWorkerCrash(
+        run.taskId,
+        { runId: persistedRun.id, profileName: persistedRun.profileName, model: persistedRun.model },
+        reason,
+      )) {
+        return true;
+      }
       this.taskRepo.update(run.taskId, { status: 'queued', resume: 1 });
       this.eventBus.emit('task.queued', run.taskId, { reason: 'resume_after_progress' });
       return true;
@@ -4052,7 +4096,7 @@ export class Scheduler {
       if (engine.id === 'codex') {
         try { fs.appendFileSync(logPath, `${reason}\n`, 'utf8'); } catch { /* best effort */ }
       }
-      this.runRepo.finish(runId, 'crashed', undefined, reason);
+      this.recordWorkerCrash(task.id, { runId, profileName: profile.name, model }, reason);
       this.taskRepo.updateStatus(task.id, 'failed');
       this.eventBus.emit('task.failed', task.id, { error: reason });
     }

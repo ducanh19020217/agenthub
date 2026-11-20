@@ -2999,6 +2999,143 @@ describe('Crash recovery on startup', () => {
     expect(taskRepo.get('test-project/progress')).toMatchObject({ status: 'queued', resume: 1, attempt: 0 });
     scheduler.stop();
   });
+
+  it('records Codex early-exit diagnostics and cools profile during startup recovery for dead worker without progress', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-recovery', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-recovery-dead.log');
+    fs.writeFileSync(logPath, 'fatal error: config invalid\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-recovery-task',
+      projectId: 'test-project',
+      slug: 'codex-recovery-task',
+      title: 'Codex recovery task',
+      status: 'running',
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-dead',
+      taskId: 'test-project/codex-recovery-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-recovery',
+      logPath,
+      pid: 999999,
+    });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map());
+    scheduler.start();
+
+    const run = runRepo.get('run-codex-dead')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toContain('[hub] codex thoát sớm: exit=null signal=none stderr=fatal error: config invalid');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('[hub] codex thoát sớm: exit=null signal=none stderr=fatal error: config invalid');
+
+    const mark = quotaMarkRepo.getAll().find((row) => row.profileName === 'codex-recovery' && row.family === 'codex');
+    expect(mark?.reason).toContain('tạm loại hồ sơ sau 1 crash liên tiếp');
+    expect(mark?.reason).toContain('[hub] codex thoát sớm: exit=null signal=none');
+    expect(profileRepo.get('codex-recovery')?.coolingUntil).toBeGreaterThan(Math.floor(Date.now() / 1000));
+
+    const task = taskRepo.get('test-project/codex-recovery-task')!;
+    expect(task.status).toBe('queued');
+    expect(task.resume).toBe(1);
+    expect(task.consecutiveCrashes).toBe(1);
+    scheduler.stop();
+  });
+
+  it('records Codex early-exit diagnostics and cools profile during startup recovery when worker has progress commits', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    execFileSync('git', ['checkout', '-b', 'agenthub/codex-progress'], { cwd: projectPath });
+    fs.writeFileSync(path.join(projectPath, 'codex-progress.txt'), 'progress from codex');
+    execFileSync('git', ['add', '.'], { cwd: projectPath });
+    execFileSync('git', ['commit', '-m', 'codex progress commit'], {
+      cwd: projectPath,
+      env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@test.com', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@test.com' },
+    });
+
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-prog-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-progress-dead.log');
+    fs.writeFileSync(logPath, 'SIGKILL received during execution\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-progress-task',
+      projectId: 'test-project',
+      slug: 'codex-progress-task',
+      title: 'Codex progress task',
+      status: 'running',
+      branch: 'agenthub/codex-progress',
+      worktreePath: projectPath,
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-progress',
+      taskId: 'test-project/codex-progress-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-prog-prof',
+      logPath,
+      pid: 999999,
+    });
+    db.prepare("UPDATE runs SET startedAt = datetime('now', '-1 minute') WHERE id = 'run-codex-progress'").run();
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map());
+    scheduler.start();
+
+    const run = runRepo.get('run-codex-progress')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toContain('[hub] codex thoát sớm: exit=null signal=none stderr=SIGKILL received during execution');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('[hub] codex thoát sớm: exit=null signal=none stderr=SIGKILL received during execution');
+
+    const mark = quotaMarkRepo.getAll().find((row) => row.profileName === 'codex-prog-prof' && row.family === 'codex');
+    expect(mark?.reason).toContain('tạm loại hồ sơ sau 1 crash liên tiếp');
+    expect(profileRepo.get('codex-prog-prof')?.coolingUntil).toBeGreaterThan(Math.floor(Date.now() / 1000));
+
+    const task = taskRepo.get('test-project/codex-progress-task')!;
+    expect(task.status).toBe('queued');
+    expect(task.resume).toBe(1);
+    expect(task.consecutiveCrashes).toBe(1);
+    scheduler.stop();
+  });
+
+  it('records explicit empty-stderr diagnostic during startup recovery when Codex log is empty', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    profileRepo.upsert({ name: 'codex-empty-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-empty-dead.log');
+    fs.writeFileSync(logPath, '');
+
+    taskRepo.insert({
+      id: 'test-project/codex-empty-task',
+      projectId: 'test-project',
+      slug: 'codex-empty-task',
+      title: 'Codex empty task',
+      status: 'running',
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-empty',
+      taskId: 'test-project/codex-empty-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-empty-prof',
+      logPath,
+      pid: 999999,
+    });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map());
+    scheduler.start();
+
+    const run = runRepo.get('run-codex-empty')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toContain('exit=null signal=none stderr=<trống>');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('exit=null signal=none stderr=<trống>');
+    scheduler.stop();
+  });
 });
 
 describe('Worktree creation', () => {

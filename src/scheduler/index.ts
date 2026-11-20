@@ -1244,7 +1244,11 @@ export class Scheduler {
     if (!checks.passed && this.config.autoFixOnFail && currentTask.checkFixAttempts < 2) {
       const feedback = checks.results
         .filter((result) => !result.ok)
-        .map((result) => `### ${result.name}\n\n${result.outputTail.split('\n').slice(-60).join('\n')}`)
+        .map((result) => {
+          const lines = result.outputTail.split('\n');
+          const tail = lines.length > 100 ? lines.slice(-100).join('\n') : result.outputTail;
+          return `### ${result.name}\n\n${tail}`;
+        })
         .join('\n\n');
       const newBody = `${currentTask.body || currentTask.title}\n\n## Feedback tự sửa lần ${currentTask.checkFixAttempts + 1}\n\nCác kiểm tra sau thất bại:\n\n${feedback}`;
       this.taskRepo.update(taskId, {
@@ -1258,6 +1262,31 @@ export class Scheduler {
         this.writeTaskFiles(currentTask, newBody, true, feedback);
       }
       this.eventBus.emit('task.queued', taskId, { reason: 'checks_failed_autofix', failed: checks.failed });
+    } else if (!checks.passed) {
+      const feedback = checks.results
+        .filter((result) => !result.ok)
+        .map((result) => {
+          const lines = result.outputTail.split('\n');
+          const tail = lines.length > 100 ? lines.slice(-100).join('\n') : result.outputTail;
+          return `### ${result.name}\n\n${tail}`;
+        })
+        .join('\n\n');
+      const isPostDoneFail = checks.failed.includes('post-done');
+      const reasonTitle = isPostDoneFail
+        ? 'post-done fail, hết vòng tự sửa'
+        : 'Kiểm tra thất bại, hết vòng tự sửa';
+      const blockedReport = `## ${reasonTitle}\n\nCác kiểm tra sau thất bại:\n\n${feedback}`;
+      this.taskRepo.update(taskId, {
+        status: 'blocked',
+        blockedReport,
+        transientRetries: 0,
+        notBefore: null,
+      });
+      this.eventBus.emit('task.blocked', taskId, {
+        reason: isPostDoneFail ? 'post_done_failed' : 'checks_failed',
+        failed: checks.failed,
+        blockedReport,
+      });
     } else {
       if (this.stopped) return;
       if (this.runMetricsRepo) {
@@ -1570,6 +1599,13 @@ export class Scheduler {
     for (const task of dependencyWaiters) {
       if (this.areDependenciesMet(task)) {
         this.taskRepo.updateStatus(task.id, 'queued');
+        this.eventBus.emit('task.queued', task.id, { reason: 'dependency_met' });
+      }
+    }
+    const queuedDependencyWaiters = this.taskRepo.getByStatus('queued').filter((t) => t.waitReason === 'dependency');
+    for (const task of queuedDependencyWaiters) {
+      if (this.areDependenciesMet(task)) {
+        this.taskRepo.update(task.id, { waitReason: null });
         this.eventBus.emit('task.queued', task.id, { reason: 'dependency_met' });
       }
     }
@@ -3191,6 +3227,11 @@ export class Scheduler {
       this.eventBus.emit('review.failed', taskId, { actor: active.actor, reason: 'malformed_output' });
       return;
     }
+    if (result.verdict === 'approved' && checks.some((c) => !c.ok)) {
+      this.runRepo.finish(runId, 'done', undefined, 'checks failed');
+      this.escalateReview(taskId, 'checks_failed', `Không thể duyệt hoàn thành task khi checks thất bại: ${checks.filter((c) => !c.ok).map((c) => c.name).join(', ')}`);
+      return;
+    }
     if (this.isReadOnlyEnvironmentFeedback(result.verdict, result.feedback)) {
       this.runRepo.finish(runId, 'done', undefined, 'reviewer read-only environment error');
       this.escalateReview(taskId, 'reviewer_environment', result.feedback);
@@ -3267,13 +3308,66 @@ export class Scheduler {
     });
   }
 
-  private areDependenciesMet(task: TaskRow): boolean {
-    const deps: string[] = JSON.parse(task.dependsOn);
+  areDependenciesMet(task: TaskRow): boolean {
+    let deps: string[];
+    try {
+      deps = JSON.parse(task.dependsOn || '[]');
+    } catch {
+      deps = [];
+    }
     for (const depId of deps) {
       const dep = this.taskRepo.get(depId);
       if (!dep || dep.status !== 'done') return false;
+      const checks = this.getCheckResults(dep.id);
+      if (checks.length > 0 && checks.some((c) => !c.ok)) return false;
+      const depProject = this.projectRepo.get(dep.projectId);
+      if (depProject && projectSettings(depProject).postDone?.enabled) {
+        const postDoneCheck = checks.find((c) => c.name === 'post-done');
+        if (!postDoneCheck || !postDoneCheck.ok) return false;
+      }
     }
     return true;
+  }
+
+  getDependencyWaitReason(task: TaskRow): string | null {
+    let deps: string[];
+    try {
+      deps = JSON.parse(task.dependsOn || '[]');
+    } catch {
+      deps = [];
+    }
+    if (deps.length === 0) return null;
+    const reasons: string[] = [];
+    for (const depId of deps) {
+      const dep = this.taskRepo.get(depId);
+      if (!dep) {
+        reasons.push(`task phụ thuộc "${depId}" không tồn tại`);
+        continue;
+      }
+      if (dep.status === 'failed') {
+        reasons.push(`task gốc "${dep.id}" bị failed`);
+      } else if (dep.status === 'blocked') {
+        const report = dep.blockedReport ? dep.blockedReport.split('\n')[0].replace(/^#+\s*/, '') : 'bị chặn';
+        reasons.push(`task gốc "${dep.id}" bị blocked (${report})`);
+      } else if (dep.status !== 'done') {
+        reasons.push(`task gốc "${dep.id}" chưa xong (trạng thái: ${dep.status})`);
+      } else {
+        const checks = this.getCheckResults(dep.id);
+        const failedChecks = checks.filter((c) => !c.ok);
+        if (failedChecks.length > 0) {
+          reasons.push(`task gốc "${dep.id}" check thất bại: ${failedChecks.map((c) => c.name).join(', ')}`);
+        } else {
+          const depProject = this.projectRepo.get(dep.projectId);
+          if (depProject && projectSettings(depProject).postDone?.enabled) {
+            const postDoneCheck = checks.find((c) => c.name === 'post-done');
+            if (!postDoneCheck || !postDoneCheck.ok) {
+              reasons.push(`task gốc "${dep.id}" chưa pass post-done`);
+            }
+          }
+        }
+      }
+    }
+    return reasons.length > 0 ? reasons.join('; ') : null;
   }
 
   private getEmailRunningCount(profile: ProfileRow): number {
@@ -4072,6 +4166,8 @@ export class Scheduler {
     const step = chain[task.reviewStep ?? 0];
 
     if (verdict === 'approved') {
+      const checks = this.getCheckResults(taskId);
+      if (checks.some((c) => !c.ok)) return;
       if (isAutoReviewer(by) && (!feedback || feedback.trim() === '')) return;
       if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
         this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback: feedback || null, actor: by || 'reviewer' });

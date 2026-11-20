@@ -1243,6 +1243,7 @@ export interface TaskRow {
   diffStat?: string | null;
   slot: number | null;
   batchId?: string | null;
+  dependencyWaitReason?: string | null;
   creationSessionId?: string | null;
   creationGoal?: string | null;
   createdAt: string;

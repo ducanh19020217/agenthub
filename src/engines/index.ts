@@ -1,4 +1,4 @@
-import { ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { ChildProcess, spawn, spawnSync, StdioOptions } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,6 +27,7 @@ export interface SpawnOpts {
   codexApproval?: 'never' | 'on-request' | 'untrusted';
   workerCount?: number;
   streamOutput?: boolean;
+  pipeStderr?: boolean;
   mcpConfigPath?: string;
   brainPolicy?: 'standard' | 'trusted';
 }
@@ -563,14 +564,30 @@ export class CodexEngine implements Engine {
         env.PATH,
       );
     }
-    const child = spawn(executable, command, {
+    let spawnExecutable = executable;
+    let spawnCommand = command;
+    if (!opts.streamOutput) {
+      const statusPath = `${opts.logPath}.status`;
+      const wrapperScript =
+        'status_file="$1"; shift; ' +
+        'trap \'code=$?; echo "$code" > "$status_file"; exit $code\' EXIT INT TERM HUP; ' +
+        '"$@" & child_pid=$!; wait $child_pid; code=$?; echo "$code" > "$status_file"; trap - EXIT INT TERM HUP; exit $code';
+      spawnCommand = ['-c', wrapperScript, '--', statusPath, executable, ...command];
+      spawnExecutable = 'sh';
+    }
+
+    const usePipe = Boolean(opts.streamOutput || opts.pipeStderr);
+    const stdio: StdioOptions = opts.streamOutput
+      ? ['ignore', 'pipe', 'pipe']
+      : usePipe
+        ? ['ignore', logFd, 'pipe']
+        : ['ignore', logFd, logFd];
+
+    const child = spawn(spawnExecutable, spawnCommand, {
       cwd: opts.cwd,
       env,
       detached: true,
-      // Brain sessions need stdout as a pipe for stream-json parsing. Worker
-      // and reviewer sessions can keep stdout in the run log directly. Stderr is always a
-      // pipe so the scheduler can retain a bounded crash diagnostic tail.
-      stdio: opts.streamOutput ? ['ignore', 'pipe', 'pipe'] : ['ignore', logFd, 'pipe'],
+      stdio,
     });
 
     child.on('spawn', () => { try { fs.closeSync(logFd); } catch { /* pipe mode */ } });

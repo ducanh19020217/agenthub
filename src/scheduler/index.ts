@@ -298,6 +298,40 @@ function formatCodexEarlyExit(
   return `[hub] codex thoát sớm: exit=${exitCode === null ? 'null' : exitCode} signal=${signal || 'none'} stderr=${stderr}`;
 }
 
+export function parseExitStatus(statusRaw: string): { exitCode: number | null; exitSignal: NodeJS.Signals | null } {
+  const trimmed = statusRaw.trim();
+  const code = parseInt(trimmed, 10);
+  if (Number.isNaN(code)) return { exitCode: null, exitSignal: null };
+  if (code > 128 && code <= 128 + 64) {
+    const sigNum = code - 128;
+    const signalNames: Record<number, NodeJS.Signals> = {
+      1: 'SIGHUP',
+      2: 'SIGINT',
+      3: 'SIGQUIT',
+      6: 'SIGABRT',
+      9: 'SIGKILL',
+      14: 'SIGALRM',
+      15: 'SIGTERM',
+    };
+    return { exitCode: null, exitSignal: signalNames[sigNum] || (`SIG#${sigNum}` as NodeJS.Signals) };
+  }
+  return { exitCode: code, exitSignal: null };
+}
+
+export function readCodexExitStatus(logPath: string | null | undefined): { exitCode: number | null; exitSignal: NodeJS.Signals | null } | null {
+  if (!logPath) return null;
+  const statusPath = `${logPath}.status`;
+  try {
+    if (fs.existsSync(statusPath)) {
+      const content = fs.readFileSync(statusPath, 'utf8');
+      return parseExitStatus(content);
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 export interface ReviewerRun {
   taskId: string;
   runId: string;
@@ -584,7 +618,10 @@ export class Scheduler {
     if (existingMatch) {
       return existingMatch[0];
     }
-    const diagnostic = formatCodexEarlyExit(null, null, logTail);
+    const status = readCodexExitStatus(logPath);
+    const exitCode = status?.exitCode ?? null;
+    const exitSignal = status?.exitSignal ?? null;
+    const diagnostic = formatCodexEarlyExit(exitCode, exitSignal, logTail);
     if (logPath) {
       try {
         fs.mkdirSync(path.dirname(logPath), { recursive: true });
@@ -2393,14 +2430,21 @@ export class Scheduler {
       this.taskRepo.update(taskId, { status: 'blocked', blockedReport: markers.blockedContent || currentTask.blockedReport, transientRetries: 0, notBefore: null });
       this.eventBus.emit('task.blocked', taskId);
     } else {
-      const exitCode = rt.exitCode ?? rt.child?.exitCode ?? null;
-      const exitSignal = rt.exitSignal ?? null;
+      let exitCode = rt.exitCode ?? rt.child?.exitCode ?? null;
+      let exitSignal = rt.exitSignal ?? null;
+      if (exitCode === null && exitSignal === null && run?.logPath) {
+        const recorded = readCodexExitStatus(run.logPath);
+        if (recorded) {
+          exitCode = recorded.exitCode;
+          exitSignal = recorded.exitSignal;
+        }
+      }
       const existingMatch = logTail.match(/\[hub\] codex thoát sớm: [^\r\n]+/);
       let codexExitReason: string | undefined;
       if (rt.engine.id === 'codex') {
         if (existingMatch) {
           codexExitReason = existingMatch[0];
-        } else if (exitCode !== 0 || exitSignal || Boolean(rt.spawnError) || !rt.child) {
+        } else if (exitCode !== 0 || exitSignal || Boolean(rt.spawnError) || (!rt.child && exitCode === null)) {
           const stderrTail = (rt.stderrTail && rt.stderrTail.trim())
             ? rt.stderrTail
             : logTail.slice(-CODEX_STDERR_TAIL_BYTES);
@@ -3328,13 +3372,23 @@ export class Scheduler {
     const duration = Date.now() - active.startedAt;
     const isLockBusy = duration < 3000 && logOutput.replace(/\[hub\] codex thoát sớm: [^\r\n]*/g, '').trim() === '' && Boolean(active.lockFile) && exitCode === 1;
 
+    let effectiveExitCode = exitCode;
+    let effectiveExitSignal = exitSignal;
+    if ((effectiveExitCode === null || effectiveExitCode === 0) && effectiveExitSignal === null && run?.logPath) {
+      const status = readCodexExitStatus(run.logPath);
+      if (status && (status.exitCode !== null || status.exitSignal !== null)) {
+        effectiveExitCode = status.exitCode;
+        effectiveExitSignal = status.exitSignal;
+      }
+    }
+
     const logTail = logOutput || (run?.logPath ? readLogTail(run.logPath, { maxBytes: CODEX_STDERR_TAIL_BYTES }) : '');
     const existingMatch = logTail.match(/\[hub\] codex thoát sớm: [^\r\n]+/);
     const resolvedStderrTail = (active.stderrTail && active.stderrTail.trim()) ? active.stderrTail : logTail;
-    const isEarlyCodexExit = active.engine.id === 'codex' && (exitCode !== 0 || exitSignal || Boolean(spawnError || active.spawnError) || reason === 'error');
+    const isEarlyCodexExit = active.engine.id === 'codex' && (effectiveExitCode !== 0 || effectiveExitSignal || Boolean(spawnError || active.spawnError) || reason === 'error');
     const codexExitReason = existingMatch
       ? existingMatch[0]
-      : (isEarlyCodexExit ? formatCodexEarlyExit(exitCode, exitSignal, resolvedStderrTail, spawnError || active.spawnError) : undefined);
+      : (isEarlyCodexExit ? formatCodexEarlyExit(effectiveExitCode, effectiveExitSignal, resolvedStderrTail, spawnError || active.spawnError) : undefined);
     if (codexExitReason && run?.logPath && !existingMatch) {
       try { fs.appendFileSync(run.logPath, `${codexExitReason}\n`, 'utf8'); } catch { /* best effort */ }
     }
@@ -3346,11 +3400,11 @@ export class Scheduler {
       this.eventBus.emit('review.waiting', taskId, { actor: active.actor, reason: 'lock_busy' });
       return;
     }
-    if (reason === 'timeout' || reason === 'error' || exitCode !== 0 || quota) {
+    if (reason === 'timeout' || reason === 'error' || effectiveExitCode !== 0 || quota) {
       if (!quota) this.reviewerErrorCounts.set(taskId, (this.reviewerErrorCounts.get(taskId) || 0) + 1);
       this.reviewerBackoffUntil.set(profileName, Date.now() + REVIEWER_CRASH_BACKOFF_MS);
       const outcome = quota ? 'quota' : reason === 'timeout' ? 'timeout' : 'crashed';
-      const finishReason = codexExitReason || (outcome === 'crashed' ? (reason === 'error' ? (spawnError || 'error') : `exit code ${exitCode}`) : undefined);
+      const finishReason = codexExitReason || (outcome === 'crashed' ? (reason === 'error' ? (spawnError || 'error') : `exit code ${effectiveExitCode}`) : undefined);
       this.runRepo.finish(runId, outcome, undefined, finishReason);
       if (quota) {
         this.quotaService.mark(profileName, active.actor === 'claude-reviewer' ? 'claude' : 'codex', this.config.reviewer?.failoverSec || 5 * 60 * 60, `${active.actor} quota`);
@@ -4098,7 +4152,7 @@ export class Scheduler {
         project,
         gitHooks: projectSettings(project).worktree.gitHooks,
         codexSandbox: this.config.workers?.codexSandbox || 'off',
-        streamOutput: this.config.workers?.agyStreamOutput ?? true,
+        streamOutput: engine.id === 'agy' ? (this.config.workers?.agyStreamOutput ?? true) : false,
         workerCount: project.maxParallel,
       });
 

@@ -3406,6 +3406,122 @@ describe('Crash recovery on startup', () => {
     expect(matches).toHaveLength(1);
     scheduler.stop();
   });
+
+  it('recovers live Codex worker after restart and preserves real exit code and signal from status file', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-status-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-status.log');
+    fs.writeFileSync(logPath, 'some crash logs from worker\n');
+    fs.writeFileSync(`${logPath}.status`, '23\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-status-task',
+      projectId: 'test-project',
+      slug: 'codex-status-task',
+      title: 'Codex status task',
+      status: 'running',
+      runCount: 1,
+    });
+    runRepo.insert({
+      id: 'run-codex-status',
+      taskId: 'test-project/codex-status-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-status-prof',
+      logPath,
+      pid: process.pid,
+      pidStart: null,
+    });
+
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map([['codex', engine]]));
+    scheduler.start();
+
+    // Verify it was recovered into running
+    expect(scheduler.getRunning().has('test-project/codex-status-task')).toBe(true);
+
+    // Simulate process exiting later
+    const internal = scheduler as unknown as {
+      isProcessAlive: (pid: number | null, expectedStart?: number | null) => boolean;
+      checkRunningTasks: () => Promise<void>;
+    };
+    internal.isProcessAlive = () => false;
+    await internal.checkRunningTasks();
+
+    const run = runRepo.get('run-codex-status')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toBe('[hub] codex thoát sớm: exit=23 signal=none stderr=some crash logs from worker');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('[hub] codex thoát sớm: exit=23 signal=none stderr=some crash logs from worker');
+    scheduler.stop();
+  });
+
+  it('does not treat recovered live Codex worker with exit 0 and commits as a crash', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-success-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-success.log');
+    fs.writeFileSync(logPath, 'worker finished work cleanly\n');
+    fs.writeFileSync(`${logPath}.status`, '0\n');
+
+    taskRepo.insert({
+      id: 'test-project/codex-success-task',
+      projectId: 'test-project',
+      slug: 'codex-success-task',
+      title: 'Codex success task',
+      status: 'running',
+      runCount: 1,
+      worktreePath: projectPath,
+    });
+    runRepo.insert({
+      id: 'run-codex-success',
+      taskId: 'test-project/codex-success-task',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-success-prof',
+      logPath,
+      pid: process.pid,
+      pidStart: null,
+    });
+
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map([['codex', engine]]));
+    scheduler.start();
+
+    const internal = scheduler as unknown as {
+      isProcessAlive: (pid: number | null, expectedStart?: number | null) => boolean;
+      hasCommitAfter: () => boolean;
+      checkRunningTasks: () => Promise<void>;
+    };
+    internal.isProcessAlive = () => false;
+    internal.hasCommitAfter = () => true;
+    await internal.checkRunningTasks();
+
+    // Verify task was resumed with resume_after_progress and no fake diagnostic line was appended
+    const task = taskRepo.get('test-project/codex-success-task')!;
+    expect(['queued', 'waiting_quota']).toContain(task.status);
+    expect(task.resume).toBe(1);
+    const run = runRepo.get('run-codex-success')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toBe('resume_after_progress');
+    // Ensure no fake early-exit diagnostic was appended to the log
+    expect(fs.readFileSync(logPath, 'utf8')).not.toContain('[hub] codex thoát sớm:');
+    scheduler.stop();
+  });
 });
 
 describe('Worktree creation', () => {

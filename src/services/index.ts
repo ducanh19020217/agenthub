@@ -4,6 +4,7 @@ import { DEFAULT_PROJECT_SETTINGS, mergeProjectSettings, ProjectSettingsInputSch
 import { projectWorktreeRoot, projectWorktreeRoots, validateProjectWorktreeRoot } from '../projects/paths.js';
 import { ensureIntegrationNodeModules, ensureIntegrationWorktree, getIntegrationStatus, removeIntegrationWorktreeAsync, validateIntegrationBranch } from '../projects/integration.js';
 import { resolveProjectFile } from '../projects/paths.js';
+import { getPostDoneArtifacts } from '../post-done.js';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -3728,6 +3729,7 @@ export class AppService {
       commits,
       worktreePath: task.worktreePath,
       checks: this.scheduler.getCheckResults(taskId),
+      postDoneArtifacts: getPostDoneArtifacts(task, project),
       sourceRef: task.sourceRef ? JSON.parse(task.sourceRef) : null,
       triage,
       derivedTasks: this.taskRepo.getDerivedFrom(taskId).map((t) => apiTask(t, this.getBlockingDiskForTask(t))),

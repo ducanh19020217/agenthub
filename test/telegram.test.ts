@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { loadConfig } from '../src/config.js';
 import { createContext, closeContext } from '../src/daemon.js';
 import { createServer } from '../src/api/server.js';
@@ -17,6 +18,7 @@ import {
   generateTaskSlug,
   parseTimesheetCommand,
 } from '../src/telegram.js';
+import { INTERNAL_MANDATORY_CHECKS, worktreeHeadSync } from '../src/checks.js';
 
 describe('Telegram timesheet parser', () => {
   it('parses waiting, decimal and pinned hours', () => {
@@ -72,6 +74,21 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
 
     process.env.AGENTHUB_HOME = tmpDir;
     process.env.AGENTHUB_AGY_HOMES = agyHomesDir;
+
+    execFileSync('git', ['init', '--template='], { cwd: tmpDir });
+    execFileSync('git', ['checkout', '-b', 'main'], { cwd: tmpDir });
+    fs.writeFileSync(path.join(tmpDir, 'README.md'), '# Telegram Test\n');
+    execFileSync('git', ['add', '.'], { cwd: tmpDir });
+    execFileSync('git', ['commit', '-m', 'init', '--allow-empty'], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'test',
+        GIT_AUTHOR_EMAIL: 'test@test.com',
+        GIT_COMMITTER_NAME: 'test',
+        GIT_COMMITTER_EMAIL: 'test@test.com',
+      },
+    });
 
     // Create secrets directory and token file
     const secretsDir = path.join(tmpDir, 'secrets');
@@ -506,6 +523,12 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
         branch: 'task/rev',
         baseRef: 'main',
       });
+      const headRev = worktreeHeadSync(tmpDir);
+      ctx.runRepo.insert({ id: 'r-rev', taskId: 'p1/task-rev', engine: 'hub', model: 'checks', profileName: 'hub' });
+      const insertRev = ctx.db.prepare("INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 1, 'ok', ?)");
+      for (const name of INTERNAL_MANDATORY_CHECKS) {
+        insertRev.run('p1/task-rev', 'r-rev', name, headRev);
+      }
 
       ctx.taskRepo.insert({
         id: 'p1/task-fail',
@@ -1033,6 +1056,12 @@ describe('Telegram Bot Remote Control (c-telegram-bot)', () => {
         branch: 'task/cbrev',
         baseRef: 'main',
       });
+      const headCbRev = worktreeHeadSync(tmpDir);
+      ctx.runRepo.insert({ id: 'r-cb-rev', taskId: 'p1/task-cb-rev', engine: 'hub', model: 'checks', profileName: 'hub' });
+      const insertCbRev = ctx.db.prepare("INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 1, 'ok', ?)");
+      for (const name of INTERNAL_MANDATORY_CHECKS) {
+        insertCbRev.run('p1/task-cb-rev', 'r-cb-rev', name, headCbRev);
+      }
 
       ctx.taskRepo.insert({
         id: 'p1/task-cb-run',

@@ -8,6 +8,7 @@ import { createContext } from '../src/daemon.js';
 import { FakeEngine, type Engine } from '../src/engines/index.js';
 import { HttpError } from '../src/errors.js';
 import { getIntegrationStatus } from '../src/projects/integration.js';
+import { INTERNAL_MANDATORY_CHECKS, worktreeHeadSync } from '../src/checks.js';
 
 vi.mock('../src/projects/integration.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/projects/integration.js')>();
@@ -31,8 +32,15 @@ describe('Integration branch and cross-project dependencies', () => {
 
   function persistPassedCheck(taskId: string, suffix: string): void {
     const runId = `check-${suffix}`;
+    const task = ctx.taskRepo.get(taskId);
+    const project = task ? ctx.projectRepo.get(task.projectId) : undefined;
+    const repoPath = task?.worktreePath || project?.path;
+    const head = repoPath ? worktreeHeadSync(repoPath) : null;
     ctx.runRepo.insert({ id: runId, taskId, engine: 'hub', model: 'checks', profileName: 'hub' });
-    ctx.db.prepare("INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'lint', 1, 0, 1, 'ok')").run(taskId, runId);
+    const insert = ctx.db.prepare("INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 1, 'ok', ?)");
+    for (const name of ['lint', ...INTERNAL_MANDATORY_CHECKS]) {
+      insert.run(taskId, runId, name, head);
+    }
   }
 
   beforeEach(() => {
@@ -193,6 +201,9 @@ describe('Integration branch and cross-project dependencies', () => {
       branch: 'agenthub/fe-task-1',
       status: 'done',
     });
+
+    persistPassedCheck('be2/task-0', 'be2-0');
+    persistPassedCheck('fe2/task-1', 'fe2-1');
 
     // Create branch in feRepo so worktree add can branch from it
     execFileSync('git', ['-C', feRepo, 'branch', 'agenthub/fe-task-1', 'main']);

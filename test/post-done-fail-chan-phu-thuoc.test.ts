@@ -1035,4 +1035,90 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
     const child = ctx.taskRepo.get('proj-with-checks/t-child')!;
     expect(ctx.scheduler.areDependenciesMet(child)).toBe(true);
   });
+
+  it('Feedback 6: fail-closed khi không lấy được commit HEAD hiện tại (worktree bị xoá hoặc lỗi git)', async () => {
+    const deletedWorktreePath = path.join(tmpDir, 'deleted-worktree-xyz');
+
+    // 1. checkMandatoryChecks trả ok: false khi currentHead là null hoặc repoPath không tồn tại
+    const res1 = checkMandatoryChecks([], null, deletedWorktreePath, null);
+    expect(res1.ok).toBe(false);
+    expect(res1.reason).toContain('không lấy được commit HEAD hiện tại');
+
+    const res2 = checkMandatoryChecks([], null, deletedWorktreePath);
+    expect(res2.ok).toBe(false);
+    expect(res2.reason).toContain('không lấy được commit HEAD hiện tại');
+
+    // 2. areDependenciesMet & getDependencyWaitReason trả false / chặn khi dependency có worktree bị xoá
+    ctx.taskRepo.insert({
+      id: 'test-proj/t-dep-deleted-wt',
+      projectId: 'test-proj',
+      slug: 't-dep-deleted-wt',
+      title: 'Dependency with deleted worktree',
+      status: 'done',
+      worktreePath: deletedWorktreePath,
+      baseRef: 'main',
+      branch: 'main',
+    });
+
+    ctx.taskRepo.insert({
+      id: 'test-proj/t-consumer-blocked',
+      projectId: 'test-proj',
+      slug: 't-consumer-blocked',
+      title: 'Consumer task',
+      status: 'queued',
+      dependsOn: ['test-proj/t-dep-deleted-wt'],
+    });
+
+    const consumer = ctx.taskRepo.get('test-proj/t-consumer-blocked')!;
+    expect(ctx.scheduler.areDependenciesMet(consumer)).toBe(false);
+    const waitReason = ctx.scheduler.getDependencyWaitReason(consumer);
+    expect(waitReason).toContain('không lấy được HEAD hiện tại');
+
+    // 3. reviewTask approved bị chặn (fail-closed) khi worktree không lấy được HEAD
+    ctx.taskRepo.insert({
+      id: 'test-proj/t-review-deleted-wt',
+      projectId: 'test-proj',
+      slug: 't-review-deleted-wt',
+      title: 'Review task with deleted worktree',
+      status: 'review',
+      worktreePath: deletedWorktreePath,
+      baseRef: 'main',
+      branch: 'main',
+    });
+
+    // 3a. Scheduler.reviewTask không chuyển sang done
+    ctx.scheduler.reviewTask('test-proj/t-review-deleted-wt', 'approved');
+    expect(ctx.taskRepo.get('test-proj/t-review-deleted-wt')?.status).toBe('review');
+
+    // 3b. Service.reviewTask ném HttpError 400
+    await expect(
+      ctx.service.reviewTask('test-proj/t-review-deleted-wt', { verdict: 'approved', by: 'reviewer' }),
+    ).rejects.toThrow('Không thể duyệt hoàn thành task khi không lấy được HEAD hiện tại');
+    expect(ctx.taskRepo.get('test-proj/t-review-deleted-wt')?.status).toBe('review');
+
+    // 4. autoCloseMergedTasks không chuyển sang done khi worktree đã bị xoá
+    ctx.taskRepo.insert({
+      id: 'test-proj/t-merged-deleted-wt',
+      projectId: 'test-proj',
+      slug: 't-merged-deleted-wt',
+      title: 'Merged task with deleted worktree',
+      status: 'review',
+      worktreePath: deletedWorktreePath,
+      baseRef: 'main',
+      branch: 't-merged-deleted-wt-branch',
+    });
+
+    // Giả lập branch đã được merge vào main trên repoDir
+    execFileSync('git', ['branch', 't-merged-deleted-wt-branch', 'main'], { cwd: repoDir });
+    const commitMsg = 'commit on branch t-merged-deleted-wt';
+    fs.writeFileSync(path.join(repoDir, 'merged-del-wt.txt'), 'hello\n');
+    execFileSync('git', ['add', '.'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', commitMsg], { cwd: repoDir });
+    execFileSync('git', ['checkout', '-b', 'temp-merge-del-wt'], { cwd: repoDir });
+    execFileSync('git', ['checkout', 'main'], { cwd: repoDir });
+    execFileSync('git', ['merge', '--no-ff', '-m', 'Merge branch t-merged-deleted-wt-branch', 'temp-merge-del-wt'], { cwd: repoDir });
+
+    await ctx.scheduler.autoCloseMergedTasks();
+    expect(ctx.taskRepo.get('test-proj/t-merged-deleted-wt')?.status).toBe('review');
+  });
 });

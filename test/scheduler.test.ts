@@ -9,6 +9,7 @@ import { Scheduler } from '../src/scheduler/index.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
 import { QuotaService } from '../src/quota/index.js';
 import { ClaudeFailoverState } from '../src/chat/failover.js';
+import { INTERNAL_MANDATORY_CHECKS, worktreeHeadSync } from '../src/checks.js';
 
 let tmpDir: string;
 let config: ReturnType<typeof loadConfig>;
@@ -215,6 +216,13 @@ describe('Task dependencies', () => {
       title: 'Task 1',
       status: 'done',
     });
+    const head = worktreeHeadSync(projectPath);
+    runRepo.insert({ id: 'r1', taskId: 'test-project/t1', engine: 'hub', model: 'checks', profileName: 'hub' });
+    const insertCheck = db.prepare("INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 1, 'ok', ?)");
+    for (const name of INTERNAL_MANDATORY_CHECKS) {
+      insertCheck.run('test-project/t1', 'r1', name, head);
+    }
+
     taskRepo.insert({
       id: 'test-project/t2',
       projectId: 'test-project',
@@ -228,6 +236,7 @@ describe('Task dependencies', () => {
     const engines = new Map<string, Engine>([['agy', fakeEngine]]);
     const scheduler = new Scheduler(
       config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, engines,
+      undefined, undefined, db,
     );
 
     await scheduler.tick();
@@ -702,10 +711,13 @@ describe('Codex reviewer failover lifecycle', () => {
     const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo,
       new Map<string, Engine>([['codex', fake]]), undefined, undefined, db);
     if (withChecks) {
+      const head = worktreeHeadSync(worktreePath);
       db.prepare('INSERT INTO runs (id, taskId, engine, model, profileName) VALUES (?, ?, ?, ?, ?)')
         .run('autocheck-run', 'test-project/review', 'agy', 'gemini-3.8-flash-low', 'codex-1');
-      db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run('test-project/review', 'autocheck-run', 'test', 1, 0, 10, 'OK');
+      const insert = db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 10, ?, ?)');
+      for (const name of ['test', ...INTERNAL_MANDATORY_CHECKS]) {
+        insert.run('test-project/review', 'autocheck-run', name, 'OK', head);
+      }
     }
     const reviewRepo = new ReviewRepo(db);
     const failover = new ClaudeFailoverState(path.join(tmpDir, 'failover.json'));

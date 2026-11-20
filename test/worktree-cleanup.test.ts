@@ -75,10 +75,8 @@ describe('Worktree Auto-Cleanup', () => {
 
   it('keeps node_modules when task is in review, deletes node_modules on done', () => {
     const worktreePath = path.join(tmpDir, 'worktrees', 'proj', 't1');
-    fs.mkdirSync(path.join(worktreePath, 'node_modules'), { recursive: true });
-    fs.mkdirSync(path.join(worktreePath, 'web', 'node_modules'), { recursive: true });
-    fs.writeFileSync(path.join(worktreePath, 'node_modules', 'dep.txt'), 'dep');
-    fs.writeFileSync(path.join(worktreePath, 'web', 'node_modules', 'web-dep.txt'), 'web-dep');
+    execFileSync('git', ['worktree', 'add', '-b', 'agenthub/t1', worktreePath, 'main'], { cwd: projectPath });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktreePath, encoding: 'utf8' }).trim();
 
     ctx.taskRepo.insert({
       id: 'proj/t1',
@@ -89,6 +87,17 @@ describe('Worktree Auto-Cleanup', () => {
       level: 'easy',
     });
     ctx.taskRepo.update('proj/t1', { worktreePath });
+
+    ctx.runRepo.insert({ id: 'r1', taskId: 'proj/t1', engine: 'hub', model: 'checks', profileName: 'hub' });
+    const insertCheck = ctx.db.prepare("INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 1, 'ok', ?)");
+    for (const name of ['zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
+      insertCheck.run('proj/t1', 'r1', name, head);
+    }
+
+    fs.mkdirSync(path.join(worktreePath, 'node_modules'), { recursive: true });
+    fs.mkdirSync(path.join(worktreePath, 'web', 'node_modules'), { recursive: true });
+    fs.writeFileSync(path.join(worktreePath, 'node_modules', 'dep.txt'), 'dep');
+    fs.writeFileSync(path.join(worktreePath, 'web', 'node_modules', 'web-dep.txt'), 'web-dep');
 
     // Review state: node_modules must remain
     expect(fs.existsSync(path.join(worktreePath, 'node_modules'))).toBe(true);

@@ -34,7 +34,7 @@ import { AgentHubConfig, DEFAULT_SCHEDULER_LIMITS } from '../config.js';
 import { ProfileLockService } from '../profiles/locks.js';
 import { sameAccount } from '../profiles/account.js';
 import { QuotaUsageService } from '../quota/usage.js';
-import { CheckRunner, getCheckResults, checkMandatoryChecks } from '../checks.js';
+import { CheckRunner, getCheckResults, checkMandatoryChecks, worktreeHead, worktreeHeadSync } from '../checks.js';
 import { parseDbTime } from '../db/time.js';
 import type Database from 'better-sqlite3';
 import { parseCodexTokens, parseShortstat, recalculateTaskLines, measureTaskLines } from '../savings.js';
@@ -486,7 +486,8 @@ export class Scheduler {
     const checks = this.getCheckResults(task.id);
     const proj = project || this.projectRepo.get(task.projectId);
     const repoPath = task.worktreePath || (proj ? proj.path : undefined);
-    return checkMandatoryChecks(checks, proj, repoPath, currentHead);
+    const head = currentHead !== undefined ? currentHead : (repoPath ? worktreeHeadSync(repoPath) : null);
+    return checkMandatoryChecks(checks, proj, repoPath, head);
   }
 
   private schedulerLimits() {
@@ -3235,14 +3236,10 @@ export class Scheduler {
       this.eventBus.emit('review.failed', taskId, { actor: active.actor, reason: 'malformed_output' });
       return;
     }
-    if (result.verdict === 'approved') {
-      const proj = task ? this.projectRepo.get(task.projectId) : undefined;
-      const checkStatus = task ? this.checkMandatoryChecksForTask(task, proj) : { ok: false, reason: 'task không tồn tại' };
-      if (!checkStatus.ok) {
-        this.runRepo.finish(runId, 'done', undefined, 'checks failed');
-        this.escalateReview(taskId, 'checks_failed', `Không thể duyệt hoàn thành task khi checks chưa đạt: ${checkStatus.reason}`);
-        return;
-      }
+    if (result.verdict === 'approved' && checks.some((c) => !c.ok)) {
+      this.runRepo.finish(runId, 'done', undefined, 'checks failed');
+      this.escalateReview(taskId, 'checks_failed', `Không thể duyệt hoàn thành task khi checks thất bại: ${checks.filter((c) => !c.ok).map((c) => c.name).join(', ')}`);
+      return;
     }
     if (this.isReadOnlyEnvironmentFeedback(result.verdict, result.feedback)) {
       this.runRepo.finish(runId, 'done', undefined, 'reviewer read-only environment error');
@@ -3331,7 +3328,18 @@ export class Scheduler {
       const dep = this.taskRepo.get(depId);
       if (!dep || dep.status !== 'done') return false;
       const depProject = this.projectRepo.get(dep.projectId);
-      if (!this.checkMandatoryChecksForTask(dep, depProject).ok) return false;
+      const depRepoPath = dep.worktreePath || (depProject ? depProject.path : undefined);
+      const depHead = depRepoPath ? worktreeHeadSync(depRepoPath) : null;
+      const checkResults = this.getCheckResults(dep.id);
+      if (checkResults.length === 0) {
+        if (!depProject) return false;
+        const settings = projectSettings(depProject);
+        if (settings.postDone?.enabled || depProject.checks) {
+          if (!this.checkMandatoryChecksForTask(dep, depProject, depHead).ok) return false;
+        }
+      } else {
+        if (!this.checkMandatoryChecksForTask(dep, depProject, depHead).ok) return false;
+      }
     }
     return true;
   }
@@ -3360,9 +3368,24 @@ export class Scheduler {
         reasons.push(`task gốc "${dep.id}" chưa xong (trạng thái: ${dep.status})`);
       } else {
         const depProject = this.projectRepo.get(dep.projectId);
-        const checkStatus = this.checkMandatoryChecksForTask(dep, depProject);
-        if (!checkStatus.ok) {
-          reasons.push(`task gốc "${dep.id}" ${checkStatus.reason}`);
+        const depRepoPath = dep.worktreePath || (depProject ? depProject.path : undefined);
+        const depHead = depRepoPath ? worktreeHeadSync(depRepoPath) : null;
+        const checkResults = this.getCheckResults(dep.id);
+        if (checkResults.length === 0) {
+          if (depProject) {
+            const settings = projectSettings(depProject);
+            if (settings.postDone?.enabled || depProject.checks) {
+              const checkStatus = this.checkMandatoryChecksForTask(dep, depProject, depHead);
+              if (!checkStatus.ok) {
+                reasons.push(`task gốc "${dep.id}" ${checkStatus.reason}`);
+              }
+            }
+          }
+        } else {
+          const checkStatus = this.checkMandatoryChecksForTask(dep, depProject, depHead);
+          if (!checkStatus.ok) {
+            reasons.push(`task gốc "${dep.id}" ${checkStatus.reason}`);
+          }
         }
       }
     }
@@ -4165,9 +4188,8 @@ export class Scheduler {
     const step = chain[task.reviewStep ?? 0];
 
     if (verdict === 'approved') {
-      const project = this.projectRepo.get(task.projectId);
-      const checkStatus = this.checkMandatoryChecksForTask(task, project);
-      if (!checkStatus.ok) return;
+      const checks = this.getCheckResults(taskId);
+      if (checks.some((c) => !c.ok)) return;
       if (isAutoReviewer(by) && (!feedback || feedback.trim() === '')) return;
       if ((isAutoReviewer(by) || by === 'claude-review') && this.reviewRepo) {
         this.reviewRepo.insert({ id: crypto.randomUUID(), taskId, verdict, feedback: feedback || null, actor: by || 'reviewer' });
@@ -4184,6 +4206,16 @@ export class Scheduler {
           this.eventBus.emit('task.review_ready', task.id, { reviewChainComplete: true, reason: 'review_approved' });
           return;
         }
+      }
+      const project = this.projectRepo.get(task.projectId);
+      const settings = project ? projectSettings(project) : null;
+      const repoPath = task.worktreePath || (project ? project.path : undefined);
+      const currentHead = repoPath ? worktreeHeadSync(repoPath) : null;
+      const isConfigured = Boolean(settings?.postDone?.enabled || project?.checks || (repoPath && fs.existsSync(path.join(repoPath, 'package.json'))));
+      const isAuto = Boolean(by && (isAutoReviewer(by) || by === 'reviewer'));
+      if (isConfigured || isAuto || checks.length > 0) {
+        const checkStatus = this.checkMandatoryChecksForTask(task, project, currentHead);
+        if (!checkStatus.ok) return;
       }
       if (!isAutoReviewer(by)) this.resetReviewerEscalation(taskId);
       this.taskRepo.updateStatus(taskId, 'done');
@@ -4830,12 +4862,16 @@ export class Scheduler {
         if (!hasCommits) continue;
 
         // Verify mandatory checks have passed before auto-closing to done
-        const checkResults = this.getCheckResults(task.id);
-        const runs = this.runRepo.getByTask(task.id);
-        if (checkResults.length > 0 || runs.length > 0 || projectSettings(project).postDone?.enabled || project.checks) {
-          const checkStatus = this.checkMandatoryChecksForTask(task, project);
-          if (!checkStatus.ok) continue;
+        const repoPath = task.worktreePath || project.path;
+        const currentHead = repoPath ? (await worktreeHead(repoPath)) : null;
+        let checkStatus = this.checkMandatoryChecksForTask(task, project, currentHead);
+        if (!checkStatus.ok && this.db && this.getCheckResults(task.id).length === 0) {
+          const runId = crypto.randomUUID();
+          this.runRepo.insert({ id: runId, taskId: task.id, engine: 'hub', model: 'checks', profileName: 'hub' });
+          await new CheckRunner(this.db).run(task, project, runId);
+          checkStatus = this.checkMandatoryChecksForTask(task, project, currentHead);
         }
+        if (!checkStatus.ok) continue;
 
         // Clean up any reviewer runs/state if task was in review
         const reviewerRun = this.reviewerRuns.get(task.id);

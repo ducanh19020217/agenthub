@@ -53,7 +53,7 @@ import { CodexEngine } from '../engines/index.js';
 import { hasClaudeQuotaAvailable, QuotaUsageService } from '../quota/usage.js';
 import { QuotaService } from '../quota/index.js';
 import { ProfileLockService } from '../profiles/locks.js';
-import { CheckRunner, worktreeHead } from '../checks.js';
+import { CheckRunner, worktreeHead, worktreeHeadSync } from '../checks.js';
 import { BrainService } from '../brain.js';
 import { toApiTime } from '../db/time.js';
 import { ChatService } from '../chat/service.js';
@@ -4568,9 +4568,17 @@ export class AppService {
     const parsed = ReviewTaskSchema.parse(raw);
     if (parsed.verdict === 'approved') {
       const project = this.projectRepo.get(task.projectId);
-      const checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project);
-      if (!checkStatus.ok) {
-        throw new HttpError(400, 'bad_request', `Không thể duyệt hoàn thành task khi checks chưa đạt: ${checkStatus.reason}`);
+      const settings = project ? projectSettings(project) : null;
+      const repoPath = task.worktreePath || (project ? project.path : undefined);
+      const currentHead = repoPath ? worktreeHeadSync(repoPath) : null;
+      const checks = this.scheduler.getCheckResults(taskId);
+      const isConfigured = Boolean(settings?.postDone?.enabled || project?.checks || (repoPath && fs.existsSync(path.join(repoPath, 'package.json'))));
+      const isAuto = Boolean(parsed.by && (isAutoReviewer(parsed.by) || parsed.by === 'reviewer' || parsed.by === 'auto-merge'));
+      if (isConfigured || isAuto || checks.length > 0) {
+        const checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
+        if (!checkStatus.ok) {
+          throw new HttpError(400, 'bad_request', `Không thể duyệt hoàn thành task khi checks chưa đạt: ${checkStatus.reason}`);
+        }
       }
     }
     if (this.reviewingTasks.has(taskId)) {
@@ -4758,9 +4766,13 @@ export class AppService {
         checks = this.scheduler.getCheckResults(taskId);
       }
       if (this.taskRepo.get(taskId)?.status !== 'review') return;
-      if (checks.length === 0 || !this.scheduler.checkMandatoryChecksForTask(task, project).ok) { skip('checks_failed', checks, retried); return; }
+      const repoPath = task.worktreePath || (project ? project.path : undefined);
+      const currentHead = repoPath ? (await worktreeHead(repoPath)) : null;
+      if (checks.length === 0 || !this.scheduler.checkMandatoryChecksForTask(task, project, currentHead).ok) { skip('checks_failed', checks, retried); return; }
     }
-    if (!this.scheduler.checkMandatoryChecksForTask(task, project).ok) { skip('checks_failed', checks); return; }
+    const repoPath = task.worktreePath || (project ? project.path : undefined);
+    const currentHead = repoPath ? (await worktreeHead(repoPath)) : null;
+    if (!this.scheduler.checkMandatoryChecksForTask(task, project, currentHead).ok) { skip('checks_failed', checks); return; }
     if (this.failedAutoMerges.has(taskId)) { skip('merge_failed', checks); return; }
     // The ready event can arrive twice for one approval; the first call is already merging.
     if (this.reviewingTasks.has(taskId)) {

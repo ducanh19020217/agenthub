@@ -2327,10 +2327,6 @@ export class Scheduler {
       this.runRepo.finish(rt.runId, 'blocked');
       this.taskRepo.update(taskId, { status: 'blocked', blockedReport: markers.blockedContent || currentTask.blockedReport, transientRetries: 0, notBefore: null });
       this.eventBus.emit('task.blocked', taskId);
-    } else if (this.hasCommitAfter(currentTask, rt.startTime)) {
-      if (this.recordWorkerCrash(taskId, rt, 'resume_after_progress')) return;
-      this.taskRepo.update(taskId, { status: 'queued', resume: 1 });
-      this.eventBus.emit('task.queued', taskId, { reason: 'resume_after_progress' });
     } else {
       const exitCode = rt.exitCode ?? rt.child?.exitCode ?? null;
       const exitSignal = rt.exitSignal ?? null;
@@ -2342,8 +2338,12 @@ export class Scheduler {
       }
       const isLockBusy = durationMs < 3000 && logTail.trim() === '' && Boolean(rt.lockFile) && exitCode === 1;
 
-      if (isLockBusy) {
-        if (this.recordWorkerCrash(taskId, rt, 'lock_busy')) return;
+      if (this.hasCommitAfter(currentTask, rt.startTime)) {
+        if (this.recordWorkerCrash(taskId, rt, codexExitReason || 'resume_after_progress')) return;
+        this.taskRepo.update(taskId, { status: 'queued', resume: 1 });
+        this.eventBus.emit('task.queued', taskId, { reason: 'resume_after_progress' });
+      } else if (isLockBusy) {
+        if (this.recordWorkerCrash(taskId, rt, codexExitReason || 'lock_busy')) return;
         this.taskRepo.update(taskId, {
           status: 'queued',
           notBefore: Math.floor(Date.now() / 1000) + 5,

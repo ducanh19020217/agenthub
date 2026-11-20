@@ -197,6 +197,88 @@ describe('Codex worker crash diagnostics', () => {
     expect(fs.readFileSync(logPath, 'utf8')).toContain('exit=7 signal=none stderr=<trống>');
     scheduler.stop();
   });
+
+  it('records Codex early-exit diagnostics even when the worker has progress commits', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-commit-crash.log');
+    fs.writeFileSync(logPath, '');
+    profileRepo.upsert({ name: 'codex-commit', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/codex-commit-crash', projectId: 'test-project', slug: 'codex-commit-crash', title: 'Commit Codex crash', status: 'running', runCount: 1, branch: 'missing-commit-branch' });
+    runRepo.insert({ id: 'codex-commit-run', taskId: 'test-project/codex-commit-crash', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-commit', logPath });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      handleRunCompletion: (taskId: string, rt: unknown) => Promise<void>;
+      running: Map<string, unknown>;
+      hasCommitAfter: (task: unknown, startTime: number) => boolean;
+    };
+    internal.hasCommitAfter = () => true;
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const rt = {
+      runId: 'codex-commit-run', taskId: 'test-project/codex-commit-crash', pid: 999997, pidStart: null,
+      engine, model: 'codex:gpt-5.6-luna', profileName: 'codex-commit', projectId: 'test-project',
+      startTime: Date.now() + 60_000, timeoutMs: 60_000, timeoutAt: Date.now() + 60_000, retryCount: 0,
+      lastOutputAt: Date.now(), lastActivityAt: Date.now(), activitySource: 'log', activityCheckedAt: Date.now(),
+      cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+      exitCode: 42, exitSignal: 'SIGABRT', stderrTail: 'panic: runtime error',
+    };
+    internal.running.set('test-project/codex-commit-crash', rt);
+    await internal.handleRunCompletion('test-project/codex-commit-crash', rt);
+
+    const reason = runRepo.get('codex-commit-run')?.reason || '';
+    expect(reason).toContain('exit=42 signal=SIGABRT stderr=panic: runtime error');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('exit=42 signal=SIGABRT stderr=panic: runtime error');
+    const task = taskRepo.get('test-project/codex-commit-crash');
+    expect(task?.status).toBe('queued');
+    expect(task?.resume).toBe(1);
+    scheduler.stop();
+  });
+
+  it('records Codex early-exit diagnostics when lock_busy occurs', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-lock-crash.log');
+    fs.writeFileSync(logPath, '');
+    profileRepo.upsert({ name: 'codex-lock', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/codex-lock-crash', projectId: 'test-project', slug: 'codex-lock-crash', title: 'Lock Codex crash', status: 'running', runCount: 1, branch: 'missing-lock-branch' });
+    runRepo.insert({ id: 'codex-lock-run', taskId: 'test-project/codex-lock-crash', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-lock', logPath });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      handleRunCompletion: (taskId: string, rt: unknown) => Promise<void>;
+      running: Map<string, unknown>;
+      hasCommitAfter: (task: unknown, startTime: number) => boolean;
+    };
+    internal.hasCommitAfter = () => false;
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const now = Date.now();
+    const rt = {
+      runId: 'codex-lock-run', taskId: 'test-project/codex-lock-crash', pid: 999996, pidStart: null,
+      engine, model: 'codex:gpt-5.6-luna', profileName: 'codex-lock', projectId: 'test-project',
+      startTime: now - 1000, timeoutMs: 60_000, timeoutAt: now + 59_000, retryCount: 0,
+      lastOutputAt: now, lastActivityAt: now, activitySource: 'log', activityCheckedAt: now,
+      cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+      exitCode: 1, exitSignal: null, stderrTail: 'cannot acquire profile lock', lockFile: '/tmp/test.lock',
+    };
+    internal.running.set('test-project/codex-lock-crash', rt);
+    await internal.handleRunCompletion('test-project/codex-lock-crash', rt);
+
+    const reason = runRepo.get('codex-lock-run')?.reason || '';
+    expect(reason).toContain('exit=1 signal=none stderr=cannot acquire profile lock');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('exit=1 signal=none stderr=cannot acquire profile lock');
+    const task = taskRepo.get('test-project/codex-lock-crash');
+    expect(task?.status).toBe('queued');
+    scheduler.stop();
+  });
 });
 
 describe('Claude profiles are never worker scheduler profiles', () => {
@@ -2057,7 +2139,7 @@ describe('Codex slots', () => {
     const runs = runRepo.getByTask('test-project/flock-busy-task');
     expect(runs).toHaveLength(1);
     expect(runs[0].outcome).toBe('crashed');
-    expect(runs[0].reason).toBe('lock_busy');
+    expect(runs[0].reason).toContain('exit=1 signal=none');
 
     const events = eventRepo.getRecent(20);
     expect(events.some((e) => e.type === 'task.queued' && e.payload?.includes('lock_busy'))).toBe(true);

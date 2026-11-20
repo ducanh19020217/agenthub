@@ -365,6 +365,18 @@ describe('AgentHub MCP Server Tools', () => {
     expect(profRes.content[0].text).toContain('p2 [agy]');
     expect(profRes.content[0].text).toContain('p2(cần xác minh)');
     expect(profRes.content[0].text).toContain('[Cần xác minh: https://accounts.google.com/signin/continue?sarp=1]');
+
+    ctx.quotaMarkRepo.mark('p1', 'codex', Math.floor(Date.now() / 1000) + 3600, 'tạm loại hồ sơ sau 2 crash liên tiếp');
+    const profWithReasonRes = (await client.callTool({ name: 'hub_profiles', arguments: {} })) as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(profWithReasonRes.content[0].text).toContain('(tạm loại hồ sơ sau 2 crash liên tiếp)');
+    expect(profWithReasonRes.content[0].text).toContain('[tạm loại hồ sơ sau 2 crash liên tiếp]');
+
+    const statusWithReasonRes = (await client.callTool({ name: 'hub_status', arguments: {} })) as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(statusWithReasonRes.content[0].text).toContain('(tạm loại hồ sơ sau 2 crash liên tiếp)');
   });
 
   it('hub_create_task and hub_tasks create and list tasks', async () => {
@@ -537,6 +549,22 @@ describe('AgentHub MCP Server Tools', () => {
     })) as { content: Array<{ type: string; text: string }> };
     expect(logRes.content[0].text).toContain('Step 1: start');
     expect(logRes.content[0].text).toContain('Step 2: done');
+
+    // Verify run reason is displayed in hub_task
+    ctx.runRepo.insert({
+      id: 'r2',
+      taskId: 'proj/t1',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-1',
+      startedAt: Date.now() - 10000,
+    });
+    ctx.runRepo.finish('r2', 'crashed', undefined, '[hub] codex thoát sớm: exit=23 signal=SIGTERM stderr=bad config');
+    const taskResWithCrash = (await client.callTool({
+      name: 'hub_task',
+      arguments: { id: 'proj/t1' },
+    })) as { content: Array<{ type: string; text: string }> };
+    expect(taskResWithCrash.content[0].text).toContain('- lý do: [hub] codex thoát sớm: exit=23 signal=SIGTERM stderr=bad config');
   });
 
   it('hub_review and hub_retry handle task reviews and retrying failed tasks', async () => {

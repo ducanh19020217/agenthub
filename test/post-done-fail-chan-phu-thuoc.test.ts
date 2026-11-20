@@ -370,6 +370,8 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
       path.join(repoDir, 'post-done.js'),
       'console.log("Render frame done");\nprocess.exit(0);\n',
     );
+    execFileSync('git', ['add', 'post-done.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'fix: post-done script'], { cwd: repoDir });
 
     // Gọi tool hub_rerun_checks qua MCP client
     const res = await client.callTool({
@@ -447,7 +449,7 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
     expect(closed2).toBe(0);
     expect(ctx.taskRepo.get('test-proj/t-merged-fail')?.status).toBe('blocked');
 
-    // Sau khi sửa tay và post-done check pass
+    // Sau khi sửa tay và tất cả mandatory checks (kèm post-done) pass
     ctx.runRepo.insert({
       id: 'run-mf-2',
       taskId: 'test-proj/t-merged-fail',
@@ -455,9 +457,11 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
       model: 'checks',
       profileName: 'hub',
     });
-    ctx.db.prepare(
-      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'post-done', 1, 0, 10, 'SUCCESS')",
-    ).run('test-proj/t-merged-fail', 'run-mf-2');
+    for (const name of ['post-done', 'zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
+      ctx.db.prepare(
+        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, 1, 0, 10, 'SUCCESS')",
+      ).run('test-proj/t-merged-fail', 'run-mf-2', name);
+    }
 
     // Bây giờ autoCloseMergedTasks được phép chuyển sang done
     const closed3 = await ctx.scheduler.autoCloseMergedTasks();
@@ -480,13 +484,13 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
     // 1. Khi chưa có check result nào -> service.reviewTask approved bị chặn
     await expect(
       ctx.service.reviewTask('test-proj/t-review-postdone', { verdict: 'approved', by: 'reviewer' }),
-    ).rejects.toThrow('chưa pass check bắt buộc "post-done"');
+    ).rejects.toThrow('chưa pass check bắt buộc');
 
     // scheduler.reviewTask cũng không chuyển task sang done
     ctx.scheduler.reviewTask('test-proj/t-review-postdone', 'approved', 'looks good', 'reviewer');
     expect(ctx.taskRepo.get('test-proj/t-review-postdone')?.status).toBe('review');
 
-    // 2. Khi có check result khác pass nhưng THIẾU post-done -> vẫn bị chặn
+    // 2. Khi có các mandatory checks khác pass nhưng THIẾU post-done -> vẫn bị chặn
     ctx.runRepo.insert({
       id: 'run-r-1',
       taskId: 'test-proj/t-review-postdone',
@@ -494,9 +498,11 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
       model: 'checks',
       profileName: 'hub',
     });
-    ctx.db.prepare(
-      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'lint', 1, 0, 5, 'ok')",
-    ).run('test-proj/t-review-postdone', 'run-r-1');
+    for (const name of ['zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
+      ctx.db.prepare(
+        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, 1, 0, 5, 'ok')",
+      ).run('test-proj/t-review-postdone', 'run-r-1', name);
+    }
 
     await expect(
       ctx.service.reviewTask('test-proj/t-review-postdone', { verdict: 'approved', by: 'reviewer' }),
@@ -511,7 +517,7 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
       ctx.service.reviewTask('test-proj/t-review-postdone', { verdict: 'approved', by: 'reviewer' }),
     ).rejects.toThrow('check thất bại: post-done');
 
-    // 4. Khi post-done pass -> duyệt approved thành công và chuyển done
+    // 4. Khi tất cả mandatory checks (kèm post-done) pass -> duyệt approved thành công và chuyển done
     ctx.runRepo.insert({
       id: 'run-r-2',
       taskId: 'test-proj/t-review-postdone',
@@ -519,11 +525,131 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
       model: 'checks',
       profileName: 'hub',
     });
-    ctx.db.prepare(
-      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'post-done', 1, 0, 10, 'ok')",
-    ).run('test-proj/t-review-postdone', 'run-r-2');
+    for (const name of ['post-done', 'zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
+      ctx.db.prepare(
+        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, 1, 0, 10, 'ok')",
+      ).run('test-proj/t-review-postdone', 'run-r-2', name);
+    }
 
     await ctx.service.reviewTask('test-proj/t-review-postdone', { verdict: 'approved', by: 'reviewer', feedback: 'all good' });
     expect(ctx.taskRepo.get('test-proj/t-review-postdone')?.status).toBe('done');
+  });
+
+  it('Feedback P1.1: checkMandatoryChecks yêu cầu đầy đủ internal mandatory checks', async () => {
+    ctx.taskRepo.insert({
+      id: 'test-proj/t-missing-internal',
+      projectId: 'test-proj',
+      slug: 't-missing-internal',
+      title: 'Task with only post-done but missing internal mandatory checks',
+      status: 'review',
+      worktreePath: repoDir,
+      baseRef: 'main',
+      branch: 'main',
+    });
+
+    ctx.runRepo.insert({
+      id: 'run-internal-1',
+      taskId: 'test-proj/t-missing-internal',
+      engine: 'hub',
+      model: 'checks',
+      profileName: 'hub',
+    });
+
+    // Chỉ có post-done pass, thiếu zero-byte, uncommitted, conflict-markers, agenthub-files
+    ctx.db.prepare(
+      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'post-done', 1, 0, 10, 'ok')",
+    ).run('test-proj/t-missing-internal', 'run-internal-1');
+
+    const checkStatus = ctx.scheduler.checkMandatoryChecksForTask(
+      ctx.taskRepo.get('test-proj/t-missing-internal')!,
+      ctx.projectRepo.get('test-proj'),
+    );
+    expect(checkStatus.ok).toBe(false);
+    expect(checkStatus.reason).toContain('chưa pass check bắt buộc "zero-byte"');
+
+    await expect(
+      ctx.service.reviewTask('test-proj/t-missing-internal', { verdict: 'approved', by: 'reviewer' }),
+    ).rejects.toThrow('chưa pass check bắt buộc "zero-byte"');
+
+    // Thêm các internal check còn lại
+    for (const name of ['zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
+      ctx.db.prepare(
+        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, 1, 0, 5, 'ok')",
+      ).run('test-proj/t-missing-internal', 'run-internal-1', name);
+    }
+
+    const checkStatus2 = ctx.scheduler.checkMandatoryChecksForTask(
+      ctx.taskRepo.get('test-proj/t-missing-internal')!,
+      ctx.projectRepo.get('test-proj'),
+    );
+    expect(checkStatus2.ok).toBe(true);
+
+    await ctx.service.reviewTask('test-proj/t-missing-internal', { verdict: 'approved', by: 'reviewer' });
+    expect(ctx.taskRepo.get('test-proj/t-missing-internal')?.status).toBe('done');
+  });
+
+  it('Feedback P1.2: checkMandatoryChecks và rerunChecks từ chối / loại bỏ kết quả check từ HEAD cũ', async () => {
+    // Commit 1: ban đầu
+    const head1 = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+
+    ctx.taskRepo.insert({
+      id: 'test-proj/t-stale-head',
+      projectId: 'test-proj',
+      slug: 't-stale-head',
+      title: 'Task with checks from stale HEAD',
+      status: 'blocked',
+      worktreePath: repoDir,
+      baseRef: 'main',
+      branch: 'main',
+    });
+
+    ctx.runRepo.insert({
+      id: 'run-sh-1',
+      taskId: 'test-proj/t-stale-head',
+      engine: 'hub',
+      model: 'checks',
+      profileName: 'hub',
+    });
+
+    // Tất cả checks pass nhưng gắn với head1
+    for (const name of ['post-done', 'zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
+      ctx.db.prepare(
+        'INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 5, ?, ?)',
+      ).run('test-proj/t-stale-head', 'run-sh-1', name, 'ok', head1);
+    }
+
+    // Commit mới: head2
+    fs.writeFileSync(path.join(repoDir, 'new-file.txt'), 'new commit');
+    execFileSync('git', ['add', '.'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'feat: new commit on branch'], { cwd: repoDir });
+    const head2 = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+    expect(head1).not.toBe(head2);
+
+    // Khi kiểm tra với head2: checkMandatoryChecks phát hiện stale head và từ chối
+    const task = ctx.taskRepo.get('test-proj/t-stale-head')!;
+    const proj = ctx.projectRepo.get('test-proj')!;
+    const staleStatus = ctx.scheduler.checkMandatoryChecksForTask(task, proj, head2);
+    expect(staleStatus.ok).toBe(false);
+    expect(staleStatus.reason).toContain('không khớp HEAD hiện tại');
+
+    // Chạy rerunChecks
+    fs.writeFileSync(
+      path.join(repoDir, 'post-done.js'),
+      'console.log("Post done ok");\nprocess.exit(0);\n',
+    );
+    execFileSync('git', ['add', 'post-done.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'fix: post-done on head3'], { cwd: repoDir });
+
+    const rerunRes = await ctx.service.rerunChecks('test-proj/t-stale-head', { onlyNames: ['post-done'] });
+    expect(rerunRes.passed).toBe(true);
+    expect(rerunRes.allPassed).toBe(true);
+
+    // Task chuyển thành done và kết quả lưu trong DB mang HEAD mới nhất
+    expect(ctx.taskRepo.get('test-proj/t-stale-head')?.status).toBe('done');
+    const results = ctx.scheduler.getCheckResults('test-proj/t-stale-head');
+    const head3 = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+    for (const r of results) {
+      expect(r.head).toBe(head3);
+    }
   });
 });

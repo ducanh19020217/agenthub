@@ -524,35 +524,42 @@ export class Scheduler {
     return true;
   }
 
+  private recordProfileCrash(
+    profileName: string,
+    model: string,
+    reason?: string,
+    taskId?: string,
+  ): void {
+    const profile = this.profileRepo.get(profileName);
+    if (!profile) return;
+    const now = Date.now();
+    if (profile.lastCrashAt && now - profile.lastCrashAt > this.config.profileCooling.windowMin * 60_000) this.profileRepo.resetCrashes(profile.name);
+    const inWindow = profile.lastCrashAt != null && now - profile.lastCrashAt <= this.config.profileCooling.windowMin * 60_000;
+    const nextCount = inWindow ? (profile.consecutiveCrashes || 0) + 1 : 1;
+    const coolingUntil = nextCount >= this.config.profileCooling.threshold
+      ? Math.floor((now + this.config.profileCooling.coolingMin * 60_000) / 1000)
+      : null;
+    this.profileRepo.recordCrash(profile.name, now, coolingUntil);
+    if (coolingUntil) {
+      const coolingSeconds = Math.max(60, this.config.profileCooling.coolingMin * 60);
+      const markReason = `tạm loại hồ sơ sau ${nextCount} crash liên tiếp${reason ? `: ${reason}` : ''}`;
+      this.quotaService.mark(profile.name, getModelFamily(model), coolingSeconds, markReason.slice(0, 1000));
+      this.eventBus.emit('profile.cooling', taskId, { profile: profile.name, until: coolingUntil, reason: 'consecutive_crashes', message: markReason });
+    }
+  }
+
   private recordWorkerCrash(
     taskId: string,
     target: { runId: string; profileName: string; model: string },
     reason?: string,
   ): boolean {
     this.runRepo.finish(target.runId, 'crashed', undefined, reason);
+    this.recordProfileCrash(target.profileName, target.model, reason, taskId);
     const task = this.taskRepo.get(taskId);
     if (!task) return false;
+    if (task.status === 'done' || task.status === 'cancelled') return false;
     const crashes = (task.consecutiveCrashes || 0) + 1;
     this.taskRepo.update(taskId, { consecutiveCrashes: crashes });
-    const profile = this.profileRepo.get(target.profileName);
-    if (profile) {
-      const now = Date.now();
-      if (profile.lastCrashAt && now - profile.lastCrashAt > this.config.profileCooling.windowMin * 60_000) this.profileRepo.resetCrashes(profile.name);
-      const inWindow = profile.lastCrashAt != null && now - profile.lastCrashAt <= this.config.profileCooling.windowMin * 60_000;
-      const nextCount = inWindow ? (profile.consecutiveCrashes || 0) + 1 : 1;
-      const coolingUntil = nextCount >= this.config.profileCooling.threshold
-        ? Math.floor((now + this.config.profileCooling.coolingMin * 60_000) / 1000)
-        : null;
-      this.profileRepo.recordCrash(profile.name, now, coolingUntil);
-      if (coolingUntil) {
-        const coolingSeconds = Math.max(60, this.config.profileCooling.coolingMin * 60);
-        const markReason = `tạm loại hồ sơ sau ${nextCount} crash liên tiếp${reason ? `: ${reason}` : ''}`;
-        // A cooling profile must be visible to the same consumers as quota
-        // state, otherwise the dashboard/MCP still reports it as runnable.
-        this.quotaService.mark(profile.name, getModelFamily(target.model), coolingSeconds, markReason.slice(0, 1000));
-        this.eventBus.emit('profile.cooling', taskId, { profile: profile.name, until: coolingUntil, reason: 'consecutive_crashes', message: markReason });
-      }
-    }
     const limits = this.schedulerLimits();
     if (crashes >= limits.maxConsecutiveCrashesPerTask || (task.runCount || 0) >= limits.maxRunsPerTask) {
       const message = crashes >= limits.maxConsecutiveCrashesPerTask
@@ -1049,6 +1056,7 @@ export class Scheduler {
         // found during daemon recovery.
         if (task.status === 'done' || task.status === 'cancelled') {
           this.runRepo.finish(run.id, 'crashed', undefined, codexExitReason);
+          this.recordProfileCrash(run.profileName, run.model, codexExitReason, run.taskId);
           continue;
         }
         const blocked = this.recordWorkerCrash(

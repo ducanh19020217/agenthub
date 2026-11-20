@@ -2949,6 +2949,41 @@ describe('Crash recovery on startup', () => {
     scheduler.stop();
   });
 
+  it('applies profile crash cooling while keeping terminal task status during daemon recovery', async () => {
+    const projectPath = path.join(tmpDir, 'repo');
+    createTestProject(projectPath);
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-term-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    const logPath = path.join(tmpDir, 'codex-term.log');
+    fs.writeFileSync(logPath, 'fatal error: memory exhausted\n');
+
+    taskRepo.insert({ id: 'test-project/cancelled-old', projectId: 'test-project', slug: 'cancelled-old', title: 'Cancelled', status: 'cancelled' });
+    runRepo.insert({
+      id: 'run-codex-cancelled-old',
+      taskId: 'test-project/cancelled-old',
+      engine: 'codex',
+      model: 'codex:gpt-5.6-luna',
+      profileName: 'codex-term-prof',
+      logPath,
+      pid: 999999,
+    });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map());
+    scheduler.start();
+
+    // Task must remain cancelled (terminal)
+    expect(taskRepo.get('test-project/cancelled-old')?.status).toBe('cancelled');
+    const run = runRepo.get('run-codex-cancelled-old')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toContain('[hub] codex thoát sớm: exit=null signal=none stderr=fatal error: memory exhausted');
+
+    // Profile crash accounting and cooling must be applied
+    const mark = quotaMarkRepo.getAll().find((row) => row.profileName === 'codex-term-prof' && row.family === 'codex');
+    expect(mark?.reason).toContain('tạm loại hồ sơ sau 1 crash liên tiếp');
+    expect(profileRepo.get('codex-term-prof')?.coolingUntil).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    scheduler.stop();
+  });
+
   it('does not treat a stale marker on a queued task as a new completion', async () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);

@@ -402,4 +402,128 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
     expect(retryText).toContain('✓ Đã retry task');
     expect(retryText).toContain('trạng thái: [done]');
   });
+
+  it('Feedback 1: autoCloseMergedTasks chặn chuyển done khi post-done fail hoặc thiếu check hợp lệ dù branch đã merge', async () => {
+    // Tạo branch cho task và merge vào main
+    execFileSync('git', ['checkout', '-b', 'agenthub/task-merged-fail', 'main'], { cwd: repoDir });
+    fs.writeFileSync(path.join(repoDir, 'merged-fail.txt'), 'some code');
+    execFileSync('git', ['add', '.'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'feat: work for merged fail task'], { cwd: repoDir });
+    execFileSync('git', ['checkout', 'main'], { cwd: repoDir });
+    execFileSync('git', ['merge', '--no-ff', 'agenthub/task-merged-fail', '-m', 'Merge branch agenthub/task-merged-fail'], { cwd: repoDir });
+
+    // Task bị blocked do post-done fail
+    ctx.taskRepo.insert({
+      id: 'test-proj/t-merged-fail',
+      projectId: 'test-proj',
+      slug: 't-merged-fail',
+      title: 'Merged task with failing post-done',
+      status: 'blocked',
+      branch: 'agenthub/task-merged-fail',
+      baseRef: 'main',
+      worktreePath: repoDir,
+    });
+
+    // Run có check result post-done = fail
+    ctx.runRepo.insert({
+      id: 'run-mf-1',
+      taskId: 'test-proj/t-merged-fail',
+      engine: 'hub',
+      model: 'checks',
+      profileName: 'hub',
+    });
+    ctx.db.prepare(
+      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'post-done', 0, 1, 10, 'NameError: TAU')",
+    ).run('test-proj/t-merged-fail', 'run-mf-1');
+
+    // Gọi autoCloseMergedTasks -> KHÔNG được chuyển task sang done vì post-done fail
+    const closed1 = await ctx.scheduler.autoCloseMergedTasks();
+    expect(closed1).toBe(0);
+    expect(ctx.taskRepo.get('test-proj/t-merged-fail')?.status).toBe('blocked');
+
+    // Trường hợp thiếu check post-done (ví dụ chỉ có check khác hoặc không có check result)
+    ctx.db.prepare('DELETE FROM check_results WHERE taskId = ?').run('test-proj/t-merged-fail');
+    const closed2 = await ctx.scheduler.autoCloseMergedTasks();
+    expect(closed2).toBe(0);
+    expect(ctx.taskRepo.get('test-proj/t-merged-fail')?.status).toBe('blocked');
+
+    // Sau khi sửa tay và post-done check pass
+    ctx.runRepo.insert({
+      id: 'run-mf-2',
+      taskId: 'test-proj/t-merged-fail',
+      engine: 'hub',
+      model: 'checks',
+      profileName: 'hub',
+    });
+    ctx.db.prepare(
+      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'post-done', 1, 0, 10, 'SUCCESS')",
+    ).run('test-proj/t-merged-fail', 'run-mf-2');
+
+    // Bây giờ autoCloseMergedTasks được phép chuyển sang done
+    const closed3 = await ctx.scheduler.autoCloseMergedTasks();
+    expect(closed3).toBe(1);
+    expect(ctx.taskRepo.get('test-proj/t-merged-fail')?.status).toBe('done');
+  });
+
+  it('Feedback 2: reviewTask approved bị chặn khi thiếu check post-done hoặc post-done fail', async () => {
+    ctx.taskRepo.insert({
+      id: 'test-proj/t-review-postdone',
+      projectId: 'test-proj',
+      slug: 't-review-postdone',
+      title: 'Task in review with postDone enabled',
+      status: 'review',
+      worktreePath: repoDir,
+      baseRef: 'main',
+      branch: 'main',
+    });
+
+    // 1. Khi chưa có check result nào -> service.reviewTask approved bị chặn
+    await expect(
+      ctx.service.reviewTask('test-proj/t-review-postdone', { verdict: 'approved', by: 'reviewer' }),
+    ).rejects.toThrow('chưa pass check bắt buộc "post-done"');
+
+    // scheduler.reviewTask cũng không chuyển task sang done
+    ctx.scheduler.reviewTask('test-proj/t-review-postdone', 'approved', 'looks good', 'reviewer');
+    expect(ctx.taskRepo.get('test-proj/t-review-postdone')?.status).toBe('review');
+
+    // 2. Khi có check result khác pass nhưng THIẾU post-done -> vẫn bị chặn
+    ctx.runRepo.insert({
+      id: 'run-r-1',
+      taskId: 'test-proj/t-review-postdone',
+      engine: 'hub',
+      model: 'checks',
+      profileName: 'hub',
+    });
+    ctx.db.prepare(
+      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'lint', 1, 0, 5, 'ok')",
+    ).run('test-proj/t-review-postdone', 'run-r-1');
+
+    await expect(
+      ctx.service.reviewTask('test-proj/t-review-postdone', { verdict: 'approved', by: 'reviewer' }),
+    ).rejects.toThrow('chưa pass check bắt buộc "post-done"');
+
+    // 3. Khi post-done fail -> bị từ chối
+    ctx.db.prepare(
+      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'post-done', 0, 1, 10, 'failed')",
+    ).run('test-proj/t-review-postdone', 'run-r-1');
+
+    await expect(
+      ctx.service.reviewTask('test-proj/t-review-postdone', { verdict: 'approved', by: 'reviewer' }),
+    ).rejects.toThrow('check thất bại: post-done');
+
+    // 4. Khi post-done pass -> duyệt approved thành công và chuyển done
+    ctx.runRepo.insert({
+      id: 'run-r-2',
+      taskId: 'test-proj/t-review-postdone',
+      engine: 'hub',
+      model: 'checks',
+      profileName: 'hub',
+    });
+    ctx.db.prepare(
+      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, 'post-done', 1, 0, 10, 'ok')",
+    ).run('test-proj/t-review-postdone', 'run-r-2');
+
+    await ctx.service.reviewTask('test-proj/t-review-postdone', { verdict: 'approved', by: 'reviewer', feedback: 'all good' });
+    expect(ctx.taskRepo.get('test-proj/t-review-postdone')?.status).toBe('done');
+  });
 });

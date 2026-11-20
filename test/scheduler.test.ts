@@ -115,6 +115,54 @@ describe('Quota mark propagation to same-email profiles', () => {
   });
 });
 
+describe('Codex worker crash diagnostics', () => {
+  beforeEach(setupTestEnv);
+  afterEach(teardownTestEnv);
+
+  it('records exit/signal/stderr in the run and temporarily marks a repeatedly failing profile', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-crash.log');
+    fs.writeFileSync(logPath, '');
+    config.profileCooling.threshold = 1;
+    profileRepo.upsert({ name: 'codex-1', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/codex-crash', projectId: 'test-project', slug: 'codex-crash', title: 'Codex crash', status: 'running', runCount: 1, branch: 'missing-crash-branch' });
+    runRepo.insert({ id: 'codex-crash-run', taskId: 'test-project/codex-crash', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-1', logPath });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      handleRunCompletion: (taskId: string, rt: unknown) => Promise<void>;
+      running: Map<string, unknown>;
+    };
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const rt = {
+      runId: 'codex-crash-run', taskId: 'test-project/codex-crash', pid: 999999, pidStart: null,
+      engine, model: 'codex:gpt-5.6-luna', profileName: 'codex-1', projectId: 'test-project',
+      startTime: Date.now() + 60_000, timeoutMs: 60_000, timeoutAt: Date.now() + 60_000, retryCount: 0,
+      lastOutputAt: Date.now(), lastActivityAt: Date.now(), activitySource: 'log', activityCheckedAt: Date.now(),
+      cachedConversationMtime: 0, cachedWorktreeMtime: 0, usageBefore: null,
+      exitCode: 23, exitSignal: 'SIGTERM', stderrTail: 'Error loading config.toml: invalid type',
+    };
+    internal.running.set('test-project/codex-crash', rt);
+    await internal.handleRunCompletion('test-project/codex-crash', rt);
+
+    const run = runRepo.get('codex-crash-run');
+    expect(run?.outcome).toBe('crashed');
+    expect(run?.reason).toContain('[hub] codex thoát sớm: exit=23 signal=SIGTERM stderr=Error loading config.toml');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('[hub] codex thoát sớm: exit=23 signal=SIGTERM');
+
+    // Repeated failures are cooled and represented as a visible codex mark.
+    const mark = quotaMarkRepo.getAll().find((row) => row.profileName === 'codex-1' && row.family === 'codex');
+    expect(mark?.reason).toContain('tạm loại hồ sơ');
+    expect(profileRepo.get('codex-1')?.coolingUntil).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    scheduler.stop();
+  });
+});
+
 describe('Claude profiles are never worker scheduler profiles', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);

@@ -567,7 +567,10 @@ export class CodexEngine implements Engine {
       cwd: opts.cwd,
       env,
       detached: true,
-      stdio: opts.streamOutput ? ['ignore', 'pipe', 'pipe'] : ['ignore', logFd, logFd],
+      // Brain sessions need stdout as a pipe for stream-json parsing. Worker
+      // sessions can keep stdout in the run log directly. Stderr is always a
+      // pipe so the scheduler can retain a bounded crash diagnostic tail.
+      stdio: opts.streamOutput ? ['ignore', 'pipe', 'pipe'] : ['ignore', logFd, 'pipe'],
     });
 
     child.on('spawn', () => { try { fs.closeSync(logFd); } catch { /* pipe mode */ } });

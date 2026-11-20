@@ -234,6 +234,9 @@ interface RunningTask {
   lockSlot?: number;
   child?: ChildProcess;
   exitCode?: number | null;
+  exitSignal?: NodeJS.Signals | null;
+  stderrTail?: string;
+  spawnError?: string;
   // Stall & looping detection
   lastCommitCheckAt?: number;
   lastCommitCount?: number;
@@ -278,6 +281,22 @@ const ARBITER_RETRY_MODEL = 'claude-opus-4-6-thinking';
 const REVIEWER_CRASH_BACKOFF_MS = 60_000;
 const REVIEWER_LOCK_BACKOFF_MS = 10_000;
 const DIRTY_WORKTREE_RECHECK_MS = 30 * 60 * 1000;
+const CODEX_STDERR_TAIL_BYTES = 8 * 1024;
+
+function appendTail(current: string, chunk: string, maxBytes: number): string {
+  const combined = Buffer.concat([Buffer.from(current), Buffer.from(chunk)]);
+  return combined.subarray(Math.max(0, combined.length - maxBytes)).toString('utf8');
+}
+
+function formatCodexEarlyExit(
+  exitCode: number | null,
+  signal: NodeJS.Signals | null,
+  stderrTail = '',
+  spawnError?: string,
+): string {
+  const stderr = stderrTail.replace(/\s+/g, ' ').trim() || spawnError || '<trống>';
+  return `[hub] codex thoát sớm: exit=${exitCode === null ? 'null' : exitCode} signal=${signal || 'none'} stderr=${stderr}`;
+}
 
 export interface ReviewerRun {
   taskId: string;
@@ -521,7 +540,14 @@ export class Scheduler {
         ? Math.floor((now + this.config.profileCooling.coolingMin * 60_000) / 1000)
         : null;
       this.profileRepo.recordCrash(profile.name, now, coolingUntil);
-      if (coolingUntil) this.eventBus.emit('profile.cooling', taskId, { profile: profile.name, until: coolingUntil, reason: 'consecutive_crashes' });
+      if (coolingUntil) {
+        const coolingSeconds = Math.max(60, this.config.profileCooling.coolingMin * 60);
+        const markReason = `tạm loại hồ sơ sau ${nextCount} crash liên tiếp${reason ? `: ${reason}` : ''}`;
+        // A cooling profile must be visible to the same consumers as quota
+        // state, otherwise the dashboard/MCP still reports it as runnable.
+        this.quotaService.mark(profile.name, getModelFamily(rt.model), coolingSeconds, markReason.slice(0, 1000));
+        this.eventBus.emit('profile.cooling', taskId, { profile: profile.name, until: coolingUntil, reason: 'consecutive_crashes', message: markReason });
+      }
     }
     const limits = this.schedulerLimits();
     if (crashes >= limits.maxConsecutiveCrashesPerTask || (task.runCount || 0) >= limits.maxRunsPerTask) {
@@ -1964,7 +1990,14 @@ export class Scheduler {
     const run = this.runRepo.get(rt.runId);
     this.refreshActivity(rt, run?.logPath);
     const silentMs = Date.now() - rt.lastActivityAt;
-    const stallMs = this.config.watchdog.stallMinutes * 60 * 1000;
+    // Codex can spend a long time reasoning without writing either stdout or
+    // a conversation file. Keep the configured value for other engines but
+    // avoid declaring a healthy Codex run stalled before the established
+    // 45-minute no-commit watch threshold.
+    const stallMinutes = rt.engine.id === 'codex'
+      ? Math.max(this.config.watchdog.stallMinutes, 45)
+      : this.config.watchdog.stallMinutes;
+    const stallMs = stallMinutes * 60 * 1000;
     if (silentMs > stallMs) return true;
     if (silentMs <= this.config.watchdog.waitingMinutes * 60 * 1000) return false;
     if (!this.logTail(run?.logPath, 20).includes('waiting up to')) return false;
@@ -2300,6 +2333,13 @@ export class Scheduler {
       this.eventBus.emit('task.queued', taskId, { reason: 'resume_after_progress' });
     } else {
       const exitCode = rt.exitCode ?? rt.child?.exitCode ?? null;
+      const exitSignal = rt.exitSignal ?? null;
+      const codexExitReason = rt.engine.id === 'codex' && (exitCode !== 0 || exitSignal || rt.spawnError)
+        ? formatCodexEarlyExit(exitCode, exitSignal, rt.stderrTail, rt.spawnError)
+        : undefined;
+      if (codexExitReason && run?.logPath) {
+        try { fs.appendFileSync(run.logPath, `${codexExitReason}\n`, 'utf8'); } catch { /* best effort */ }
+      }
       const isLockBusy = durationMs < 3000 && logTail.trim() === '' && Boolean(rt.lockFile) && exitCode === 1;
 
       if (isLockBusy) {
@@ -2345,7 +2385,7 @@ export class Scheduler {
           this.taskRepo.update(taskId, { status: 'queued', resume: 1, transientRetries: 0, notBefore: null });
           this.eventBus.emit('task.queued', taskId, { reason: 'quota_retry', failover: next ? 'available' : 'waiting_quota' });
         } else if (rt.engine.detectAuthError(logTail).expired) {
-          this.runRepo.finish(rt.runId, 'crashed', undefined, 'auth');
+          this.runRepo.finish(rt.runId, 'crashed', undefined, codexExitReason || 'auth');
           this.markProfileAuthExpired(rt.profileName);
 
           this.taskRepo.update(taskId, { status: 'queued', attempt: task.attempt, resume: 1, transientRetries: 0, notBefore: null });
@@ -2355,7 +2395,7 @@ export class Scheduler {
           if (rt.engine.detectTransientError(logTail) && task.transientRetries < 3) {
             const delays = [60000, 120000, 180000];
             const delay = delays[task.transientRetries] || 180000;
-            if (this.recordWorkerCrash(taskId, rt)) return;
+            if (this.recordWorkerCrash(taskId, rt, codexExitReason)) return;
             this.taskRepo.update(taskId, {
               status: 'queued',
               notBefore: Math.floor(Date.now() / 1000) + Math.ceil(delay / 1000),
@@ -2364,7 +2404,7 @@ export class Scheduler {
             this.eventBus.emit('task.queued', taskId, { reason: 'transient_retry', delay });
           } else {
             // Failed
-            if (this.recordWorkerCrash(taskId, rt)) return;
+            if (this.recordWorkerCrash(taskId, rt, codexExitReason)) return;
             this.taskRepo.updateStatus(taskId, 'failed');
             this.eventBus.emit('task.failed', taskId);
           }
@@ -3968,6 +4008,23 @@ export class Scheduler {
         pausedAt: null,
       };
       this.running.set(task.id, rt);
+      if (engine.id === 'codex' && child.stderr) {
+        child.stderr.setEncoding('utf8');
+        child.stderr.on('data', (chunk: string) => {
+          rt.stderrTail = appendTail(rt.stderrTail || '', chunk, CODEX_STDERR_TAIL_BYTES);
+          try { fs.appendFileSync(logPath, chunk, 'utf8'); } catch { /* best effort */ }
+        });
+      }
+      if (engine.id === 'codex' && child.stdout) {
+        child.stdout.setEncoding('utf8');
+        child.stdout.on('data', (chunk: string) => {
+          try { fs.appendFileSync(logPath, chunk, 'utf8'); } catch { /* best effort */ }
+        });
+      }
+      child.once('error', (error) => {
+        rt.spawnError = error.message;
+        if (!this.stopped) void this.checkRunningTasks().catch(() => {});
+      });
       this.measureTaskResources(rt);
       this.starting.delete(task.id);
       this.locks.invalidate(profileName);
@@ -3978,8 +4035,9 @@ export class Scheduler {
       this.eventBus.emit('task.running', task.id, { runId, model, profile: profileName });
 
       // Listen for exit
-      child.on('exit', (code) => {
+      child.on('exit', (code, signal) => {
         rt.exitCode = code;
+        rt.exitSignal = signal;
         if (this.stopped) return;
         // Trigger immediate check
         setTimeout(() => {
@@ -3988,9 +4046,15 @@ export class Scheduler {
       });
     } catch (e) {
       this.locks.release(profile.name, lockFile);
-      this.runRepo.finish(runId, 'crashed');
+      const reason = engine.id === 'codex'
+        ? formatCodexEarlyExit(null, null, '', String(e))
+        : String(e);
+      if (engine.id === 'codex') {
+        try { fs.appendFileSync(logPath, `${reason}\n`, 'utf8'); } catch { /* best effort */ }
+      }
+      this.runRepo.finish(runId, 'crashed', undefined, reason);
       this.taskRepo.updateStatus(task.id, 'failed');
-      this.eventBus.emit('task.failed', task.id, { error: String(e) });
+      this.eventBus.emit('task.failed', task.id, { error: reason });
     }
   }
 

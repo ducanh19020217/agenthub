@@ -842,4 +842,197 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
     ctx.scheduler.reviewTask('test-proj/t-review-stale-head', 'approved', 'looks good', 'reviewer');
     expect(ctx.taskRepo.get('test-proj/t-review-stale-head')?.status).toBe('review');
   });
+
+  it('Feedback 4 P1: đường approved bắt buộc kiểm tra mandatory checks kể cả khi project không cấu hình checks', async () => {
+    // Tạo repo riêng không cấu hình checks/postDone/package.json
+    const unconfiguredRepo = path.join(tmpDir, 'unconfigured-repo');
+    fs.mkdirSync(unconfiguredRepo, { recursive: true });
+    execFileSync('git', ['init', '--template='], { cwd: unconfiguredRepo });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: unconfiguredRepo });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: unconfiguredRepo });
+    execFileSync('git', ['checkout', '-b', 'main'], { cwd: unconfiguredRepo });
+    fs.writeFileSync(path.join(unconfiguredRepo, 'readme.txt'), 'hello');
+    execFileSync('git', ['add', '.'], { cwd: unconfiguredRepo });
+    execFileSync('git', ['commit', '-m', 'feat: initial commit'], { cwd: unconfiguredRepo });
+
+    ctx.projectRepo.insert({
+      id: 'unconf-proj',
+      name: 'Unconfigured Project',
+      path: unconfiguredRepo,
+      defaultBranch: 'main',
+      envTemplate: null,
+      maxParallel: 1,
+      settings: JSON.stringify({}),
+    });
+
+    // 1. Task trong unconf-proj nhưng chưa chạy check nào và không có run
+    ctx.taskRepo.insert({
+      id: 'unconf-proj/t-no-checks',
+      projectId: 'unconf-proj',
+      slug: 't-no-checks',
+      title: 'Task without checks in unconfigured project',
+      status: 'review',
+      worktreePath: unconfiguredRepo,
+      baseRef: 'main',
+      branch: 'main',
+    });
+
+    // Gọi Scheduler.reviewTask khi chưa có checks -> không được chuyển sang done
+    ctx.scheduler.reviewTask('unconf-proj/t-no-checks', 'approved', 'looks good', 'human-reviewer');
+    expect(ctx.taskRepo.get('unconf-proj/t-no-checks')?.status).toBe('review');
+
+    // 2. Task có uncommitted file (vi phạm check uncommitted)
+    ctx.taskRepo.insert({
+      id: 'unconf-proj/t-dirty',
+      projectId: 'unconf-proj',
+      slug: 't-dirty',
+      title: 'Task with dirty worktree in unconfigured project',
+      status: 'review',
+      worktreePath: unconfiguredRepo,
+      baseRef: 'main',
+      branch: 'main',
+    });
+    ctx.runRepo.insert({
+      id: 'run-unconf-dirty',
+      taskId: 'unconf-proj/t-dirty',
+      engine: 'hub',
+      model: 'checks',
+      profileName: 'hub',
+    });
+    fs.writeFileSync(path.join(unconfiguredRepo, 'dirty.txt'), 'dirty worktree content');
+
+    // Gọi service.reviewTask -> tự chạy check runner nhưng check uncommitted fail -> ném 400
+    await expect(
+      ctx.service.reviewTask('unconf-proj/t-dirty', { verdict: 'approved', by: 'human-reviewer' }),
+    ).rejects.toThrow('check thất bại: uncommitted');
+    expect(ctx.taskRepo.get('unconf-proj/t-dirty')?.status).toBe('review');
+
+    // Xóa file dirty để worktree sạch
+    fs.unlinkSync(path.join(unconfiguredRepo, 'dirty.txt'));
+
+    // 3. Task sạch trong unconf-proj: khi duyệt approved, service tự động chạy CheckRunner và chuyển sang done
+    ctx.taskRepo.insert({
+      id: 'unconf-proj/t-clean',
+      projectId: 'unconf-proj',
+      slug: 't-clean',
+      title: 'Clean task in unconfigured project',
+      status: 'review',
+      worktreePath: unconfiguredRepo,
+      baseRef: 'main',
+      branch: 'main',
+    });
+    ctx.runRepo.insert({
+      id: 'run-unconf-clean',
+      taskId: 'unconf-proj/t-clean',
+      engine: 'hub',
+      model: 'checks',
+      profileName: 'hub',
+    });
+
+    const reviewed = await ctx.service.reviewTask('unconf-proj/t-clean', { verdict: 'approved', by: 'human-reviewer' });
+    expect(reviewed.status).toBe('done');
+  });
+
+  it('Feedback 4 P2: rerun riêng post-done trên commit HEAD mới tự động đồng bộ và chạy lại các checks còn lại trên HEAD mới', async () => {
+    // Project có cấu hình project.checks và postDone
+    const checksConfigRepo = path.join(tmpDir, 'checks-config-repo');
+    fs.mkdirSync(checksConfigRepo, { recursive: true });
+    execFileSync('git', ['init', '--template='], { cwd: checksConfigRepo });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: checksConfigRepo });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: checksConfigRepo });
+    execFileSync('git', ['checkout', '-b', 'main'], { cwd: checksConfigRepo });
+
+    const postDoneScript = path.join(checksConfigRepo, 'post-done.js');
+    fs.writeFileSync(postDoneScript, 'process.exit(1);\n'); // Ban đầu fail
+    fs.writeFileSync(path.join(checksConfigRepo, 'file.txt'), 'initial\n');
+    execFileSync('git', ['add', '.'], { cwd: checksConfigRepo });
+    execFileSync('git', ['commit', '-m', 'feat: initial commit'], { cwd: checksConfigRepo });
+    const head1 = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checksConfigRepo, encoding: 'utf8' }).trim();
+
+    ctx.projectRepo.insert({
+      id: 'proj-with-checks',
+      name: 'Project With Checks',
+      path: checksConfigRepo,
+      defaultBranch: 'main',
+      envTemplate: null,
+      maxParallel: 1,
+      checks: JSON.stringify([
+        { name: 'lint', cmd: ['node', '-e', 'process.exit(0)'] },
+      ]),
+      settings: JSON.stringify({
+        postDone: {
+          enabled: true,
+          cmd: ['node', 'post-done.js'],
+          timeoutSec: 30,
+        },
+      }),
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj-with-checks/t-parent',
+      projectId: 'proj-with-checks',
+      slug: 't-parent',
+      title: 'Parent Task',
+      status: 'failed',
+      worktreePath: checksConfigRepo,
+      baseRef: 'main',
+      branch: 'main',
+    });
+
+    ctx.taskRepo.insert({
+      id: 'proj-with-checks/t-child',
+      projectId: 'proj-with-checks',
+      slug: 't-child',
+      title: 'Child Task',
+      status: 'queued',
+      dependsOn: ['proj-with-checks/t-parent'],
+    });
+
+    ctx.runRepo.insert({
+      id: 'run-head1',
+      taskId: 'proj-with-checks/t-parent',
+      engine: 'hub',
+      model: 'checks',
+      profileName: 'hub',
+    });
+
+    // Giả lập kết quả trên head1: lint pass, mandatory pass, nhưng post-done fail
+    for (const name of ['lint', 'zero-byte', 'uncommitted', 'conflict-markers', 'agenthub-files']) {
+      ctx.db.prepare(
+        "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 5, 'ok', ?)",
+      ).run('proj-with-checks/t-parent', 'run-head1', name, head1);
+    }
+    ctx.db.prepare(
+      "INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 0, 1, 5, 'fail', ?)",
+    ).run('proj-with-checks/t-parent', 'run-head1', 'post-done', head1);
+
+    // Người dùng sửa post-done script trên nhánh và tạo commit mới head2
+    fs.writeFileSync(postDoneScript, 'process.exit(0);\n');
+    execFileSync('git', ['add', '.'], { cwd: checksConfigRepo });
+    execFileSync('git', ['commit', '-m', 'fix: resolve post-done error'], { cwd: checksConfigRepo });
+    const head2 = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checksConfigRepo, encoding: 'utf8' }).trim();
+    expect(head2).not.toBe(head1);
+
+    // Gọi rerunChecks chỉ định riêng post-done
+    const rerunResult = await ctx.service.rerunChecks('proj-with-checks/t-parent', {
+      onlyNames: ['post-done'],
+    });
+
+    // rerunChecks phải tự động bảo đảm cả post-done và các check còn lại đều pass trên head2
+    expect(rerunResult.passed).toBe(true);
+    expect(rerunResult.allPassed).toBe(true);
+    expect(ctx.taskRepo.get('proj-with-checks/t-parent')?.status).toBe('done');
+
+    // Kiểm tra tất cả check_results đều thuộc head2
+    const results = ctx.scheduler.getCheckResults('proj-with-checks/t-parent');
+    expect(results.length).toBeGreaterThan(0);
+    for (const r of results) {
+      expect(r.head).toBe(head2);
+      expect(r.ok).toBe(true);
+    }
+
+    // Task phụ thuộc được unblock
+    const child = ctx.taskRepo.get('proj-with-checks/t-child')!;
+    expect(ctx.scheduler.areDependenciesMet(child)).toBe(true);
+  });
 });

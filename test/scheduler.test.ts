@@ -457,6 +457,107 @@ describe('Codex reviewer crash diagnostics', () => {
 
     scheduler.stop();
   });
+
+  it('reviewer thoát sớm, stderr chỉ có trong file .stderr -> runs.reason và log chứa stderr thật, không có stderr=<trống>', async () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-reviewer-only-stderr.log');
+    // Pre-populate with diagnostic containing <trống> to verify that existing <trống> gets replaced by real stderr
+    fs.writeFileSync(logPath, '[hub] codex thoát sớm: exit=1 signal=none stderr=<trống>\n');
+    fs.writeFileSync(`${logPath}.stderr`, 'syntax error in reviewer configuration\n');
+    profileRepo.upsert({ name: 'codex-rev-stderr-prof', engine: 'codex', kind: 'codex', home: null, email: null, enabled: 1 });
+    taskRepo.insert({ id: 'test-project/rev-stderr-task', projectId: 'test-project', slug: 'rev-stderr-task', title: 'Reviewer stderr task', status: 'review' });
+    runRepo.insert({ id: 'codex-rev-stderr-run', taskId: 'test-project/rev-stderr-task', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-rev-stderr-prof', logPath, kind: 'reviewer' });
+
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      finishReview: (taskId: string, runId: string, profileName: string, reason: string, exitCode: number | null, exitSignal: NodeJS.Signals | null, spawnError?: string) => void;
+      reviewerRuns: Map<string, unknown>;
+    };
+    const engine = {
+      id: 'codex',
+      detectQuota: () => ({ exhausted: false }),
+      detectAuthError: () => ({ expired: false }),
+      detectTransientError: () => false,
+    } as unknown as Engine;
+    const active = {
+      taskId: 'test-project/rev-stderr-task',
+      runId: 'codex-rev-stderr-run',
+      pid: 999997,
+      profileName: 'codex-rev-stderr-prof',
+      engine,
+      actor: 'codex-reviewer',
+      model: 'codex:gpt-5.6-luna',
+      logPath,
+      outputPath: path.join(tmpDir, 'nonexistent.final.json'),
+      lockSlot: 0,
+      startedAt: Date.now() - 5000,
+      timeout: setTimeout(() => {}, 60_000),
+      stderrTail: '',
+    };
+    internal.reviewerRuns.set('test-project/rev-stderr-task', active);
+    internal.finishReview('test-project/rev-stderr-task', 'codex-rev-stderr-run', 'codex-rev-stderr-prof', 'exit', 1, null);
+
+    const run = runRepo.get('codex-rev-stderr-run');
+    expect(run?.outcome).toBe('crashed');
+    expect(run?.reason).toBe('[hub] codex thoát sớm: exit=1 signal=none stderr=syntax error in reviewer configuration');
+    expect(run?.reason).not.toContain('stderr=<trống>');
+
+    const logContent = fs.readFileSync(logPath, 'utf8');
+    expect(logContent).toContain('[hub] codex thoát sớm: exit=1 signal=none stderr=syntax error in reviewer configuration');
+    expect(logContent).not.toContain('stderr=<trống>');
+
+    // Also verify when log file initially has no diagnostic line and active.stderrTail is empty
+    const cleanLogPath = path.join(tmpDir, 'codex-reviewer-clean.log');
+    fs.writeFileSync(cleanLogPath, '');
+    fs.writeFileSync(`${cleanLogPath}.stderr`, 'another fatal reviewer configuration error\n');
+    taskRepo.insert({ id: 'test-project/rev-clean-task', projectId: 'test-project', slug: 'rev-clean-task', title: 'Reviewer clean task', status: 'review' });
+    runRepo.insert({ id: 'codex-rev-clean-run', taskId: 'test-project/rev-clean-task', engine: 'codex', model: 'codex:gpt-5.6-luna', profileName: 'codex-rev-stderr-prof', logPath: cleanLogPath, kind: 'reviewer' });
+
+    const cleanActive = {
+      taskId: 'test-project/rev-clean-task',
+      runId: 'codex-rev-clean-run',
+      pid: 999996,
+      profileName: 'codex-rev-stderr-prof',
+      engine,
+      actor: 'codex-reviewer',
+      model: 'codex:gpt-5.6-luna',
+      logPath: cleanLogPath,
+      outputPath: path.join(tmpDir, 'nonexistent.clean.json'),
+      lockSlot: 0,
+      startedAt: Date.now() - 5000,
+      timeout: setTimeout(() => {}, 60_000),
+      stderrTail: '',
+    };
+    internal.reviewerRuns.set('test-project/rev-clean-task', cleanActive);
+    internal.finishReview('test-project/rev-clean-task', 'codex-rev-clean-run', 'codex-rev-stderr-prof', 'exit', 2, null);
+
+    const cleanRun = runRepo.get('codex-rev-clean-run');
+    expect(cleanRun?.outcome).toBe('crashed');
+    expect(cleanRun?.reason).toBe('[hub] codex thoát sớm: exit=2 signal=none stderr=another fatal reviewer configuration error');
+    expect(cleanRun?.reason).not.toContain('stderr=<trống>');
+
+    const cleanLogContent = fs.readFileSync(cleanLogPath, 'utf8');
+    expect(cleanLogContent).toContain('[hub] codex thoát sớm: exit=2 signal=none stderr=another fatal reviewer configuration error');
+    expect(cleanLogContent).not.toContain('stderr=<trống>');
+
+    scheduler.stop();
+  });
+
+  it('replaces empty-stderr diagnostic with true stderr during daemon restart recovery', () => {
+    createTestProject(path.join(tmpDir, 'repo'));
+    const logPath = path.join(tmpDir, 'codex-recovery-stderr.log');
+    fs.writeFileSync(logPath, '[hub] codex thoát sớm: exit=1 signal=none stderr=<trống>\n');
+    fs.writeFileSync(`${logPath}.stderr`, 'fatal crash during daemon restart\n');
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map<string, Engine>());
+    const internal = scheduler as unknown as {
+      recoverCodexExitReason: (logPath: string | null | undefined) => string;
+    };
+    const recoveredReason = internal.recoverCodexExitReason(logPath);
+    expect(recoveredReason).toBe('[hub] codex thoát sớm: exit=1 signal=none stderr=fatal crash during daemon restart');
+    expect(fs.readFileSync(logPath, 'utf8')).toContain('[hub] codex thoát sớm: exit=1 signal=none stderr=fatal crash during daemon restart');
+    expect(fs.readFileSync(logPath, 'utf8')).not.toContain('stderr=<trống>');
+    scheduler.stop();
+  });
 });
 
 describe('Claude profiles are never worker scheduler profiles', () => {

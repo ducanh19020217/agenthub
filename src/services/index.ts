@@ -4576,15 +4576,15 @@ export class AppService {
         const repoPath = task.worktreePath || (project ? project.path : undefined);
         const currentHead = repoPath ? worktreeHeadSync(repoPath) : null;
         let checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
-        if (!checkStatus.ok && this.scheduler.getDatabase() && this.scheduler.getCheckResults(taskId).length === 0 && project) {
+        if (!checkStatus.ok && this.scheduler.getDatabase() && this.scheduler.getCheckResults(taskId).length === 0 && project && repoPath) {
           let lastRun = this.runRepo.getByTask(taskId).at(-1);
-          if (!lastRun) {
+          if (!lastRun && parsed.merge) {
             const runId = crypto.randomUUID();
             this.runRepo.insert({ id: runId, taskId: task.id, engine: 'hub', model: 'checks', profileName: 'hub' });
             lastRun = this.runRepo.get(runId);
           }
           if (lastRun) {
-            await new CheckRunner(this.scheduler.getDatabase()!).run(task, project, lastRun.id);
+            await new CheckRunner(this.scheduler.getDatabase()!).run(task, project, lastRun.id, { reuseSavedResults: true });
             checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
           }
         }
@@ -4772,13 +4772,21 @@ export class AppService {
         checks = this.scheduler.getCheckResults(taskId);
       }
       if (this.taskRepo.get(taskId)?.status !== 'review') return;
-      const repoPath = task.worktreePath || (project ? project.path : undefined);
-      const currentHead = repoPath ? (await worktreeHead(repoPath)) : null;
-      if (checks.length === 0 || !this.scheduler.checkMandatoryChecksForTask(task, project, currentHead).ok) { skip('checks_failed', checks, retried); return; }
+      checks = this.scheduler.getCheckResults(taskId);
+      if (checks.some((c) => !c.ok)) { skip('checks_failed', checks, retried); return; }
     }
     const repoPath = task.worktreePath || (project ? project.path : undefined);
     const currentHead = repoPath ? (await worktreeHead(repoPath)) : null;
-    if (!this.scheduler.checkMandatoryChecksForTask(task, project, currentHead).ok) { skip('checks_failed', checks); return; }
+    let checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
+    if (!checkStatus.ok && !checks.some((c) => !c.ok) && this.scheduler.getDatabase() && project && task.worktreePath) {
+      const lastRun = this.runRepo.getByTask(taskId).at(-1);
+      if (lastRun) {
+        await new CheckRunner(this.scheduler.getDatabase()!).run(task, project, lastRun.id, { reuseSavedResults: true });
+        checks = this.scheduler.getCheckResults(taskId);
+        checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
+      }
+    }
+    if (!checkStatus.ok) { skip('checks_failed', checks); return; }
     if (this.failedAutoMerges.has(taskId)) { skip('merge_failed', checks); return; }
     // The ready event can arrive twice for one approval; the first call is already merging.
     if (this.reviewingTasks.has(taskId)) {

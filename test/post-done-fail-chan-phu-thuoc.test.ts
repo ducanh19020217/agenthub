@@ -490,7 +490,7 @@ describe('postDone failure and dependency unblocking (4 điểm yêu cầu)', ()
     // 1. Khi chưa có check result nào -> service.reviewTask approved bị chặn
     await expect(
       ctx.service.reviewTask('test-proj/t-review-postdone', { verdict: 'approved', by: 'reviewer' }),
-    ).rejects.toThrow('chưa pass check bắt buộc');
+    ).rejects.toThrow(/chưa pass check bắt buộc|check thất bại/);
 
     // scheduler.reviewTask cũng không chuyển task sang done
     ctx.scheduler.reviewTask('test-proj/t-review-postdone', 'approved', 'looks good', 'reviewer');

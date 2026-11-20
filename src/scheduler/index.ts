@@ -3330,16 +3330,7 @@ export class Scheduler {
       const depProject = this.projectRepo.get(dep.projectId);
       const depRepoPath = dep.worktreePath || (depProject ? depProject.path : undefined);
       const depHead = depRepoPath ? worktreeHeadSync(depRepoPath) : null;
-      const checkResults = this.getCheckResults(dep.id);
-      if (checkResults.length === 0) {
-        if (!depProject) return false;
-        const settings = projectSettings(depProject);
-        if (settings.postDone?.enabled || depProject.checks) {
-          if (!this.checkMandatoryChecksForTask(dep, depProject, depHead).ok) return false;
-        }
-      } else {
-        if (!this.checkMandatoryChecksForTask(dep, depProject, depHead).ok) return false;
-      }
+      if (!this.checkMandatoryChecksForTask(dep, depProject, depHead).ok) return false;
     }
     return true;
   }
@@ -3370,22 +3361,9 @@ export class Scheduler {
         const depProject = this.projectRepo.get(dep.projectId);
         const depRepoPath = dep.worktreePath || (depProject ? depProject.path : undefined);
         const depHead = depRepoPath ? worktreeHeadSync(depRepoPath) : null;
-        const checkResults = this.getCheckResults(dep.id);
-        if (checkResults.length === 0) {
-          if (depProject) {
-            const settings = projectSettings(depProject);
-            if (settings.postDone?.enabled || depProject.checks) {
-              const checkStatus = this.checkMandatoryChecksForTask(dep, depProject, depHead);
-              if (!checkStatus.ok) {
-                reasons.push(`task gốc "${dep.id}" ${checkStatus.reason}`);
-              }
-            }
-          }
-        } else {
-          const checkStatus = this.checkMandatoryChecksForTask(dep, depProject, depHead);
-          if (!checkStatus.ok) {
-            reasons.push(`task gốc "${dep.id}" ${checkStatus.reason}`);
-          }
+        const checkStatus = this.checkMandatoryChecksForTask(dep, depProject, depHead);
+        if (!checkStatus.ok) {
+          reasons.push(`task gốc "${dep.id}" ${checkStatus.reason}`);
         }
       }
     }

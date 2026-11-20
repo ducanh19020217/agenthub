@@ -16,6 +16,7 @@ import { Engine } from '../src/engines/index.js';
 import { saveOpenProjectKey } from '../src/integrations/openproject/secrets.js';
 import { OpenProjectSourceSchema } from '../src/config.js';
 import { DailyReportService } from '../src/integrations/openproject/daily-report.js';
+import { INTERNAL_MANDATORY_CHECKS } from '../src/checks.js';
 
 describe('AgentHub MCP Server Tools', () => {
   let tmpDir: string;
@@ -568,10 +569,22 @@ describe('AgentHub MCP Server Tools', () => {
   });
 
   it('hub_review and hub_retry handle task reviews and retrying failed tasks', async () => {
+    const repoDir = path.join(tmpDir, 'review-repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+    execFileSync('git', ['init', '--template='], { cwd: repoDir });
+    execFileSync('git', ['checkout', '-b', 'main'], { cwd: repoDir });
+    fs.writeFileSync(path.join(repoDir, 'README.md'), '# Test\n');
+    execFileSync('git', ['add', '.'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'init', '--allow-empty'], {
+      cwd: repoDir,
+      env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@test.com', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@test.com' },
+    });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+
     ctx.projectRepo.insert({
       id: 'proj',
       name: 'proj',
-      path: tmpDir,
+      path: repoDir,
       defaultBranch: 'main',
       envTemplate: null,
       maxParallel: 1,
@@ -584,6 +597,12 @@ describe('AgentHub MCP Server Tools', () => {
       title: 'Review Task',
       status: 'review',
     });
+
+    ctx.runRepo.insert({ id: 'r-rev', taskId: 'proj/t-review', engine: 'hub', model: 'checks', profileName: 'hub' });
+    const insertCheck = ctx.db.prepare("INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 1, 'ok', ?)");
+    for (const name of INTERNAL_MANDATORY_CHECKS) {
+      insertCheck.run('proj/t-review', 'r-rev', name, head);
+    }
 
     // Approve
     const approveRes = (await client.callTool({
@@ -787,10 +806,22 @@ describe('AgentHub MCP Server Tools', () => {
   });
 
   it('hub_review auto-updates brain status to reviewing <taskId>', async () => {
+    const repoDir = path.join(tmpDir, 'revproj-repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+    execFileSync('git', ['init', '--template='], { cwd: repoDir });
+    execFileSync('git', ['checkout', '-b', 'main'], { cwd: repoDir });
+    fs.writeFileSync(path.join(repoDir, 'README.md'), '# Test\n');
+    execFileSync('git', ['add', '.'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'init', '--allow-empty'], {
+      cwd: repoDir,
+      env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@test.com', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@test.com' },
+    });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+
     ctx.projectRepo.insert({
       id: 'revproj',
       name: 'Review Project',
-      path: tmpDir,
+      path: repoDir,
       defaultBranch: 'main',
       envTemplate: null,
       maxParallel: 3,
@@ -802,6 +833,12 @@ describe('AgentHub MCP Server Tools', () => {
       title: 'Task to Review',
       status: 'review',
     });
+
+    ctx.runRepo.insert({ id: 'r-revproj', taskId: 'revproj/task-rev', engine: 'hub', model: 'checks', profileName: 'hub' });
+    const insertCheck = ctx.db.prepare("INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 1, 'ok', ?)");
+    for (const name of INTERNAL_MANDATORY_CHECKS) {
+      insertCheck.run('revproj/task-rev', 'r-revproj', name, head);
+    }
 
     const res = (await client.callTool({
       name: 'hub_review',

@@ -1028,6 +1028,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
             reviewerEscalated?: number;
             reviewRound?: number;
             reviewMaxRounds?: number;
+            waitReason?: string | null;
+            dependencyWaitReason?: string | null;
           }>
         >('GET', `/api/tasks${query}`);
 
@@ -1039,7 +1041,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         const lines = [`Tasks (${tasks.length}):`];
         for (const t of tasks) {
           const round = t.reviewRound && t.reviewMaxRounds ? `, Vòng duyệt ${t.reviewRound}/${t.reviewMaxRounds}` : '';
-          lines.push(`- [${t.status}] ${t.id} - ${t.title} (level: ${t.level}, attempt: ${t.attempt}${round})`);
+          const waiting = t.waitReason ? ` [chờ: ${t.waitReason === 'dependency' ? (t.dependencyWaitReason || 'task phụ thuộc') : t.waitReason}]` : '';
+          lines.push(`- [${t.status}] ${t.id} - ${t.title} (level: ${t.level}, attempt: ${t.attempt}${round})${waiting}`);
         }
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       } catch (err: unknown) {
@@ -1108,6 +1111,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           `Tiêu đề: ${t.title}`,
           `Level: ${t.level} | Lượt chạy: ${typeof t.runCount === 'number' ? t.runCount : runs.length}`,
           ...(typeof t.reviewRound === 'number' && typeof t.reviewMaxRounds === 'number' ? [`Vòng duyệt: ${t.reviewRound}/${t.reviewMaxRounds}`] : []),
+          ...(t.waitReason ? [`Lý do chờ: ${t.waitReason === 'dependency' ? (t.dependencyWaitReason || obj.dependencyWaitReason || 'chờ task phụ thuộc') : t.waitReason}`] : []),
           `Branch: ${t.branch || '(chưa tạo)'}`,
           `Worktree: ${t.worktreePath || '(chưa tạo)'}`,
           `Base ref: ${t.baseRef || '(mặc định)'}`,
@@ -1244,19 +1248,63 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
   // 10. hub_retry
   server.tool(
     'hub_retry',
-    'Chạy lại task bị failed hoặc blocked',
+    'Chạy lại task bị failed hoặc blocked. Đặt checksOnly: true để chỉ chạy lại checks (vd: post-done) sau khi sửa tay trên nhánh.',
     {
       id: z.string().describe('ID của task'),
       note: z.string().optional().describe('Ghi chú cho lượt chạy lại'),
+      checksOnly: z.boolean().optional().describe('Chỉ chạy lại checks (vd: post-done) sau khi sửa tay trên nhánh, không chạy lại worker'),
+      onlyNames: z.array(z.string()).optional().describe('Danh sách check cần chạy lại khi dùng checksOnly'),
     },
     async (args) => {
       try {
         assertTaskId(args.id, 'Retry task');
         const routeId = toRouteId(args.id);
-        await callApi('POST', `/api/tasks/${routeId}/retry`, { note: args.note });
+        const result = await callApi<Record<string, unknown>>('POST', `/api/tasks/${routeId}/retry`, {
+          note: args.note,
+          checksOnly: args.checksOnly,
+          onlyNames: args.onlyNames,
+        });
+        const task = (result.task || result) as Record<string, unknown>;
         return {
-          content: [{ type: 'text', text: `✓ Đã retry task "${args.id}"` }],
+          content: [{ type: 'text', text: `✓ Đã retry task "${args.id}" (trạng thái: [${task.status || 'unknown'}])` }],
         };
+      } catch (err: unknown) {
+        return handleError(err);
+      }
+    },
+  );
+
+  // 10b. hub_rerun_checks
+  server.tool(
+    'hub_rerun_checks',
+    'Chạy lại checks (vd: post-done hoặc toàn bộ checks) cho task sau khi sửa tay trên nhánh. Nếu pass, task sẽ chuyển done và mở khoá các task phụ thuộc.',
+    {
+      id: z.string().describe('ID của task'),
+      onlyNames: z.array(z.string()).optional().describe('Danh sách tên check cần chạy lại (vd: ["post-done"]). Để trống để chạy tất cả checks.'),
+    },
+    async (args) => {
+      try {
+        assertTaskId(args.id, 'Chạy lại checks');
+        const routeId = toRouteId(args.id);
+        const data = await callApi<{
+          passed: boolean;
+          failed: string[];
+          allPassed: boolean;
+          taskStatus?: string;
+          results: Array<{ name: string; ok: boolean; exitCode: number | null; outputTail: string }>;
+        }>('POST', `/api/tasks/${routeId}/checks/rerun`, { onlyNames: args.onlyNames });
+        const lines: string[] = [
+          `Kết quả chạy lại checks cho "${args.id}": ${data.allPassed ? '✓ TẤT CẢ PASS' : '✗ CÓ CHECK THẤT BẠI'}`,
+          `Trạng thái task: [${data.taskStatus || 'unknown'}]`,
+          '',
+          ...data.results.map((r) => `  ${r.ok ? '✓' : '✗'} ${r.name}${!r.ok && r.exitCode != null ? ` (exit: ${r.exitCode})` : ''}`),
+        ];
+        if (data.allPassed) {
+          lines.push('', 'Task đã chuyển trạng thái [done] và mở khoá các task phụ thuộc.');
+        } else {
+          lines.push('', `Các check thất bại: ${data.failed.join(', ')}`);
+        }
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
       } catch (err: unknown) {
         return handleError(err);
       }

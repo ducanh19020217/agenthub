@@ -18,6 +18,7 @@ import { Scheduler } from '../src/scheduler/index.js';
 import { FakeEngine, Engine } from '../src/engines/index.js';
 import { loadConfig } from '../src/config.js';
 import { ClaudeFailoverState } from '../src/chat/failover.js';
+import { INTERNAL_MANDATORY_CHECKS, worktreeHeadSync } from '../src/checks.js';
 
 describe('dependency context in worker files', () => {
   it('writes dependency context and prepends the read instruction', () => {
@@ -272,6 +273,13 @@ describe('dependency context in worker files', () => {
         diffStat: ' dep.txt | 1 +\n 1 file changed, 1 insertion(+)',
       });
 
+      const depHead = worktreeHeadSync(projectPath);
+      runRepo.insert({ id: 'r-dep', taskId: 'p1/dep', engine: 'hub', model: 'checks', profileName: 'hub' });
+      const insertCheck = db.prepare("INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail, head) VALUES (?, ?, ?, 1, 0, 1, 'ok', ?)");
+      for (const name of INTERNAL_MANDATORY_CHECKS) {
+        insertCheck.run('p1/dep', 'r-dep', name, depHead);
+      }
+
       reviewRepo.insert({
         id: 'rev-1',
         taskId: 'p1/dep',
@@ -300,6 +308,11 @@ describe('dependency context in worker files', () => {
         profileRepo,
         quotaMarkRepo,
         new Map<string, Engine>([['agy', fakeEngine]]),
+        undefined,
+        undefined,
+        db,
+        undefined,
+        undefined,
         { diskSpace: () => ({ freeGB: 10, totalGB: 100 }) },
       );
       scheduler.configureReviewer(reviewRepo, new ClaudeFailoverState());

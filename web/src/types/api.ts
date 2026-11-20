@@ -371,6 +371,7 @@ export interface Task {
   worktreePath?: string | null;
   status: TaskStatus;
   waitReason?: WaitReason;
+  dependencyWaitReason?: string | null;
   blockingDisk?: BlockingDiskInfo | null;
   modelWarnings?: string[];
   mergeWarning?: string | null;

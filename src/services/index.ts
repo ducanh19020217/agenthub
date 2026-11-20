@@ -53,7 +53,7 @@ import { CodexEngine } from '../engines/index.js';
 import { hasClaudeQuotaAvailable, QuotaUsageService } from '../quota/usage.js';
 import { QuotaService } from '../quota/index.js';
 import { ProfileLockService } from '../profiles/locks.js';
-import { CheckRunner } from '../checks.js';
+import { CheckRunner, worktreeHead, worktreeHeadSync } from '../checks.js';
 import { BrainService } from '../brain.js';
 import { toApiTime } from '../db/time.js';
 import { ChatService } from '../chat/service.js';
@@ -446,6 +446,12 @@ export const ReviewTaskSchema = z.object({
 
 export const RetryTaskSchema = z.object({
   note: z.string().optional(),
+  checksOnly: z.boolean().optional(),
+  onlyNames: z.array(z.string()).optional(),
+});
+
+export const RerunChecksSchema = z.object({
+  onlyNames: z.array(z.string()).optional(),
 });
 
 export const CreateTaskNoteSchema = z.object({
@@ -3522,6 +3528,7 @@ export class AppService {
         autoMergeSkippedReason,
         autoMergeSkippedChecks,
         autoMergeSkippedRetried,
+        dependencyWaitReason: this.scheduler ? this.scheduler.getDependencyWaitReason(task) : null,
         checks: this.scheduler.getCheckResults(task.id),
         paused: Boolean(run?.paused),
         pauseReason: run?.pauseReason ?? null,
@@ -3729,6 +3736,7 @@ export class AppService {
       commits,
       worktreePath: task.worktreePath,
       checks: this.scheduler.getCheckResults(taskId),
+      dependencyWaitReason: this.scheduler ? this.scheduler.getDependencyWaitReason(task) : null,
       postDoneArtifacts: getPostDoneArtifacts(task, project),
       sourceRef: task.sourceRef ? JSON.parse(task.sourceRef) : null,
       triage,
@@ -4563,6 +4571,30 @@ export class AppService {
     }
     this.reviewingTasks.add(taskId);
     try {
+      if (parsed.verdict === 'approved') {
+        const project = this.projectRepo.get(task.projectId);
+        const repoPath = task.worktreePath || (project ? project.path : undefined);
+        const currentHead = repoPath ? worktreeHeadSync(repoPath) : null;
+        if (!currentHead) {
+          throw new HttpError(400, 'bad_request', 'Không thể duyệt hoàn thành task khi không lấy được HEAD hiện tại');
+        }
+        let checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
+        if (!checkStatus.ok && this.scheduler.getDatabase() && this.scheduler.getCheckResults(taskId).length === 0 && project && repoPath) {
+          let lastRun = this.runRepo.getByTask(taskId).at(-1);
+          if (!lastRun && parsed.merge) {
+            const runId = crypto.randomUUID();
+            this.runRepo.insert({ id: runId, taskId: task.id, engine: 'hub', model: 'checks', profileName: 'hub' });
+            lastRun = this.runRepo.get(runId);
+          }
+          if (lastRun) {
+            await new CheckRunner(this.scheduler.getDatabase()!).run(task, project, lastRun.id, { reuseSavedResults: true });
+            checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
+          }
+        }
+        if (!checkStatus.ok) {
+          throw new HttpError(400, 'bad_request', `Không thể duyệt hoàn thành task khi checks chưa đạt: ${checkStatus.reason}`);
+        }
+      }
 
     let mergeResult: { mergeCommit: string; checks: string[] } | undefined;
     const isPlan = task.slug.endsWith('-plan');
@@ -4743,8 +4775,21 @@ export class AppService {
         checks = this.scheduler.getCheckResults(taskId);
       }
       if (this.taskRepo.get(taskId)?.status !== 'review') return;
-      if (checks.length === 0 || checks.some((c) => !c.ok)) { skip('checks_failed', checks, retried); return; }
+      checks = this.scheduler.getCheckResults(taskId);
+      if (checks.some((c) => !c.ok)) { skip('checks_failed', checks, retried); return; }
     }
+    const repoPath = task.worktreePath || (project ? project.path : undefined);
+    const currentHead = repoPath ? (await worktreeHead(repoPath)) : null;
+    let checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
+    if (!checkStatus.ok && !checks.some((c) => !c.ok) && this.scheduler.getDatabase() && project && task.worktreePath) {
+      const lastRun = this.runRepo.getByTask(taskId).at(-1);
+      if (lastRun) {
+        await new CheckRunner(this.scheduler.getDatabase()!).run(task, project, lastRun.id, { reuseSavedResults: true });
+        checks = this.scheduler.getCheckResults(taskId);
+        checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
+      }
+    }
+    if (!checkStatus.ok) { skip('checks_failed', checks); return; }
     if (this.failedAutoMerges.has(taskId)) { skip('merge_failed', checks); return; }
     // The ready event can arrive twice for one approval; the first call is already merging.
     if (this.reviewingTasks.has(taskId)) {
@@ -4948,7 +4993,7 @@ export class AppService {
     return this.scheduler.autoCloseMergedTasks();
   }
 
-  retryTask(idParam: string, raw: unknown): TaskRow {
+  async retryTask(idParam: string, raw: unknown): Promise<TaskRow> {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) {
@@ -4959,6 +5004,23 @@ export class AppService {
     }
 
     const parsed = RetryTaskSchema.parse(raw || {});
+    if (parsed.checksOnly) {
+      if (parsed.note && this.taskNoteRepo) {
+        try {
+          this.taskNoteRepo.insert({
+            projectId: task.projectId,
+            taskId: task.id,
+            kind: 'note',
+            content: parsed.note,
+          });
+        } catch {
+          // ignore
+        }
+      }
+      await this.rerunChecks(idParam, { onlyNames: parsed.onlyNames });
+      return this.taskRepo.get(taskId)!;
+    }
+
     const newBody = parsed.note ? `${task.body || ''}\n\n## Retry Note\n\n${parsed.note}` : task.body;
 
     this.taskRepo.update(taskId, {
@@ -5112,7 +5174,13 @@ export class AppService {
     return readLogTail(targetRun.logPath, isNaN(tailKB) ? 512 : tailKB);
   }
 
-  async rerunChecks(idParam: string) {
+  async rerunChecks(idParam: string, raw?: unknown): Promise<{
+    passed: boolean;
+    failed: string[];
+    results: import('../checks.js').CheckResult[];
+    allPassed: boolean;
+    taskStatus?: string;
+  }> {
     const taskId = toTaskId(idParam);
     const task = this.taskRepo.get(taskId);
     if (!task) throw new HttpError(404, 'not_found', `Task "${taskId}" không tồn tại`);
@@ -5121,7 +5189,44 @@ export class AppService {
     if (!project || !run) throw new HttpError(400, 'bad_request', 'Task chưa có run để lưu kết quả kiểm tra');
     const db = this.scheduler.getDatabase();
     if (!db) throw new HttpError(500, 'internal_server_error', 'Check database chưa sẵn sàng');
-    return new CheckRunner(db).run(task, project, run.id);
+    const parsed = RerunChecksSchema.safeParse(raw || {});
+    const onlyNames = parsed.success && parsed.data.onlyNames && parsed.data.onlyNames.length > 0 ? parsed.data.onlyNames : undefined;
+    const runner = new CheckRunner(db);
+    let result = await runner.run(task, project, run.id, { onlyNames });
+
+    const repoPath = task.worktreePath || project.path;
+    const currentHead = await worktreeHead(repoPath);
+    let checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
+
+    if (!checkStatus.ok && result.passed && onlyNames) {
+      // Re-run remaining required checks that are missing or belong to an older HEAD
+      const fullResult = await runner.run(task, project, run.id, { reuseSavedResults: true });
+      result = {
+        passed: fullResult.passed,
+        failed: [...new Set([...result.failed, ...fullResult.failed])],
+        results: fullResult.results,
+      };
+      checkStatus = this.scheduler.checkMandatoryChecksForTask(task, project, currentHead);
+    }
+    const allPassed = checkStatus.ok && result.passed;
+
+    if (allPassed) {
+      this.taskRepo.update(taskId, {
+        status: 'done',
+        transientRetries: 0,
+        notBefore: null,
+        waitReason: null,
+        blockedReport: null,
+      });
+      this.scheduler.getEventBus().emit('task.done', taskId, { rerunChecks: true, passed: true });
+      this.scheduler.triggerTick();
+    }
+
+    return {
+      ...result,
+      allPassed,
+      taskStatus: this.taskRepo.get(taskId)?.status,
+    };
   }
 
   // --- Task Notes ---

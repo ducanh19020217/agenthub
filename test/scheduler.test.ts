@@ -4588,6 +4588,75 @@ describe('Worker timeout resume and failure events', () => {
   beforeEach(setupTestEnv);
   afterEach(teardownTestEnv);
 
+  it('hands a run with no commit to the next model: no_progress requeues with resume and reorders the chain', () => {
+    const projectPath = path.join(tmpDir, 'repo-no-progress');
+    createTestProject(projectPath);
+    execFileSync('git', ['checkout', '-b', 'agenthub/t-no-progress-kill'], { cwd: projectPath });
+
+    profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: tmpDir, email: null, enabled: 1 });
+    taskRepo.insert({
+      id: 'test-project/t-no-progress-kill',
+      projectId: 'test-project',
+      slug: 't-no-progress-kill',
+      title: 'No progress task',
+      status: 'running',
+      branch: 'agenthub/t-no-progress-kill',
+      worktreePath: projectPath,
+      body: 'Task body content',
+      modelChain: JSON.stringify(['gemini-3.8-flash-medium', 'codex:gpt-5.6-luna']),
+    });
+
+    const queuedEvents: Array<{ taskId: string; payload: unknown }> = [];
+    const noProgressEvents: Array<{ taskId: string; payload: unknown }> = [];
+    const scheduler = new Scheduler(config, taskRepo, runRepo, eventRepo, projectRepo, profileRepo, quotaMarkRepo, new Map());
+    scheduler.getEventBus().on('task.queued', (taskId, payload) => queuedEvents.push({ taskId, payload }));
+    scheduler.getEventBus().on('task.no_progress', (taskId, payload) => noProgressEvents.push({ taskId, payload }));
+    const schedulerInternal = scheduler as unknown as {
+      killTask: (taskId: string, outcome: string) => void;
+      running: Map<string, unknown>;
+      orderChainByProgress: (task: unknown, chain: string[]) => string[];
+    };
+
+    runRepo.insert({
+      id: 'run-no-progress-1',
+      taskId: 'test-project/t-no-progress-kill',
+      engine: 'agy',
+      model: 'gemini-3.8-flash-medium',
+      profileName: 'p1',
+      pid: 999992,
+      kind: 'worker',
+    });
+    schedulerInternal.running.set('test-project/t-no-progress-kill', {
+      runId: 'run-no-progress-1',
+      taskId: 'test-project/t-no-progress-kill',
+      pid: 999992,
+      engine: { id: 'agy' },
+      model: 'gemini-3.8-flash-medium',
+      profileName: 'p1',
+      startTime: Date.now() - 140 * 60_000,
+      usageBefore: null,
+      lockFile: null,
+    });
+
+    schedulerInternal.killTask('test-project/t-no-progress-kill', 'no_progress');
+
+    const task = taskRepo.get('test-project/t-no-progress-kill')!;
+    expect(task.status).toBe('queued');
+    expect(task.resume).toBe(1);
+    const run = runRepo.get('run-no-progress-1')!;
+    expect(run.outcome).toBe('crashed');
+    expect(run.reason).toBe('no_progress');
+    expect(noProgressEvents).toHaveLength(1);
+    expect(noProgressEvents[0].payload).toMatchObject({ model: 'gemini-3.8-flash-medium', engine: 'agy', profile: 'p1' });
+    expect(queuedEvents).toHaveLength(1);
+    expect(queuedEvents[0].payload).toMatchObject({ reason: 'no_progress', model: 'gemini-3.8-flash-medium' });
+
+    // The model that made no progress is tried last from now on; other models keep their order.
+    expect(schedulerInternal.orderChainByProgress(task, ['gemini-3.8-flash-medium', 'codex:gpt-5.6-luna', 'claude:sonnet']))
+      .toEqual(['codex:gpt-5.6-luna', 'claude:sonnet', 'gemini-3.8-flash-medium']);
+    expect(schedulerInternal.orderChainByProgress(task, ['gemini-3.8-flash-medium'])).toEqual(['gemini-3.8-flash-medium']);
+  });
+
   it('requeues task with resume when timeout has progress, and fails on the 3rd consecutive timeout', () => {
     const projectPath = path.join(tmpDir, 'repo');
     createTestProject(projectPath);

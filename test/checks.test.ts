@@ -233,7 +233,7 @@ describe('checks and worktree excludes', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('fails the agenthub-files check when a branch diff contains a committed .agenthub file', async () => {
+  it('untracks committed .agenthub files with an extra commit instead of failing the agenthub-files check', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-files-check-'));
     const repo = path.join(tmp, 'repo');
     fs.mkdirSync(repo, { recursive: true });
@@ -262,11 +262,22 @@ describe('checks and worktree excludes', () => {
       .run(task.id, task.projectId, task.slug, task.title, task.status, task.baseRef, task.branch, task.worktreePath);
     db.prepare('INSERT INTO runs (id, taskId, engine, model, profileName) VALUES (?, ?, ?, ?, ?)').run('run-1', task.id, 'agy', 'model', 'profile');
 
+    const headBefore = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
     const result = await new CheckRunner(db).run(task, project, 'run-1');
     const check = result.results.find((item) => item.name === 'agenthub-files');
-    expect(check?.ok).toBe(false);
+    expect(check?.ok).toBe(true);
+    expect(check?.outputTail).toContain('Đã tự gỡ');
     expect(check?.outputTail).toContain('.agenthub/x');
-    expect(check?.outputTail).toContain('Không được commit');
+    // One new commit on top of the worker's commit; the branch diff no longer carries .agenthub files.
+    const headAfter = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
+    expect(headAfter).not.toBe(headBefore);
+    expect(execFileSync('git', ['rev-parse', 'HEAD~1'], { cwd: repo, encoding: 'utf8' }).trim()).toBe(headBefore);
+    expect(execFileSync('git', ['log', '-1', '--format=%s'], { cwd: repo, encoding: 'utf8' }).trim()).toBe('chore: untrack .agenthub files');
+    expect(execFileSync('git', ['diff', '--name-only', 'main...feature'], { cwd: repo, encoding: 'utf8' })).not.toContain('.agenthub');
+    expect(execFileSync('git', ['ls-files', '.agenthub'], { cwd: repo, encoding: 'utf8' }).trim()).toBe('');
+    // The file itself stays on disk and the index matches HEAD.
+    expect(fs.existsSync(path.join(repo, '.agenthub', 'x'))).toBe(true);
+    expect(execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], { cwd: repo, encoding: 'utf8' }).trim()).toBe('');
     db.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   });

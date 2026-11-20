@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type Database from 'better-sqlite3';
@@ -86,6 +87,36 @@ function committedAgentHubFiles(repo: string, task: TaskRow, project: ProjectRow
   }
 }
 
+/**
+ * Removes committed .agenthub/ files from the branch tip with one extra commit, built from a
+ * temporary index so the worker's working tree and index are left untouched. The files stay
+ * on disk. Returns false when git refuses, in which case the check fails as before.
+ */
+function untrackAgentHubFiles(repo: string, files: string[]): boolean {
+  const tmpIndex = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'agenthub-untrack-')), 'index');
+  const identity = {
+    GIT_AUTHOR_NAME: 'AgentHub',
+    GIT_AUTHOR_EMAIL: 'agenthub@localhost',
+    GIT_COMMITTER_NAME: 'AgentHub',
+    GIT_COMMITTER_EMAIL: 'agenthub@localhost',
+  };
+  const env = { ...process.env, ...identity, GIT_INDEX_FILE: tmpIndex };
+  try {
+    execFileSync('git', ['read-tree', 'HEAD'], { cwd: repo, env });
+    execFileSync('git', ['rm', '-r', '--cached', '-q', '--ignore-unmatch', '--', ...files], { cwd: repo, env });
+    const tree = execFileSync('git', ['write-tree'], { cwd: repo, env, encoding: 'utf8' }).trim();
+    const commit = execFileSync('git', ['commit-tree', tree, '-p', 'HEAD', '-m', 'chore: untrack .agenthub files'], { cwd: repo, env, encoding: 'utf8' }).trim();
+    execFileSync('git', ['update-ref', 'HEAD', commit], { cwd: repo });
+    // Keep the real index in step with the new HEAD so the files do not show up as staged additions.
+    execFileSync('git', ['rm', '-r', '--cached', '-q', '--ignore-unmatch', '--', ...files], { cwd: repo });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    fs.rmSync(path.dirname(tmpIndex), { recursive: true, force: true });
+  }
+}
+
 export function mandatoryChecks(repo: string, task: TaskRow, project: ProjectRow): CheckDefinition[] {
   const files = changedFiles(repo, task, project);
   const checks = [
@@ -147,9 +178,13 @@ async function runOne(check: CheckDefinition, repo: string, hubHome: string, pro
       }
     }
     else if (check.name === 'zero-byte') output = files.filter((f) => !f.endsWith('.gitkeep') && !f.endsWith('__init__.py') && fs.existsSync(path.join(repo, f)) && fs.statSync(path.join(repo, f)).size === 0).join('\n');
-    else if (check.name === 'agenthub-files') output = files.length > 0
-      ? `Không được commit file trong .agenthub/:\n${files.join('\n')}`
-      : '';
+    else if (check.name === 'agenthub-files') {
+      // Fix it here instead of sending the task back through a whole worker round.
+      if (files.length > 0 && task && project && untrackAgentHubFiles(repo, files) && committedAgentHubFiles(repo, task, project).length === 0) {
+        return { name: check.name, ok: true, exitCode: 0, durationMs: Date.now() - started, outputTail: tail(`Đã tự gỡ file .agenthub/ khỏi nhánh bằng một commit mới:\n${files.join('\n')}`) };
+      }
+      output = files.length > 0 ? `Không được commit file trong .agenthub/:\n${files.join('\n')}` : '';
+    }
     else output = files.filter((f) => { try { return CONFLICT_MARKER_REGEX.test(fs.readFileSync(path.join(repo, f), 'utf8')); } catch { return false; } }).join('\n');
     return { name: check.name, ok: !output, exitCode: output ? 1 : 0, durationMs: Date.now() - started, outputTail: tail(output || 'OK') };
   }

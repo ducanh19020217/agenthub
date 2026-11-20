@@ -1853,6 +1853,7 @@ export const en: typeof vi = {
       model_skipped: "Task model skipped",
       model_unavailable: "Model unavailable, switching model",
       no_commit: "Task has no commits",
+      no_progress: "No commit after repeated reminders, switching model",
       note: "Task note",
       overlap: "Task overlap",
       paused: "Task paused",

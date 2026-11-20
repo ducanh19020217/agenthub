@@ -1882,6 +1882,7 @@ export const vi = {
       model_skipped: "Task bỏ qua model",
       model_unavailable: "Model không dùng được, chuyển model khác",
       no_commit: "Task không có commit",
+      no_progress: "Không commit sau nhiều lần nhắc, chuyển model khác",
       note: "Ghi chú task",
       overlap: "Task trùng lặp",
       paused: "Task tạm dừng",

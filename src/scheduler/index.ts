@@ -337,6 +337,8 @@ export interface RestartState {
 
 const STALL_NOTE = 'Lượt trước bị kẹt khi chờ tác vụ nền. Chạy lệnh trực tiếp với timeout.';
 export const TIMEOUT_RESUME_NOTE = 'Lượt trước bị timeout nhưng đã có tiến độ. Kiểm tra git log/status rồi làm tiếp, không làm lại, và commit thường xuyên.';
+/** A run with no commit after this many no-commit windows (noCommitMin each) is handed to the next model. */
+export const NO_PROGRESS_KILL_TIER = 3;
 
 export interface SchedulerOptions {
   diskSpace?: (path: string) => DiskSpace;
@@ -2440,6 +2442,13 @@ export class Scheduler {
           }
         }
       }
+
+      // Still not a single commit after several reminder windows: hand the task to the
+      // next model in the chain now instead of waiting for the 3h timeout.
+      if (commitCount === 0 && thresholdTier >= NO_PROGRESS_KILL_TIER && this.hasAlternativeModel(task, rt.model)) {
+        this.killTask(taskId, 'no_progress');
+        return;
+      }
     } else {
       rt.noCommitMinutes = undefined;
       rt.lastNoCommitThresholdEmitted = 0;
@@ -4295,7 +4304,7 @@ export class Scheduler {
   private findModelProfilePair(
     task: TaskRow,
   ): { model: string; profileName: string } | null {
-    const chain = this.getModelChain(task);
+    const chain = this.orderChainByProgress(task, this.getModelChain(task));
     const departmentId = this.departmentIdForTask(task);
 
     for (const model of chain) {
@@ -4455,6 +4464,32 @@ export class Scheduler {
         });
       }
       return false;
+    });
+  }
+
+  /** Models whose earlier worker run on this task ended without any commit go to the end of the chain. */
+  private orderChainByProgress(task: TaskRow, chain: string[]): string[] {
+    if (chain.length < 2) return chain;
+    const noProgress = new Set(
+      this.runRepo.getByTask(task.id)
+        .filter((run) => run.kind !== 'reviewer' && run.reason === 'no_progress')
+        .map((run) => run.model),
+    );
+    if (noProgress.size === 0) return chain;
+    return [...chain.filter((model) => !noProgress.has(model)), ...chain.filter((model) => noProgress.has(model))];
+  }
+
+  /** True when another model in the chain has at least one usable profile right now. */
+  private hasAlternativeModel(task: TaskRow, currentModel: string): boolean {
+    const profiles = this.profileRepo.getEnabled().filter((p) => !p.authState || p.authState === 'ok');
+    return this.getModelChain(task).some((model) => {
+      if (model === currentModel) return false;
+      const engineId = getModelEngine(model);
+      const family = getModelFamily(model);
+      return profiles.some((profile) =>
+        profile.engine === engineId
+        && this.profileHasModel(profile.name, model)
+        && !this.quotaService.isExhausted(profile.name, family));
     });
   }
 
@@ -5112,7 +5147,8 @@ export class Scheduler {
     this.running.delete(taskId);
     if (rt.lockFile) this.locks.release(rt.profileName, rt.lockFile);
     this.locks.invalidate(rt.profileName);
-    this.runRepo.finish(rt.runId, outcome);
+    if (outcome === 'no_progress') this.runRepo.finish(rt.runId, 'crashed', undefined, 'no_progress');
+    else this.runRepo.finish(rt.runId, outcome);
 
     const durationMs = Date.now() - rt.startTime;
     if (this.runMetricsRepo) {
@@ -5137,6 +5173,21 @@ export class Scheduler {
       this.pendingCancel.delete(taskId);
       const recorded = this.recordCancel(taskId, info);
       this.eventBus.emit('task.cancelled', taskId, { reason: recorded.reason, by: recorded.by, previousStatus: 'running' });
+    } else if (outcome === 'no_progress') {
+      const minutes = Math.round(durationMs / 60_000);
+      this.taskRepo.update(taskId, { status: 'queued', resume: 1, notBefore: null });
+      this.eventBus.emit('task.no_progress', taskId, {
+        model: rt.model,
+        engine: rt.engine.id,
+        profile: rt.profileName,
+        minutes,
+      });
+      this.eventBus.emit('task.queued', taskId, {
+        reason: 'no_progress',
+        model: rt.model,
+        engine: rt.engine.id,
+        minutes,
+      });
     } else if (outcome === 'timeout') {
       const runRow = this.runRepo.get(rt.runId);
       const parsedRunStartedAt = runRow ? parseDbTime(runRow.startedAt) : NaN;

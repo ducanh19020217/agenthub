@@ -1081,6 +1081,7 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
           doneReport?: string | null;
           blockedReason?: string | null;
           checks?: Array<{ name: string; ok: boolean; exitCode: number | null }>;
+          postDoneArtifacts?: string[];
         }>('GET', `/api/tasks/${routeId}`);
 
         const obj = data as Record<string, unknown>;
@@ -1136,6 +1137,14 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
 
         if (checks.length > 0) {
           lines.push('', `Checks: ${checks.map((check) => `${check.ok ? '✓' : '✗'}${check.name}${!check.ok && check.exitCode != null ? `(${check.exitCode})` : ''}`).join(' ')}`);
+        }
+
+        const artifacts = (obj.postDoneArtifacts || []) as string[];
+        if (artifacts.length > 0) {
+          lines.push('', 'Kết quả postDone:');
+          for (const art of artifacts) {
+            lines.push(`  - ${art}`);
+          }
         }
 
         lines.push(

@@ -7,6 +7,9 @@ import type { ProjectRow, TaskRow } from './db/index.js';
 import { runInProcessGroup } from './priority.js';
 import { workerEnvironment } from './worker-guard.js';
 import { taskCommitRef } from './commit-convention.js';
+import { ensureWorktreeNodeModules } from './cache.js';
+import { projectSettings } from './projects/settings.js';
+import { runPostDone } from './post-done.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -57,6 +60,19 @@ async function isGitIgnored(repo: string, rel: string): Promise<boolean> {
   }
 }
 
+function isArtifactsOrAgentHub(rel: string, project?: ProjectRow): boolean {
+  if (!rel || rel === '.agenthub' || rel.startsWith('.agenthub/')) return true;
+  if (project?.settings) {
+    try {
+      const postDoneDir = projectSettings(project).postDone?.artifactsDir;
+      if (postDoneDir && (rel === postDoneDir || rel.startsWith(postDoneDir + '/'))) return true;
+    } catch {
+      // ignore
+    }
+  }
+  return false;
+}
+
 async function changedFiles(repo: string, task: TaskRow, project: ProjectRow): Promise<string[]> {
   const names = new Set<string>();
   try {
@@ -68,7 +84,7 @@ async function changedFiles(repo: string, task: TaskRow, project: ProjectRow): P
     for (const line of statusOut.split('\n')) {
       if (!line.trim()) continue;
       const rel = line.slice(3).trim().replace(/^"|"$/g, '');
-      if (!rel || rel === '.agenthub' || rel.startsWith('.agenthub/')) continue;
+      if (isArtifactsOrAgentHub(rel, project)) continue;
       if (isNodeModules(rel) || await isGitIgnored(repo, rel)) continue;
       try {
         const cleanRel = rel.replace(/\/+$/, '');
@@ -140,7 +156,7 @@ async function runOne(check: CheckDefinition, repo: string, hubHome: string, pro
           .filter(Boolean)
           .filter((x) => {
             const rel = x.slice(3).trim().replace(/^"|"$/g, '');
-            if (!rel || rel === '.agenthub' || rel.startsWith('.agenthub/')) return false;
+            if (isArtifactsOrAgentHub(rel, project)) return false;
             return true;
           });
         const untrackedLines = untrackedOut.stdout
@@ -149,7 +165,7 @@ async function runOne(check: CheckDefinition, repo: string, hubHome: string, pro
         const filteredUntracked: string[] = [];
         for (const x of untrackedLines) {
           const rel = x.slice(3).trim().replace(/^"|"$/g, '');
-          if (!rel || rel === '.agenthub' || rel.startsWith('.agenthub/')) continue;
+          if (isArtifactsOrAgentHub(rel, project)) continue;
           if (isNodeModules(rel)) continue;
           if (await isGitIgnored(repo, rel)) continue;
           try {
@@ -196,12 +212,23 @@ async function runOne(check: CheckDefinition, repo: string, hubHome: string, pro
     }
     return { name: check.name, ok: !output, exitCode: output ? 1 : 0, durationMs: Date.now() - started, outputTail: tail(output || 'OK') };
   }
+  if (check.name === 'post-done') {
+    if (!project || !task) {
+      return {
+        name: 'post-done',
+        ok: false,
+        exitCode: 1,
+        durationMs: Date.now() - started,
+        outputTail: 'Thiếu project hoặc task để chạy post-done',
+      };
+    }
+    const { checkResult } = await runPostDone(task, project, hubHome);
+    return checkResult;
+  }
   const r = await runInProcessGroup(check.cmd[0], check.cmd.slice(1), { cwd: repo, env: envFromFiles(repo, hubHome, project), timeoutMs: (check.timeoutSec || 600) * 1000 });
   const ok = r.code === 0 && !r.timedOut;
   return { name: check.name, ok, exitCode: r.code, durationMs: Date.now() - started, outputTail: tail(`${r.output}${r.timedOut ? `\nTimeout sau ${check.timeoutSec || 600}s` : ''}`) };
 }
-import { ensureWorktreeNodeModules } from './cache.js';
-import { projectSettings } from './projects/settings.js';
 
 export class CheckRunner {
   constructor(private db: Database.Database) {}
@@ -211,7 +238,14 @@ export class CheckRunner {
     const configured = project.checks ? JSON.parse(project.checks) as CheckDefinition[] : detectChecks(repo);
     // Explicit project checks are authoritative. Only auto-detected release
     // checks are excluded because they may run npm ci/package.
-    const allChecks = [...(project.checks ? configured : configured.filter((check) => !isHeavyReleaseCheck(check))), ...await mandatoryChecks(repo, task, project)];
+    const postDoneChecks: CheckDefinition[] = project && projectSettings(project).postDone?.enabled
+      ? [{ name: 'post-done', cmd: [], timeoutSec: projectSettings(project).postDone.timeoutSec }]
+      : [];
+    const allChecks = [
+      ...(project.checks ? configured : configured.filter((check) => !isHeavyReleaseCheck(check))),
+      ...await mandatoryChecks(repo, task, project),
+      ...postDoneChecks,
+    ];
     const checks = options.onlyNames ? allChecks.filter((check) => options.onlyNames!.includes(check.name)) : allChecks;
     if (!options.reuseSavedResults) {
       if (options.onlyNames?.length) {

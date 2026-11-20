@@ -8,6 +8,7 @@ import { createContext } from '../src/daemon.js';
 import { FakeEngine, type Engine } from '../src/engines/index.js';
 import {
   DEFAULT_PROJECT_SETTINGS,
+  PostDoneSettingsSchema,
   mergeProjectSettings,
   parseProjectSettings,
   projectSettings,
@@ -318,5 +319,81 @@ describe('project settings through the service', () => {
     expect(proj3.settings.review.order).toBeUndefined();
     expect(proj3.settings.review.fallback).toBeUndefined();
     expect(proj3.settings.review).toEqual({ autoMerge: false });
+  });
+
+  it('validates postDone schema defaults, safe paths and command arguments', () => {
+    // Defaults
+    const parsedDefault = PostDoneSettingsSchema.parse({});
+    expect(parsedDefault).toEqual({
+      enabled: false,
+      cmd: [],
+      timeoutSec: 1800,
+      artifactsDir: '.agenthub/post-done',
+    });
+
+    // Valid configurations
+    expect(PostDoneSettingsSchema.parse({
+      enabled: true,
+      cmd: ['bash', 'scripts/hub-post-done.sh'],
+      timeoutSec: 3600,
+      artifactsDir: '.agenthub/post-done',
+    })).toEqual({
+      enabled: true,
+      cmd: ['bash', 'scripts/hub-post-done.sh'],
+      timeoutSec: 3600,
+      artifactsDir: '.agenthub/post-done',
+    });
+
+    expect(PostDoneSettingsSchema.parse({
+      enabled: true,
+      cmd: ['scripts/render.sh', '--fps', '30'],
+    }).cmd).toEqual(['scripts/render.sh', '--fps', '30']);
+
+    // Invalid cmd[0]: absolute path
+    expect(() => PostDoneSettingsSchema.parse({ cmd: ['/bin/bash', 'test.sh'] })).toThrow();
+    // Invalid cmd[0]: path traversal
+    expect(() => PostDoneSettingsSchema.parse({ cmd: ['../escape.sh'] })).toThrow();
+    // Invalid argument: path traversal
+    expect(() => PostDoneSettingsSchema.parse({ cmd: ['bash', '../secrets/leak.sh'] })).toThrow();
+    // Invalid timeoutSec: exceeds 7200
+    expect(() => PostDoneSettingsSchema.parse({ timeoutSec: 10000 })).toThrow();
+    // Invalid timeoutSec: <= 0
+    expect(() => PostDoneSettingsSchema.parse({ timeoutSec: 0 })).toThrow();
+    // Invalid artifactsDir: absolute path
+    expect(() => PostDoneSettingsSchema.parse({ artifactsDir: '/var/log' })).toThrow();
+    // Invalid artifactsDir: path traversal
+    expect(() => PostDoneSettingsSchema.parse({ artifactsDir: '../artifacts' })).toThrow();
+  });
+
+  it('merges postDone settings and preserves values on serialization', () => {
+    const initial = projectSettings(undefined);
+    expect(initial.postDone).toEqual({
+      enabled: false,
+      cmd: [],
+      timeoutSec: 1800,
+      artifactsDir: '.agenthub/post-done',
+    });
+
+    const updated = mergeProjectSettings(initial, {
+      postDone: {
+        enabled: true,
+        cmd: ['bash', 'scripts/post-done.sh'],
+        timeoutSec: 2400,
+      },
+    });
+    expect(updated.postDone).toEqual({
+      enabled: true,
+      cmd: ['bash', 'scripts/post-done.sh'],
+      timeoutSec: 2400,
+      artifactsDir: '.agenthub/post-done',
+    });
+
+    const json = JSON.parse(JSON.stringify(updated));
+    expect(json.postDone).toEqual({
+      enabled: true,
+      cmd: ['bash', 'scripts/post-done.sh'],
+      timeoutSec: 2400,
+      artifactsDir: '.agenthub/post-done',
+    });
   });
 });

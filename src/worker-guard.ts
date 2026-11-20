@@ -13,7 +13,7 @@ function isWithin(parent: string, candidate: string): boolean {
   return candidate === parent || candidate.startsWith(parent + path.sep);
 }
 
-function isHubShimPath(hubHome: string, candidate: string): boolean {
+export function isHubShimPath(hubHome: string, candidate: string): boolean {
   const shimRoot = path.resolve(hubHome, 'shims');
   const roots = [shimRoot];
   try {

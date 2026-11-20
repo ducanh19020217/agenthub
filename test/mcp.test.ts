@@ -504,6 +504,16 @@ describe('AgentHub MCP Server Tools', () => {
     fs.mkdirSync(agenthubDir, { recursive: true });
     fs.writeFileSync(path.join(agenthubDir, 'DONE'), 'Task finished successfully\nAll tests pass.', 'utf-8');
 
+    // Add postDone setting, check result and artifact
+    ctx.projectRepo.update('proj', {
+      settings: JSON.stringify({ postDone: { enabled: true, cmd: ['echo', '1'], artifactsDir: '.agenthub/post-done' } }),
+    });
+    const postDoneArtDir = path.join(agenthubDir, 'post-done');
+    fs.mkdirSync(postDoneArtDir, { recursive: true });
+    fs.writeFileSync(path.join(postDoneArtDir, 'preview.png'), 'png');
+    ctx.db.prepare('INSERT INTO check_results (taskId, runId, name, ok, exitCode, durationMs, outputTail) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run('proj/t1', 'r1', 'post-done', 1, 0, 100, 'postDone OK');
+
     // hub_task
     const taskRes = (await client.callTool({
       name: 'hub_task',
@@ -513,6 +523,9 @@ describe('AgentHub MCP Server Tools', () => {
     expect(taskRes.content[0].text).toContain('Tiêu đề: Detailed Task');
     expect(taskRes.content[0].text).toContain('--- Báo cáo DONE ---');
     expect(taskRes.content[0].text).toContain('Task finished successfully');
+    expect(taskRes.content[0].text).toContain('Checks: ✓post-done');
+    expect(taskRes.content[0].text).toContain('Kết quả postDone:');
+    expect(taskRes.content[0].text).toContain(path.join(postDoneArtDir, 'preview.png'));
     expect(taskRes.content[0].text).toContain(
       `Review: đọc diff bằng \`git -C ${wtPath} diff main...HEAD\``,
     );

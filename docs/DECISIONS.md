@@ -194,3 +194,20 @@
 - `wait` dùng các event trạng thái chờ check/review/merge làm mốc bắt đầu, kéo dài tới mốc kế tiếp hoặc hết ngày, rồi giới hạn không vượt `run`. Đây là xấp xỉ vì schema event hiện chưa lưu khoảng chờ riêng.
 - `chat` tính các event review/comment/question/decision/blocked trong ngày; mỗi lượt quy đổi thành 10 phút. Nội dung `## Cần quyết định` trong payload được tính thêm khi event không có type tương ứng.
 - Khi nhiều task cùng ticket có level khác nhau, `weight` cộng theo từng task; trường `level` hiển thị là level hiệu dụng (trung bình có trọng số) để khớp với tổng weight.
+
+## DEC-017: Thực thi tác vụ nặng qua postDone hook của daemon thay vì mở quyền docker cho worker
+
+- **Bối cảnh**:
+  - Các project như `lesson-video` cần render video hoặc chạy tác vụ nặng bằng `docker` sau khi worker hoàn thành code.
+  - Theo thiết kế bảo mật (`src/worker-guard.ts` và mục 2 của PLAN), worker bị chặn gọi `docker`, `sudo`, `mount`, v.v. để đảm bảo an toàn sandbox. Việc nới lỏng sandbox để worker trực tiếp gọi Docker có thể gây rủi ro bảo mật nghiêm trọng.
+- **Quyết định**:
+  - Giữ nguyên cơ chế chặn lệnh nguy hiểm của worker (`src/worker-guard.ts` không thay đổi; worker vẫn bị cấm gọi `docker`).
+  - Bổ sung cấu hình `postDone` ở cấp project (`settings.postDone: { enabled, cmd, timeoutSec, artifactsDir }`).
+  - Sau khi worker hoàn thành và chuyển task sang review/check (hoặc khi gọi `rerunChecks`), daemon sẽ trực tiếp thực thi lệnh `postDone` ngoài phạm vi shim của worker (`PATH` đã được loại bỏ shim qua `isHubShimPath`).
+  - Daemon truyền các biến môi trường ngữ cảnh an toàn (`AGENTHUB_TASK_ID`, `AGENTHUB_PROJECT`, `AGENTHUB_BASE_REF`, `AGENTHUB_BRANCH`, `AGENTHUB_ARTIFACTS_DIR`), đồng thời lọc sạch mọi token/secret/password/key của hub.
+  - Mỗi project được giới hạn tối đa 1 tiến trình `postDone` đồng thời thông qua hàng đợi (`ProjectPostDoneQueue`), timeout sẽ gửi tín hiệu kill cả process group (`-pid`).
+  - Kết quả artifacts trong `artifactsDir` (ảnh png/jpg, mp4, json, txt) được quét và hiển thị đường dẫn tuyệt đối trong API và công cụ `hub_task` ("Kết quả postDone:"), phục vụ reviewer (Claude/brain).
+- **Hệ quả**:
+  - Vừa đảm bảo an toàn sandbox của worker, vừa đáp ứng nhu cầu render/chạy container nặng của project một cách tự động và có kiểm soát.
+  - Các file artifacts dưới `artifactsDir` được loại khỏi phạm vi kiểm tra `uncommitted`/`agenthub-files`, không gây lỗi check sau khi render.
+

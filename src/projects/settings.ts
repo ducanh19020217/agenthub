@@ -65,8 +65,36 @@ export const RemoteDeploySettingsSchema = z.object({
 });
 export type RemoteDeploySettings = z.infer<typeof RemoteDeploySettingsSchema>;
 
+export function isValidPostDoneCmd(cmd: string[]): boolean {
+  if (!cmd || cmd.length === 0) return true;
+  const exec = cmd[0].trim();
+  if (!exec) return false;
+  if (exec.includes('/') || exec.includes('\\')) {
+    if (!isSafeProjectRelativePath(exec)) return false;
+  } else {
+    if (exec === '.' || exec === '..' || !/^[a-zA-Z0-9_.-]+$/.test(exec)) return false;
+  }
+  for (let i = 1; i < cmd.length; i++) {
+    const parts = cmd[i].split(/[\\/]+/);
+    if (parts.includes('..')) return false;
+  }
+  return true;
+}
+
+export const PostDoneSettingsSchema = z.object({
+  enabled: z.boolean().default(false),
+  cmd: z.array(z.string().min(1)).default([]).refine(
+    isValidPostDoneCmd,
+    'cmd[0] phải là đường dẫn tương đối an toàn trong project hoặc tên lệnh trong PATH; các đối số không được chứa ..'
+  ),
+  timeoutSec: z.number().int().min(1).max(7200).default(1800),
+  artifactsDir: z.string().trim().min(1).refine(isSafeProjectRelativePath, 'phải là đường dẫn tương đối trong project, không được chứa ..').default('.agenthub/post-done'),
+});
+export type PostDoneSettings = z.infer<typeof PostDoneSettingsSchema>;
+
 export const ProjectSettingsSchema = z.object({
   remoteDeploy: RemoteDeploySettingsSchema.default({}),
+  postDone: PostDoneSettingsSchema.default({}),
   openproject: z.object({
     enabled: z.boolean().default(false),
     sourceId: z.string().min(1).nullable().default(null),
@@ -152,6 +180,7 @@ export type ProjectSettings = z.infer<typeof ProjectSettingsSchema>;
 /** Input accepted by the API: every section and field optional; merged over the stored settings. */
 export const ProjectSettingsInputSchema = z.object({
   remoteDeploy: ProjectSettingsSchema.shape.remoteDeploy.removeDefault().partial().optional(),
+  postDone: ProjectSettingsSchema.shape.postDone.removeDefault().partial().optional(),
   openproject: ProjectSettingsSchema.shape.openproject.removeDefault().partial().optional(),
   gitea: ProjectSettingsSchema.shape.gitea.removeDefault().partial().optional(),
   commitConvention: ProjectSettingsSchema.shape.commitConvention.removeDefault().partial().optional(),
@@ -178,9 +207,10 @@ const parsedDefaultProjectSettings = ProjectSettingsSchema.parse({});
 Object.defineProperty(parsedDefaultProjectSettings, 'openproject', { value: parsedDefaultProjectSettings.openproject, enumerable: false, writable: true });
 Object.defineProperty(parsedDefaultProjectSettings, 'gitea', { value: parsedDefaultProjectSettings.gitea, enumerable: false, writable: true });
 Object.defineProperty(parsedDefaultProjectSettings, 'remoteDeploy', { value: parsedDefaultProjectSettings.remoteDeploy, enumerable: false, writable: true });
+Object.defineProperty(parsedDefaultProjectSettings, 'postDone', { value: parsedDefaultProjectSettings.postDone, enumerable: false, writable: true });
 Object.defineProperty(parsedDefaultProjectSettings, 'toJSON', {
   value: function (this: ProjectSettings) {
-    return { ...this, openproject: this.openproject, gitea: this.gitea, remoteDeploy: this.remoteDeploy };
+    return { ...this, openproject: this.openproject, gitea: this.gitea, remoteDeploy: this.remoteDeploy, postDone: this.postDone };
   },
   enumerable: false,
   writable: true,
@@ -200,9 +230,10 @@ export function parseProjectSettings(raw: string | null | undefined): ProjectSet
     Object.defineProperty(parsed, 'openproject', { value: parsed.openproject, enumerable: false, writable: true });
     Object.defineProperty(parsed, 'gitea', { value: parsed.gitea, enumerable: false, writable: true });
     Object.defineProperty(parsed, 'remoteDeploy', { value: parsed.remoteDeploy, enumerable: false, writable: true });
+    Object.defineProperty(parsed, 'postDone', { value: parsed.postDone, enumerable: false, writable: true });
     Object.defineProperty(parsed, 'toJSON', {
       value: function (this: ProjectSettings) {
-        return { ...this, openproject: this.openproject, gitea: this.gitea, remoteDeploy: this.remoteDeploy };
+        return { ...this, openproject: this.openproject, gitea: this.gitea, remoteDeploy: this.remoteDeploy, postDone: this.postDone };
       },
       enumerable: false,
       writable: true,
@@ -264,6 +295,13 @@ export function mergeProjectSettings(current: ProjectSettings, input: ProjectSet
           ...(input.remoteDeploy.healthChecks ? { healthChecks: input.remoteDeploy.healthChecks } : {}),
         }
       : current.remoteDeploy,
+    postDone: input.postDone
+      ? {
+          ...current.postDone,
+          ...input.postDone,
+          ...(input.postDone.cmd !== undefined ? { cmd: input.postDone.cmd } : {}),
+        }
+      : current.postDone,
     commitConvention: { ...current.commitConvention, ...input.commitConvention },
     worktree: { ...current.worktree, ...input.worktree },
     integration: {
@@ -283,9 +321,11 @@ export function mergeProjectSettings(current: ProjectSettings, input: ProjectSet
   });
   Object.defineProperty(res, 'openproject', { value: res.openproject, enumerable: false, writable: true });
   Object.defineProperty(res, 'gitea', { value: res.gitea, enumerable: false, writable: true });
+  Object.defineProperty(res, 'remoteDeploy', { value: res.remoteDeploy, enumerable: false, writable: true });
+  Object.defineProperty(res, 'postDone', { value: res.postDone, enumerable: false, writable: true });
   Object.defineProperty(res, 'toJSON', {
     value: function (this: ProjectSettings) {
-      return { ...this, openproject: this.openproject, gitea: this.gitea, remoteDeploy: this.remoteDeploy };
+      return { ...this, openproject: this.openproject, gitea: this.gitea, remoteDeploy: this.remoteDeploy, postDone: this.postDone };
     },
     enumerable: false,
     writable: true,

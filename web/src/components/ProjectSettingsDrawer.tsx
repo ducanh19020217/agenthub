@@ -189,6 +189,7 @@ export const defaultProjectSettings = (): NonNullable<Project['settings']> => ({
   openproject: { enabled: false, sourceId: null, role: 'primary' },
   gitea: { enabled: false, schedule: ['12:00', '18:00'], weekdaysOnly: false, checks: [], unionMergeGlobs: [] },
   remoteDeploy: { enabled: false, trigger: 'manual', steps: [], healthChecks: [], waitMinutes: 15 },
+  postDone: { enabled: false, cmd: [], timeoutSec: 1800, artifactsDir: '.agenthub/post-done' },
 });
 
 function normalizeProjectSettings(settings?: Partial<NonNullable<Project['settings']>>): NonNullable<Project['settings']> {
@@ -209,6 +210,14 @@ function normalizeProjectSettings(settings?: Partial<NonNullable<Project['settin
     openproject: { ...defaults.openproject, ...settings?.openproject, enabled: settings?.openproject?.enabled ?? false, sourceId: settings?.openproject?.sourceId ?? null, role: settings?.openproject?.role ?? 'primary' },
     gitea: { ...defaults.gitea, ...settings?.gitea, enabled: settings?.gitea?.enabled ?? false, schedule: settings?.gitea?.schedule ?? defaults.gitea!.schedule, weekdaysOnly: settings?.gitea?.weekdaysOnly ?? false, checks: settings?.gitea?.checks ?? [], unionMergeGlobs: settings?.gitea?.unionMergeGlobs ?? [] },
     remoteDeploy: { ...defaults.remoteDeploy, ...settings?.remoteDeploy, enabled: settings?.remoteDeploy?.enabled ?? false, trigger: settings?.remoteDeploy?.trigger ?? 'manual', steps: settings?.remoteDeploy?.steps ?? [], healthChecks: settings?.remoteDeploy?.healthChecks ?? [], waitMinutes: settings?.remoteDeploy?.waitMinutes ?? 15 },
+    postDone: {
+      ...defaults.postDone,
+      ...settings?.postDone,
+      enabled: settings?.postDone?.enabled ?? false,
+      cmd: settings?.postDone?.cmd ?? [],
+      timeoutSec: settings?.postDone?.timeoutSec ?? 1800,
+      artifactsDir: settings?.postDone?.artifactsDir ?? '.agenthub/post-done',
+    },
     ci: { ...defaults.ci, ...settings?.ci },
     notifications: { ...defaults.notifications, ...settings?.notifications },
     references: settings?.references ?? defaults.references,
@@ -257,6 +266,7 @@ export function changedSettings(
     'openproject',
     'gitea',
     'remoteDeploy',
+    'postDone',
     'ci',
     'references',
     'reviewChecklist',
@@ -956,6 +966,12 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
       JSON.stringify(origSettings.remoteDeploy),
     [draftSettings.remoteDeploy, origSettings.remoteDeploy],
   );
+  const postDoneChanged = useMemo(
+    () =>
+      JSON.stringify(draftSettings.postDone) !==
+      JSON.stringify(origSettings.postDone),
+    [draftSettings.postDone, origSettings.postDone],
+  );
   const referencesChanged = useMemo(
     () =>
       JSON.stringify(draftSettings.references) !==
@@ -1035,6 +1051,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     if (openprojectChanged) count++;
     if (giteaChanged) count++;
     if (remoteDeployChanged) count++;
+    if (postDoneChanged) count++;
     if (referencesChanged) count++;
     if (checklistChanged) count++;
     if (notificationsChanged) count++;
@@ -1057,6 +1074,7 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
     openprojectChanged,
     giteaChanged,
     remoteDeployChanged,
+    postDoneChanged,
     referencesChanged,
     checklistChanged,
     notificationsChanged,
@@ -3301,6 +3319,98 @@ export const ProjectSettingsDrawer: React.FC<ProjectSettingsDrawerProps> = ({
               <p className="text-[11px] text-[var(--t-text-3)] leading-relaxed">
                 {t('projects.telegramContentDesc')}
               </p>
+            </div>
+          </Card>
+
+          {/* Post-Done Hook */}
+          <Card className="p-5 space-y-4" data-testid="project-post-done-section">
+            <div className="space-y-1">
+              <h3 className="text-sm font-bold text-[var(--t-text)]">
+                {t('projects.postDoneTitle')}
+              </h3>
+              <p className="text-xs text-[var(--t-text-3)]">
+                {t('projects.postDoneDesc')}
+              </p>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-[var(--t-text)] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={Boolean(draftSettings.postDone?.enabled)}
+                onChange={(e) =>
+                  setDraftSettings((p) => ({
+                    ...p,
+                    postDone: {
+                      ...(p.postDone || { cmd: [], timeoutSec: 1800, artifactsDir: '.agenthub/post-done' }),
+                      enabled: e.target.checked,
+                    },
+                  }))
+                }
+              />
+              <span className="font-medium">{t('projects.postDoneEnabled')}</span>
+            </label>
+            <div className="space-y-3">
+              <Field
+                label={t('projects.postDoneCmd')}
+                description={t('projects.postDoneCmdDesc')}
+              >
+                <Input
+                  type="text"
+                  value={(draftSettings.postDone?.cmd || []).map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg)).join(' ')}
+                  onChange={(e) =>
+                    setDraftSettings((p) => ({
+                      ...p,
+                      postDone: {
+                        ...(p.postDone || { enabled: false, timeoutSec: 1800, artifactsDir: '.agenthub/post-done' }),
+                        cmd: parseArgv(e.target.value),
+                      },
+                    }))
+                  }
+                  placeholder="bash scripts/hub-post-done.sh"
+                  className="font-mono text-sm"
+                />
+              </Field>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field
+                  label={t('projects.postDoneTimeout')}
+                  description={t('projects.postDoneTimeoutDesc')}
+                >
+                  <Input
+                    type="number"
+                    min={1}
+                    max={7200}
+                    value={draftSettings.postDone?.timeoutSec ?? 1800}
+                    onChange={(e) =>
+                      setDraftSettings((p) => ({
+                        ...p,
+                        postDone: {
+                          ...(p.postDone || { enabled: false, cmd: [], artifactsDir: '.agenthub/post-done' }),
+                          timeoutSec: Number(e.target.value) || 1800,
+                        },
+                      }))
+                    }
+                  />
+                </Field>
+                <Field
+                  label={t('projects.postDoneArtifactsDir')}
+                  description={t('projects.postDoneArtifactsDirDesc')}
+                >
+                  <Input
+                    type="text"
+                    value={draftSettings.postDone?.artifactsDir ?? '.agenthub/post-done'}
+                    onChange={(e) =>
+                      setDraftSettings((p) => ({
+                        ...p,
+                        postDone: {
+                          ...(p.postDone || { enabled: false, cmd: [], timeoutSec: 1800 }),
+                          artifactsDir: e.target.value,
+                        },
+                      }))
+                    }
+                    placeholder=".agenthub/post-done"
+                    className="font-mono text-sm"
+                  />
+                </Field>
+              </div>
             </div>
           </Card>
 

@@ -1,0 +1,54 @@
+# Hoàn thành task: post-done fail chặn phụ thuộc
+
+## 1. Tóm tắt việc đã làm
+1. **Yêu cầu 1**: Check `post-done` (và mọi check bắt buộc của hub) fail ở lượt cuối (`checkFixAttempts >= 2`) thì task không chuyển thành `done`, mà chuyển sang `blocked` với lý do `## post-done fail, hết vòng tự sửa` kèm `outputTail`. Task không thể vào `done` hay `review`.
+2. **Yêu cầu 2**: Task phụ thuộc chỉ được chạy khi task gốc `done` VÀ mọi check bắt buộc (`INTERNAL_MANDATORY_CHECKS` cùng các checks của project / postDone) pass trên cùng commit HEAD hiện tại. Nếu task gốc failed/blocked/chưa pass check, phụ thuộc chờ với trạng thái `queued`, `waitReason: 'dependency'` và thông tin chi tiết qua `getDependencyWaitReason`.
+3. **Yêu cầu 3**: Khi check bắt buộc fail mà task còn vòng (< 2), worker tự động chạy lại với feedback chứa `outputTail` của post-done / mandatory check lỗi.
+4. **Yêu cầu 4**: Cung cấp cơ chế chạy lại check qua `rerunChecks`, công cụ MCP `hub_rerun_checks` và `hub_retry --checks-only`. Khi check pass trên current HEAD, task được cập nhật thành `done` và mở khóa các task phụ thuộc.
+5. **Giải quyết Feedback Review 1**:
+   - `autoCloseMergedTasks()` không chuyển `done` khi thiếu hoặc fail bất kỳ check bắt buộc nào trên commit HEAD hiện tại; tự động kích hoạt `CheckRunner.run()` nếu chưa có kết quả check.
+   - `reviewTask()` (`Scheduler` & `Service`) đường `approved` bắt buộc kiểm tra các check bắt buộc và post-done đạt `ok: true` trên current HEAD trước khi hoàn thành task.
+6. **Giải quyết Feedback Review 2**:
+   - `checkMandatoryChecks()` và `getRequiredCheckNames()` yêu cầu đầy đủ các check bắt buộc nội bộ (`zero-byte`, `uncommitted`, `conflict-markers`, `agenthub-files`, `commit-message` nếu cấu hình).
+   - `CheckRunner.run()` xóa các check thuộc HEAD cũ khi rerun toàn bộ (`!onlyNames`).
+   - `checkMandatoryChecks()` xác thực `currentHead` trùng khớp và từ chối các kết quả check thuộc HEAD cũ.
+7. **Giải quyết Feedback Review 3**:
+   - P1.1: `getRequiredCheckNames()` luôn bao gồm `INTERNAL_MANDATORY_CHECKS` cho mọi project, kể cả không có checks/postDone/package.json. `autoCloseMergedTasks` không cho phép chuyển done nếu thiếu kết quả check.
+   - P1.2: Các kết quả check có `head = NULL` (dữ liệu cũ/thiếu thông tin HEAD) bị coi là không hợp lệ khi kiểm tra `currentHead`, và bị xóa khi rerun toàn bộ để chạy lại đầy đủ mang HEAD mới.
+   - P1.3: Cung cấp và kiểm tra `currentHead` trên tất cả các luồng kiểm tra hoàn tất task và mở khóa phụ thuộc: `areDependenciesMet`, `getDependencyWaitReason`, `reviewTask` (Scheduler & Service), `autoMergeReviewedTask`, và `autoCloseMergedTasks`.
+8. **Giải quyết Feedback Review 4**:
+   - P1: Bắt buộc gọi `checkMandatoryChecksForTask` trên mọi đường `approved` (`Scheduler.reviewTask` và `AppService.reviewTask`), loại bỏ hoàn toàn điều kiện bỏ qua kiểm tra khi project chưa cấu hình. `AppService.reviewTask` tự động chạy `CheckRunner` cho task trên project chưa cấu hình nếu chưa có kết quả kiểm tra nào. Đảm bảo mutex review lock được kích hoạt trước khi chạy kiểm tra để xử lý đồng thời an toàn.
+   - P2: Trong `AppService.rerunChecks`, khi người dùng commit HEAD mới và gọi `rerunChecks` chỉ định riêng `post-done` (`onlyNames: ['post-done']`), sau khi post-done pass trên HEAD mới, hệ thống tự động kiểm tra và chạy lại các check bắt buộc còn lại đang thiếu hoặc thuộc HEAD cũ (`reuseSavedResults: true`), loại bỏ các kết quả stale, tái sử dụng post-done vừa pass, bảo đảm mọi check bắt buộc đồng bộ pass trên HEAD mới trước khi chuyển task thành `done` và mở khóa dependency.
+9. **Giải quyết Feedback Review 5**:
+   - P1: Trong `src/checks.ts`, giới hạn các bypass mock check run chỉ cho phép đối với các unit test cô lập không đi qua luồng task completion (`isActualTaskCompletionPath`). Toàn bộ các project trong production và mọi task hoàn tất bắt buộc phải vượt qua tất cả mandatory checks (`zero-byte`, `uncommitted`, `conflict-markers`, `agenthub-files`, `post-done`).
+   - P1: Trong `src/scheduler/index.ts`, loại bỏ hoàn toàn điều kiện bỏ qua kiểm tra trong `areDependenciesMet()` và `getDependencyWaitReason()` khi `checkResults.length === 0` trên project chưa cấu hình. Mọi dependency đều được kiểm tra nghiêm ngặt qua `checkMandatoryChecksForTask()`.
+   - P1: Trong `src/services/index.ts`, `autoMergeReviewedTask` kiểm tra retry failed checks và chạy `CheckRunner` với `reuseSavedResults: true` trên worktree trước khi auto-merge; `service.reviewTask` chỉ tự động tạo run chạy checks khi có yêu cầu merge tương thích (`parsed.merge`), tránh tạo run giả cho các task chưa từng chạy.
+   - P2: Trong `test/post-done-fail-chan-phu-thuoc.test.ts`, đồng bộ assertion ở dòng 493 chấp nhận `/chưa pass check bắt buộc|check thất bại/` phù hợp với hành vi tự động thực thi CheckRunner.
+10. **Kiểm thử**:
+   - Viết đầy đủ bộ test trong `test/post-done-fail-chan-phu-thuoc.test.ts` bao phủ 4 điểm yêu cầu, Feedback 1, Feedback 2, Feedback P1.1, Feedback P1.2, Feedback 3 (P1.1, P1.2, P1.3), Feedback 4 (P1, P2) và Feedback 5 (P1, P2).
+   - Toàn bộ test suite trong repo (135 test files, 1652 tests backend; 68 test files, 580 tests web) vượt qua 100%.
+
+## 2. Kết quả kiểm tra
+- `npm run lint`: 0 errors (80 warnings pre-existing trong file test gitea/openproject cũ).
+- `npx tsc --noEmit`: 0 errors.
+- `npm run build`: Thành công (`tsc && cp src/protocol.md dist/protocol.md`).
+- `npm test -- --run`: 135 files passed (100%), 1652 tests passed (100%), 0 failed.
+- `npm run build:web`: Thành công (`tsc && vite build`).
+- `npm run test:web`: 68 files passed (100%), 580 tests passed (100%), 0 failed.
+
+## 3. Việc chưa làm được và lý do
+- Không có. Tất cả các yêu cầu và phản hồi review đã được xử lý hoàn chỉnh và kiểm thử toàn diện.
+
+## 4. Danh sách commit
+- `b2897bfc`: `fix: loai bo bypass mandatory checks cho task completion va dong bo assertion review`
+- `62cef097`: `test: bo sung kiem thu cho Review 4 P1 va P2`
+- `8568062e`: `fix: bat buoc mandatory checks tren moi duong approved va dong bo HEAD khi rerun post-done`
+- `7fd37d93`: `test: bo sung kiem thu cho Review 3 P1.1, P1.2 va P1.3`
+- `c7a32de1`: `fix: yeu cau mandatory checks va dong bo HEAD tren moi duong hoan tat task`
+- `c2574b38`: `test: bo sung kiem thu cho mandatory checks noi bo va vo hieu hoa check tu HEAD cu`
+- `47722dca`: `fix: bat buoc kiem tra day du checks noi bo va xac thuc dong bo HEAD`
+- `81429daf`: `test: bổ sung kiểm thử chặn auto-close và reviewTask approved khi thiếu hoặc fail check post-done`
+- `4e8db6ef`: `fix: bắt buộc kiểm tra các check bắt buộc trước khi approved hoặc auto-close`
+- `a8c8958f`: `test: bổ sung kiểm thử cho luồng post-done fail, chặn phụ thuộc và rerun checks`
+- `6b07c0f7`: `feat: hỗ trợ chạy lại riêng check post-done qua rerunChecks và hub_retry checksOnly`
+- `c4253ebf`: `feat: chặn task phụ thuộc và chuyển task sang blocked khi check bắt buộc thất bại`

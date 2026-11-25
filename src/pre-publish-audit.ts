@@ -31,6 +31,8 @@ export interface BuildAuditPromptOptions {
    * auditor still reports. The arbiter only confirms or dismisses these.
    */
   contestedFindings?: PrePublishAuditFinding[];
+  /** Results of the project checks the hub itself ran on this task's code (lint, test, build, e2e…). */
+  checks?: Array<{ name: string; ok: boolean; outputTail?: string }>;
 }
 
 export const PRE_PUBLISH_AUDIT_SCHEMA = `{"verdict":"pass|fail","findings":[{"severity":"P1|P2|P3","kind":"wrong_requirement|out_of_scope|regression_risk|merge_loss","file":"...","line":N,"detail":"..."}],"summary":"..."}`;
@@ -80,6 +82,15 @@ ${formatAuditFindings(contested).join('\n')}
 `
     : '';
 
+  const checks = opts.checks || [];
+  const checksSection = checks.length > 0
+    ? `
+KẾT QUẢ KIỂM TRA TỰ ĐỘNG (do hệ thống tự chạy trên code của task, KHÔNG phải lời khai của worker):
+${checks.map((c) => `- ${c.name}: ${c.ok ? 'ĐẠT' : `KHÔNG ĐẠT\n${(c.outputTail || '').slice(-600)}`}`).join('\n')}
+- Kiểm tra ĐẠT là bằng chứng thật rằng lệnh đó đã chạy và pass. Không được nêu finding vì "chưa chứng minh test/build pass", vì báo cáo DONE ghi số liệu khác, hoặc vì bạn không tự chạy được lệnh.
+`
+    : '';
+
   return `Bạn là Pre-Publish Audit Agent của AgentHub. Nhiệm vụ của bạn là kiểm tra chất lượng và an toàn của task trước khi commit/nhánh được đẩy (push) lên remote git.
 Bạn là agent CHỈ ĐỌC (read-only): TUYỆT ĐỐI không sửa file, không commit, không merge, không push và không chạy các lệnh phá hoại.
 TUYỆT ĐỐI KHÔNG chạy npm/node/vitest/vite/tsc/eslint hay bất kỳ lệnh build/test nào.
@@ -108,7 +119,7 @@ QUY TẮC ĐÁNH GIÁ (VERDICT & FINDINGS):
   - P3: gợi ý nhỏ.
 - Nếu có bất kỳ lỗi P1: verdict là "fail".
 - Nếu không có P1: verdict là "pass" (kể cả khi có P2, P3).
-${historySection}${arbiterSection}
+${checksSection}${historySection}${arbiterSection}
 THÔNG TIN TASK CẦN AUDIT:
 - Task ID: ${opts.taskId}
 - Tiêu đề: ${opts.taskTitle}

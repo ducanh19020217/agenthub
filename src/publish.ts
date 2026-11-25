@@ -279,6 +279,8 @@ export interface PublishTaskDeps {
    * Returns the new task id, or null when none was created (e.g. the task is itself a follow-up).
    */
   createFollowUpTask?(task: TaskRow, findings: PrePublishAuditFinding[]): string | null;
+  /** Latest stored results of the project checks the hub ran for a task. */
+  getCheckResults?(taskId: string): Array<{ name: string; ok: boolean; outputTail?: string }>;
 }
 
 export type LocalBranchUpdateStatus = 'updated' | 'skipped_dirty';
@@ -1277,6 +1279,9 @@ async function runAuditAgentForTask(
     commitSha,
     previousRounds: previousAuditRounds(task, deps),
     contestedFindings: arbiter?.contested,
+    checks: (() => {
+      try { return deps.getCheckResults?.(task.id).map((c) => ({ name: c.name, ok: c.ok, outputTail: c.outputTail })); } catch { return undefined; }
+    })(),
   });
 
   const tmpDir = path.join(deps.hubHome, 'tmp');

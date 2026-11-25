@@ -199,4 +199,15 @@ describe('Pre-publish audit prompt and parser', () => {
     // Stored feedback round-trips back into findings.
     expect(parseAuditFeedbackFindings(['intro', ...formatAuditFindings(round)].join('\n'))).toEqual(round);
   });
+
+  it('prompt carries the hub-run check results as evidence', () => {
+    const base = { taskId: 'p/t', taskTitle: 'T', taskBody: 'B', diff: 'd', changedFiles: ['a.ts'], repoPath: '/r' };
+    expect(buildPrePublishAuditPrompt(base)).not.toContain('KẾT QUẢ KIỂM TRA TỰ ĐỘNG');
+    const prompt = buildPrePublishAuditPrompt({ ...base, checks: [{ name: 'test', ok: true }, { name: 'e2e', ok: false, outputTail: '1 failed: smoke.spec.ts:168' }] });
+    expect(prompt).toContain('KẾT QUẢ KIỂM TRA TỰ ĐỘNG');
+    expect(prompt).toContain('- test: ĐẠT');
+    expect(prompt).toContain('- e2e: KHÔNG ĐẠT');
+    expect(prompt).toContain('smoke.spec.ts:168');
+    expect(prompt).toContain('Không được nêu finding vì "chưa chứng minh test/build pass"');
+  });
 });

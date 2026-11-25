@@ -6529,6 +6529,7 @@ export class AppService {
         runRepo: this.runRepo,
         config: this.config,
         createFollowUpTask: (source, findings) => this.createAuditFollowUpTask(source, findings),
+        getCheckResults: (id) => this.scheduler.getCheckResults(id),
       },
       options,
     );

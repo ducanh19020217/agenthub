@@ -48,6 +48,16 @@ describe('mergeTaskIntoBase', () => {
     expect(git(f.integration, 'log', '-1', '--pretty=%s')).toContain('Merge branch');
   });
 
+  it('treats a branch that is already in the target as merged instead of failing verification', async () => {
+    const f = fixture();
+    const settings = { defaultBranch: 'main', merge: JSON.stringify({ enabled: true, worktrees: { main: f.integration }, checks: [], timeoutSec: 30 }) };
+    const first = await mergeTaskIntoBase({ slug: 'task', branch: f.branch, baseRef: 'main' }, settings);
+    const again = await mergeTaskIntoBase({ slug: 'task', branch: f.branch, baseRef: 'main' }, settings);
+    expect(again.mergeCommit).toBe(first.mergeCommit);
+    expect(git(f.integration, 'rev-parse', 'HEAD')).toBe(first.mergeCommit);
+    expect(git(f.integration, 'status', '--porcelain')).toBe('');
+  });
+
   it('aborts a conflict and leaves the integration worktree clean', async () => {
     const f = fixture();
     git(f.integration, 'checkout', '-b', 'integration-change');

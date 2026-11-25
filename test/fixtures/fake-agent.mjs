@@ -63,6 +63,12 @@ async function run() {
       console.error('usage limit exceeded; try again in 2h 3m');
       process.exit(1);
     }
+    if (mode === 'audit-arbiter-overrules' || mode === 'audit-arbiter-confirms') {
+      const isArbiter = (process.env.FAKE_PROMPT || '').includes('CHẾ ĐỘ TRỌNG TÀI');
+      const result = isArbiter && mode === 'audit-arbiter-overrules' ? auditResults['audit-pass'] : auditResults['audit-fail'];
+      if (process.env.FAKE_OUTPUT_PATH) fs.writeFileSync(process.env.FAKE_OUTPUT_PATH, JSON.stringify(result));
+      return;
+    }
     if (mode === 'audit-quota-first-profile') {
       if (process.env.FAKE_PROFILE === 'codex-a-exhausted') {
         console.error("ERROR: You've hit your usage limit. Upgrade to Plus to continue using Codex, or try again at Dec 31st, 2099 2:54 PM.");

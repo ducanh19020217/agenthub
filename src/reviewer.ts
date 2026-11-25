@@ -50,7 +50,16 @@ export function buildReviewerPrompt(
   projectPath = worktreePath,
   previousReviews: ReviewerHistoryItem[] = [],
   isPlanTask = false,
+  finalDecision = false,
 ): string {
+  const finalDecisionSection = finalDecision
+    ? `\n\n${FINAL_DECISION_HEADING}
+Task này đã bị từ chối nhiều vòng. Bạn là trọng tài và lượt này phải ra quyết định cuối, thay cho các quy tắc "bắt buộc changes_requested" ở trên:
+- CHỈ chọn changes_requested khi còn lỗi P1 có bằng chứng cụ thể (file:dòng): hỏng chức năng chính, làm hỏng tính năng đang chạy, mất code, mất dữ liệu, lộ thông tin đăng nhập, hoặc thiếu hẳn chức năng chính của đề bài. Khi đó liệt kê tối đa 3 việc cụ thể, làm được trong một lượt.
+- Mọi trường hợp còn lại PHẢI chọn approved, kể cả khi còn lỗi P2/P3, thiếu ảnh, thiếu tài liệu, thiếu bằng chứng hay một điều kiện hoàn thành phụ chưa đạt.
+- Khi approved mà còn việc nên làm, ghi chúng dưới đúng tiêu đề "${FOLLOW_UP_HEADING}", mỗi việc một dòng bắt đầu bằng "- ". Hệ thống sẽ tự tạo task nối tiếp; không yêu cầu worker hiện tại làm.
+- Không nêu lại lỗi đã sửa và không mở thêm hạng mục mới ngoài đề bài.\n`
+    : '';
   let checkBytes = 0;
   const boundedChecks = checks.map((check) => {
     if (checkBytes >= 10 * 1024) return { name: check.name, ok: check.ok, outputTail: '[đã bỏ qua: vượt ngân sách output checks]', runId: check.runId, runStartedAt: check.runStartedAt };
@@ -123,7 +132,7 @@ ${reviewHistory}
 Nếu feedback chỉ nói về lỗi do môi trường chỉ đọc của reviewer, không yêu cầu worker sửa; báo rõ đây là lỗi môi trường để hệ thống chuyển cho người.
 
 Đề bài task:
-${truncateUtf8(taskBody, 24 * 1024, `\n[đề bài đã rút gọn; đọc toàn bộ tại ${worktreePath}/.agenthub/task.md]`)}${planInstructions}${standardCriteria}
+${truncateUtf8(taskBody, 24 * 1024, `\n[đề bài đã rút gọn; đọc toàn bộ tại ${worktreePath}/.agenthub/task.md]`)}${planInstructions}${standardCriteria}${finalDecisionSection}
 
 CHECKLIST KHI DUYỆT (BẮT BUỘC ĐỐI CHIẾU):
 ${checklistText}
@@ -131,6 +140,24 @@ Feedback phải liệt kê mục checklist vi phạm; nếu không vi phạm ph�
 
 Chỉ trả về đúng một JSON object, không markdown fence, theo schema: ${REVIEWER_SCHEMA}`;
   return truncateUtf8(prompt, REVIEWER_PROMPT_MAX_BYTES, `\n[nội dung prompt được giới hạn ${REVIEWER_PROMPT_MAX_BYTES} byte UTF-8]`);
+}
+
+export const FINAL_DECISION_HEADING = 'CHẾ ĐỘ QUYẾT ĐỊNH CUỐI (ƯU TIÊN CAO NHẤT):';
+export const FOLLOW_UP_HEADING = '## Việc nối tiếp';
+
+/** Follow-up items an arbiter listed under FOLLOW_UP_HEADING when approving in final-decision mode. */
+export function parseFollowUpItems(feedback: string | null | undefined): string[] {
+  const text = feedback || '';
+  const start = text.indexOf(FOLLOW_UP_HEADING);
+  if (start < 0) return [];
+  const items: string[] = [];
+  for (const line of text.slice(start + FOLLOW_UP_HEADING.length).split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('#')) break;
+    const m = trimmed.match(/^[-*]\s+(.+)$/);
+    if (m) items.push(m[1].trim());
+  }
+  return items.slice(0, 20);
 }
 
 export function parseReviewerOutput(output: string): ReviewerResult | null {

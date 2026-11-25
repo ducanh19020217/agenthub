@@ -92,7 +92,7 @@ import { computeTaskGraph, filterTasksForGraph, detectCycle, parseDependsOn } fr
 import { excerptHash, extractFileLocations, toMarkdownCodeBlock, truncateExcerpt } from '../task-capture.js';
 import type { TelegramBotService } from '../telegram.js';
 import { ReviewChainSchema, isAutomatedStep, parseReviewChain, type ReviewChainStep, type ReviewChainStepView } from '../review-chain.js';
-import { isAutoReviewer } from '../reviewer.js';
+import { isAutoReviewer, parseFollowUpItems } from '../reviewer.js';
 import { AvatarService, type AvatarResult } from '../avatar.js';
 import { isKnownModel } from '../quota/index.js';
 import { isValidReviewerModel, ReviewerArbiterSchema, ReviewerFallbackSchema, ReviewerOrderSchema, reviewerSettingsFromLegacy } from '../reviewer-config.js';
@@ -6535,6 +6535,46 @@ export class AppService {
   }
 
   /**
+   * Queues a follow-up for the items an arbiter listed under "## Việc nối tiếp" when it approved
+   * a task in final-decision mode. It waits for the source task and never chains.
+   */
+  createReviewFollowUpTask(taskId: string): string | null {
+    const source = this.taskRepo.get(taskId);
+    if (!source || /-(?:audit|review)-followup(?:-\d+)?$/.test(source.slug)) return null;
+    const last = this.reviewRepo.getByTask(taskId).at(-1);
+    if (!last || last.verdict !== 'approved' || !isAutoReviewer(last.actor ?? undefined)) return null;
+    const items = parseFollowUpItems(last.feedback);
+    if (items.length === 0) return null;
+    const slug = `${source.slug}-review-followup`.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 60);
+    if (this.taskRepo.get(`${source.projectId}/${slug}`)) return null;
+    const body = [
+      `Task gốc \`${source.id}\` đã được trọng tài duyệt sau nhiều vòng review. Các việc dưới đây được ghi nhận là nên làm nhưng không chặn task gốc.`,
+      '',
+      '## Việc cần làm',
+      ...items.map((item, idx) => `${idx + 1}. ${item}`),
+      '',
+      '## Cách làm',
+      '- Kiểm tra từng mục trên code hiện tại. Mục nào đúng thì sửa gọn, đúng phạm vi mục đó.',
+      '- Mục nào không còn đúng hoặc không đáng sửa thì ghi lý do ngắn vào báo cáo DONE, không cần sửa.',
+      '',
+      '## Hoàn thành khi',
+      '- Các kiểm tra tự động của project pass.',
+      '- Báo cáo DONE ghi từng mục: đã sửa hoặc bỏ qua kèm lý do.',
+    ].join('\n');
+    const created = this.createTask({
+      project: source.projectId,
+      slug,
+      title: `Việc nối tiếp sau review: ${source.title}`.slice(0, 200),
+      body,
+      level: 'easy',
+      dependsOn: [source.id],
+      start: true,
+    });
+    this.scheduler.getEventBus().emit('task.review_followup_created', taskId, { taskId, followUpTaskId: created.id, items });
+    return created.id;
+  }
+
+  /**
    * Queues one easy task that fixes the non-blocking (P2) audit findings of a pushed task.
    * A follow-up never spawns another follow-up, so the chain always ends.
    */
@@ -6543,7 +6583,7 @@ export class AppService {
     findings: Array<{ severity: string; kind: string; file: string; line: number; detail: string }>,
   ): string | null {
     if (findings.length === 0) return null;
-    if (/-audit-followup(?:-\d+)?$/.test(source.slug)) return null;
+    if (/-(?:audit|review)-followup(?:-\d+)?$/.test(source.slug)) return null;
     const slugBase = `${source.slug}-audit-followup`.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 60);
     if (this.taskRepo.get(`${source.projectId}/${slugBase}`)) return null;
     const body = [

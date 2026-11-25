@@ -1868,6 +1868,8 @@ export const vi = {
     task: {
       audit_failed: "Audit trước khi publish không đạt",
       audit_followup_created: "Đã tạo task nối tiếp cho lỗi P2 của audit",
+      audit_arbitrated: "Trọng tài audit đã ra quyết định cuối",
+      review_followup_created: "Đã tạo task nối tiếp sau quyết định của trọng tài review",
       audit_passed: "Audit trước khi publish đạt yêu cầu",
       audit_skipped: "Bỏ qua audit trước khi publish",
       audit_started: "Bắt đầu audit trước khi publish",

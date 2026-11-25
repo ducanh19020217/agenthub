@@ -26,6 +26,11 @@ export interface BuildAuditPromptOptions {
   commitSha?: string;
   /** Findings of earlier audit rounds on this task, oldest first. */
   previousRounds?: PrePublishAuditFinding[][];
+  /**
+   * Set for the arbiter run after the fix rounds are used up: the P1 findings another
+   * auditor still reports. The arbiter only confirms or dismisses these.
+   */
+  contestedFindings?: PrePublishAuditFinding[];
 }
 
 export const PRE_PUBLISH_AUDIT_SCHEMA = `{"verdict":"pass|fail","findings":[{"severity":"P1|P2|P3","kind":"wrong_requirement|out_of_scope|regression_risk|merge_loss","file":"...","line":N,"detail":"..."}],"summary":"..."}`;
@@ -63,6 +68,18 @@ QUY TẮC CHO VÒNG SAU (BẮT BUỘC):
 `
     : '';
 
+  const contested = opts.contestedFindings || [];
+  const arbiterSection = contested.length > 0
+    ? `
+${AUDIT_ARBITER_HEADING}
+Một auditor khác vẫn báo các lỗi P1 dưới đây sau khi task đã hết số vòng sửa. Bạn là trọng tài độc lập:
+${formatAuditFindings(contested).join('\n')}
+- Với TỪNG lỗi trên, tự mở file trong repo và kiểm chứng. Chỉ giữ lại lỗi nào bạn tự xác nhận được bằng bằng chứng cụ thể và đúng định nghĩa P1 ở trên.
+- Lỗi không xác nhận được, đã được sửa, hoặc thuộc mục "KHÔNG THUỘC PHẠM VI AUDIT" thì bỏ, hoặc hạ xuống P2 nếu vẫn nên sửa.
+- Không tìm thêm lỗi mới ngoài danh sách này, trừ khi là mất code, mất dữ liệu hoặc lộ thông tin đăng nhập.
+`
+    : '';
+
   return `Bạn là Pre-Publish Audit Agent của AgentHub. Nhiệm vụ của bạn là kiểm tra chất lượng và an toàn của task trước khi commit/nhánh được đẩy (push) lên remote git.
 Bạn là agent CHỈ ĐỌC (read-only): TUYỆT ĐỐI không sửa file, không commit, không merge, không push và không chạy các lệnh phá hoại.
 TUYỆT ĐỐI KHÔNG chạy npm/node/vitest/vite/tsc/eslint hay bất kỳ lệnh build/test nào.
@@ -91,7 +108,7 @@ QUY TẮC ĐÁNH GIÁ (VERDICT & FINDINGS):
   - P3: gợi ý nhỏ.
 - Nếu có bất kỳ lỗi P1: verdict là "fail".
 - Nếu không có P1: verdict là "pass" (kể cả khi có P2, P3).
-${historySection}
+${historySection}${arbiterSection}
 THÔNG TIN TASK CẦN AUDIT:
 - Task ID: ${opts.taskId}
 - Tiêu đề: ${opts.taskTitle}
@@ -235,6 +252,8 @@ export function setCachedAuditPass(taskId: string, commitSha: string, result: Pr
 export function clearAuditPassCache(): void {
   auditPassCache.clear();
 }
+
+export const AUDIT_ARBITER_HEADING = 'CHẾ ĐỘ TRỌNG TÀI (QUYẾT ĐỊNH CUỐI):';
 
 /** Formats findings the way they are stored in audit review feedback. */
 export function formatAuditFindings(findings: PrePublishAuditFinding[]): string[] {

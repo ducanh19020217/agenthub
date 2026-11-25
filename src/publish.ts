@@ -1187,6 +1187,7 @@ async function runAuditAgentForTask(
   changedFiles: string[],
   doneReport: string,
   commitSha?: string,
+  arbiter?: { excludeEngine: string; contested: PrePublishAuditFinding[] },
 ): Promise<
   | { ok: true; result: PrePublishAuditResult; engineId: string; profileName: string; model: string }
   | { ok: false; error: string; retryable: boolean; isQuota?: boolean; noProfile?: boolean }
@@ -1207,7 +1208,16 @@ async function runAuditAgentForTask(
 
   const enabledProfiles = deps.profileRepo?.getEnabled() || [];
 
-  for (const item of reviewerOrder) {
+  // The arbiter must be a different engine than the auditor it second-guesses.
+  const auditOrder = arbiter
+    ? [
+        ...reviewerOrder,
+        { engine: 'claude' as const, model: 'sonnet', profiles: [] },
+        { engine: 'codex' as const, model: 'gpt-5.6-luna', profiles: [] },
+      ].filter((item) => item.engine !== arbiter.excludeEngine)
+    : reviewerOrder;
+
+  for (const item of auditOrder) {
     const engineKey = item.engine === 'claude' ? CLAUDE_REVIEW_ENGINE_KEY : 'codex';
     const engine = deps.engines?.get(engineKey) || (item.engine === 'codex' ? deps.engines?.get('codex') : undefined);
     if (!engine) continue;
@@ -1230,7 +1240,7 @@ async function runAuditAgentForTask(
   }
 
   // Fallback: search any engine in deps.engines that has an enabled profile
-  if (!chosenEngine || !chosenProfile) {
+  if (!arbiter && (!chosenEngine || !chosenProfile)) {
     if (deps.engines) {
       for (const [key, engine] of deps.engines.entries()) {
         const engName = key === CLAUDE_REVIEW_ENGINE_KEY ? 'claude' : 'codex';
@@ -1266,6 +1276,7 @@ async function runAuditAgentForTask(
     repoPath,
     commitSha,
     previousRounds: previousAuditRounds(task, deps),
+    contestedFindings: arbiter?.contested,
   });
 
   const tmpDir = path.join(deps.hubHome, 'tmp');
@@ -1933,8 +1944,62 @@ export async function publishTask(
           const maxFixRounds = currentSettings.publish?.audit?.maxFixRounds ?? 2;
           const currentAuditRounds = getTaskAuditRounds(t, deps);
 
+          // Out of fix rounds: before stopping for a person, let an auditor from another engine
+          // re-check exactly the P1 findings still reported. Unless it confirms one, publish.
           if (currentAuditRounds >= maxFixRounds) {
-            // Exceeded maxFixRounds -> stop, do not return to worker
+            const contested = auditResult.findings.filter((f) => f.severity === 'P1');
+            const arbiterExec = await runAuditAgentForTask(
+              t, currentProject, repoPath, deps, diff, changedFiles, doneReport, commitSha,
+              { excludeEngine: auditExec.engineId, contested },
+            );
+            if (arbiterExec.ok) {
+              const arbiterPassed = isAuditPassed(arbiterExec.result);
+              deps.eventBus.emit('task.audit_arbitrated', t.id, {
+                taskId: t.id,
+                projectId: currentProject.id,
+                verdict: arbiterPassed ? 'pass' : 'fail',
+                contested,
+                findings: arbiterExec.result.findings,
+                summary: arbiterExec.result.summary,
+                engine: arbiterExec.engineId,
+                model: arbiterExec.model,
+                firstEngine: auditExec.engineId,
+              });
+              if (arbiterPassed) {
+                // Keep what the first auditor found as follow-up work, downgraded to P2.
+                const merged: PrePublishAuditResult = {
+                  verdict: 'pass',
+                  summary: arbiterExec.result.summary,
+                  findings: [
+                    ...arbiterExec.result.findings,
+                    ...auditResult.findings
+                      .filter((f) => f.severity !== 'P3')
+                      .filter((f) => !arbiterExec.result.findings.some((a) => a.file === f.file && a.line === f.line))
+                      .map((f) => ({ ...f, severity: 'P2' as const })),
+                  ],
+                };
+                auditedResults.set(t.id, merged);
+                setCachedAuditPass(t.id, commitSha, merged);
+                if (branchSha && branchSha !== commitSha) setCachedAuditPass(t.id, branchSha, merged);
+                deps.eventBus.emit('task.audit_passed', t.id, {
+                  taskId: t.id,
+                  projectId: currentProject.id,
+                  findings: merged.findings,
+                  summary: merged.summary,
+                  engine: arbiterExec.engineId,
+                  model: arbiterExec.model,
+                  arbitrated: true,
+                  startedAt: auditStartedAt,
+                  finishedAt: new Date().toISOString(),
+                  ...(auditRange ? { auditRange } : {}),
+                });
+                continue;
+              }
+            }
+          }
+
+          if (currentAuditRounds >= maxFixRounds) {
+            // Exceeded maxFixRounds and the arbiter confirmed a P1 (or no arbiter was available) -> stop
             // Emit task.audit_failed ONCE with exceededMaxRounds: true
             const failedAt = new Date().toISOString();
             deps.eventBus.emit('task.audit_failed', t.id, {

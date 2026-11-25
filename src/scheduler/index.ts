@@ -3024,10 +3024,20 @@ export class Scheduler {
               profile: rt.profileName,
             });
           } else {
-            // Failed
+            // The worker exited without a DONE/BLOCKED report and without a known error.
+            // recordWorkerCrash stops the task after the consecutive-crash limit; until then try again.
             if (this.recordWorkerCrash(taskId, rt)) return;
-            this.taskRepo.updateStatus(taskId, 'failed');
-            this.eventBus.emit('task.failed', taskId);
+            this.taskRepo.update(taskId, {
+              status: 'queued',
+              resume: 1,
+              notBefore: Math.floor(Date.now() / 1000) + 60,
+            });
+            this.eventBus.emit('task.queued', taskId, {
+              reason: 'worker_exit_retry',
+              model: rt.model,
+              engine: rt.engine.id,
+              profile: rt.profileName,
+            });
           }
         }
       }
@@ -3863,6 +3873,8 @@ export class Scheduler {
           project?.path,
           previousReviews,
           task.slug.endsWith('-plan'),
+          // After the reviewers' round limit the arbiter must settle the task, not open another round.
+          Boolean(task.reviewerEscalated) && task.reviewerEscalationReason === 'reviewer_changes_limit',
         ),
         logPath,
         outputPath,
@@ -4439,10 +4451,16 @@ export class Scheduler {
         chain = [];
       }
     }
-    if (chain.length === 0) {
-      const defaults = this.config.defaultModelChains;
-      chain = (task.level === 'hard' ? defaults?.hard : defaults?.easy) || [];
-    }
+    const defaults = this.config.defaultModelChains;
+    const defaultChain = (task.level === 'hard' ? defaults?.hard : defaults?.easy) || [];
+    if (chain.length === 0) chain = defaultChain;
+    const usable = this.filterUsableModels(task, chain);
+    // A task chain made only of models no engine knows must not fail the task: use the defaults.
+    if (usable.length === 0 && chain !== defaultChain) return this.filterUsableModels(task, defaultChain);
+    return usable;
+  }
+
+  private filterUsableModels(task: TaskRow, chain: string[]): string[] {
     const knownDiscovered = this.getKnownDiscoveredModels();
     const hasUndiscoveredCodex = this.profileRepo.getEnabled().some(
       (p) => p.engine === 'codex' && (!this.profileModelRepo || this.profileModelRepo.getForProfile(p.name).length === 0),

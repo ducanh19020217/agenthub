@@ -107,3 +107,23 @@ describe('reviewer order configuration', () => {
     expect(reviewerModelValidator.safeParse('').success).toBe(false);
   });
 });
+
+import { buildReviewerPrompt as buildPromptForFinal, parseFollowUpItems, FINAL_DECISION_HEADING, FOLLOW_UP_HEADING } from '../src/reviewer.js';
+
+describe('reviewer final-decision mode', () => {
+  it('adds the final-decision rules only for an arbiter review', () => {
+    const normal = buildPromptForFinal('Đề bài', '/tmp/wt', [], [], '/tmp/wt', [], false);
+    const final = buildPromptForFinal('Đề bài', '/tmp/wt', [], [], '/tmp/wt', [], false, true);
+    expect(normal).not.toContain(FINAL_DECISION_HEADING);
+    expect(final).toContain(FINAL_DECISION_HEADING);
+    expect(final).toContain('PHẢI chọn approved');
+    expect(final).toContain(FOLLOW_UP_HEADING);
+  });
+
+  it('reads follow-up items listed by the arbiter', () => {
+    const feedback = ['Đã duyệt.', '', FOLLOW_UP_HEADING, '- Thêm test cho luồng lọc', '* Cập nhật PARITY.md', 'ghi chú không phải mục', '## Khác', '- không tính'].join('\n');
+    expect(parseFollowUpItems(feedback)).toEqual(['Thêm test cho luồng lọc', 'Cập nhật PARITY.md']);
+    expect(parseFollowUpItems('Đã duyệt, không còn gì.')).toEqual([]);
+    expect(parseFollowUpItems(null)).toEqual([]);
+  });
+});

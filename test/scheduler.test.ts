@@ -4229,7 +4229,7 @@ describe('Env file generation', () => {
     scheduler.stop();
   });
 
-  it('skips unknown models, emits task.model_skipped, and fails when none are usable', () => {
+  it('skips unknown models, emits task.model_skipped, and falls back to the default chain when none are usable', () => {
     const projectPath = path.join(tmpDir, 'repo-model-skip');
     createTestProject(projectPath);
     profileRepo.upsert({ name: 'p1', engine: 'agy', kind: 'isolated', home: '/tmp/p1', email: null, enabled: 1 });
@@ -4251,9 +4251,14 @@ describe('Env file generation', () => {
     scheduler.tick();
 
     expect(runRepo.getByTask('test-project/skip-known')[0]?.model).toBe('gemini-3.8-flash-medium');
-    expect(taskRepo.get('test-project/skip-all')?.status).toBe('failed');
     expect(skipped).toHaveLength(2);
-    expect(eventRepo.getRecent(100).some((event) => event.type === 'task.failed' && event.taskId === 'test-project/skip-all')).toBe(true);
+    // A task chain with no usable model is not a dead end: the default chain is used instead.
+    const internal = scheduler as unknown as { getModelChain: (task: unknown) => string[] };
+    const fallback = internal.getModelChain(taskRepo.get('test-project/skip-all')!);
+    expect(fallback.length).toBeGreaterThan(0);
+    expect(fallback).not.toContain('made-up-model');
+    expect(taskRepo.get('test-project/skip-all')?.status).not.toBe('failed');
+    expect(eventRepo.getRecent(100).some((event) => event.type === 'task.failed' && event.taskId === 'test-project/skip-all')).toBe(false);
     scheduler.stop();
   });
 

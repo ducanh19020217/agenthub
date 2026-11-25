@@ -90,6 +90,8 @@ export const ALL_BACKEND_EVENT_TYPES: string[] = [
   'setup.install_refresh_error',
   'task.audit_failed',
   'task.audit_followup_created',
+  'task.audit_arbitrated',
+  'task.review_followup_created',
   'task.audit_passed',
   'task.audit_skipped',
   'task.audit_started',

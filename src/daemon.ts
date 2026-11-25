@@ -380,6 +380,14 @@ export function createContext(
   scheduler.getEventBus().on('task.queued', (taskId) => {
     if (taskId) service.clearFailedAutoMerge(taskId);
   });
+  scheduler.getEventBus().on('review.completed', (taskId, payload) => {
+    const data = payload && typeof payload === 'object' ? payload as { verdict?: unknown } : {};
+    if (!taskId || data.verdict !== 'approved') return;
+    // An arbiter that settled the task may have listed leftover work: queue it as a follow-up.
+    setImmediate(() => {
+      try { service.createReviewFollowUpTask(taskId); } catch (err) { console.warn(`[daemon] review follow-up for ${taskId} failed:`, err); }
+    });
+  });
   scheduler.getEventBus().on('review.escalated', (taskId, payload) => {
     if (taskId) void service.retryEscalatedReview(taskId, (payload && typeof payload === 'object' ? payload : {}) as { reason?: unknown; feedback?: unknown });
   });

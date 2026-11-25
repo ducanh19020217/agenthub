@@ -347,6 +347,17 @@ export async function mergeTaskIntoBase(
   if (hasMergeHead || status) throw new MergeError(409, 'conflict', 'worktree tích hợp có thay đổi chưa commit');
 
   const before = await git(repo, ['rev-parse', 'HEAD']);
+  // The branch can already be part of the target (merged by an earlier attempt or by hand).
+  // git would answer "Already up to date" and create nothing: that is a successful merge.
+  const alreadyMerged = await (async () => {
+    try {
+      await execFileAsync('git', ['merge-base', '--is-ancestor', branch, 'HEAD'], { cwd: repo, env });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  if (alreadyMerged) return { mergeCommit: before, checks: [] };
   const identity = await gitIdentityArgs(repo, env);
   try {
     const message = renderCommitTemplate(settings.commitConvention.mergeMessageTemplate, { branch, target: targetBranch });

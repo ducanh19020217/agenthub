@@ -1,3 +1,4 @@
+import { CLAUDE_REVIEW_ENGINE_KEY } from '../src/engines/claude-review.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -726,6 +727,126 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(events.some((e) => e.type === 'task.audit_started')).toBe(true);
       expect(events.some((e) => e.type === 'task.audit_passed')).toBe(true);
       expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
+    });
+
+    it('out of fix rounds: an arbiter from another engine overrules the P1 and the task is pushed with a follow-up', async () => {
+      const remotePath = path.join(tmpDir, 'remote-audit-arb1.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-audit-arb1');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/audit-task-1'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'pass.txt'), 'clean code\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: clean feature'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-audit-arb1',
+        name: 'Project Audit arb1',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 1 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-audit-arb1/task-1',
+        projectId: 'proj-audit-arb1',
+        slug: 'audit-task-1',
+        title: 'Audit Task 1',
+        status: 'done',
+        branch: 'agenthub/audit-task-1',
+        baseRef: 'main',
+      });
+
+      const events: Array<{ type: string; payload: any }> = [];
+      ctx.scheduler.getEventBus().on('task.audit_started', (_id, p) => events.push({ type: 'task.audit_started', payload: p }));
+      ctx.scheduler.getEventBus().on('task.audit_passed', (_id, p) => events.push({ type: 'task.audit_passed', payload: p }));
+      ctx.scheduler.getEventBus().on('task.pushed', (_id, p) => events.push({ type: 'task.pushed', payload: p }));
+
+      ctx.scheduler.getEngines().set(CLAUDE_REVIEW_ENGINE_KEY, fakeEngine);
+      // One audit round was already spent, so this publish is at the fix-round limit.
+      ctx.reviewRepo.insert({ id: 'prev-audit-arb1', taskId: 'proj-audit-arb1/task-1', verdict: 'changes_requested', feedback: '1. [P1] [wrong_requirement] src/main.ts:10 - Missing required feature X', actor: 'audit-prepublish' });
+      ctx.profileRepo.upsert({ name: 'claude-arbiter', engine: 'claude', kind: 'isolated', home: path.join(tmpDir, 'claude-home'), email: 'arbiter@example.com', enabled: 1 });
+      const arbitrated: any[] = [];
+      ctx.scheduler.getEventBus().on('task.audit_arbitrated', (_id, p) => arbitrated.push(p));
+      process.env.FAKE_MODE = 'audit-arbiter-overrules';
+      const result = await ctx.service.publishTask('proj-audit-arb1/task-1');
+      expect(result.ok).toBe(true);
+      expect(arbitrated).toHaveLength(1);
+      expect(arbitrated[0]).toMatchObject({ verdict: 'pass', engine: 'claude', firstEngine: 'codex' });
+      const updated = ctx.taskRepo.get('proj-audit-arb1/task-1');
+      expect(updated?.status).toBe('pushed');
+      // The first auditor's finding is kept as follow-up work.
+      expect(ctx.taskRepo.get('proj-audit-arb1/audit-task-1-audit-followup')?.body).toContain('Missing required feature X');
+    });
+
+    it('out of fix rounds: when the arbiter confirms the P1 the task still stops for a person', async () => {
+      const remotePath = path.join(tmpDir, 'remote-audit-arb2.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-audit-arb2');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/audit-task-1'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'pass.txt'), 'clean code\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: clean feature'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-audit-arb2',
+        name: 'Project Audit arb2',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 1 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-audit-arb2/task-1',
+        projectId: 'proj-audit-arb2',
+        slug: 'audit-task-1',
+        title: 'Audit Task 1',
+        status: 'done',
+        branch: 'agenthub/audit-task-1',
+        baseRef: 'main',
+      });
+
+      const events: Array<{ type: string; payload: any }> = [];
+      ctx.scheduler.getEventBus().on('task.audit_started', (_id, p) => events.push({ type: 'task.audit_started', payload: p }));
+      ctx.scheduler.getEventBus().on('task.audit_passed', (_id, p) => events.push({ type: 'task.audit_passed', payload: p }));
+      ctx.scheduler.getEventBus().on('task.pushed', (_id, p) => events.push({ type: 'task.pushed', payload: p }));
+
+      ctx.scheduler.getEngines().set(CLAUDE_REVIEW_ENGINE_KEY, fakeEngine);
+      // One audit round was already spent, so this publish is at the fix-round limit.
+      ctx.reviewRepo.insert({ id: 'prev-audit-arb2', taskId: 'proj-audit-arb2/task-1', verdict: 'changes_requested', feedback: '1. [P1] [wrong_requirement] src/main.ts:10 - Missing required feature X', actor: 'audit-prepublish' });
+      ctx.profileRepo.upsert({ name: 'claude-arbiter', engine: 'claude', kind: 'isolated', home: path.join(tmpDir, 'claude-home'), email: 'arbiter@example.com', enabled: 1 });
+      const arbitrated: any[] = [];
+      ctx.scheduler.getEventBus().on('task.audit_arbitrated', (_id, p) => arbitrated.push(p));
+      process.env.FAKE_MODE = 'audit-arbiter-confirms';
+      const result = await ctx.service.publishTask('proj-audit-arb2/task-1');
+      expect(result.ok).toBe(false);
+      expect(arbitrated).toHaveLength(1);
+      expect(arbitrated[0]).toMatchObject({ verdict: 'fail', engine: 'claude' });
+      const updated = ctx.taskRepo.get('proj-audit-arb2/task-1');
+      expect(updated?.status).toBe('done');
+      expect(JSON.parse(updated!.pushResult!).exceededMaxRounds).toBe(true);
+      expect(events.some((e) => e.type === 'task.pushed')).toBe(false);
     });
 
     it('P2-only audit does not block: pushes and queues one follow-up task, which never spawns another', async () => {

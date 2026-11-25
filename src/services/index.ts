@@ -6528,9 +6528,48 @@ export class AppService {
         reviewRepo: this.reviewRepo,
         runRepo: this.runRepo,
         config: this.config,
+        createFollowUpTask: (source, findings) => this.createAuditFollowUpTask(source, findings),
       },
       options,
     );
+  }
+
+  /**
+   * Queues one easy task that fixes the non-blocking (P2) audit findings of a pushed task.
+   * A follow-up never spawns another follow-up, so the chain always ends.
+   */
+  createAuditFollowUpTask(
+    source: TaskRow,
+    findings: Array<{ severity: string; kind: string; file: string; line: number; detail: string }>,
+  ): string | null {
+    if (findings.length === 0) return null;
+    if (/-audit-followup(?:-\d+)?$/.test(source.slug)) return null;
+    const slugBase = `${source.slug}-audit-followup`.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 60);
+    if (this.taskRepo.get(`${source.projectId}/${slugBase}`)) return null;
+    const body = [
+      `Task gốc \`${source.id}\` đã được publish. Audit trước khi publish nêu các lỗi mức vừa (P2) dưới đây; chúng không chặn publish và được gom vào task này.`,
+      '',
+      '## Việc cần làm',
+      ...findings.map((f, idx) => `${idx + 1}. [${f.kind}] \`${f.file}:${f.line}\` - ${f.detail}`),
+      '',
+      '## Cách làm',
+      '- Kiểm tra từng mục trên code hiện tại. Mục nào đúng thì sửa gọn, đúng phạm vi mục đó.',
+      '- Mục nào không còn đúng hoặc không đáng sửa thì ghi lý do ngắn vào báo cáo DONE, không cần sửa.',
+      '- Không mở rộng phạm vi sang việc khác.',
+      '',
+      '## Hoàn thành khi',
+      '- Các kiểm tra tự động của project pass.',
+      '- Báo cáo DONE ghi từng mục: đã sửa hoặc bỏ qua kèm lý do.',
+    ].join('\n');
+    const created = this.createTask({
+      project: source.projectId,
+      slug: slugBase,
+      title: `Sửa lỗi P2 sau audit: ${source.title}`.slice(0, 200),
+      body,
+      level: 'easy',
+      start: true,
+    });
+    return created.id;
   }
 
   enqueueAutoPublish(projectId: string, taskId: string): void {

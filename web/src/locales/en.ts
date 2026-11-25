@@ -1838,6 +1838,7 @@ export const en: typeof vi = {
     },
     task: {
       audit_failed: "Pre-publish audit failed",
+      audit_followup_created: "Created a follow-up task for the audit's P2 findings",
       audit_passed: "Pre-publish audit passed",
       audit_skipped: "Pre-publish audit skipped",
       audit_started: "Pre-publish audit started",

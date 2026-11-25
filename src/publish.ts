@@ -14,6 +14,9 @@ import {
   buildPrePublishAuditPrompt,
   parsePrePublishAuditOutput,
   isAuditPassed,
+  auditFollowUpFindings,
+  formatAuditFindings,
+  parseAuditFeedbackFindings,
   getCachedAuditPass,
   setCachedAuditPass,
   type PrePublishAuditResult,
@@ -271,6 +274,11 @@ export interface PublishTaskDeps {
     getByTask(taskId: string): Array<{ id: string; outcome?: string | null; startedAt?: string | null; endedAt?: string | null }>;
   };
   config?: AgentHubConfig;
+  /**
+   * Creates a queued follow-up task for non-blocking (P2) audit findings of a pushed task.
+   * Returns the new task id, or null when none was created (e.g. the task is itself a follow-up).
+   */
+  createFollowUpTask?(task: TaskRow, findings: PrePublishAuditFinding[]): string | null;
 }
 
 export type LocalBranchUpdateStatus = 'updated' | 'skipped_dirty';
@@ -696,6 +704,20 @@ export async function findMergeCommitForTask(
 /**
  * Returns number of audit fix rounds already completed by this task.
  */
+/** Findings of earlier audit rounds, oldest first, read back from the stored audit reviews. */
+function previousAuditRounds(task: TaskRow, deps: PublishTaskDeps): PrePublishAuditFinding[][] {
+  try {
+    const reviews = (deps.reviewRepo?.getByTask(task.id) || []).filter((r) => r.actor === 'audit-prepublish');
+    return reviews
+      .slice()
+      .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')))
+      .map((r) => parseAuditFeedbackFindings(r.feedback))
+      .filter((round) => round.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 function getTaskAuditRounds(task: TaskRow, deps: PublishTaskDeps): number {
   if (deps.reviewRepo?.getByTask) {
     try {
@@ -1243,6 +1265,7 @@ async function runAuditAgentForTask(
     doneReport,
     repoPath,
     commitSha,
+    previousRounds: previousAuditRounds(task, deps),
   });
 
   const tmpDir = path.join(deps.hubHome, 'tmp');
@@ -2019,13 +2042,16 @@ export async function publishTask(
             ...(auditRange ? { auditRange } : {}),
           });
 
+          const blocking = auditResult.findings.filter((f) => f.severity === 'P1');
+          const optional = auditResult.findings.filter((f) => f.severity !== 'P1');
           const feedback = [
             '### Kết quả Audit trước khi publish thất bại',
             auditResult.summary,
-            '\nCác vấn đề phát hiện:',
-            ...auditResult.findings.map(
-              (f, idx) => `${idx + 1}. [${f.severity}] [${f.kind}] ${f.file}:${f.line} - ${f.detail}`,
-            ),
+            '\nBắt buộc sửa (chỉ các mục P1 này chặn publish):',
+            ...formatAuditFindings(blocking),
+            ...(optional.length > 0
+              ? ['\nKhông bắt buộc (không chặn publish; chỉ sửa nếu nhanh và không mở rộng phạm vi):', ...formatAuditFindings(optional)]
+              : []),
           ].join('\n');
 
           deps.reviewRepo?.insert({
@@ -2185,7 +2211,8 @@ export async function publishTask(
       // Update all tasks included in this pushed range
       for (const t of tasksToAudit) {
         const auditRes = auditedResults.get(t.id);
-        const p3Findings = auditRes?.findings?.filter((f) => f.severity === 'P3') ?? [];
+        const p3Findings = auditRes?.findings?.filter((f) => f.severity !== 'P1') ?? [];
+        const followUpFindings = auditFollowUpFindings(auditRes);
         const tAuditRange = taskAuditRangeMap.get(t.id);
         const tPushResultObj = {
           state: 'pushed',
@@ -2207,6 +2234,23 @@ export async function publishTask(
           pushedAt,
           pushResult: JSON.stringify(tPushResultObj),
         });
+
+        // P2 findings did not block the publish: hand them to a follow-up task.
+        if (followUpFindings.length > 0 && deps.createFollowUpTask) {
+          try {
+            const followUpId = deps.createFollowUpTask(t, followUpFindings);
+            if (followUpId) {
+              deps.eventBus.emit('task.audit_followup_created', t.id, {
+                taskId: t.id,
+                projectId: currentProject.id,
+                followUpTaskId: followUpId,
+                findings: followUpFindings,
+              });
+            }
+          } catch (err) {
+            console.warn(`[publish] could not create audit follow-up for ${t.id}:`, err);
+          }
+        }
 
         if (t.id !== taskId) {
           deps.eventBus.emit('task.pushed', t.id, {

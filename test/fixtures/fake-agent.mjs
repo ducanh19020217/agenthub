@@ -42,6 +42,11 @@ async function run() {
       findings: [{ severity: 'P1', kind: 'wrong_requirement', file: 'src/main.ts', line: 10, detail: 'Missing required feature X' }],
       summary: 'Audit failed due to missing requirements.',
     },
+    'audit-p2': {
+      verdict: 'fail',
+      findings: [{ severity: 'P2', kind: 'regression_risk', file: 'src/util.ts', line: 7, detail: 'Default changed without updating one caller' }],
+      summary: 'Only a medium finding.',
+    },
     'audit-fail-empty': {
       verdict: 'fail',
       findings: [],

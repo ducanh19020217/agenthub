@@ -728,6 +728,74 @@ describe('Publish Service (t-auto-push-after-done)', () => {
       expect(events.some((e) => e.type === 'task.pushed')).toBe(true);
     });
 
+    it('P2-only audit does not block: pushes and queues one follow-up task, which never spawns another', async () => {
+      const remotePath = path.join(tmpDir, 'remote-audit-p2.git');
+      initBareRemote(remotePath);
+
+      const repoPath = path.join(tmpDir, 'local-repo-audit-p2');
+      initGitRepoWithRemote(repoPath, remotePath, 'main');
+
+      execFileSync('git', ['checkout', '-b', 'agenthub/audit-task-1'], { cwd: repoPath, env: testEnv });
+      fs.writeFileSync(path.join(repoPath, 'pass.txt'), 'clean code\n');
+      execFileSync('git', ['add', '.'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['commit', '-m', 'feat: clean feature'], { cwd: repoPath, env: testEnv });
+      execFileSync('git', ['checkout', 'main'], { cwd: repoPath, env: testEnv });
+
+      ctx.service.createProject({
+        id: 'proj-audit-p2',
+        name: 'Project Audit P2',
+        path: repoPath,
+        defaultBranch: 'main',
+        settings: {
+          publish: {
+            enabled: true,
+            remote: 'origin',
+            branch: 'main',
+            audit: { enabled: true, maxFixRounds: 2 },
+          },
+        },
+      });
+
+      ctx.taskRepo.insert({
+        id: 'proj-audit-p2/task-1',
+        projectId: 'proj-audit-p2',
+        slug: 'audit-task-1',
+        title: 'Audit Task 1',
+        status: 'done',
+        branch: 'agenthub/audit-task-1',
+        baseRef: 'main',
+      });
+
+      const events: Array<{ type: string; payload: any }> = [];
+      ctx.scheduler.getEventBus().on('task.audit_started', (_id, p) => events.push({ type: 'task.audit_started', payload: p }));
+      ctx.scheduler.getEventBus().on('task.audit_passed', (_id, p) => events.push({ type: 'task.audit_passed', payload: p }));
+      ctx.scheduler.getEventBus().on('task.pushed', (_id, p) => events.push({ type: 'task.pushed', payload: p }));
+
+      process.env.FAKE_MODE = 'audit-p2';
+      const result = await ctx.service.publishTask('proj-audit-p2/task-1');
+      expect(result.ok).toBe(true);
+
+      const updated = ctx.taskRepo.get('proj-audit-p2/task-1');
+      expect(updated?.status).toBe('pushed');
+      const pushResult = JSON.parse(updated!.pushResult!);
+      expect(pushResult.auditPassed).toBe(true);
+      expect(pushResult.auditSkipped).toBe(false);
+
+      expect(pushResult.findings).toHaveLength(1);
+      expect(pushResult.findings[0].severity).toBe('P2');
+
+      const followUp = ctx.taskRepo.get('proj-audit-p2/audit-task-1-audit-followup');
+      expect(['queued', 'running']).toContain(followUp?.status);
+      expect(followUp?.level).toBe('easy');
+      expect(followUp?.body).toContain('src/util.ts:7');
+      expect(followUp?.body).toContain('Default changed without updating one caller');
+
+      // No duplicate for the same source, and a follow-up never gets its own follow-up.
+      const finding = [{ severity: 'P2', kind: 'regression_risk', file: 'a.ts', line: 1, detail: 'x' }];
+      expect(ctx.service.createAuditFollowUpTask(updated!, finding)).toBeNull();
+      expect(ctx.service.createAuditFollowUpTask(followUp!, finding)).toBeNull();
+    });
+
     it('a successful audit whose log mentions rate limit / 429 still passes and pushes', async () => {
       const remotePath = path.join(tmpDir, 'remote-audit-limit.git');
       initBareRemote(remotePath);

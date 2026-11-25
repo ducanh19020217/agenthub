@@ -7,6 +7,9 @@ import {
   setCachedAuditPass,
   clearAuditPassCache,
   type PrePublishAuditResult,
+  auditFollowUpFindings,
+  formatAuditFindings,
+  parseAuditFeedbackFindings,
 } from '../src/pre-publish-audit.js';
 
 describe('Pre-publish audit prompt and parser', () => {
@@ -168,5 +171,32 @@ describe('Pre-publish audit prompt and parser', () => {
     });
     expect(prompt).toContain('DIFF BỊ CẮT VÌ VƯỢT QUÁ 40000 KÝ TỰ');
     expect(prompt).toContain('git show commit-sha-abc');
+  });
+
+  it('only P1 blocks: P2 findings pass and are returned as follow-up work', () => {
+    const p2 = { severity: 'P2' as const, kind: 'regression_risk' as const, file: 'a.ts', line: 1, detail: 'd' };
+    const p1 = { ...p2, severity: 'P1' as const };
+    expect(isAuditPassed({ verdict: 'fail', findings: [p2], summary: '' })).toBe(true);
+    expect(isAuditPassed({ verdict: 'pass', findings: [p2], summary: '' })).toBe(true);
+    expect(isAuditPassed({ verdict: 'pass', findings: [p1, p2], summary: '' })).toBe(false);
+    expect(isAuditPassed({ verdict: 'fail', findings: [], summary: '' })).toBe(false);
+    expect(auditFollowUpFindings({ verdict: 'pass', findings: [p1, p2], summary: '' })).toEqual([p2]);
+  });
+
+  it('prompt narrows the scope and carries earlier rounds', () => {
+    const base = { taskId: 'p/t', taskTitle: 'T', taskBody: 'B', diff: 'd', changedFiles: ['a.ts'], repoPath: '/r' };
+    const first = buildPrePublishAuditPrompt(base);
+    expect(first).toContain('KHÔNG THUỘC PHẠM VI AUDIT');
+    expect(first).toContain('.agenthub/');
+    expect(first).toContain('P2 KHÔNG chặn publish');
+    expect(first).not.toContain('LỊCH SỬ AUDIT');
+
+    const round = [{ severity: 'P1' as const, kind: 'merge_loss' as const, file: 'src/x.ts', line: 12, detail: 'lost hunk - really' }];
+    const later = buildPrePublishAuditPrompt({ ...base, previousRounds: [round] });
+    expect(later).toContain('LỊCH SỬ AUDIT CỦA TASK NÀY (đây là vòng 2)');
+    expect(later).toContain('[P1] [merge_loss] src/x.ts:12 - lost hunk - really');
+    expect(later).toContain('Chỉ được nêu lỗi MỚI khi nó là P1');
+    // Stored feedback round-trips back into findings.
+    expect(parseAuditFeedbackFindings(['intro', ...formatAuditFindings(round)].join('\n'))).toEqual(round);
   });
 });

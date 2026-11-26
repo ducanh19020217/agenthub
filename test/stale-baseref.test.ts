@@ -398,4 +398,123 @@ describe('Stale baseRef & merge_failed handling', () => {
     expect(updated.autoMergeSkippedReason).toBeNull();
     expect(ctx.eventRepo.getByTask('rt-proj/next').some((e) => e.type === 'merge.base_ref_retargeted')).toBe(true);
   });
+
+  it('optimizes findBaseRefSourceTask via TaskRepo.findByBranch and slug fast-path', () => {
+    const repo = path.join(tmpDir, 'repo-find-src');
+    initGitRepo(repo, 'main');
+    ctx.service.createProject({
+      id: 'fsrc-proj',
+      name: 'Find Source Project',
+      path: repo,
+      defaultBranch: 'main',
+      merge: { enabled: true, worktrees: { main: repo }, checks: [], timeoutSec: 30 },
+    });
+
+    // 1. Task with explicit custom branch
+    ctx.taskRepo.insert({
+      id: 'fsrc-proj/explicit-src',
+      projectId: 'fsrc-proj',
+      slug: 'explicit-src',
+      title: 'Explicit Branch Source',
+      branch: 'agenthub/custom-explicit-branch',
+      status: 'pushed',
+    });
+    expect(ctx.taskRepo.findByBranch('fsrc-proj', 'agenthub/custom-explicit-branch')?.id).toBe('fsrc-proj/explicit-src');
+    expect(ctx.taskRepo.findByBranch('fsrc-proj', 'nonexistent')).toBeUndefined();
+
+    const t1 = ctx.service.createTask({
+      project: 'fsrc-proj',
+      slug: 'follow-explicit',
+      title: 'Follow explicit',
+      baseRef: 'agenthub/custom-explicit-branch',
+    }) as unknown as { baseRef: string | null; baseRefWarning?: string };
+    expect(t1.baseRef).toBeNull();
+    expect(t1.baseRefWarning).toContain('agenthub/custom-explicit-branch');
+
+    // 2. Standard template task without explicit branch column set
+    ctx.taskRepo.insert({
+      id: 'fsrc-proj/std-src',
+      projectId: 'fsrc-proj',
+      slug: 'std-src',
+      title: 'Standard Slug Source',
+      status: 'pushed',
+    });
+    const t2 = ctx.service.createTask({
+      project: 'fsrc-proj',
+      slug: 'follow-std',
+      title: 'Follow standard slug',
+      baseRef: 'agenthub/std-src',
+    }) as unknown as { baseRef: string | null; baseRefWarning?: string };
+    expect(t2.baseRef).toBeNull();
+    expect(t2.baseRefWarning).toContain('agenthub/std-src');
+
+    // 3. Unknown branch leaves baseRef as requested
+    const t3 = ctx.service.createTask({
+      project: 'fsrc-proj',
+      slug: 'follow-unknown',
+      title: 'Follow unknown',
+      baseRef: 'agenthub/completely-unknown-branch',
+    }) as unknown as { baseRef: string | null; baseRefWarning?: string };
+    expect(t3.baseRef).toBe('agenthub/completely-unknown-branch');
+    expect(t3.baseRefWarning).toBeUndefined();
+  });
+
+  it('supports custom commitConvention branchTemplate in findBaseRefSourceTask and respects project isolation', () => {
+    const repoA = path.join(tmpDir, 'repo-conv-a');
+    const repoB = path.join(tmpDir, 'repo-conv-b');
+    initGitRepo(repoA, 'main');
+    initGitRepo(repoB, 'main');
+
+    ctx.service.createProject({
+      id: 'proj-custom-conv',
+      name: 'Custom Convention Project',
+      path: repoA,
+      defaultBranch: 'main',
+      settings: {
+        commitConvention: {
+          branchTemplate: 'agenthub/{ref}-{slug}',
+          defaultRef: 'DEFAULT',
+        },
+      },
+      merge: { enabled: true, worktrees: { main: repoA }, checks: [], timeoutSec: 30 },
+    });
+
+    ctx.service.createProject({
+      id: 'proj-other',
+      name: 'Other Project',
+      path: repoB,
+      defaultBranch: 'main',
+      merge: { enabled: true, worktrees: { main: repoB }, checks: [], timeoutSec: 30 },
+    });
+
+    // Insert task in proj-custom-conv with externalRef
+    ctx.taskRepo.insert({
+      id: 'proj-custom-conv/feat-xyz',
+      projectId: 'proj-custom-conv',
+      slug: 'feat-xyz',
+      title: 'Feature XYZ',
+      externalRef: 'TASK-999',
+      status: 'pushed',
+    });
+
+    // Creating task in proj-custom-conv targeting rendered branch agenthub/TASK-999-feat-xyz
+    const customCreated = ctx.service.createTask({
+      project: 'proj-custom-conv',
+      slug: 'follow-custom-conv',
+      title: 'Follow custom conv',
+      baseRef: 'agenthub/TASK-999-feat-xyz',
+    }) as unknown as { baseRef: string | null; baseRefWarning?: string };
+    expect(customCreated.baseRef).toBeNull();
+    expect(customCreated.baseRefWarning).toContain('agenthub/TASK-999-feat-xyz');
+
+    // Isolation check: proj-other should NOT match proj-custom-conv's task branch
+    const otherCreated = ctx.service.createTask({
+      project: 'proj-other',
+      slug: 'other-task',
+      title: 'Other task',
+      baseRef: 'agenthub/TASK-999-feat-xyz',
+    }) as unknown as { baseRef: string | null; baseRefWarning?: string };
+    expect(otherCreated.baseRef).toBe('agenthub/TASK-999-feat-xyz');
+    expect(otherCreated.baseRefWarning).toBeUndefined();
+  });
 });

@@ -2492,6 +2492,12 @@ export class TaskRepo {
       .all(projectId) as TaskRow[];
   }
 
+  findByBranch(projectId: string, branch: string): TaskRow | undefined {
+    return this.db
+      .prepare('SELECT * FROM tasks WHERE projectId = ? AND branch = ? LIMIT 1')
+      .get(projectId, branch) as TaskRow | undefined;
+  }
+
   getByStatus(status: string): TaskRow[] {
     return this.db
       .prepare('SELECT * FROM tasks WHERE status = ? ORDER BY createdAt')

@@ -4,6 +4,7 @@ export type AutoMergeSkipReason =
   | 'escalated'
   | 'chain_incomplete'
   | 'merge_failed'
+  | 'base_ref_unavailable'
   | 'auto_merge_disabled';
 
 export function firstCheckError(output: unknown): string | undefined {
@@ -26,6 +27,7 @@ export function autoMergeReasonLabel(reason: unknown): string {
     case 'escalated': return 'review escalated';
     case 'chain_incomplete': return 'review chain incomplete';
     case 'merge_failed': return 'merge failed';
+    case 'base_ref_unavailable': return 'base ref unavailable';
     case 'auto_merge_disabled': return 'auto-merge disabled';
     default: return 'unknown reason';
   }

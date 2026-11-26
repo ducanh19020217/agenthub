@@ -5,6 +5,7 @@ export function autoMergeReasonKey(reason: string | null | undefined): string {
     case 'escalated': return 'extra.manualApprovalReasonEscalated';
     case 'chain_incomplete': return 'extra.manualApprovalReasonChainIncomplete';
     case 'merge_failed': return 'extra.manualApprovalReasonMergeFailed';
+    case 'base_ref_unavailable': return 'extra.manualApprovalReasonBaseRefUnavailable';
     case 'auto_merge_disabled': return 'extra.manualApprovalReasonDisabled';
     default: return 'extra.manualApprovalReasonUnknown';
   }

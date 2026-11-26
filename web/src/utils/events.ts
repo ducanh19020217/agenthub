@@ -53,6 +53,7 @@ export const ALL_BACKEND_EVENT_TYPES: string[] = [
   'load.ok',
   'load.task_paused',
   'load.task_resumed',
+  'merge.base_ref_retargeted',
   'merge.conflict',
   'merge.failed',
   'profile.auth_expired',

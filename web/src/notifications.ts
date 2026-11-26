@@ -198,8 +198,8 @@ export function browserNotificationBody(event: EventItem, locale: 'vi' | 'en' = 
     const reason = payload.reason === 'checks_failed'
       ? (isEn ? `${failed?.name || 'test'} check failed${retryText}` : `check ${failed?.name || 'test'} đỏ${retryText}`)
       : (isEn
-        ? ({ checks_missing: 'checks missing', escalated: 'review escalated', chain_incomplete: 'review chain incomplete', merge_failed: 'merge failed', auto_merge_disabled: 'auto-merge disabled' } as Record<string, string>)[String(payload.reason)] || 'unknown reason'
-        : ({ checks_missing: 'thiếu check', escalated: 'review đã escalated', chain_incomplete: 'chưa đủ chuỗi review', merge_failed: 'merge thất bại', auto_merge_disabled: 'đã tắt auto-merge' } as Record<string, string>)[String(payload.reason)] || 'không rõ lý do');
+        ? ({ checks_missing: 'checks missing', escalated: 'review escalated', chain_incomplete: 'review chain incomplete', merge_failed: 'merge failed', base_ref_unavailable: 'base ref unavailable', auto_merge_disabled: 'auto-merge disabled' } as Record<string, string>)[String(payload.reason)] || 'unknown reason'
+        : ({ checks_missing: 'thiếu check', escalated: 'review đã escalated', chain_incomplete: 'chưa đủ chuỗi review', merge_failed: 'merge thất bại', base_ref_unavailable: 'base ref chưa sẵn sàng', auto_merge_disabled: 'đã tắt auto-merge' } as Record<string, string>)[String(payload.reason)] || 'không rõ lý do');
     const detail = firstCheckError(failed?.outputTail);
     return isEn
       ? `✋ ${title} was approved but not auto-merged: ${reason}. Manual approval required.${detail ? ` ${detail}` : ''}`

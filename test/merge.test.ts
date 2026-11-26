@@ -58,6 +58,83 @@ describe('mergeTaskIntoBase', () => {
     expect(git(f.integration, 'status', '--porcelain')).toBe('');
   });
 
+  it('retargets a merged agent task base ref to the project default branch', async () => {
+    const f = fixture();
+    git(f.integration, 'merge', '--no-ff', f.branch, '-m', 'merge prior task');
+    const result = await mergeTaskIntoBase(
+      { slug: 'next', branch: f.branch, baseRef: f.branch, status: 'review', baseRefSourceStatus: 'pushed' },
+      { defaultBranch: 'main', merge: JSON.stringify({ enabled: true, worktrees: { main: f.integration }, checks: [] }) },
+    );
+    expect(result.retargetedFrom).toBe(f.branch);
+    expect(result.retargetedTo).toBe('main');
+    expect(result.mergeCommit).toBe(git(f.integration, 'rev-parse', 'HEAD'));
+  });
+
+  it('retargets when the baseRef commit is an ancestor of origin/<defaultBranch> without source status', async () => {
+    const f = fixture();
+    const priorTip = git(f.root, 'rev-parse', f.branch);
+    git(f.root, 'update-ref', 'refs/remotes/origin/main', priorTip);
+    const result = await mergeTaskIntoBase(
+      { slug: 'next', branch: f.branch, baseRef: f.branch, status: 'review' },
+      { path: f.root, defaultBranch: 'main', merge: JSON.stringify({ enabled: true, worktrees: { main: f.integration }, checks: [] }) },
+    );
+    expect(result.retargetedFrom).toBe(f.branch);
+    expect(result.retargetedTo).toBe('main');
+  });
+
+  it('does not silently retarget an unmerged agenthub/* baseRef even when current task status is done or review', async () => {
+    const f = fixture();
+    git(f.root, 'checkout', '-b', 'agenthub/unmerged-parent');
+    fs.writeFileSync(path.join(f.root, 'parent.txt'), 'unmerged parent\n');
+    git(f.root, 'add', 'parent.txt');
+    git(f.root, 'commit', '-m', 'unmerged parent commit');
+
+    await expect(mergeTaskIntoBase(
+      { slug: 'next', branch: f.branch, baseRef: 'agenthub/unmerged-parent', status: 'done' },
+      { path: f.root, defaultBranch: 'main', merge: JSON.stringify({ enabled: true, worktrees: { main: f.integration }, checks: [] }) },
+    )).rejects.toMatchObject<Partial<MergeError>>({ error: 'config', configuration: true });
+  });
+
+  it('reports an unavailable base ref as configuration instead of a conflict', async () => {
+    const f = fixture();
+    await expect(mergeTaskIntoBase(
+      { slug: 'next', branch: f.branch, baseRef: 'agenthub/unknown' },
+      { defaultBranch: 'main', merge: JSON.stringify({ enabled: true, worktrees: { main: f.integration }, checks: [] }) },
+    )).rejects.toMatchObject<Partial<MergeError>>({ error: 'config', configuration: true });
+  });
+
+  it('reports missing or disabled auto-merge config as configuration instead of a conflict', async () => {
+    const f = fixture();
+    await expect(mergeTaskIntoBase(
+      { slug: 'next', branch: f.branch, baseRef: 'main' },
+      { defaultBranch: 'main', merge: JSON.stringify({ enabled: false, worktrees: {} }) },
+    )).rejects.toMatchObject<Partial<MergeError>>({ error: 'config', configuration: true });
+  });
+
+  it('preserves merging into a valid configured baseRef worktree without retargeting', async () => {
+    const f = fixture();
+    const baseWorktree = path.join(f.root, 'wt-base');
+    git(f.root, 'branch', 'agenthub/base-feature', 'main');
+    git(f.root, 'worktree', 'add', baseWorktree, 'agenthub/base-feature');
+
+    const result = await mergeTaskIntoBase(
+      { slug: 'next', branch: f.branch, baseRef: 'agenthub/base-feature', status: 'review' },
+      {
+        path: f.root,
+        defaultBranch: 'main',
+        merge: JSON.stringify({
+          enabled: true,
+          worktrees: { main: f.integration, 'agenthub/base-feature': baseWorktree },
+          checks: [],
+        }),
+      },
+    );
+    expect(result.retargetedFrom).toBeUndefined();
+    expect(result.retargetedTo).toBeUndefined();
+    expect(result.mergeCommit).toBe(git(baseWorktree, 'rev-parse', 'HEAD'));
+    expect(git(f.integration, 'rev-parse', 'HEAD')).toBe(f.before);
+  });
+
   it('aborts a conflict and leaves the integration worktree clean', async () => {
     const f = fixture();
     git(f.integration, 'checkout', '-b', 'integration-change');

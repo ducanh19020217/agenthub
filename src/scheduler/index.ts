@@ -2161,6 +2161,7 @@ export class Scheduler {
     const dependencyWaiters = this.taskRepo.getByStatus('waiting_quota').filter((t) => t.waitReason === 'dependency');
     for (const task of dependencyWaiters) {
       if (this.areDependenciesMet(task)) {
+        this.rebaseStaleDependencyBaseRef(task);
         this.taskRepo.updateStatus(task.id, 'queued');
         this.eventBus.emit('task.queued', task.id, { reason: 'dependency_met' });
       }
@@ -2302,7 +2303,10 @@ export class Scheduler {
       if (!this.projectRepo.get(task.projectId)) continue;
       if (reason !== 'startup_recheck') {
         if (task.waitReason === 'disk' && this.getBlockingDiskForTask(task)) continue;
-        if (task.waitReason === 'dependency' && !this.areDependenciesMet(task)) continue;
+        if (task.waitReason === 'dependency') {
+          if (!this.areDependenciesMet(task)) continue;
+          this.rebaseStaleDependencyBaseRef(task);
+        }
         if (task.waitReason === 'load' && this.loadGuard.isOverloaded()) continue;
       }
       this.taskRepo.updateStatus(task.id, 'queued');
@@ -3200,6 +3204,8 @@ export class Scheduler {
       const project = this.projectRepo.get(task.projectId);
       if (!project) continue;
 
+      const effectiveTask = this.rebaseStaleDependencyBaseRef(task, project);
+
       const projectAccessible = isProjectAccessible(project.path);
       const worktreeAccessible = !task.worktreePath || fs.existsSync(task.worktreePath);
       if (!projectAccessible || !worktreeAccessible) {
@@ -3229,7 +3235,7 @@ export class Scheduler {
         }
         const departmentId = this.departmentIdForTask(task);
         fairUsage.set(departmentId, (fairUsage.get(departmentId) || 0) + 1);
-        void this.startTask(task, pair.model, pair.profileName)
+        void this.startTask(effectiveTask, pair.model, pair.profileName)
           .catch((error) => {
             console.error(`[scheduler] failed to start task ${task.id}:`, error);
           })
@@ -4684,7 +4690,8 @@ export class Scheduler {
           return;
         }
       }
-      const baseRef = this.resolveBaseRef(task, project);
+      const effectiveTask = this.rebaseStaleDependencyBaseRef(task, project);
+      const baseRef = this.resolveBaseRef(effectiveTask, project);
       try {
         worktreePath = this.worktreeService.create({
           projectPath: project.path,
@@ -4945,6 +4952,62 @@ export class Scheduler {
     }
   }
 
+  rebaseStaleDependencyBaseRef(task: TaskRow, projectArg?: { id: string; defaultBranch: string; settings?: string | null }): TaskRow {
+    if (!task.baseRef) return task;
+    let deps: string[] = [];
+    try {
+      deps = JSON.parse(task.dependsOn || '[]');
+    } catch {
+      deps = [];
+    }
+    if (deps.length === 0) return task;
+
+    const project = projectArg || this.projectRepo.get(task.projectId);
+    if (!project) return task;
+
+    for (const depId of deps) {
+      const dep = this.taskRepo.get(depId);
+      if (!dep || dep.projectId !== task.projectId) continue;
+      const depBranch = dep.branch || renderTaskBranch(project, dep);
+      const depPushedOrCancelled = ['pushed', 'cancelled'].includes(dep.status) || (dep.status === 'done' && Boolean(dep.pushedAt));
+      if (!depPushedOrCancelled || task.baseRef !== depBranch) continue;
+
+      const settings = projectSettings(project);
+      const nextBaseRef = settings.integration?.enabled ? null : project.defaultBranch;
+      const toBranch = settings.integration?.enabled
+        ? (settings.integration.branch || 'agenthub/integration')
+        : project.defaultBranch;
+      this.taskRepo.update(task.id, { baseRef: nextBaseRef });
+      this.eventBus.emit('merge.base_ref_retargeted', task.id, {
+        from: task.baseRef,
+        to: toBranch,
+        reason: dep.status === 'cancelled' ? 'dependency_cancelled' : 'dependency_pushed',
+        dependencyId: dep.id,
+      });
+      return this.taskRepo.get(task.id) || { ...task, baseRef: nextBaseRef };
+    }
+    return task;
+  }
+
+  rebaseDependentTasksOnPush(pushedTaskId: string): void {
+    const pushed = this.taskRepo.get(pushedTaskId);
+    if (!pushed) return;
+    const project = this.projectRepo.get(pushed.projectId);
+    if (!project) return;
+    for (const candidate of this.taskRepo.getByProject(pushed.projectId)) {
+      if (!candidate.baseRef || candidate.worktreePath) continue;
+      if (['done', 'pushed', 'cancelled', 'failed'].includes(candidate.status)) continue;
+      let deps: string[] = [];
+      try {
+        deps = JSON.parse(candidate.dependsOn || '[]');
+      } catch {
+        deps = [];
+      }
+      if (!deps.includes(pushedTaskId)) continue;
+      this.rebaseStaleDependencyBaseRef(candidate, project);
+    }
+  }
+
   private resolveBaseRef(task: TaskRow, project: { defaultBranch: string; settings?: string | null }): string {
     if (task.baseRef) return task.baseRef;
 
@@ -4957,7 +5020,7 @@ export class Scheduler {
     }
     for (let i = deps.length - 1; i >= 0; i--) {
       const dep = this.taskRepo.get(deps[i]);
-      if (dep && dep.projectId === task.projectId && dep.branch && !['done', 'pushed', 'cancelled'].includes(dep.status)) {
+      if (dep && dep.projectId === task.projectId && dep.branch && !['pushed', 'cancelled'].includes(dep.status) && !(dep.status === 'done' && dep.pushedAt)) {
         return dep.branch;
       }
     }

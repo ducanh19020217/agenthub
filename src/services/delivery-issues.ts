@@ -346,12 +346,12 @@ export function computeDeliveryIssue(
 
   // 2. merge_failed: task không ở trạng thái kết thúc khác (pushed/cancelled/failed), có lần merge vào integration (hoặc nhánh đích nếu project không dùng integration) thất bại gần nhất, và nhánh task thực sự chưa được merge.
   const TERMINAL_EXCLUDED = ['pushed', 'cancelled', 'failed'];
-  if (task.status === 'done' && task.pushedAt) return null;
-  if (!TERMINAL_EXCLUDED.includes(task.status)) {
+  if (!(task.status === 'done' && task.pushedAt) && !TERMINAL_EXCLUDED.includes(task.status)) {
     const mergeEvents = events.filter((e) =>
       e.type === 'merge.conflict' ||
       e.type === 'merge.failed' ||
       e.type === 'task.merged' ||
+      e.type === 'task.pushed' ||
       (e.type === 'review.auto_merge_skipped' && (() => {
         try {
           const p = typeof e.payload === 'string' ? JSON.parse(e.payload) : e.payload;
@@ -363,7 +363,7 @@ export function computeDeliveryIssue(
     );
 
     const lastEvent = mergeEvents.at(-1);
-    if (lastEvent && lastEvent.type !== 'task.merged') {
+    if (lastEvent && lastEvent.type !== 'task.merged' && lastEvent.type !== 'task.pushed') {
       let error = '';
       let files: string[] = [];
       const failedAt = toApiTime(lastEvent.ts) || lastEvent.ts;

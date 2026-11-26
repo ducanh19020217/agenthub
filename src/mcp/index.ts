@@ -866,7 +866,13 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     async (args) => {
       try {
         assertProject(args.project, 'Tạo task');
-        const res = await callApi<{ id: string; status: string; title: string }>('POST', '/api/tasks', {
+        const res = await callApi<{
+          id: string;
+          status: string;
+          title: string;
+          mergeWarning?: string | null;
+          baseRefWarning?: string | null;
+        }>('POST', '/api/tasks', {
           ...args,
           fromClaude: true,
           sessionId: options?.chatSessionId || process.env.AGENTHUB_CHAT_SESSION_ID,
@@ -880,8 +886,10 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
         } catch {
           // ignore brain update failure
         }
+        const warnings = [res.baseRefWarning, res.mergeWarning].filter((w): w is string => Boolean(w));
+        const warningSuffix = warnings.length > 0 ? `\n⚠ ${warnings.join('\n⚠ ')}` : '';
         return {
-          content: [{ type: 'text', text: `✓ Đã tạo task "${res.id}" [${res.status}]: ${res.title}` }],
+          content: [{ type: 'text', text: `✓ Đã tạo task "${res.id}" [${res.status}]: ${res.title}${warningSuffix}` }],
         };
       } catch (err: unknown) {
         return handleError(err);

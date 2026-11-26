@@ -26,6 +26,7 @@ interface MergeTask {
   baseRef: string | null;
   externalRef?: string | null;
   status?: string;
+  baseRefSourceStatus?: string;
 }
 
 interface MergeProject {
@@ -257,17 +258,40 @@ async function isAncestor(repo: string | undefined, candidate: string, target: s
   }
 }
 
+async function retargetMergedBaseRef(
+  config: MergeConfig,
+  project: MergeProject,
+  baseRef: string,
+  sourceStatus?: string,
+): Promise<string | undefined> {
+  const candidates = [project.defaultBranch, ...Object.keys(config.worktrees)]
+    .filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
+  const repos = [project.path, ...Object.values(config.worktrees)]
+    .filter((dir, index, all): dir is string => Boolean(dir) && all.indexOf(dir) === index);
+
+  for (const candidate of candidates) {
+    for (const repoDir of repos) {
+      if (await isAncestor(repoDir, baseRef, candidate) || await isAncestor(repoDir, baseRef, `origin/${candidate}`)) {
+        return candidate;
+      }
+    }
+  }
+  if (sourceStatus === 'done' || sourceStatus === 'pushed') return project.defaultBranch;
+  return undefined;
+}
+
 export async function mergeTaskIntoBase(
   task: MergeTask,
   project: MergeProject,
   options?: MergeOptions,
-): Promise<{ mergeCommit: string; checks: string[]; retargetedFrom?: string }> {
+): Promise<{ mergeCommit: string; checks: string[]; retargetedFrom?: string; retargetedTo?: string }> {
   const settings = projectSettings(project);
   let repo: string;
   let targetBranch: string;
   let checks: string[] = [];
   let timeoutSec = 600;
   let retargetedFrom: string | undefined;
+  let retargetedTo: string | undefined;
 
   if (settings.integration.enabled) {
     if (!project.id || !project.path) {
@@ -300,11 +324,13 @@ export async function mergeTaskIntoBase(
   } else {
     const config = parseConfig(project.merge);
     targetBranch = task.baseRef || project.defaultBranch;
-    if (task.baseRef && /^agenthub\//.test(task.baseRef) && task.baseRef !== project.defaultBranch) {
-      const canRetarget = task.status === 'done' || task.status === 'pushed' || await isAncestor(project.path, task.baseRef, project.defaultBranch);
-      if (canRetarget) {
+    const hasConfiguredTarget = Boolean(config.worktrees[targetBranch] && path.isAbsolute(config.worktrees[targetBranch]));
+    if (!hasConfiguredTarget && task.baseRef && /^agenthub\//.test(task.baseRef) && task.baseRef !== project.defaultBranch) {
+      const retarget = await retargetMergedBaseRef(config, project, task.baseRef, task.baseRefSourceStatus);
+      if (retarget) {
         retargetedFrom = task.baseRef;
-        targetBranch = project.defaultBranch;
+        targetBranch = retarget;
+        retargetedTo = retarget;
       }
     }
     const integrationPath = config.worktrees[targetBranch];
@@ -376,7 +402,7 @@ export async function mergeTaskIntoBase(
       return false;
     }
   })();
-  if (alreadyMerged) return { mergeCommit: before, checks: [], ...(retargetedFrom ? { retargetedFrom } : {}) };
+  if (alreadyMerged) return { mergeCommit: before, checks: [], ...(retargetedFrom ? { retargetedFrom, retargetedTo } : {}) };
   const identity = await gitIdentityArgs(repo, env);
   try {
     const message = renderCommitTemplate(settings.commitConvention.mergeMessageTemplate, { branch, target: targetBranch });
@@ -503,7 +529,7 @@ export async function mergeTaskIntoBase(
     );
   }
 
-  return { mergeCommit, checks, ...(retargetedFrom ? { retargetedFrom } : {}) };
+  return { mergeCommit, checks, ...(retargetedFrom ? { retargetedFrom, retargetedTo } : {}) };
 }
 
 async function gitIdentityArgs(repo: string, env: NodeJS.ProcessEnv): Promise<string[]> {

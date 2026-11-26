@@ -85,7 +85,7 @@ import { decodeCursor, encodeCursor, parsePageSize, type PageResult } from '../p
 import { findClaudeBin, getClaudeVersion } from '../chat/claude.js';
 import { listAllWorktreeProcesses, reapSyncForWorktree } from '../reaper.js';
 import { mergeTaskIntoBase, MergeError } from '../merge.js';
-import { renderTaskBranch } from '../commit-convention.js';
+import { renderCommitTemplate, renderTaskBranch } from '../commit-convention.js';
 import { computeDeliveryIssue, clearGitCheckCache, clearGitCheckCacheForTask, extractConflictFiles, type DeliveryIssue } from './delivery-issues.js';
 import { computeTaskAudit, type TaskAuditInfo } from './audit-status.js';
 import { publishTask as executePublishTask, isProjectPublishing, onProjectPublishLockReleased, type PublishResult } from '../publish.js';
@@ -5961,9 +5961,31 @@ export class AppService {
 
   private findBaseRefSourceTask(project: ProjectRow, baseRef: string | null | undefined): TaskRow | undefined {
     if (!baseRef || !/^agenthub\//.test(baseRef)) return undefined;
-    return this.taskRepo.getAll().find((candidate) =>
-      candidate.projectId === project.id &&
-      (candidate.branch || renderTaskBranch(project, candidate)) === baseRef);
+
+    const direct = this.taskRepo.findByBranch(project.id, baseRef);
+    if (direct) return direct;
+
+    const settings = projectSettings(project);
+    const convention = settings.commitConvention;
+    const branchTemplate = convention.branchTemplate;
+    const defaultRef = convention.defaultRef;
+
+    if (branchTemplate === 'agenthub/{slug}') {
+      const slug = baseRef.slice('agenthub/'.length);
+      const candidate = this.taskRepo.get(`${project.id}/${slug}`);
+      if (candidate && (candidate.branch || `agenthub/${candidate.slug}`) === baseRef) {
+        return candidate;
+      }
+      return undefined;
+    }
+
+    return this.taskRepo.getByProject(project.id).find((candidate) => {
+      const branch = candidate.branch || renderCommitTemplate(branchTemplate, {
+        slug: candidate.slug,
+        ref: candidate.externalRef || defaultRef,
+      });
+      return branch === baseRef;
+    });
   }
 
   /**

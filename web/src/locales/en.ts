@@ -1628,7 +1628,7 @@ export const en: typeof vi = {
     resetIn: 'resets in {time}', fast: 'fast', locale: 'en', updatedAt: 'updated at', claudeQuotaSummary: '{ok}/{total} accounts available', claudeQuotaAvailable: 'Quota available', claudeQuotaWarning: 'Quota running low', claudeQuotaRejected: 'Quota exhausted (temporarily locked)',
     themeAria: 'Theme mode', dark: 'Dark', light: 'Light', system: 'System', default: 'Default',
     sidebarAria: 'Sidebar navigation', pageTaskCreate: 'Create task', pageTaskDetail: 'Task details', pageSavings: 'Savings', pagePlans: 'Plan review', pageAgentHub: 'AgentHub', claudeQuota: 'Claude quota', unknown: 'unknown', claudeSessions: 'Claude sessions', tokensOverTime: 'Tokens over time', token: 'Token', task: 'Task', messages: 'messages', model: 'Model', lastActive: 'Last active', rescan: 'Rescan',
-    checking: 'Checking', stuck: 'stalled', waitingApprover: 'Waiting for reviewer', manualApproval: 'Manual approval required', manualApprovalReasonChecksFailed: 'checks failed', manualApprovalReasonChecksMissing: 'checks missing', manualApprovalReasonEscalated: 'review escalated', manualApprovalReasonChainIncomplete: 'review chain incomplete', manualApprovalReasonMergeFailed: 'merge failed', manualApprovalReasonDisabled: 'auto-merge disabled', manualApprovalReasonUnknown: 'unknown reason', retryReviewer: 'Retry reviewer', quickChatError: 'Quick chat error', diskFree: 'Disk: {free} / {total} GB free',
+    checking: 'Checking', stuck: 'stalled', waitingApprover: 'Waiting for reviewer', manualApproval: 'Manual approval required', manualApprovalReasonChecksFailed: 'checks failed', manualApprovalReasonChecksMissing: 'checks missing', manualApprovalReasonEscalated: 'review escalated', manualApprovalReasonChainIncomplete: 'review chain incomplete', manualApprovalReasonMergeFailed: 'merge failed', manualApprovalReasonBaseRefUnavailable: 'base ref unavailable', manualApprovalReasonDisabled: 'auto-merge disabled', manualApprovalReasonUnknown: 'unknown reason', retryReviewer: 'Retry reviewer', quickChatError: 'Quick chat error', diskFree: 'Disk: {free} / {total} GB free',
     diskFreeWithMin: 'Disk: {free} / {total} GB free (min {min} GB)',
     waitingQueue: 'Waiting Queue', waitingCount: '{count} task(s) waiting', noWaitingTasks: 'No tasks waiting.',
     reviewRound: 'Review round {current}/{max}',
@@ -1784,6 +1784,7 @@ export const en: typeof vi = {
       task_resumed: "Task resumed after load recovery",
     },
     merge: {
+      base_ref_retargeted: "Retargeted baseRef to new target branch",
       conflict: "Merge conflict",
       failed: "Merge failed",
     },

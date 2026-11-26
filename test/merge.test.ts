@@ -58,6 +58,25 @@ describe('mergeTaskIntoBase', () => {
     expect(git(f.integration, 'status', '--porcelain')).toBe('');
   });
 
+  it('retargets a merged agent task base ref to the project default branch', async () => {
+    const f = fixture();
+    git(f.integration, 'merge', '--no-ff', f.branch, '-m', 'merge prior task');
+    const result = await mergeTaskIntoBase(
+      { slug: 'next', branch: f.branch, baseRef: f.branch, status: 'pushed' },
+      { defaultBranch: 'main', merge: JSON.stringify({ enabled: true, worktrees: { main: f.integration }, checks: [] }) },
+    );
+    expect(result.retargetedFrom).toBe(f.branch);
+    expect(result.mergeCommit).toBe(git(f.integration, 'rev-parse', 'HEAD'));
+  });
+
+  it('reports an unavailable base ref as configuration instead of a conflict', async () => {
+    const f = fixture();
+    await expect(mergeTaskIntoBase(
+      { slug: 'next', branch: f.branch, baseRef: 'agenthub/unknown' },
+      { defaultBranch: 'main', merge: JSON.stringify({ enabled: true, worktrees: { main: f.integration }, checks: [] }) },
+    )).rejects.toMatchObject<Partial<MergeError>>({ error: 'config', configuration: true });
+  });
+
   it('aborts a conflict and leaves the integration worktree clean', async () => {
     const f = fixture();
     git(f.integration, 'checkout', '-b', 'integration-change');

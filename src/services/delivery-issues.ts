@@ -346,6 +346,7 @@ export function computeDeliveryIssue(
 
   // 2. merge_failed: task không ở trạng thái kết thúc khác (pushed/cancelled/failed), có lần merge vào integration (hoặc nhánh đích nếu project không dùng integration) thất bại gần nhất, và nhánh task thực sự chưa được merge.
   const TERMINAL_EXCLUDED = ['pushed', 'cancelled', 'failed'];
+  if (task.status === 'done' && task.pushedAt) return null;
   if (!TERMINAL_EXCLUDED.includes(task.status)) {
     const mergeEvents = events.filter((e) =>
       e.type === 'merge.conflict' ||

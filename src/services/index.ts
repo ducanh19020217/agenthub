@@ -1807,7 +1807,7 @@ export class AppService {
       }
       tasksByProject[t.projectId][t.status] = (tasksByProject[t.projectId][t.status] || 0) + 1;
 
-      if (t.status !== 'pushed' && t.status !== 'cancelled' && t.status !== 'failed') {
+      if (t.status !== 'pushed' && t.status !== 'cancelled' && t.status !== 'failed' && !(t.status === 'done' && t.pushedAt)) {
         const events = this.eventRepo ? this.eventRepo.getByTask(t.id) : [];
         const project = projects.find((p) => p.id === t.projectId);
         const issue = computeDeliveryIssue(t, events, project);
@@ -4564,7 +4564,11 @@ export class AppService {
     }
     const reviewMaxRounds = reviewMaxRoundsFor(project, this.config);
     const reviewRound = Math.min((task.reviewerChangesRequested || 0) + 1, reviewMaxRounds);
-    const skippedEvent = events.filter((event) => event.type === 'review.auto_merge_skipped').at(-1);
+    const skippedEvent = events
+      .filter((event) => event.type === 'review.auto_merge_skipped')
+      .filter((event) => !events.some((success) =>
+        (success.type === 'task.pushed' || success.type === 'task.merged') && success.id > event.id))
+      .at(-1);
     const skippedPayload = skippedEvent?.payload && typeof skippedEvent.payload === 'object' ? skippedEvent.payload as { reason?: unknown; checks?: unknown; retried?: unknown } : undefined;
     const deliveryIssue = computeDeliveryIssue(task, rawEvents, project);
     const audit = computeTaskAudit(task, rawEvents, project, reviews);
@@ -5028,6 +5032,14 @@ export class AppService {
 
     let initialStatus = parsed.start ? 'queued' : 'draft';
     let batchId = parsed.batchId || null;
+    let baseRef = parsed.baseRef;
+    const staleSource = baseRef && /^agenthub\//.test(baseRef)
+      ? this.taskRepo.getAll().find((candidate) =>
+          candidate.projectId === parsed.project &&
+          (candidate.branch || `agenthub/${candidate.slug}`) === baseRef &&
+          ['pushed', 'cancelled'].includes(candidate.status))
+      : undefined;
+    if (staleSource) baseRef = undefined;
 
     if (parsed.fromClaude && parsed.start && !batchId && !this.config.planning?.requireApproval && this.taskBatchRepo) {
       initialStatus = 'queued';
@@ -5100,7 +5112,7 @@ export class AppService {
       body: parsed.body,
       level: parsed.level,
       modelChain: parsed.modelChain ? JSON.stringify(parsed.modelChain) : undefined,
-      baseRef: parsed.baseRef,
+      baseRef,
       branch: parsed.branch,
       dependsOn: parsed.dependsOn,
       status: initialStatus,
@@ -5118,7 +5130,15 @@ export class AppService {
     }
 
     const task = this.taskRepo.get(taskId)!;
-    const warning = mergeWarning(project, parsed.baseRef || project.defaultBranch);
+    if (staleSource) {
+      const payload = {
+        from: staleSource.branch || `agenthub/${staleSource.slug}`,
+        to: project.defaultBranch,
+        reason: `source_task_${staleSource.status}`,
+      };
+      this.scheduler.getEventBus().emit('merge.base_ref_retargeted', taskId, payload);
+    }
+    const warning = mergeWarning(project, baseRef || project.defaultBranch);
     return warning ? { ...task, mergeWarning: warning } as TaskRow : task;
   }
 
@@ -5764,7 +5784,7 @@ export class AppService {
     // Stop any automated reviewer still running so its late verdict cannot override this decision.
     if (manualReview) this.scheduler.supersedeReviewerRun(taskId, parsed.by);
 
-    let mergeResult: { mergeCommit: string; checks: string[] } | undefined;
+    let mergeResult: { mergeCommit: string; checks: string[]; retargetedFrom?: string } | undefined;
     const isPlan = task.slug.endsWith('-plan');
     const reviewedProject = this.projectRepo.get(task.projectId);
     const projectAutoMerge = reviewedProject
@@ -5804,6 +5824,13 @@ export class AppService {
             maxBytes: this.config.cacheMaxGB * 1024 ** 3,
           },
         });
+        if (mergeResult.retargetedFrom) {
+          this.scheduler.getEventBus().emit('merge.base_ref_retargeted', taskId, {
+            from: mergeResult.retargetedFrom,
+            to: project.defaultBranch,
+            reason: 'base_ref_task_branch_already_merged',
+          });
+        }
       } catch (error) {
         if (error instanceof MergeError) {
           if (!error.configuration && !error.environment) this.createMergeFailureDraft(task, error.message);
@@ -5984,7 +6011,17 @@ export class AppService {
       this.failedAutoMerges.delete(taskId);
     } catch (error) {
       this.failedAutoMerges.add(taskId);
-      skip('merge_failed', this.scheduler.getCheckResults(taskId));
+      const isConfig = (error instanceof HttpError && error.error === 'config') ||
+        (error instanceof MergeError && (error.error === 'config' || error.configuration));
+      skip(isConfig ? 'base_ref_unavailable' : 'merge_failed', this.scheduler.getCheckResults(taskId));
+      if (isConfig) {
+        this.taskRepo.update(taskId, { status: 'blocked', waitReason: null });
+        this.scheduler.getEventBus().emit('task.blocked', taskId, {
+          reason: 'merge_config',
+          message: error instanceof Error ? error.message : String(error),
+          suggestion: 'Cấu hình worktree tích hợp cho baseRef hoặc đổi baseRef về nhánh mặc định rồi retry merge.',
+        });
+      }
       const isConflict = (error instanceof HttpError && error.error === 'conflict') ||
         (error instanceof MergeError && error.error === 'conflict') ||
         (error instanceof Error && /conflict/i.test(error.message));
@@ -6098,7 +6135,7 @@ export class AppService {
     if (project.path) clearGitCheckCache(project.path);
     clearGitCheckCache();
     this.scheduler.setTaskMerging(taskId, true);
-    let mergeResult: { mergeCommit: string; checks: string[] };
+    let mergeResult: { mergeCommit: string; checks: string[]; retargetedFrom?: string };
 
     try {
       mergeResult = await mergeTaskIntoBase(task, project, {

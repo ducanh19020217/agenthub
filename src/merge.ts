@@ -25,6 +25,7 @@ interface MergeTask {
   branch: string | null;
   baseRef: string | null;
   externalRef?: string | null;
+  status?: string;
 }
 
 interface MergeProject {
@@ -38,7 +39,7 @@ interface MergeProject {
 export class MergeError extends Error {
   constructor(
     public statusCode: 409 | 422 | 503,
-    public error: 'conflict' | 'unprocessable_entity' | 'environment_error',
+    public error: 'conflict' | 'config' | 'unprocessable_entity' | 'environment_error',
     message: string,
     public configuration = false,
     public environment = false,
@@ -58,12 +59,12 @@ export interface MergeOptions {
 }
 
 function parseConfig(value: string | null | undefined): MergeConfig {
-  if (!value) throw new MergeError(409, 'conflict', 'Project chưa cấu hình merge tự động', true);
+  if (!value) throw new MergeError(409, 'config', 'Project chưa cấu hình merge tự động', true);
   let parsed: unknown;
-  try { parsed = JSON.parse(value); } catch { throw new MergeError(409, 'conflict', 'Cấu hình merge không hợp lệ', true); }
+  try { parsed = JSON.parse(value); } catch { throw new MergeError(409, 'config', 'Cấu hình merge không hợp lệ', true); }
   const config = parsed as Partial<MergeConfig>;
   if (config.enabled !== true || !config.worktrees || typeof config.worktrees !== 'object') {
-    throw new MergeError(409, 'conflict', 'Merge tự động chưa được bật hoặc chưa có worktree tích hợp', true);
+    throw new MergeError(409, 'config', 'Merge tự động chưa được bật hoặc chưa có worktree tích hợp', true);
   }
   return {
     enabled: true,
@@ -246,16 +247,27 @@ async function git(repo: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
+async function isAncestor(repo: string | undefined, candidate: string, target: string): Promise<boolean> {
+  if (!repo) return false;
+  try {
+    await execFileAsync('git', ['merge-base', '--is-ancestor', candidate, target], { cwd: repo });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function mergeTaskIntoBase(
   task: MergeTask,
   project: MergeProject,
   options?: MergeOptions,
-): Promise<{ mergeCommit: string; checks: string[] }> {
+): Promise<{ mergeCommit: string; checks: string[]; retargetedFrom?: string }> {
   const settings = projectSettings(project);
   let repo: string;
   let targetBranch: string;
   let checks: string[] = [];
   let timeoutSec = 600;
+  let retargetedFrom: string | undefined;
 
   if (settings.integration.enabled) {
     if (!project.id || !project.path) {
@@ -288,9 +300,16 @@ export async function mergeTaskIntoBase(
   } else {
     const config = parseConfig(project.merge);
     targetBranch = task.baseRef || project.defaultBranch;
+    if (task.baseRef && /^agenthub\//.test(task.baseRef) && task.baseRef !== project.defaultBranch) {
+      const canRetarget = task.status === 'done' || task.status === 'pushed' || await isAncestor(project.path, task.baseRef, project.defaultBranch);
+      if (canRetarget) {
+        retargetedFrom = task.baseRef;
+        targetBranch = project.defaultBranch;
+      }
+    }
     const integrationPath = config.worktrees[targetBranch];
     if (!integrationPath || !path.isAbsolute(integrationPath)) {
-      throw new MergeError(409, 'conflict', `Chưa khai báo worktree tích hợp cho baseRef "${targetBranch}"`, true);
+      throw new MergeError(409, 'config', `Chưa khai báo worktree tích hợp cho baseRef "${targetBranch}"`, true);
     }
     repo = path.resolve(integrationPath);
     checks = config.checks;
@@ -357,7 +376,7 @@ export async function mergeTaskIntoBase(
       return false;
     }
   })();
-  if (alreadyMerged) return { mergeCommit: before, checks: [] };
+  if (alreadyMerged) return { mergeCommit: before, checks: [], ...(retargetedFrom ? { retargetedFrom } : {}) };
   const identity = await gitIdentityArgs(repo, env);
   try {
     const message = renderCommitTemplate(settings.commitConvention.mergeMessageTemplate, { branch, target: targetBranch });
@@ -484,7 +503,7 @@ export async function mergeTaskIntoBase(
     );
   }
 
-  return { mergeCommit, checks };
+  return { mergeCommit, checks, ...(retargetedFrom ? { retargetedFrom } : {}) };
 }
 
 async function gitIdentityArgs(repo: string, env: NodeJS.ProcessEnv): Promise<string[]> {

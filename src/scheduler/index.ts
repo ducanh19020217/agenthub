@@ -4957,7 +4957,7 @@ export class Scheduler {
     }
     for (let i = deps.length - 1; i >= 0; i--) {
       const dep = this.taskRepo.get(deps[i]);
-      if (dep && dep.projectId === task.projectId && dep.branch) {
+      if (dep && dep.projectId === task.projectId && dep.branch && !['done', 'pushed', 'cancelled'].includes(dep.status)) {
         return dep.branch;
       }
     }
